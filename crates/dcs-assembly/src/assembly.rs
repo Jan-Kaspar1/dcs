@@ -126,13 +126,16 @@ fn is_internal(point_map: &PointMap, point: PointId) -> bool {
 /// Channel-bound `io_point`s enter the point map as field points a
 /// driver serves; channel-less ones become internal points the scan
 /// image carries at their declared `initial` — a malformed declaration
-/// defers [`AssemblyError::InvalidInternalPoint`]. Connections then bind
-/// ports to points, collect field wires for field point-to-point
-/// connections and internal links for internal ones — a mixed pair
-/// defers [`AssemblyError::MixedPointLink`] — and synthesize linked
-/// internal point pairs for port-to-port wires. Finally every port
-/// declared on an instance must be bound; wiring failures are deferred
-/// in [`Resolved::binding_error`] for [`assemble`] to report.
+/// defers [`AssemblyError::InvalidInternalPoint`]. Both carry their
+/// declared `writable` flag into the map, the executor's command-surface
+/// authority; the point pairs port-to-port wires synthesize are not
+/// declared points and stay unmarked. Connections then bind ports to
+/// points, collect field wires for field point-to-point connections and
+/// internal links for internal ones — a mixed pair defers
+/// [`AssemblyError::MixedPointLink`] — and synthesize linked internal
+/// point pairs for port-to-port wires. Finally every port declared on an
+/// instance must be bound; wiring failures are deferred in
+/// [`Resolved::binding_error`] for [`assemble`] to report.
 pub(crate) fn resolve(model: &PlantModel) -> Resolved {
     let mut point_map = PointMap::new();
     let mut binding_error = None;
@@ -142,11 +145,19 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
             // A field point: a driver serves it through the declared
             // channel, starting at the neutral value of its kind.
             (Some(_), _) => {
-                point_map = point_map.with_point(point.id, direction, point.value_type);
+                point_map = if point.writable {
+                    point_map.with_writable_point(point.id, direction, point.value_type)
+                } else {
+                    point_map.with_point(point.id, direction, point.value_type)
+                };
             }
             // An internal point: image-carried at its declared initial.
             (None, Some(initial)) if initial.kind() == point.value_type => {
-                point_map = point_map.with_internal(point.id, direction, point.value_type, initial);
+                point_map = if point.writable {
+                    point_map.with_writable_internal(point.id, direction, point.value_type, initial)
+                } else {
+                    point_map.with_internal(point.id, direction, point.value_type, initial)
+                };
             }
             // Reachable only for a model resolved without validation.
             (None, initial) => {

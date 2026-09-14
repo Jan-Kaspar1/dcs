@@ -16,7 +16,8 @@
       "id": 10,
       "direction": "in",
       "value_type": "Float",
-      "channel": { "device": 1, "name": "setpoint" }
+      "channel": { "device": 1, "name": "setpoint" },
+      "writable": true
     },
     {
       "id": 11,

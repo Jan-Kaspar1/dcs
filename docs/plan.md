@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47) now serving `sim*`, `sim-tcp`, and `sim-scripted` (#67), the paced controller binary with active/standby modes (#32), role machine, and scan-boundary promotion/demotion with role reporting (#46) plus Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The integration guide (`docs/integration-guide.md`, #71) documents both extension seams. The remaining M2 gap is writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89, #70).
+The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47) now serving `sim*`, `sim-tcp`, and `sim-scripted` (#67), the paced controller binary with active/standby modes (#32), role machine, and scan-boundary promotion/demotion with role reporting (#46) plus Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The integration guide (`docs/integration-guide.md`, #71) documents both extension seams. The M2 gap — writable points (#49) — has landed. Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89, #70).
 
 ## Milestones
 
@@ -20,7 +20,7 @@ One controller runs a deterministic fixed-step scan entirely against simulated I
 
 Done criterion met by `dcs-demo` (#12): the binary loads the checked-in `tank_level.json` model, assembles a `SimDriver` and `Executor` plus `dcs-blocks` components, and produces deterministic per-tick outputs and a final telemetry snapshot.
 
-### M2: Model-driven controller with monitoring access — nearly done
+### M2: Model-driven controller with monitoring access — done
 
 A `dcs-controller` binary loads a plant model path, assembles its driver and executor from the validated model, paces the scan to wall-clock, and exposes monitoring and operator commands to the future UI. Architecture decisions 6–9 record the approach; the real per-layer status:
 
@@ -29,7 +29,7 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 | `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47); internal points and links resolved under #30 (decision 14) |
 | `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); `--standby`/`--remote` modes track an active's checkpoints (#32); Docker packaging done (#39) |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented: `/snapshot`, `/receipts`, `/command`, `/scan` (#20); `/signals` and the live page (#34); `/history` and `/journal` with since-cursors (#35, decision 17); trend and journal panes (#51) |
-| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); component-targeted `set_parameter` implemented under #82 (decision 20); model-declared writable targets proposed under #49 (decision 18) |
+| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); component-targeted `set_parameter` implemented under #82 (decision 20); model-declared writable targets implemented under #49 (decision 18) |
 | `dcs-model` internal points | Channel-less operator and port-to-port points | Implemented (#30): channel-less `io_point`s carry `initial` in the scan image — held `In` setpoints, monitored `Out` writes, and internal links serving port-to-port wiring (decision 14) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); every kind ships `KIND`, `from_parameters`, and a `ComponentDescriptor` (#50, #61, decision 16) |
 
@@ -37,7 +37,7 @@ Done when:
 
 - `dcs-assembly` resolves a validated `PlantModel` into a configured `Executor` and `SimDriver`, constructing components through a kind registry and rejecting unknown kinds before any scan (decision 6; #19) — **done**;
 - `dcs-controller` runs the paced scan and serves `TelemetrySnapshot` and the signal index over HTTP + JSON (decisions 8, 9; #19, #48, #34) — **done**;
-- internal points carry operator values and port-to-port wiring as model declarations (decision 14; #30) — **done** — with writable points restricting the command surface (#49) — **open**;
+- internal points carry operator values and port-to-port wiring as model declarations (decision 14; #30) — **done** — with writable points restricting the command surface (#49) — **done**;
 - the monitoring surface serves signal metadata, a minimal live page, and bounded history (decision 8; #34, #35) — **done**.
 
 ### M3: Redundant hot-swap controllers — in progress
@@ -70,7 +70,7 @@ Ticket breakdown:
 - #35 — bounded per-point history and the transition journal served with since-cursors (decision 17). **Done.**
 - #50 — `ComponentDescriptor` contract and per-kind descriptors, served to the UI (decision 16). **Done** — per-kind descriptors completed under #61.
 - #51 — the page's trend slice: live telemetry plus signal metadata, per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`. **Done.**
-- #49 — model-declared `writable` points narrowing the command surface (decision 18). **Open** — M2 layer gating #62's affordances and #84's forcing.
+- #49 — model-declared `writable` points narrowing the command surface (decision 18). **Done** — `IoPoint::writable` (optional, default unset) validated `In`-only, carried through assembly into `PointSpec::writable`, enforced at `submit_command` as `CommandError::NotWritable`, reported in the signal index, and filtering the page's command select; `Out`-point writes are the recorded rejection rule.
 - #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Open.**
 - #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Done** — `PairClient`/`PeerStatus`/`PairError` in `dcs-monitor`, the page's `?peer=` pair view with per-peer role polling, active-only command routing with mid-transition retry, tick-continuity merging, and cross-origin reads on the JSON endpoints.
 - #69 — showcase plant model exercising the full component library. **Open.**
@@ -79,7 +79,7 @@ Done when:
 
 - the monitoring surface serves the signal index, per-kind `ComponentDescriptor`s, bounded point history, and the transition journal over the decision-8 transport (#34, #35, #50) — **done**;
 - a served page renders live telemetry and signal metadata, faceplates generated from descriptors without per-kind UI code, and trend and journal panes fed by incremental since-cursor polling (#51, #62) — **partially done** (trend and journal slices landed; faceplates open);
-- the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **open**;
+- the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **partially done** (the generic command select is writable-filtered since #49; descriptor faceplate affordances remain #62);
 - under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **done**.
 
 ### M5: Lifecycle and device integration — in progress
@@ -130,6 +130,6 @@ Done when:
 
 ## Next planning pass
 
-Inspect current main, open issues, and PRs before updating this plan. M2's critical path remains #49: it gates #62's command affordances and #84's forcing. With #46 landed, M3's critical path is #64 proving the swap end-to-end between two controller processes. M5's lifecycle tickets are now startable: #65 and #66 build directly on the shipped checkpoint-pull and promotion machinery, while #87 and #88 wait on them (#87 on #66, #88 on #64); #67 and #71 already landed. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
+Inspect current main, open issues, and PRs before updating this plan. M2 closed with #49; #62's command affordances and #84's forcing now build on its writable-point contract. With #46 landed, M3's critical path is #64 proving the swap end-to-end between two controller processes. M5's lifecycle tickets are now startable: #65 and #66 build directly on the shipped checkpoint-pull and promotion machinery, while #87 and #88 wait on them (#87 on #66, #88 on #64); #67 and #71 already landed. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
 
 Update this document when milestones change or complete. Reference actual issue and PR numbers once created; mark blocked dependencies and distinguish completed work from planned work.
