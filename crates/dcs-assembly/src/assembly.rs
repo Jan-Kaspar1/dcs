@@ -325,7 +325,10 @@ pub fn sim_driver(model: &PlantModel) -> Result<SimDriver, AssemblyError> {
 /// before
 /// [`Executor::new`](dcs_runtime::Executor::new) performs its own wiring
 /// check. Components step in `components` order: the model's declared scan
-/// order.
+/// order. The returned executor is stamped with
+/// [`PlantModel::fingerprint`], so every checkpoint it emits names the
+/// model it was captured under and a restore negotiated against a
+/// different model fails before any state applies.
 pub fn assemble<'d>(
     model: &PlantModel,
     registry: &ComponentRegistry,
@@ -392,5 +395,6 @@ pub fn assemble<'d>(
         components.push(component);
     }
     Executor::new(driver, resolved.point_map, components)
+        .map(|executor| executor.with_model_fingerprint(model.fingerprint()))
         .map_err(|detail| AssemblyError::Wiring { detail })
 }

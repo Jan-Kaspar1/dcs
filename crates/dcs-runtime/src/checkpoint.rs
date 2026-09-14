@@ -23,10 +23,38 @@
 //! `driver` empty and the restore skips it.
 
 use crate::executor::WiringError;
-use dcs_core::{PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
+use dcs_core::{ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// The checkpoint format version this build writes.
+///
+/// The version negotiates checkpoint compatibility explicitly, the way
+/// `MODEL_VERSION` does for the model document: a bump marks a breaking
+/// format change, while additive changes — a new optional section or a
+/// new optional field inside an element's [`StateMap`] vocabulary — ride
+/// the existing version. Restore accepts every version in
+/// [`SUPPORTED_FORMAT_VERSIONS`]; anything else is
+/// [`RestoreError::UnsupportedVersion`].
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+
+/// The checkpoint format versions a restore accepts.
+///
+/// Version 0 is the shape checkpoints had before the format was
+/// versioned — serde reads an absent `format_version` as 0 — so a
+/// checkpoint captured by a pre-versioning build still restores where
+/// its fingerprint also matches, i.e. onto an executor assembled without
+/// one. A compatible version may differ from
+/// [`CHECKPOINT_FORMAT_VERSION`] only in what serde tolerates on this
+/// schema: sections or fields it does not name may be absent (they
+/// default) or extra (they are ignored), and an element's [`StateMap`]
+/// may carry optional fields its `optional_*` accessors read. Everything
+/// else remains strict: component-set equality, each element's required
+/// fields and known-field check, and the point/kind checks on the
+/// `outputs` and `internal` sections all still apply after the version
+/// is accepted.
+pub const SUPPORTED_FORMAT_VERSIONS: &[u32] = &[0, CHECKPOINT_FORMAT_VERSION];
 
 /// A serializable snapshot of a run's transferable state.
 ///
@@ -35,8 +63,30 @@ use std::fmt;
 /// [`Executor::restore`](crate::Executor::restore) on a standby — or by a
 /// test reconstructing a run. The whole value round-trips through serde
 /// like the rest of the contract types.
+///
+/// Restore enforces a two-part negotiation before any state applies: the
+/// checkpoint's [`format_version`](Self::format_version) must be one of
+/// [`SUPPORTED_FORMAT_VERSIONS`] and its
+/// [`model_fingerprint`](Self::model_fingerprint) must equal the
+/// fingerprint the restoring executor was assembled with — mismatches
+/// are the named [`RestoreError::UnsupportedVersion`] and
+/// [`RestoreError::FingerprintMismatch`]. Only then do the structural
+/// checks of decision 11's strictness run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    /// The wire format's version. Checkpoints serialized before the
+    /// format was versioned carry no field and deserialize as 0; this
+    /// build writes [`CHECKPOINT_FORMAT_VERSION`].
+    #[serde(default)]
+    pub format_version: u32,
+    /// The fingerprint of the model the capturing run was assembled
+    /// from, supplied by the assembling layer — the executor is
+    /// model-agnostic and never derives it. `None` when the run was
+    /// assembled without one (and on every checkpoint a pre-versioning
+    /// build wrote); a fingerprinted executor accepts only a checkpoint
+    /// carrying the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fingerprint: Option<ModelFingerprint>,
     /// The executor's tick at capture; the restored executor resumes
     /// numbering from here.
     pub tick: Tick,
@@ -75,6 +125,27 @@ pub struct Checkpoint {
 /// leaves them untouched.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum RestoreError {
+    /// The checkpoint's format version is not one this build accepts —
+    /// checked before anything else, so a checkpoint from a newer or
+    /// unknown format never reaches the structural checks.
+    UnsupportedVersion {
+        /// The version the checkpoint declares — 0 when the field is
+        /// absent, as on checkpoints a pre-versioning build wrote.
+        found: u32,
+        /// Every format version this build accepts.
+        supported: &'static [u32],
+    },
+    /// The checkpoint's model fingerprint differs from the fingerprint
+    /// the executor was assembled with — a checkpoint captured under a
+    /// different model, including one whose component set happens to
+    /// match structurally.
+    FingerprintMismatch {
+        /// The fingerprint the checkpoint carries — `None` when it was
+        /// captured by a run assembled without one.
+        found: Option<ModelFingerprint>,
+        /// The fingerprint the restoring executor was assembled with.
+        expected: Option<ModelFingerprint>,
+    },
     /// The fresh components did not wire against the point map.
     Wiring(WiringError),
     /// The checkpoint names a component the executor does not register.
@@ -131,6 +202,20 @@ pub enum RestoreError {
 impl fmt::Display for RestoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedVersion { found, supported } => write!(
+                f,
+                "unsupported checkpoint format version {found} (this build accepts {supported:?})"
+            ),
+            Self::FingerprintMismatch { found, expected } => write!(
+                f,
+                "checkpoint model fingerprint {} does not match this run's {}",
+                found
+                    .map(|fingerprint| fingerprint.to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+                expected
+                    .map(|fingerprint| fingerprint.to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+            ),
             Self::Wiring(error) => write!(f, "wiring the fresh components failed: {error}"),
             Self::UnknownComponent { component } => write!(
                 f,
