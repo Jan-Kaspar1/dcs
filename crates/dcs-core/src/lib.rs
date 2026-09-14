@@ -13,17 +13,25 @@
 //! deterministic scan boundary, each answered by a receipt. The state
 //! contract (`StateMap`, `StateError`) is the redundancy groundwork: a
 //! serializable map of named values components and drivers checkpoint
-//! their internal state into and restore from.
+//! their internal state into and restore from. The descriptor contract
+//! (`ComponentDescriptor`) is the UI-facing self-description: each
+//! component's kind, label, named I/O ports, and tunable parameters —
+//! enough for a monitoring UI to render a faceplate without per-kind
+//! engineering.
 
 #![warn(missing_docs)]
 
 mod command;
+mod descriptor;
 mod io;
 mod signal;
 mod state;
 mod telemetry;
 
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
+pub use descriptor::{
+    ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
+};
 pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
