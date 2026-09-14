@@ -18,6 +18,10 @@ const DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/tank_loop_dynamics.json"
 );
+const SECOND_ORDER_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/tank_loop_second_order_dynamics.json"
+);
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_point.json"
@@ -157,6 +161,53 @@ fn a_declared_lag_advances_only_on_explicit_step_requests() {
     );
     // ...and no further: the stepped value holds across reads.
     assert_eq!(driver.read(PointId(10)).unwrap(), after);
+
+    assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn a_declared_second_order_lag_loads_and_overshoots_its_step_input() {
+    let mut plant = spawn(&[
+        MODEL,
+        "--dynamics",
+        SECOND_ORDER_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+
+    // The element seeds its output — the raw tank level — at its
+    // declared initial value.
+    assert_eq!(driver.read(PointId(10)).unwrap().value, Value::Float(4.0));
+
+    driver.write(PointId(20), Value::Float(12.0)).unwrap();
+    // τ = 1.0, ζ = 0.25: the continuous-time response to the 8-unit
+    // step change, evaluated at each tick boundary — what the element's
+    // exact zero-order-hold discretization reproduces.
+    let sigma = 0.25;
+    let wd = (1.0_f64 - 0.25 * 0.25).sqrt();
+    let expected =
+        |t: f64| 12.0 - 8.0 * (-sigma * t).exp() * ((wd * t).cos() + sigma / wd * (wd * t).sin());
+    let dt = 0.25;
+    let mut peak = f64::MIN;
+    for tick in 1..=60_u64 {
+        driver.step(dt).unwrap();
+        let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
+            panic!("the driven point is Float")
+        };
+        peak = peak.max(level);
+        let wanted = expected(tick as f64 * dt);
+        assert!(
+            (level - wanted).abs() < 1e-9,
+            "tick {tick}: level={level} expected={wanted}"
+        );
+    }
+    // The underdamped element overshot its input, then settled to it.
+    assert!(peak > 15.0, "peak {peak}");
+    let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
+        panic!("the driven point is Float")
+    };
+    assert!((level - 12.0).abs() < 0.25, "settled level {level}");
 
     assert!(stop(&mut plant).success());
 }
