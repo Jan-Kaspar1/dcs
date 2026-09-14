@@ -72,7 +72,7 @@ Ticket breakdown:
 - #51 — the page's trend slice: live telemetry plus signal metadata, per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`. **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18). **Open** — M2 layer gating #62's affordances and #84's forcing.
 - #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Open.**
-- #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Open.**
+- #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Done** — `PairClient`/`PeerStatus`/`PairError` in `dcs-monitor`, the page's `?peer=` pair view with per-peer role polling, active-only command routing with mid-transition retry, tick-continuity merging, and cross-origin reads on the JSON endpoints.
 - #69 — showcase plant model exercising the full component library. **Open.**
 
 Done when:
@@ -80,7 +80,7 @@ Done when:
 - the monitoring surface serves the signal index, per-kind `ComponentDescriptor`s, bounded point history, and the transition journal over the decision-8 transport (#34, #35, #50) — **done**;
 - a served page renders live telemetry and signal metadata, faceplates generated from descriptors without per-kind UI code, and trend and journal panes fed by incremental since-cursor polling (#51, #62) — **partially done** (trend and journal slices landed; faceplates open);
 - the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **open**;
-- under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **open**.
+- under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **done**.
 
 ### M5: Lifecycle and device integration — registered
 
