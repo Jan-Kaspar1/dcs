@@ -14,9 +14,9 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
-    EdgeTrigger, GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor,
-    OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter, Sequencer, SignalFilter, SrLatch, Timer,
-    Totalizer, Valve,
+    EdgeTrigger, FailoverSelect, GroupOutputs, Interlock, LatchingAlarm, ManualStation,
+    MedianVoter, Motor, OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter, Sequencer,
+    SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -329,6 +329,30 @@ pub fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(ThresholdChain::KIND, |spec| {
+            boxed(ThresholdChain::from_parameters(
+                spec.name.as_str(),
+                spec.require("level")?,
+                ThresholdOutputs {
+                    demand: spec.require("demand")?,
+                    duty_call: spec.require("duty_call")?,
+                    lag_call: spec.require("lag_call")?,
+                    below_cutoff: spec.require("below_cutoff")?,
+                    high_level: spec.require("high_level")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(FailoverSelect::KIND, |spec| {
+            boxed(FailoverSelect::from_parameters(
+                spec.name.as_str(),
+                spec.require("primary")?,
+                spec.require("backup")?,
+                spec.require("out")?,
+                spec.require("backup_active")?,
                 spec.parameters,
             ))
         })

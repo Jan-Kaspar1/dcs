@@ -1855,3 +1855,178 @@ impl Spec for EdgeTriggerSpec {
         }
     }
 }
+
+/// Spec for the `threshold-chain` kind: the station's ordered
+/// start/stop setpoint table driving a pump-stage demand.
+///
+/// Ports mirror the descriptor: `level` (`In`, `Float`); `demand`
+/// (`Out`, `Int`); `duty_call`, `lag_call`, `below_cutoff`,
+/// `high_level` (`Out`, `Bool`). Parameters: `cutoff`, `stop`,
+/// `start`, `lag_start`, `high` (required finite `Float`s; their
+/// strictly-increasing ordering is a cross-parameter invariant the
+/// kind's `from_parameters` checks — a spec cannot express it) and
+/// `on_bad_demand` (required `Int` in `0..=2`).
+pub struct ThresholdChainSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `threshold-chain` instance.
+pub struct ThresholdChainInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `level` port (`In`, `Float`): the station level measurement —
+    /// normally the `failover-select`'s chosen source.
+    pub level: Sink<f64>,
+    /// `demand` port (`Out`, `Int`): the held stage count — `0` all
+    /// stopped, `1` duty called, `2` duty plus lag.
+    pub demand: Source<i64>,
+    /// `duty_call` port (`Out`, `Bool`): asserts while the held demand
+    /// is at least `1`.
+    pub duty_call: Source<bool>,
+    /// `lag_call` port (`Out`, `Bool`): asserts while the held demand
+    /// is `2`.
+    pub lag_call: Source<bool>,
+    /// `below_cutoff` port (`Out`, `Bool`): the low-water cut-off
+    /// condition.
+    pub below_cutoff: Source<bool>,
+    /// `high_level` port (`Out`, `Bool`): the high-level alarm
+    /// condition.
+    pub high_level: Source<bool>,
+}
+
+impl ThresholdChainSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "threshold-chain";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("cutoff", ValueKind::Float, Some(FINITE_F64)),
+        required("stop", ValueKind::Float, Some(FINITE_F64)),
+        required("start", ValueKind::Float, Some(FINITE_F64)),
+        required("lag_start", ValueKind::Float, Some(FINITE_F64)),
+        required("high", ValueKind::Float, Some(FINITE_F64)),
+        required("on_bad_demand", ValueKind::Int, Some(CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for ThresholdChainSpec {
+    type Instance = ThresholdChainInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("level", Direction::In, ValueKind::Float),
+            port("demand", Direction::Out, ValueKind::Int),
+            port("duty_call", Direction::Out, ValueKind::Bool),
+            port("lag_call", Direction::Out, ValueKind::Bool),
+            port("below_cutoff", Direction::Out, ValueKind::Bool),
+            port("high_level", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ThresholdChainInstance {
+            id,
+            level: Sink::port(id, "level"),
+            demand: Source::port(id, "demand"),
+            duty_call: Source::port(id, "duty_call"),
+            lag_call: Source::port(id, "lag_call"),
+            below_cutoff: Source::port(id, "below_cutoff"),
+            high_level: Source::port(id, "high_level"),
+        }
+    }
+}
+
+/// Spec for the `failover-select` kind: quality-driven selection
+/// between a primary and a backup analog measurement.
+///
+/// Ports mirror the descriptor: `primary` (`In`, `Float`), `backup`
+/// (`In`, `Float`), `out` (`Out`, `Float`), `backup_active` (`Out`,
+/// `Bool`). The kind takes no parameters.
+pub struct FailoverSelectSpec {
+    /// The instance's parameter map — the kind declares no parameters,
+    /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
+    /// at `build`.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `failover-select` instance.
+pub struct FailoverSelectInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `primary` port (`In`, `Float`): the preferred measurement.
+    pub primary: Sink<f64>,
+    /// `backup` port (`In`, `Float`): the measurement served while the
+    /// primary is unusable.
+    pub backup: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the selected source's sample.
+    pub out: Source<f64>,
+    /// `backup_active` port (`Out`, `Bool`): asserts while the backup
+    /// is selected.
+    pub backup_active: Source<bool>,
+}
+
+impl FailoverSelectSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "failover-select";
+
+    /// The declared parameter set: the kind takes none.
+    pub const PARAMETERS: &'static [ParamDecl] = &[];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for FailoverSelectSpec {
+    type Instance = FailoverSelectInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("primary", Direction::In, ValueKind::Float),
+            port("backup", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("backup_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        FailoverSelectInstance {
+            id,
+            primary: Sink::port(id, "primary"),
+            backup: Sink::port(id, "backup"),
+            out: Source::port(id, "out"),
+            backup_active: Source::port(id, "backup_active"),
+        }
+    }
+}

@@ -17,10 +17,10 @@ use std::collections::BTreeSet;
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, InterlockSpec,
+    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
+    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -355,6 +355,100 @@ fn edge_trigger_spec_emits_an_assembling_document() {
 }
 
 #[test]
+fn threshold_chain_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level", Direction::In);
+
+    let level = plant.field_input::<f64>(PointId(10), level_raw, false);
+    let demand = plant.internal_output::<i64>(PointId(20), 0);
+    let duty_call = plant.internal_output::<bool>(PointId(21), false);
+    let lag_call = plant.internal_output::<bool>(PointId(22), false);
+    let below_cutoff = plant.internal_output::<bool>(PointId(23), false);
+    let high_level = plant.internal_output::<bool>(PointId(24), false);
+
+    let chain = plant.add(ThresholdChainSpec::new(parameters([
+        ("cutoff", Value::Float(1.0)),
+        ("stop", Value::Float(2.0)),
+        ("start", Value::Float(4.0)),
+        ("lag_start", Value::Float(6.0)),
+        ("high", Value::Float(8.0)),
+        ("on_bad_demand", Value::Int(0)),
+    ])));
+    plant.connect(level, chain.level);
+    plant.connect(&chain.demand, demand);
+    plant.connect(&chain.duty_call, duty_call);
+    plant.connect(&chain.lag_call, lag_call);
+    plant.connect(&chain.below_cutoff, below_cutoff);
+    plant.connect(&chain.high_level, high_level);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, ThresholdChainSpec::KIND);
+}
+
+#[test]
+fn threshold_chain_rejects_an_unordered_setpoint_table() {
+    // The strictly-increasing ordering is a cross-parameter invariant
+    // no spec can express: `build` accepts the map, and the kind's
+    // `from_parameters` reports the offending setpoint at assembly.
+    let mut plant = PlantBuilder::new();
+    let level = plant.internal_input::<f64>(PointId(10), 0.0, true);
+    let demand = plant.internal_output::<i64>(PointId(20), 0);
+    let duty_call = plant.internal_output::<bool>(PointId(21), false);
+    let lag_call = plant.internal_output::<bool>(PointId(22), false);
+    let below_cutoff = plant.internal_output::<bool>(PointId(23), false);
+    let high_level = plant.internal_output::<bool>(PointId(24), false);
+
+    let chain = plant.add(ThresholdChainSpec::new(parameters([
+        ("cutoff", Value::Float(1.0)),
+        ("stop", Value::Float(2.0)),
+        ("start", Value::Float(4.0)),
+        ("lag_start", Value::Float(3.0)),
+        ("high", Value::Float(8.0)),
+        ("on_bad_demand", Value::Int(0)),
+    ])));
+    plant.connect(level, chain.level);
+    plant.connect(&chain.demand, demand);
+    plant.connect(&chain.duty_call, duty_call);
+    plant.connect(&chain.lag_call, lag_call);
+    plant.connect(&chain.below_cutoff, below_cutoff);
+    plant.connect(&chain.high_level, high_level);
+
+    let model = plant.build().unwrap();
+    let driver = sim_driver(&model).unwrap();
+    let error = assemble(&model, &dcs_controller::registry(), &driver).unwrap_err();
+    match &error {
+        AssemblyError::Component { detail, .. } => assert!(
+            detail.contains("lag_start"),
+            "the failure should name the offending setpoint, found {detail}"
+        ),
+        _ => panic!("expected a component construction failure, found {error:?}"),
+    }
+}
+
+#[test]
+fn failover_select_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let primary_raw = plant.channel::<f64>(sim, "level", Direction::In);
+    let backup_raw = plant.channel::<f64>(sim, "backup", Direction::In);
+
+    let primary = plant.field_input::<f64>(PointId(10), primary_raw, false);
+    let backup = plant.field_input::<f64>(PointId(11), backup_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let backup_active = plant.internal_output::<bool>(PointId(21), false);
+
+    let select = plant.add(FailoverSelectSpec::new(Default::default()));
+    plant.connect(primary, select.primary);
+    plant.connect(backup, select.backup);
+    plant.connect(&select.out, out);
+    plant.connect(&select.backup_active, backup_active);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, FailoverSelectSpec::KIND);
+}
+
+#[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
     let sim = plant.device("sim").id;
@@ -424,6 +518,8 @@ fn every_registered_kind_has_a_spec() {
         PumpGroupSpec::KIND,
         SrLatchSpec::KIND,
         EdgeTriggerSpec::KIND,
+        ThresholdChainSpec::KIND,
+        FailoverSelectSpec::KIND,
     ]
     .into_iter()
     .collect();

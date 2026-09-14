@@ -58,7 +58,13 @@
 //! - [`SrLatch`] — a set/reset latch, reset-dominant on simultaneous
 //!   assertion;
 //! - [`EdgeTrigger`] — a one-scan pulse on the rising, falling, or both
-//!   edges of a Boolean input.
+//!   edges of a Boolean input;
+//! - [`ThresholdChain`] — the station's ordered start/stop setpoint
+//!   table driving a pump-stage demand, with hysteresis and a declared
+//!   bad-measurement fallback;
+//! - [`FailoverSelect`] — quality-driven selection between a primary
+//!   and a backup analog measurement, alarming the backup-mode
+//!   transition.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -80,6 +86,7 @@ pub mod describe;
 mod digital_input;
 mod digital_output;
 mod edge_trigger;
+mod failover_select;
 mod interlock;
 mod latching_alarm;
 mod manual_station;
@@ -93,6 +100,7 @@ mod rate_limiter;
 mod sequencer;
 mod signal_filter;
 mod sr_latch;
+mod threshold_chain;
 mod timer;
 mod totalizer;
 mod valve;
@@ -105,6 +113,7 @@ pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use edge_trigger::{Edge, EdgeTrigger};
+pub use failover_select::FailoverSelect;
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
@@ -118,6 +127,7 @@ pub use rate_limiter::RateLimiter;
 pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
 pub use sr_latch::SrLatch;
+pub use threshold_chain::{SetpointTable, ThresholdChain, ThresholdOutputs};
 pub use timer::Timer;
 pub use totalizer::Totalizer;
 pub use valve::Valve;
@@ -156,6 +166,8 @@ pub const KINDS: &[&str] = &[
     PumpGroup::KIND,
     SrLatch::KIND,
     EdgeTrigger::KIND,
+    ThresholdChain::KIND,
+    FailoverSelect::KIND,
 ];
 
 #[cfg(test)]
