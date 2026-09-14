@@ -15,6 +15,14 @@
   .nosample { color: #888; font-style: italic; }
   #status { color: #666; }
   #receipt { background: #f6f6f6; padding: 0.5rem; white-space: pre-wrap; }
+  #trends { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .trend { margin: 0; }
+  .trend figcaption { font-size: 0.85rem; color: #444; margin-bottom: 0.25rem; }
+  .trend svg { display: block; border: 1px solid #ccc; background: #fbfbfb; }
+  .trend polyline { fill: none; stroke: #146; stroke-width: 1.5; }
+  .trend .limit { fill: #888; font-size: 9px; }
+  .trend circle.uncertain { fill: #a60; }
+  .trend circle.bad { fill: #b00; }
 </style>
 </head>
 <body>
@@ -30,6 +38,17 @@
   <tbody id="points"></tbody>
 </table>
 
+<h2>Trends</h2>
+<div id="trends"></div>
+
+<h2>Journal</h2>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="journal"></tbody>
+</table>
+
 <h2>Operator command</h2>
 <form id="command-form">
   <label>Signal <select id="command-point" required></select></label>
@@ -41,10 +60,23 @@
 <script>
 "use strict";
 // The page speaks only the monitor's JSON contract: GET /signals for the
-// loaded model's point metadata, GET /snapshot for live samples, and
-// POST /command for operator writes. No dependencies, no build step.
+// loaded model's point metadata, GET /snapshot for live samples, GET
+// /history for each point's retained sample stream, GET /journal for the
+// transition journal, and POST /command for operator writes. Snapshot,
+// history, and journal are polled on one shared one-second cadence; the
+// history and journal fetches carry since-cursors, so each poll transfers
+// only entries newer than the last seen sequence. No dependencies, no
+// build step.
 
 let index = { points: [] };
+// point id -> { samples: [Sample], lastSeq } — the series a trend draws.
+const trends = new Map();
+// The retained journal window, oldest first.
+const journalEntries = [];
+let journalSince = 0;
+// Client-side display bounds; the server's rings bound retention anyway.
+const TREND_LIMIT = 600;
+const JOURNAL_LIMIT = 300;
 
 function esc(text) {
   return String(text).replace(/[&<>"']/g, c => ({
@@ -61,6 +93,15 @@ function formatValue(value) {
   return JSON.stringify(value);
 }
 
+// The numeric ordinate a trend plots for a value; Bool draws as 0/1.
+function numericValue(value) {
+  if (value == null) return null;
+  if ("Bool" in value) return value.Bool ? 1 : 0;
+  if ("Int" in value) return value.Int;
+  if ("Float" in value) return value.Float;
+  return null;
+}
+
 // Quality serializes as "Good" | {"Uncertain": reason} | {"Bad": reason}.
 function formatQuality(quality) {
   if (typeof quality === "string") return quality;
@@ -68,26 +109,217 @@ function formatQuality(quality) {
   return severity + " (" + reason + ")";
 }
 
+function isGood(quality) {
+  return quality === "Good";
+}
+
 function qualityClass(quality) {
   const severity = typeof quality === "string" ? quality : Object.keys(quality)[0];
   return esc(severity.toLowerCase());
 }
 
+// The signal-index name for a point, falling back to the bare id.
+function pointName(point) {
+  const meta = index.points.find(p => p.point === point);
+  return meta ? meta.name + " (point " + point + ")" : "point " + point;
+}
+
+let polling = false;
 async function refresh() {
-  const snapshot = await (await fetch("/snapshot")).json();
-  document.getElementById("status").textContent =
-    "tick " + snapshot.tick + " — polled " + new Date().toLocaleTimeString();
-  const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
-  document.getElementById("points").innerHTML = index.points.map(meta => {
-    const sample = (telemetry.get(meta.point) || {}).sample;
-    const quality = sample ? formatQuality(sample.quality) : "no sample";
-    const cls = sample ? qualityClass(sample.quality) : "nosample";
-    return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
-      meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
-      (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
-      esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
-      (sample ? sample.tick : "") + "</td></tr>";
-  }).join("");
+  if (polling) return;
+  polling = true;
+  try {
+    const snapshot = await (await fetch("/snapshot")).json();
+    document.getElementById("status").textContent =
+      "tick " + snapshot.tick + " — polled " + new Date().toLocaleTimeString();
+    const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+    document.getElementById("points").innerHTML = index.points.map(meta => {
+      const sample = (telemetry.get(meta.point) || {}).sample;
+      const quality = sample ? formatQuality(sample.quality) : "no sample";
+      const cls = sample ? qualityClass(sample.quality) : "nosample";
+      return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
+        meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
+        (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
+        esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
+        (sample ? sample.tick : "") + "</td></tr>";
+    }).join("");
+    await Promise.all([refreshTrends(), refreshJournal()]);
+  } catch (error) {
+    document.getElementById("status").textContent = "poll failed: " + error;
+  } finally {
+    polling = false;
+  }
+}
+
+// One inline-SVG trend panel per point, built once from the signal index.
+function buildTrends() {
+  document.getElementById("trends").innerHTML = index.points.map(meta =>
+    "<figure class=\"trend\">" +
+    "<figcaption id=\"trend-caption-" + meta.point + "\">" + esc(meta.name) + "</figcaption>" +
+    "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
+    "</figure>").join("");
+  for (const meta of index.points) {
+    trends.set(meta.point, { samples: [], lastSeq: 0 });
+  }
+}
+
+// Fetches each point's history increments. Every point's ring shares the
+// scan cadence, so the smallest seen seq is a safe common cursor; each
+// point's own lastSeq still dedupes what the fetch returns.
+async function refreshTrends() {
+  const states = [...trends.values()];
+  let since = 0;
+  if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
+    since = Math.min(...states.map(state => state.lastSeq));
+  }
+  const histories = await (await fetch("/history?since=" + since)).json();
+  for (const history of histories) {
+    const state = trends.get(history.point);
+    if (!state) continue;
+    for (const entry of history.samples) {
+      if (entry.seq > state.lastSeq) {
+        state.samples.push(entry.sample);
+        state.lastSeq = entry.seq;
+      }
+    }
+    if (state.samples.length > TREND_LIMIT) {
+      state.samples.splice(0, state.samples.length - TREND_LIMIT);
+    }
+  }
+  for (const meta of index.points) drawTrend(meta);
+}
+
+// Draws one point's retained series as a polyline; samples with non-good
+// quality get a marker dot in the quality's color, so a degraded stretch
+// is visible on the trend itself.
+function drawTrend(meta) {
+  const state = trends.get(meta.point);
+  const svg = document.getElementById("trend-" + meta.point);
+  const caption = document.getElementById("trend-caption-" + meta.point);
+  const latest = state.samples[state.samples.length - 1];
+  caption.textContent = meta.name + " (point " + meta.point + ")" +
+    (meta.unit ? " [" + meta.unit + "]" : "") + (latest
+      ? " — latest " + formatValue(latest.value) + " at tick " + latest.tick +
+        ", " + state.samples.length + " samples, ticks " +
+        state.samples[0].tick + "–" + latest.tick
+      : " — no samples");
+  const coords = state.samples
+    .map((sample, i) => ({ i, v: numericValue(sample.value), sample }))
+    .filter(c => c.v != null);
+  if (coords.length === 0) {
+    svg.innerHTML = "";
+    return;
+  }
+  const min = Math.min(...coords.map(c => c.v));
+  const max = Math.max(...coords.map(c => c.v));
+  let lo = min, hi = max;
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const W = 320, H = 90, padX = 8, padY = 14;
+  const n = state.samples.length;
+  const px = i => padX + (W - 2 * padX) * (n > 1 ? i / (n - 1) : 0.5);
+  const py = v => H - padY - (H - 2 * padY) * (v - lo) / (hi - lo);
+  let body =
+    "<text class=\"limit\" x=\"" + padX + "\" y=\"10\">" + esc(max) + "</text>" +
+    "<text class=\"limit\" x=\"" + padX + "\" y=\"" + (H - 4) + "\">" + esc(min) + "</text>" +
+    "<polyline points=\"" +
+    coords.map(c => px(c.i).toFixed(1) + "," + py(c.v).toFixed(1)).join(" ") +
+    "\"/>";
+  for (const c of coords) {
+    if (!isGood(c.sample.quality)) {
+      body += "<circle class=\"" + qualityClass(c.sample.quality) +
+        "\" cx=\"" + px(c.i).toFixed(1) + "\" cy=\"" + py(c.v).toFixed(1) +
+        "\" r=\"3\"><title>tick " + c.sample.tick + ": " +
+        esc(formatQuality(c.sample.quality)) + "</title></circle>";
+    }
+  }
+  svg.innerHTML = body;
+}
+
+// Fetches the journal increment and re-renders the pane in tick order —
+// the endpoint already returns entries oldest-first.
+async function refreshJournal() {
+  const entries = await (await fetch("/journal?since=" + journalSince)).json();
+  for (const entry of entries) {
+    journalSince = Math.max(journalSince, entry.seq);
+    journalEntries.push(entry);
+  }
+  if (journalEntries.length > JOURNAL_LIMIT) {
+    journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT);
+  }
+  document.getElementById("journal").innerHTML = journalEntries.map(entry =>
+    "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
+    esc(describeEvent(entry.event)) + "</td></tr>").join("");
+}
+
+// Journal events serialize as {"quality_changed": ...} |
+// {"command_settled": ...} | {"step_failed": ...}.
+function describeEvent(event) {
+  if ("quality_changed" in event) {
+    const change = event.quality_changed;
+    return pointName(change.point) + " quality " +
+      (change.from ? formatQuality(change.from) : "no prior sample") +
+      " → " + formatQuality(change.to);
+  }
+  if ("command_settled" in event) {
+    const receipt = event.command_settled.receipt;
+    return describeCommand(receipt.command) + " — " +
+      describeOutcome(receipt.outcome);
+  }
+  if ("step_failed" in event) {
+    const failure = event.step_failed;
+    return "component " + failure.component + " step failed: " + failure.error;
+  }
+  return JSON.stringify(event);
+}
+
+// A command serializes as {"write_value": {point, kind, value}}.
+function describeCommand(command) {
+  if ("write_value" in command) {
+    const write = command.write_value;
+    return "write " + pointName(write.point) + " := " + formatValue(write.value);
+  }
+  return JSON.stringify(command);
+}
+
+// An outcome serializes as {"accepted": {apply_tick}} |
+// {"applied": {tick}} | {"rejected": {reason}}.
+function describeOutcome(outcome) {
+  if ("applied" in outcome) return "applied at tick " + outcome.applied.tick;
+  if ("accepted" in outcome) {
+    return "accepted for tick " + outcome.accepted.apply_tick;
+  }
+  if ("rejected" in outcome) {
+    return "rejected: " + describeReason(outcome.rejected.reason);
+  }
+  return JSON.stringify(outcome);
+}
+
+// A rejection reason serializes as {"unknown_point": {point}} |
+// {"type_mismatch": {point, expected, found}} |
+// {"driver_rejected": {point, error}}.
+function describeReason(reason) {
+  if ("unknown_point" in reason) {
+    return "unknown point " + reason.unknown_point.point;
+  }
+  if ("type_mismatch" in reason) {
+    const mismatch = reason.type_mismatch;
+    return "type mismatch on " + pointName(mismatch.point) + ": expected " +
+      mismatch.expected + ", found " + formatValue(mismatch.found);
+  }
+  if ("driver_rejected" in reason) {
+    const rejection = reason.driver_rejected;
+    return "driver rejected " + pointName(rejection.point) + ": " +
+      describeIoError(rejection.error);
+  }
+  return JSON.stringify(reason);
+}
+
+// An IoError serializes as {"UnknownPoint": id} | {"Disconnected": id} |
+// {"Timeout": id} | {"TypeMismatch": {point, expected, found}}.
+function describeIoError(error) {
+  const [name, detail] = Object.entries(error)[0];
+  if (typeof detail === "number") return name + " on point " + detail;
+  return name + " " + JSON.stringify(detail);
 }
 
 function commandValue(kind, text) {
@@ -102,6 +334,7 @@ async function init() {
   select.innerHTML = index.points.map(p =>
     "<option value=\"" + p.point + "\">" + esc(p.name) +
     " (point " + p.point + ")</option>").join("");
+  buildTrends();
   document.getElementById("command-form").addEventListener("submit", async event => {
     event.preventDefault();
     const point = Number(select.value);
