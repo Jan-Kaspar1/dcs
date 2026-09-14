@@ -4,7 +4,10 @@
 //! identical behavior for a scripted executor run local and
 //! register-mapped.
 
-use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    Direction, DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value,
+    ValueKind,
+};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
@@ -344,6 +347,42 @@ fn protocol_answers_map_to_named_io_errors() {
 }
 
 #[test]
+fn a_live_link_reports_connected_health_with_no_last_error() {
+    with_server(&fixture_decls(), |_, addr| {
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+
+        // A driver that has never failed reports a live link and no
+        // failure history on the diagnostics surface.
+        assert_eq!(
+            bus.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+            })
+        );
+
+        // Successful exchanges and register-level refusals leave the
+        // link-health surface clear — they are not link failures.
+        bus.read(PointId(1)).unwrap();
+        assert_eq!(
+            bus.write(PointId(1), Value::Bool(true)),
+            Err(IoError::TypeMismatch {
+                point: PointId(1),
+                expected: ValueKind::Float,
+                found: Value::Bool(true),
+            })
+        );
+        assert_eq!(
+            bus.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+            })
+        );
+    });
+}
+
+#[test]
 fn stopping_the_server_surfaces_disconnected_not_panics() {
     let server = BusServer::bind(
         ("127.0.0.1", 0),
@@ -368,6 +407,17 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
         assert!(!bus.connected());
         assert_eq!(bus.last_failure(), Some(LinkError::Disconnected));
         assert_eq!(bus.read(PointId(1)), Err(IoError::Disconnected(PointId(1))));
+
+        // The diagnostics hook names the same event at link level:
+        // disconnected, carrying the failure that severed the link —
+        // permanently, since the driver never reconnects.
+        assert_eq!(
+            bus.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the device server".to_string()),
+            })
+        );
     });
 }
 
@@ -385,6 +435,15 @@ fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
     // dropped: the next access fails fast as Disconnected.
     assert_eq!(bus.read(PointId(1)), Err(IoError::Disconnected(PointId(1))));
     assert_eq!(bus.last_failure(), Some(LinkError::Timeout));
+    // The link-level report carries the failure that severed the link
+    // — the timeout, not the Disconnected its consequence produces.
+    assert_eq!(
+        bus.diagnostics(),
+        Some(DriverDiagnostics {
+            link: LinkState::Disconnected,
+            last_error: Some("device server did not answer in time".to_string()),
+        })
+    );
     drop(listener);
 }
 

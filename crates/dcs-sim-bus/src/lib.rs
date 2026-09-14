@@ -94,8 +94,9 @@
 //! `IoError::UnknownPoint`, a kind-mismatched write as
 //! `IoError::TypeMismatch`, and a fenced-out write as
 //! `IoError::Fenced` — the first failure drops the connection
-//! for good, and [`BusDriver::connected`]/[`BusDriver::last_failure`]
-//! report link health for the driver-diagnostics surface. The
+//! for good, and [`BusDriver`] reports that link health through
+//! `IoDriver::diagnostics` for the telemetry snapshot's I/O-health
+//! section. The
 //! `dcs-sim-bus-device` binary in this crate serves one model-declared
 //! `sim-bus` device's registers for integration rigs.
 

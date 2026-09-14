@@ -12,7 +12,10 @@ use dcs_assembly::{
     StepError, assemble, resolve_drivers, sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{IoDriver, IoError, PointId, Quality, QualityReason, Value, ValueKind};
+use dcs_core::{
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason,
+    TelemetrySnapshot, Value, ValueKind,
+};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
 use dcs_sim_bus::{BusDriver, BusServer, PointRegister, RegisterBank, RegisterDecl};
@@ -258,10 +261,27 @@ fn sim_bus_run_matches_the_all_local_reference() {
             executor.scan().unwrap();
             driver.step(0.1).unwrap();
         }
-        serde_json::to_string(&executor.snapshot()).unwrap()
+        executor.snapshot()
     });
 
-    assert_eq!(reference, mixed);
+    // The mixed run's bus backend reports its link — the live
+    // connection the reference's all-local driver has no transport to
+    // report on. That is the one legitimate difference between the two
+    // snapshots' health sections; every other field, including the
+    // executor-collected counters, is identical.
+    assert_eq!(
+        mixed.io_health.driver,
+        Some(DriverDiagnostics {
+            link: LinkState::Connected,
+            last_error: None,
+        })
+    );
+    let mut normalized = mixed;
+    normalized.io_health.driver = None;
+    assert_eq!(
+        serde_json::from_str::<TelemetrySnapshot>(&reference).unwrap(),
+        normalized
+    );
 }
 
 #[test]
@@ -303,6 +323,15 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
                 .quality,
             Quality::Good
         );
+        // While the device server is live the fan-out's aggregate
+        // reports the bus backend's link as connected, no last error.
+        assert_eq!(
+            executor.snapshot().io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+            })
+        );
 
         server.shutdown();
         // The lost device surfaces named IoErrors through the fan-out —
@@ -319,6 +348,15 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         let bus = driver.inspect::<BusDriver>(BUS_DEVICE).unwrap();
         assert!(!bus.connected());
         assert!(bus.last_failure().is_some());
+        // The fan-out's aggregate names the dead backend's last failure
+        // by the device it serves.
+        assert_eq!(
+            driver.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("device 2: no live connection to the device server".to_string()),
+            })
+        );
         // Stepping fails on the cross-backend wire first: the route's
         // write to the dead register surfaces the same named IoError.
         assert_eq!(
@@ -330,8 +368,8 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         // degrades the remote input to Bad rather than panicking.
         driver.write(SETPOINT, Value::Float(40.0)).unwrap();
         executor.scan().unwrap();
-        let sample = executor
-            .snapshot()
+        let snapshot = executor.snapshot();
+        let sample = snapshot
             .points
             .iter()
             .find(|telemetry| telemetry.point == LEVEL_RAW)
@@ -340,6 +378,16 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         assert_eq!(
             sample.quality,
             Quality::Bad(QualityReason::CommunicationFault)
+        );
+        // The same dead link reaches the snapshot's I/O-health driver
+        // section through the aggregate — the link-level report beside
+        // the per-point quality the event left on the input sample.
+        assert_eq!(
+            snapshot.io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("device 2: no live connection to the device server".to_string()),
+            })
         );
     });
 }
