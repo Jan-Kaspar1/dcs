@@ -1,0 +1,58 @@
+"""Operator CLI for the pinned local installation."""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from .config import load
+from .state import State
+
+def main():
+    parser = argparse.ArgumentParser(prog='dcs-agents')
+    parser.add_argument('--config')
+    commands = parser.add_subparsers(dest='command', required=True)
+    for name in ('start', 'pause', 'resume', 'stop', 'status', 'logs', 'run', 'wait-service'):
+        commands.add_parser(name)
+    retry = commands.add_parser('retry')
+    retry.add_argument('issue', type=int)
+    upgrade = commands.add_parser('upgrade')
+    upgrade.add_argument('source', help='Reviewed source checkout to install')
+    args = parser.parse_args()
+    config = load(args.config)
+    state = State(Path(config['state_root']) / 'state.sqlite3')
+    if args.command == 'run':
+        from .supervisor import Supervisor
+        Supervisor(config).run()
+    elif args.command == 'pause':
+        state.pause()
+    elif args.command == 'resume':
+        state.resume()
+    elif args.command == 'start':
+        subprocess.run(['systemctl', '--user', 'start', 'dcs-agents.service'], check=True)
+    elif args.command == 'stop':
+        subprocess.run(['systemctl', '--user', 'stop', 'dcs-agents.service'], check=True)
+    elif args.command == 'status':
+        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'jobs':state.jobs()}, indent=2))
+    elif args.command == 'logs':
+        subprocess.run(['tail', '-n', '100', str(Path(config['state_root']) / 'supervisor.log')], check=True)
+    elif args.command == 'retry':
+        if state.paused():
+            parser.error('Resume before requesting retry')
+        if not state.job(args.issue) or state.job(args.issue)['status'] != 'blocked':
+            parser.error('Only blocked jobs can be retried')
+        state.set('retry:' + str(args.issue), True)
+        print('Retry queued; supervisor will reconcile and preserve previous work.')
+    elif args.command == 'upgrade':
+        subprocess.run([sys.executable, str(Path(args.source).resolve() / 'scripts/install_agents.py')], check=True)
+    elif args.command == 'wait-service':
+        subprocess.run(['systemctl', '--user', 'start', 'dcs-agents.service'], check=True)
+        while True:
+            status = subprocess.run(['systemctl', '--user', 'show', '-p', 'ActiveState', '--value', 'dcs-agents.service'], capture_output=True, text=True).stdout.strip()
+            if status in ('inactive', 'failed'):
+                break
+            time.sleep(10)
+
+if __name__ == '__main__':
+    main()
