@@ -380,8 +380,9 @@ fn latching_alarm_fixture_trips_latches_and_acknowledges() {
     assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
 
-    // The operator's ack — a command to the internal point — applies at
-    // the scan boundary and clears the latch.
+    // The operator's ack — a command to the fixture's `writable`
+    // internal point — applies at the scan boundary and clears the
+    // latch.
     let receipt = executor.submit_command(Command::WriteValue {
         point: ALARM_ACK,
         kind: ValueKind::Bool,

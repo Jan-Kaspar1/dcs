@@ -22,7 +22,8 @@
       "id": 11,
       "direction": "in",
       "value_type": "Bool",
-      "initial": { "Bool": false }
+      "initial": { "Bool": false },
+      "writable": true
     },
     {
       "id": 20,
