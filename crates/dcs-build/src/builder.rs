@@ -250,8 +250,27 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable,
+            stale_after_ticks: None,
         });
         InPoint::new(id)
+    }
+
+    /// Declares an `In` point of value type `T` bound to `channel` with
+    /// a declared freshness budget of `stale_after_ticks` ticks — like
+    /// [`field_input`](Self::field_input), plus the executor landing the
+    /// image sample as `Uncertain(Stale)` once the driver-stamped tick
+    /// lags the scan tick by more than the budget. A budget of `0`
+    /// requires a sample stamped at the current scan tick.
+    pub fn field_input_stale_after<T: PointType>(
+        &mut self,
+        id: PointId,
+        channel: ChannelRef,
+        writable: bool,
+        stale_after_ticks: u64,
+    ) -> InPoint<T> {
+        let point = self.field_input(id, channel, writable);
+        self.io_points.last_mut().unwrap().stale_after_ticks = Some(stale_after_ticks);
+        point
     }
 
     /// Declares an `Out` point of value type `T` bound to `channel`,
@@ -268,6 +287,7 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable: false,
+            stale_after_ticks: None,
         });
         OutPoint::new(id)
     }
@@ -292,6 +312,7 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable,
+            stale_after_ticks: None,
         });
         InPoint::new(id)
     }
@@ -307,6 +328,7 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable: false,
+            stale_after_ticks: None,
         });
         OutPoint::new(id)
     }
