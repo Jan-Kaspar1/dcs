@@ -236,17 +236,26 @@ impl Component for Valve {
         Ok(())
     }
 
+    /// Reports the declared `tolerance`/`discrepancy_ticks` tuning —
+    /// the same fields [`capture_state`](Self::capture_state)
+    /// checkpoints, so the faceplate and a tracking standby read one
+    /// vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("tolerance", Value::Float(self.tolerance));
+        parameters.insert(
+            "discrepancy_ticks",
+            Value::Int(self.discrepancy_ticks as i64),
+        );
+        parameters
+    }
+
     /// Captures the banked deviating-scan count and the tuned
     /// `tolerance`/`discrepancy_ticks` so a tracking standby continues
     /// the discrepancy count under the same tuning.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("deviating", Value::Int(self.deviating as i64));
-        state.insert("tolerance", Value::Float(self.tolerance));
-        state.insert(
-            "discrepancy_ticks",
-            Value::Int(self.discrepancy_ticks as i64),
-        );
         state
     }
 

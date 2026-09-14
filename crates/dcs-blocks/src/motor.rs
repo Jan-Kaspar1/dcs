@@ -170,13 +170,21 @@ impl Component for Motor {
         Ok(())
     }
 
+    /// Reports the declared `fault_ticks` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("fault_ticks", Value::Int(self.fault_ticks as i64));
+        parameters
+    }
+
     /// Captures the banked disagreeing-scan count and the tuned
     /// `fault_ticks` so a tracking standby continues the count under
     /// the same tuning.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("disagreeing", Value::Int(self.disagreeing as i64));
-        state.insert("fault_ticks", Value::Int(self.fault_ticks as i64));
         state
     }
 

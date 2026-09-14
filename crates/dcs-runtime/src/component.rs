@@ -225,6 +225,27 @@ pub trait Component: Send {
         })
     }
 
+    /// Reports the current values of the component's declared parameters
+    /// — the read half of the tuning surface
+    /// [`apply_parameter`](Component::apply_parameter) writes.
+    ///
+    /// The executor serves the report in the
+    /// [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot)'s per-component
+    /// parameter section, filtered to the names
+    /// [`describe`](Component::describe) declares, so the descriptor
+    /// stays the surface's sole authority: a name the descriptor does
+    /// not declare never reaches the snapshot.
+    ///
+    /// Report from the same fields
+    /// [`capture_state`](Component::capture_state) checkpoints — one
+    /// vocabulary feeds the tracking standby and the faceplate, so the
+    /// value the operator sees is the value a standby inherited. The
+    /// default reports nothing; kinds declaring no tunable parameters
+    /// are unaffected.
+    fn report_parameters(&self) -> StateMap {
+        StateMap::new()
+    }
+
     /// Captures the component's internal state into a [`StateMap`].
     ///
     /// This is the component half of the state-capture contract behind

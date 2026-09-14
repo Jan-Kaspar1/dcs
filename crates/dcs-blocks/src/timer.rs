@@ -186,15 +186,23 @@ impl Component for Timer {
         Ok(())
     }
 
+    /// Reports the declared `delay_ticks`/`off_delay` tuning — the same
+    /// fields [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("delay_ticks", Value::Int(self.delay_ticks as i64));
+        parameters.insert("off_delay", Value::Bool(self.off_delay));
+        parameters
+    }
+
     /// Captures the in-progress count and the tuned delay so a
     /// checkpointed timer continues mid-count under the same tuning: a
     /// restored timer with `elapsed` scans banked needs exactly
     /// `delay_ticks - elapsed` further scans of the timed state.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("elapsed", Value::Int(self.elapsed as i64));
-        state.insert("delay_ticks", Value::Int(self.delay_ticks as i64));
-        state.insert("off_delay", Value::Bool(self.off_delay));
         state
     }
 

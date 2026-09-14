@@ -168,19 +168,27 @@ impl Component for DigitalInput {
         Ok(())
     }
 
+    /// Reports the declared `invert`/`debounce_ticks` tuning — the same
+    /// fields [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("invert", Value::Bool(self.invert));
+        parameters.insert("debounce_ticks", Value::Int(self.debounce_ticks as i64));
+        parameters
+    }
+
     /// Captures the driven output value, the debounce's in-progress
     /// observation (`stable_value`/`stable_count`, absent before the
     /// first step), and the tuned `invert`/`debounce_ticks` so a
     /// tracking standby inherits runtime tuning.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("driven", Value::Bool(self.driven));
         if let Some((value, held)) = self.stable {
             state.insert("stable_value", Value::Bool(value));
             state.insert("stable_count", Value::Int(held as i64));
         }
-        state.insert("invert", Value::Bool(self.invert));
-        state.insert("debounce_ticks", Value::Int(self.debounce_ticks as i64));
         state
     }
 

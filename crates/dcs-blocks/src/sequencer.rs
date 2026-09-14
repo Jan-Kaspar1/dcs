@@ -367,24 +367,33 @@ impl Component for Sequencer {
         Ok(())
     }
 
+    /// Reports the declared step table — `step_count` plus each step's
+    /// `ticks`/`out` — the same fields
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("step_count", Value::Int(self.steps.len() as i64));
+        for (index, entry) in self.steps.iter().enumerate() {
+            parameters.insert(
+                format!("step_{}_ticks", index + 1),
+                Value::Int(entry.ticks as i64),
+            );
+            parameters.insert(format!("step_{}_out", index + 1), Value::Float(entry.value));
+        }
+        parameters
+    }
+
     /// Captures the active step, its banked count, the completion flag,
     /// and the tuned step table, so a checkpointed sequencer continues
     /// mid-sequence under the same tuning: a restored sequencer sitting
     /// `elapsed` scans into step `step` advances exactly as the captured
     /// one would have.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("step", Value::Int(self.current as i64 + 1));
         state.insert("elapsed", Value::Int(self.elapsed as i64));
         state.insert("done", Value::Bool(self.completed));
-        state.insert("step_count", Value::Int(self.steps.len() as i64));
-        for (index, entry) in self.steps.iter().enumerate() {
-            state.insert(
-                format!("step_{}_ticks", index + 1),
-                Value::Int(entry.ticks as i64),
-            );
-            state.insert(format!("step_{}_out", index + 1), Value::Float(entry.value));
-        }
         state
     }
 

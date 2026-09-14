@@ -216,15 +216,23 @@ impl Component for MedianVoter {
         Ok(())
     }
 
+    /// Reports the declared `tolerance` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("tolerance", Value::Float(self.tolerance));
+        parameters
+    }
+
     /// Captures the held vote — absent before the first participating
     /// scan — plus the tuned `tolerance`, so a checkpointed voter holds
     /// the same value through a full input loss under the same bound.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         if let Some(held) = self.held {
             state.insert("held", Value::Float(held));
         }
-        state.insert("tolerance", Value::Float(self.tolerance));
         state
     }
 

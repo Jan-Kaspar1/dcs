@@ -184,15 +184,23 @@ impl Component for SignalFilter {
         Ok(())
     }
 
+    /// Reports the declared `alpha` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("alpha", Value::Float(self.alpha));
+        parameters
+    }
+
     /// Captures the estimate — absent before the first `Good` input —
     /// plus the tuned `alpha`, so a checkpointed filter continues the
     /// recurrence under the same constant.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         if let Some(estimate) = self.estimate {
             state.insert("estimate", Value::Float(estimate));
         }
-        state.insert("alpha", Value::Float(self.alpha));
         state
     }
 

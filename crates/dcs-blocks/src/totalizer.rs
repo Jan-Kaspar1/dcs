@@ -257,14 +257,22 @@ impl Component for Totalizer {
         Ok(())
     }
 
+    /// Reports the declared `rate_unit`/`rollover` tuning — the same
+    /// fields [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("rate_unit", Value::Float(self.rate_unit));
+        parameters.insert("rollover", Value::Float(self.rollover));
+        parameters
+    }
+
     /// Captures the banked total and the tuned `rate_unit`/`rollover`,
     /// so a checkpointed totalizer continues accumulating from the
     /// transferred count under the same tuning.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("total", Value::Float(self.total));
-        state.insert("rate_unit", Value::Float(self.rate_unit));
-        state.insert("rollover", Value::Float(self.rollover));
         state
     }
 
