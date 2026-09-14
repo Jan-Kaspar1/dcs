@@ -8,7 +8,8 @@
       "value_type": "Float",
       "unit": "degC",
       "description": "Reactor core temperature",
-      "group": null
+      "group": null,
+      "writable": false
     },
     {
       "point": 11,
@@ -18,7 +19,8 @@
       "value_type": "Bool",
       "unit": null,
       "description": null,
-      "group": null
+      "group": null,
+      "writable": false
     },
     {
       "point": 12,
@@ -28,7 +30,8 @@
       "value_type": "Float",
       "unit": "%",
       "description": "Control valve position command",
-      "group": null
+      "group": null,
+      "writable": false
     }
   ]
 }

@@ -149,13 +149,10 @@ fn with_monitor_config<T>(
         (PointId(20), Value::Float(0.0)),
         (PointId(30), Value::Float(0.0)),
     ]);
-    let map: PointMap = [
-        (PointId(10), Direction::In, ValueKind::Float),
-        (PointId(20), Direction::Out, ValueKind::Float),
-        (PointId(30), Direction::Out, ValueKind::Float),
-    ]
-    .into_iter()
-    .collect();
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
     let executor = Executor::new(&driver, map, components).unwrap();
     let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
@@ -334,29 +331,33 @@ fn commands_are_journaled_with_their_final_outcomes() {
         );
 
         // Refused by the driver at the scan boundary: journaled with the
-        // named driver reason at that scan's tick.
-        driver.faults.lock().unwrap().insert(PointId(30));
+        // named driver reason at that scan's tick, ahead of the quality
+        // transition the faulted input read produces in the same scan.
+        driver.faults.lock().unwrap().insert(PointId(10));
         let receipt = client
-            .command(&write_value(30, ValueKind::Float, Value::Float(9.0)))
+            .command(&write_value(10, ValueKind::Float, Value::Float(9.0)))
             .unwrap();
         client.advance(1).unwrap();
+        let settled = client
+            .journal(base_seq + 2)
+            .unwrap()
+            .into_iter()
+            .find(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .expect("the boundary rejection is journaled");
+        assert_eq!(settled.tick, Tick(4));
         assert_eq!(
-            client.journal(base_seq + 2).unwrap(),
-            vec![JournalEntry {
-                seq: base_seq + 3,
-                tick: Tick(4),
-                event: JournalEvent::CommandSettled {
-                    receipt: CommandReceipt {
-                        command: receipt.command,
-                        outcome: CommandOutcome::Rejected {
-                            reason: CommandError::DriverRejected {
-                                point: PointId(30),
-                                error: IoError::Disconnected(PointId(30)),
-                            },
+            settled.event,
+            JournalEvent::CommandSettled {
+                receipt: CommandReceipt {
+                    command: receipt.command,
+                    outcome: CommandOutcome::Rejected {
+                        reason: CommandError::DriverRejected {
+                            point: PointId(10),
+                            error: IoError::Disconnected(PointId(10)),
                         },
                     },
                 },
-            }]
+            }
         );
     });
 }

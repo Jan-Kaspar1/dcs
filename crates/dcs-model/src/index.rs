@@ -3,15 +3,16 @@
 //! [`SignalIndex`] is a derived view of a [`PlantModel`]: one [`PointSignal`]
 //! entry per declared [`IoPoint`](crate::IoPoint), ordered by [`PointId`],
 //! carrying the metadata a monitoring UI needs — signal name, engineering
-//! unit, description, display group, direction, and value type — so
-//! consumers never walk the device/channel/signal graph themselves.
+//! unit, description, display group, direction, value type, and command
+//! writability — so consumers never walk the device/channel/signal graph
+//! themselves.
 //! [`PlantModel::signal_index`] builds it.
 //!
 //! Resolution rules:
 //!
 //! - A point sourced by a [`Signal`](crate::Signal) copies the signal's
-//!   `name`, `unit`, `description`, and `group`; `direction` and
-//!   `value_type` always come from the point itself.
+//!   `name`, `unit`, `description`, and `group`; `direction`, `value_type`,
+//!   and `writable` always come from the point itself.
 //! - A point no signal sources gets a default entry: `signal` is `None`,
 //!   `name` is `"point-<id>"`, and `unit`/`description`/`group` are `None`.
 //! - When several signals source one point, the lowest [`SignalId`] wins, so
@@ -47,6 +48,12 @@ pub struct PointSignal {
     /// point is ungrouped; the monitoring UI files such points under its
     /// documented default group.
     pub group: Option<String>,
+    /// Whether the point's `io_point` declaration marks it writable — the
+    /// model-declared command surface. A monitoring consumer may offer
+    /// operator `WriteValue` commands against these `In` points only;
+    /// writes to `Out` points and unmarked points are refused with a
+    /// `not_writable` rejection.
+    pub writable: bool,
 }
 
 /// A derived view resolving every declared I/O point to its monitoring
@@ -101,6 +108,7 @@ impl PlantModel {
                     unit: signal.unit.clone(),
                     description: signal.description.clone(),
                     group: signal.group.clone(),
+                    writable: point.writable,
                 },
                 None => PointSignal {
                     point: point.id,
@@ -111,6 +119,7 @@ impl PlantModel {
                     unit: None,
                     description: None,
                     group: None,
+                    writable: point.writable,
                 },
             })
             .collect();
@@ -217,6 +226,15 @@ mod tests {
         let entry = index.get(PointId(11)).unwrap();
         assert_eq!(entry.direction, Direction::Out);
         assert_eq!(entry.value_type, ValueKind::Float);
+    }
+
+    #[test]
+    fn index_carries_the_points_writable_mark() {
+        let mut model: PlantModel = serde_json::from_str(MINIMAL).unwrap();
+        model.io_points[0].writable = true;
+        let index = model.signal_index();
+        assert!(index.get(PointId(10)).unwrap().writable);
+        assert!(!index.get(PointId(11)).unwrap().writable);
     }
 
     #[test]

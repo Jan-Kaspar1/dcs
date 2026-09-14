@@ -28,7 +28,8 @@
       "id": 11,
       "direction": "in",
       "value_type": "Float",
-      "channel": { "device": 1, "name": "lic101_sp" }
+      "channel": { "device": 1, "name": "lic101_sp" },
+      "writable": true
     },
     {
       "id": 20,

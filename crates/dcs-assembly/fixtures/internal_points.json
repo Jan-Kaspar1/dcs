@@ -15,7 +15,8 @@
       "id": 10,
       "direction": "in",
       "value_type": "Float",
-      "initial": { "Float": 25.0 }
+      "initial": { "Float": 25.0 },
+      "writable": true
     },
     {
       "id": 11,

@@ -22,7 +22,8 @@
       "id": 10,
       "direction": "in",
       "value_type": "Float",
-      "channel": { "device": 1, "name": "temperature" }
+      "channel": { "device": 1, "name": "temperature" },
+      "writable": true
     },
     {
       "id": 20,
