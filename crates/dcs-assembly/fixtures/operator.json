@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "cv": { "direction": "in", "value_type": "Float" },
+        "manual": { "direction": "in", "value_type": "Float" },
+        "mode": { "direction": "in", "value_type": "Bool" },
+        "raw": { "direction": "in", "value_type": "Float" },
+        "drive": { "direction": "out", "value_type": "Float" },
+        "active": { "direction": "out", "value_type": "Bool" },
+        "filtered": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "cv" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "manual" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "mode" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "raw" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "drive" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "active" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "filtered" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "control-value",
+      "source": 10,
+      "unit": "%",
+      "description": "Automatic control value the station follows in auto"
+    },
+    {
+      "id": 101,
+      "name": "manual-value",
+      "source": 11,
+      "unit": "%",
+      "description": "Operator-entered manual value the station follows in manual"
+    },
+    {
+      "id": 102,
+      "name": "mode-select",
+      "source": 12,
+      "description": "Mode switch: false is auto, true is manual"
+    },
+    {
+      "id": 103,
+      "name": "raw-measurement",
+      "source": 13,
+      "unit": "mA",
+      "description": "Unsmoothed measurement feeding the signal filter"
+    },
+    {
+      "id": 104,
+      "name": "station-output",
+      "source": 20,
+      "unit": "%",
+      "description": "The driven value the station slews between sources"
+    },
+    {
+      "id": 105,
+      "name": "manual-active",
+      "source": 21,
+      "description": "Reported mode: asserted while the manual source drives"
+    },
+    {
+      "id": 106,
+      "name": "filtered-measurement",
+      "source": 22,
+      "unit": "mA",
+      "description": "First-order smoothed measurement"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "manual-station",
+      "parameters": {
+        "transfer_delta": { "Float": 5.0 }
+      },
+      "ports": {
+        "control": { "direction": "in", "value_type": "Float" },
+        "manual": { "direction": "in", "value_type": "Float" },
+        "mode": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "manual_active": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "signal-filter",
+      "parameters": {
+        "alpha": { "Float": 0.5 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "control" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "manual" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "mode" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "manual_active" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 22 }
+    }
+  ]
+}

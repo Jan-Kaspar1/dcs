@@ -351,6 +351,15 @@ impl<'d> Monitor<'d> {
         scan_and_record(&mut shared)
     }
 
+    /// Records one scan cycle that overran its wall-clock period — the
+    /// paced scan loop's feed for the snapshot's `io_health.scan_overruns`,
+    /// taken under the same lock that serializes scans. Wall-clock pacing
+    /// is the shell's business, so the loop detects the overrun and this
+    /// call only reports it into telemetry.
+    pub fn record_scan_overrun(&self) {
+        self.shared.lock().unwrap().peer.record_scan_overrun();
+    }
+
     /// The executor's current telemetry snapshot, taken under the lock.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         self.shared.lock().unwrap().peer.snapshot()
@@ -380,8 +389,18 @@ impl<'d> Monitor<'d> {
     /// boundary. A field-owning instance refuses with
     /// [`ApplyError::OwnsField`]; a rejected checkpoint rolls back and
     /// the peer reports itself degraded.
+    ///
+    /// The apply also runs the peer's staged-output divergence check; a
+    /// transition into `diverged` is journaled at the tick the compared
+    /// staged image belonged to.
     pub fn apply_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
-        self.shared.lock().unwrap().peer.apply(checkpoint)
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        let result = peer.apply(checkpoint);
+        for report in peer.take_divergences() {
+            recorder.note_divergence(report.tick, report.mismatches);
+        }
+        result
     }
 
     /// Marks a tracking peer degraded after a checkpoint fetch produced
@@ -469,6 +488,14 @@ impl<'d> Monitor<'d> {
                             match MonitorClient::new(active).checkpoint() {
                                 Ok(checkpoint) => {
                                     let _ = shared.peer.apply(&checkpoint);
+                                    // The apply's divergence check
+                                    // journals a transition into
+                                    // `diverged` at the compared tick.
+                                    for report in shared.peer.take_divergences() {
+                                        shared
+                                            .recorder
+                                            .note_divergence(report.tick, report.mismatches);
+                                    }
                                 }
                                 Err(error) => shared
                                     .peer

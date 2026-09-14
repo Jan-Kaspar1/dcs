@@ -426,6 +426,11 @@ fn page_serves_trend_and_journal_markup() {
         for needle in ["id=\"journal\"", "<th>Tick</th>", "/journal?since="] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
+        // The I/O-health line: the snapshot's io_health section rendered
+        // as its own surface beside the per-point quality column.
+        for needle in ["id=\"io-health\"", "snapshot.io_health"] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
         // The page stays a single dependency-free asset.
         assert!(!page.contains("src="), "page references external assets");
     });
@@ -508,6 +513,14 @@ fn trend_and_journal_feeds_track_the_run() {
         // command rejected at submission, both tick-attributed.
         driver.faults.lock().unwrap().insert(PointId(10));
         client.advance(1).unwrap();
+        // The same fault counted on the snapshot's I/O-health surface —
+        // named counters and attribution beside the point's bad quality.
+        let health = &client.snapshot().unwrap().io_health;
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(
+            health.last_error.map(|fault| (fault.tick, fault.point)),
+            Some((Tick(4), PointId(10)))
+        );
         let rejected = client
             .command(&write_value(99, ValueKind::Float, Value::Float(1.0)))
             .unwrap();
@@ -618,6 +631,39 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
 
         monitor.shutdown();
     });
+}
+
+#[test]
+fn the_paced_loops_overrun_feed_counts_into_io_health() {
+    // The paced controller loop's documented feed: a cycle that overran
+    // its wall-clock period is reported through
+    // `Monitor::record_scan_overrun` — under the same lock that
+    // serializes scans — and the count surfaces in the snapshot the
+    // endpoints serve.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
+    let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
+
+    assert_eq!(monitor.snapshot().io_health.scan_overruns, 0);
+    monitor.paced_scan().unwrap();
+    monitor.record_scan_overrun();
+    monitor.record_scan_overrun();
+    let snapshot = monitor.snapshot();
+    assert_eq!(snapshot.io_health.scan_overruns, 2);
+    // The JSON contract carries the counter as part of the section.
+    let json = serde_json::to_string(&snapshot.io_health).unwrap();
+    assert_eq!(
+        serde_json::from_str::<dcs_core::IoHealth>(&json).unwrap(),
+        snapshot.io_health
+    );
 }
 
 #[test]

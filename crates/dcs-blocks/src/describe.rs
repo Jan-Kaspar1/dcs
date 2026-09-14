@@ -46,6 +46,15 @@ pub const NONNEGATIVE_INT: ParameterRange = ParameterRange {
     max: Value::Int(i64::MAX),
 };
 
+/// The inclusive bound a `Float` parameter in `(0, 1]` accepts — a
+/// positive fraction such as a per-tick smoothing constant. The lower
+/// bound is the smallest positive normal double — the tightest
+/// inclusive bound on `x > 0` the type can express.
+pub const FRACTION_F64: ParameterRange = ParameterRange {
+    min: Value::Float(f64::MIN_POSITIVE),
+    max: Value::Float(1.0),
+};
+
 /// A [`ParameterDescriptor`] for one key a kind's `from_parameters`
 /// accepts: the parameter's name in the model's parameter map, its value
 /// kind, and the inclusive bound it accepts, when bounded.

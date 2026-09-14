@@ -28,7 +28,7 @@
 
 use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::executor::{Executor, ScanError};
-use dcs_core::{TelemetrySnapshot, Tick};
+use dcs_core::{Divergence, TelemetrySnapshot, Tick};
 use std::fmt;
 
 /// How the last checkpoint transfer went — the standby's named,
@@ -49,6 +49,16 @@ pub enum StandbyState {
         /// What the failed transfer reported, for diagnostics.
         detail: String,
     },
+    /// Checkpoints apply cleanly but the field `Out` values this peer's
+    /// own scan stages mismatch what the field carries — the divergence
+    /// check of [`Peer`](crate::Peer), which runs this comparison at each
+    /// checkpoint transfer. A diverged standby is refused promotion until
+    /// a fresh checkpoint resynchronizes it. A bare [`Standby`] performs
+    /// no field comparison and never reports this state.
+    Diverged {
+        /// The mismatched field `Out` points and both sides' values.
+        mismatches: Vec<Divergence>,
+    },
 }
 
 impl fmt::Display for StandbyState {
@@ -57,6 +67,15 @@ impl fmt::Display for StandbyState {
             Self::Unsynchronized => f.write_str("unsynchronized"),
             Self::Tracking => f.write_str("tracking"),
             Self::Degraded { detail } => write!(f, "degraded: {detail}"),
+            Self::Diverged { mismatches } => write!(
+                f,
+                "diverged: staged outputs mismatch the field at {}",
+                mismatches
+                    .iter()
+                    .map(|mismatch| mismatch.point.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -127,6 +146,13 @@ impl<'d> Standby<'d> {
     /// A monitoring snapshot of the tracked run.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         self.executor.snapshot()
+    }
+
+    /// Records one scan cycle that overran its wall-clock period —
+    /// forwarded to the executor; the pacing shell calls this through
+    /// whichever wrapper it scans through.
+    pub fn record_scan_overrun(&mut self) {
+        self.executor.record_scan_overrun();
     }
 
     /// Applies a checkpoint received from the active, aligning the run
