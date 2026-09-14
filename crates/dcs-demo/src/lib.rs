@@ -477,7 +477,7 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
     for instance in &model.components {
         let name = format!("{}-{}", instance.kind, instance.id.0);
         let component: Box<dyn Component> = match instance.kind.as_str() {
-            "analog-input" => {
+            kind if kind == AnalogInput::<f64>::KIND => {
                 let raw = port_point(instance.id, "raw")?;
                 let out = port_point(instance.id, "out")?;
                 match wiring.kinds[&raw] {
@@ -502,14 +502,14 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
                     }
                 }
             }
-            "pid" => Box::new(Pid::from_parameters(
+            kind if kind == Pid::KIND => Box::new(Pid::from_parameters(
                 name,
                 port_point(instance.id, "sp")?,
                 port_point(instance.id, "pv")?,
                 port_point(instance.id, "out")?,
                 &instance.parameters,
             )?),
-            "digital-output" => Box::new(DigitalOutput::from_parameters(
+            kind if kind == DigitalOutput::KIND => Box::new(DigitalOutput::from_parameters(
                 name,
                 port_point(instance.id, "in")?,
                 port_point(instance.id, "out")?,
@@ -527,9 +527,9 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
 
     // The loop's process-relevant points: where the setpoint enters, where
     // the valve command leaves, and where the tank level is measured.
-    let setpoint = loop_point(model, &port_points, "pid", "sp")?;
-    let level = loop_point(model, &port_points, "analog-input", "raw")?;
-    let valve = loop_point(model, &port_points, "pid", "out")?;
+    let setpoint = loop_point(model, &port_points, Pid::KIND, "sp")?;
+    let level = loop_point(model, &port_points, AnalogInput::<f64>::KIND, "raw")?;
+    let valve = loop_point(model, &port_points, Pid::KIND, "out")?;
 
     // The analog-input's scaling parameters, kept so the level trace can
     // report engineering units. `from_parameters` already validated them.
@@ -537,9 +537,9 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
         let instance = model
             .components
             .iter()
-            .find(|component| component.kind == "analog-input")
+            .find(|component| component.kind == AnalogInput::<f64>::KIND)
             .ok_or(DemoError::MissingLoopComponent {
-                kind: "analog-input",
+                kind: AnalogInput::<f64>::KIND,
             })?;
         instance
             .parameters

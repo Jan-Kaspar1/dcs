@@ -1,7 +1,8 @@
 //! Digital output: boolean write with quality propagation.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Sample, Tick, Value};
+use dcs_core::{ComponentDescriptor, PointId, PortRole, Sample, Tick, Value, ValueKind};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A digital output channel: copies a boolean command `In` point onto a
@@ -24,6 +25,10 @@ pub struct DigitalOutput {
 }
 
 impl DigitalOutput {
+    /// The component-kind string the model-driven registry maps onto this
+    /// type's constructor.
+    pub const KIND: &'static str = "digital-output";
+
     /// A non-inverting digital output.
     pub fn new(name: impl Into<String>, input: PointId, output: PointId) -> Self {
         Self {
@@ -78,13 +83,25 @@ impl Component for DigitalOutput {
         )?;
         Ok(())
     }
+
+    /// Describes the channel: `in` is the commanded state the block
+    /// echoes, `out` the field value it writes; the `invert` parameter.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[("in", PortRole::Setpoint), ("out", PortRole::Output)],
+            vec![describe::parameter("invert", ValueKind::Bool, None)],
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality, QualityReason};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, QualityReason};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -141,7 +158,7 @@ mod tests {
             .collect();
         let instance = ComponentInstance {
             id: ComponentId(3),
-            kind: "digital-output".to_string(),
+            kind: DigitalOutput::KIND.to_string(),
             parameters,
             ports: BTreeMap::new(),
         };
@@ -163,5 +180,40 @@ mod tests {
             DigitalOutput::from_parameters("do", IN, OUT, &wrong).unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "invert"
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = DigitalOutput::new("do", IN, OUT).describe();
+        assert_eq!(descriptor.name, "do");
+        assert_eq!(descriptor.kind, DigitalOutput::KIND);
+        assert_eq!(descriptor.label, "do");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "in".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [ParameterDescriptor {
+                name: "invert".to_string(),
+                kind: ValueKind::Bool,
+                range: None,
+            }]
+        );
     }
 }

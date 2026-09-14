@@ -36,13 +36,19 @@
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
-//! `from_parameters` constructor.
+//! `from_parameters` constructor, and describe themselves to the
+//! monitoring UI through a
+//! [`Component::describe`](dcs_runtime::Component::describe) override
+//! built with the shared [`describe`] helpers — kind string, role-hinted
+//! ports, and parameter metadata declared beside `KIND` and
+//! `from_parameters`.
 
 #![warn(missing_docs)]
 
 mod alarm_monitor;
 mod analog_input;
 mod analog_output;
+pub mod describe;
 mod digital_input;
 mod digital_output;
 mod interlock;

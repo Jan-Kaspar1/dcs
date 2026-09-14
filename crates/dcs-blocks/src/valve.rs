@@ -1,8 +1,11 @@
 //! Valve: an analog actuator that echoes a command to the field and
 //! flags a discrepancy when the position feedback stops tracking it.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A valve: drives the analog `cmd` request onto the field `out` point and
@@ -173,13 +176,43 @@ impl Component for Valve {
         )?;
         Ok(())
     }
+
+    /// Describes the actuator: `cmd` is the position request the block is
+    /// driven toward, `out` the field command, `fb` the measured position
+    /// feedback it verifies, `discrepancy` the reported diagnostic; the
+    /// `tolerance` and `discrepancy_ticks` parameters.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[
+                ("cmd", PortRole::Setpoint),
+                ("out", PortRole::Output),
+                ("fb", PortRole::ProcessValue),
+                ("discrepancy", PortRole::Status),
+            ],
+            vec![
+                describe::parameter(
+                    "tolerance",
+                    ValueKind::Float,
+                    Some(describe::NONNEGATIVE_F64),
+                ),
+                describe::parameter(
+                    "discrepancy_ticks",
+                    ValueKind::Int,
+                    Some(describe::NONNEGATIVE_INT),
+                ),
+            ],
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -416,5 +449,59 @@ mod tests {
             Valve::from_parameters("vlv", CMD, OUT, FB, DISCREPANCY, &bad_ticks).unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "discrepancy_ticks"
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "vlv");
+        assert_eq!(descriptor.kind, Valve::KIND);
+        assert_eq!(descriptor.label, "vlv");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "cmd".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+                PortDescriptor {
+                    name: "fb".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "discrepancy".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "tolerance".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::NONNEGATIVE_F64),
+                },
+                ParameterDescriptor {
+                    name: "discrepancy_ticks".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+            ]
+        );
     }
 }
