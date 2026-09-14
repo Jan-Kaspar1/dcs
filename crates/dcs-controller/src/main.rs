@@ -107,6 +107,20 @@
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
 //!
+//! Rolling a revised plant model into production, per the rolling
+//! model-revision decision: start the standby with `--revised` against
+//! the revised model document. Its fingerprint differs by design, so
+//! each pulled checkpoint crosses the model boundary under the
+//! documented carryover rule — operator-writable internal points matched
+//! by declared identity carry their last values, component state
+//! reinitializes — and `GET /role` reports the named `reinitialized`
+//! state carrying the carryover report: what transferred, what
+//! initialized fresh, and every dropped element named. A checkpoint the
+//! rule cannot carry is rejected before promotion with a named error and
+//! the peer reports `degraded`; the old active keeps the field. The same
+//! `POST /demote`-then-`POST /promote` order then moves the field writer
+//! to the revised model at a scan boundary.
+//!
 //! Automatic failover, per the failover decision: a standby armed with
 //! `--auto-promote N` treats the checkpoint pull as the heartbeat —
 //! `N` consecutive failed pulls is active loss, and the peer
@@ -262,6 +276,11 @@ struct Options {
     /// The consecutive checkpoint-pull misses after which a tracking
     /// standby self-promotes — `None` keeps promotion manual-only.
     auto_promote: Option<u32>,
+    /// This standby's model is a deliberate revision: a pulled
+    /// checkpoint carrying a different fingerprint crosses the model
+    /// boundary through the documented carryover rule instead of
+    /// degrading on the mismatch.
+    revised: bool,
     /// Persist the run's checkpoint to this file at the end of every
     /// scan cycle, and resume from it at startup when it exists — the
     /// restart-recovery path for a controller with no redundant peer.
@@ -277,7 +296,7 @@ const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
                       [--remote ADDR] [--driven] [--auto-promote N]
-                      [--state-file PATH] [--journal-file PATH]
+                      [--revised] [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -300,6 +319,15 @@ controller scan.
                   its monitoring address ADDR and apply one per scan;
                   combines with --listen, whose POST /promote is the
                   switchover action
+  --revised       declare this standby's model a deliberate revision of
+                  the active's: a pulled checkpoint whose model
+                  fingerprint differs crosses the boundary under the
+                  documented carryover rule — operator-writable internal
+                  points matched by declared identity carry their last
+                  values, component state reinitializes — and the peer
+                  reports reinitialized, promotable in place of tracking;
+                  a checkpoint breaking the rule is rejected with a named
+                  error before promotion. Requires --standby
   --remote ADDR   attach to the shared simulated plant at ADDR instead
                   of a local simulation
   --driven        serve the monitor without pacing: scans run only when
@@ -349,6 +377,7 @@ impl Options {
         let mut remote = None;
         let mut driven = false;
         let mut auto_promote = None;
+        let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
         let mut args = args;
@@ -384,6 +413,7 @@ impl Options {
                 "--standby" => standby = Some(value("--standby")?),
                 "--remote" => remote = Some(value("--remote")?),
                 "--driven" => driven = true,
+                "--revised" => revised = true,
                 "--auto-promote" => {
                     auto_promote = Some(
                         value("--auto-promote")?
@@ -421,6 +451,7 @@ impl Options {
                 ("--remote", remote.is_some()),
                 ("--driven", driven),
                 ("--auto-promote", auto_promote.is_some()),
+                ("--revised", revised),
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
             ] {
@@ -450,6 +481,12 @@ impl Options {
         }
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
+        }
+        if revised && standby.is_none() {
+            return Err(
+                "--revised requires --standby: only a tracking peer rolls a revised model"
+                    .to_string(),
+            );
         }
         if driven {
             if listen.is_none() {
@@ -485,6 +522,7 @@ impl Options {
             remote,
             driven,
             auto_promote,
+            revised,
             state_file,
             journal_file,
         })
@@ -690,6 +728,15 @@ fn main() -> ExitCode {
         Some(budget) => peer.with_failover(budget),
         None => peer,
     };
+    // A --revised standby declared its model a deliberate revision of
+    // the active's: the pull path routes a foreign-fingerprint
+    // checkpoint through the documented carryover rule rather than
+    // degrading on the mismatch the fingerprint gate would otherwise
+    // report.
+    let peer = match options.revised {
+        true => peer.with_revision(),
+        false => peer,
+    };
 
     // The simulated process time per scan: explicit --dt, else the
     // wall-clock period in seconds, else one unit per unpaced tick.
@@ -777,7 +824,7 @@ fn main() -> ExitCode {
                         if !monitor.owns_field() {
                             match client.checkpoint() {
                                 Ok(checkpoint) => {
-                                    if let Err(error) = monitor.apply_checkpoint(&checkpoint) {
+                                    if let Err(error) = monitor.transfer_checkpoint(&checkpoint) {
                                         eprintln!(
                                             "standby: rejected checkpoint from {active_addr}: {error}"
                                         );
@@ -826,7 +873,7 @@ fn main() -> ExitCode {
                         if !peer.owns_field() {
                             match client.checkpoint() {
                                 Ok(checkpoint) => {
-                                    if let Err(error) = peer.apply(&checkpoint) {
+                                    if let Err(error) = peer.transfer(&checkpoint) {
                                         eprintln!(
                                             "standby: rejected checkpoint from {active_addr}: {error}"
                                         );
@@ -836,6 +883,9 @@ fn main() -> ExitCode {
                                             "standby: staged outputs diverged from the field at tick {}: {:?}",
                                             report.tick.0, report.mismatches
                                         );
+                                    }
+                                    for report in peer.take_reinitializations() {
+                                        eprintln!("standby: {report}");
                                     }
                                 }
                                 Err(error) => {

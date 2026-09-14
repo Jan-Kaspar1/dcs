@@ -110,6 +110,18 @@ applying it (`ensure_known_fields`, `require_f64`/`require_i64`/`optional_*`,
 `StateError` naming the element and field). The field names are a de facto
 wire contract between redundant peers. Stateless kinds leave the defaults.
 
+Checkpointed component state crosses only between same-model peers: a
+rolling model revision (`dcs-controller --revised`, decision 25 in
+`docs/architecture.md`) reassembles the standby under the new model and
+reinitializes every component — the carryover rule moves operator-writable
+internal points, still-declared output image samples, and the force set
+matched by declared point identity, and names each component's captured
+state `DroppedElement::Component` in the carryover report rather than
+restoring it. A revision that wants an instance's state to survive keeps
+its declared identity (`<kind>:<id>`) — but only ordinary same-model
+checkpoint convergence restores it; there are no per-kind compatibility
+rules yet.
+
 ### 6. Register the kind
 
 A `ComponentRegistry` maps each `kind` string to a constructor receiving a
