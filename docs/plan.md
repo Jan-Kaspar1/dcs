@@ -125,7 +125,7 @@ Ticket breakdown:
 - #89 — the M6 decision record and plan refresh (decisions 20–26). **Done.**
 - #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Done.**
 - #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Open** — issue filed under M4; #107 is its page slice.
-- #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; depends on #49). **Open** — issue filed under M4; #106 is its page slice.
+- #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; its #49 dependency has landed). **Open** — issue filed under M4; #106 is its page slice.
 - #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **Done** — issue filed under M4.
 - #85 — timer, counter, and rate-limiter kinds in `dcs-blocks`, each shipping `KIND`/`from_parameters`/`describe` per the established convention. **Done.**
 - Declared plant-side dynamics (decision 24). **Done** — `dcs-plant-server --dynamics` merges a JSON list of `ProcessElement` declarations (#81).
