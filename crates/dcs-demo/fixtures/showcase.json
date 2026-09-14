@@ -1,22 +1,25 @@
 {
   "version": 1,
   "devices": [
-    {
+{
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "lt101_raw": { "direction": "in", "value_type": "Float" },
+        "lt101a_raw": { "direction": "in", "value_type": "Float" },
+        "lt101b_raw": { "direction": "in", "value_type": "Float" },
+        "lt101c_raw": { "direction": "in", "value_type": "Float" },
+        "ft101_raw": { "direction": "in", "value_type": "Float" },
         "ly101_raw": { "direction": "in", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 2,
       "kind": "sim-ao",
       "channels": {
         "lv101_raw": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 3,
       "kind": "sim-di",
       "channels": {
@@ -24,328 +27,371 @@
         "lsh101": { "direction": "in", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 4,
       "kind": "sim-do",
       "channels": {
         "p101_cmd": { "direction": "out", "value_type": "Bool" },
-        "la101_horn": { "direction": "out", "value_type": "Bool" }
+        "la101_horn": { "direction": "out", "value_type": "Bool" },
+        "la102_lamp": { "direction": "out", "value_type": "Bool" }
       }
     }
   ],
   "io_points": [
-    {
+{
       "id": 10,
       "direction": "in",
       "value_type": "Float",
-      "channel": { "device": 1, "name": "lt101_raw" }
+      "channel": { "device": 1, "name": "lt101a_raw" }
     },
-    {
+{
       "id": 11,
       "direction": "in",
       "value_type": "Float",
       "channel": { "device": 1, "name": "ly101_raw" }
     },
-    {
+{
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "lt101b_raw" }
+    },
+{
+      "id": 13,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "lt101c_raw" }
+    },
+{
+      "id": 14,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "ft101_raw" }
+    },
+{
       "id": 20,
       "direction": "out",
       "value_type": "Float",
       "channel": { "device": 2, "name": "lv101_raw" }
     },
-    {
+{
       "id": 30,
       "direction": "in",
       "value_type": "Bool",
       "channel": { "device": 3, "name": "p101_run" }
     },
-    {
+{
       "id": 31,
       "direction": "in",
       "value_type": "Bool",
       "channel": { "device": 3, "name": "lsh101" }
     },
-    {
+{
       "id": 40,
       "direction": "out",
       "value_type": "Bool",
       "channel": { "device": 4, "name": "p101_cmd" }
     },
-    {
+{
       "id": 41,
       "direction": "out",
       "value_type": "Bool",
       "channel": { "device": 4, "name": "la101_horn" }
     },
-    {
+{
+      "id": 42,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 4, "name": "la102_lamp" }
+    },
+{
       "id": 50,
       "direction": "in",
       "value_type": "Float",
       "initial": { "Float": 60.0 },
       "writable": true
     },
-    {
+{
       "id": 51,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": true },
       "writable": true
     },
-    {
+{
       "id": 52,
       "direction": "in",
       "value_type": "Float",
       "initial": { "Float": 0.0 },
       "writable": true
     },
-    {
+{
       "id": 53,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false },
       "writable": true
     },
-    {
+{
       "id": 54,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false },
       "writable": true
     },
-    {
+{
+      "id": 55,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+{
+      "id": 56,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+{
+      "id": 57,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+{
+      "id": 58,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+{
+      "id": 59,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+{
       "id": 60,
       "direction": "out",
       "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "initial": { "Float": 60.0 }
     },
-    {
+{
       "id": 61,
       "direction": "in",
       "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "initial": { "Float": 60.0 }
     },
-    {
+{
       "id": 62,
       "direction": "in",
       "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "initial": { "Float": 60.0 }
     },
-    {
+{
       "id": 63,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 64,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 65,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 66,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 67,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 68,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 69,
       "direction": "in",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 70,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 71,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
     },
-    {
+{
       "id": 72,
       "direction": "out",
       "value_type": "Int",
       "initial": { "Int": 0 }
     },
-    {
+{
       "id": 73,
       "direction": "out",
       "value_type": "Bool",
       "initial": { "Bool": false }
+    },
+{
+      "id": 74,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 75,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 60.0 }
+    },
+{
+      "id": 76,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 60.0 }
+    },
+{
+      "id": 77,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 60.0 }
+    },
+{
+      "id": 78,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 79,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 80,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 81,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+{
+      "id": 82,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+{
+      "id": 83,
+      "direction": "out",
+      "value_type": "Int",
+      "initial": { "Int": 0 }
+    },
+{
+      "id": 84,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 85,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+{
+      "id": 86,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+{
+      "id": 87,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+{
+      "id": 88,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
     }
   ],
   "signals": [
-    {
-      "id": 100,
-      "name": "tank-level-raw",
-      "source": 10,
-      "unit": "mA",
-      "description": "LT-101 tank level transmitter raw output",
-      "group": "tank-t101"
-    },
-    {
-      "id": 101,
-      "name": "tank-level",
-      "source": 60,
-      "unit": "%",
-      "description": "T-101 level in engineering units",
-      "group": "tank-t101"
-    },
-    {
-      "id": 102,
-      "name": "level-setpoint",
-      "source": 50,
-      "unit": "%",
-      "description": "LIC-101 operator level setpoint",
-      "group": "tank-t101"
-    },
-    {
-      "id": 103,
-      "name": "level-alarm",
-      "source": 68,
-      "description": "LA-101 high/low level alarm",
-      "group": "tank-t101"
-    },
-    {
-      "id": 104,
-      "name": "alarm-horn",
-      "source": 41,
-      "description": "LA-101 horn field output",
-      "group": "tank-t101"
-    },
-    {
-      "id": 110,
-      "name": "pump-start",
-      "source": 51,
-      "description": "P-101 operator start request",
-      "group": "pump-p101"
-    },
-    {
-      "id": 111,
-      "name": "pump-run-feedback",
-      "source": 30,
-      "description": "P-101 field run feedback",
-      "group": "pump-p101"
-    },
-    {
-      "id": 112,
-      "name": "pump-running",
-      "source": 63,
-      "description": "P-101 conditioned run status",
-      "group": "pump-p101"
-    },
-    {
-      "id": 113,
-      "name": "pump-fault",
-      "source": 70,
-      "description": "P-101 run feedback fault",
-      "group": "pump-p101"
-    },
-    {
-      "id": 114,
-      "name": "pump-command",
-      "source": 40,
-      "description": "P-101 starter field command",
-      "group": "pump-p101"
-    },
-    {
-      "id": 120,
-      "name": "valve-command-raw",
-      "source": 20,
-      "unit": "mA",
-      "description": "LV-101 field command",
-      "group": "valve-lv101"
-    },
-    {
-      "id": 121,
-      "name": "valve-position-raw",
-      "source": 11,
-      "unit": "mA",
-      "description": "LY-101 position feedback raw",
-      "group": "valve-lv101"
-    },
-    {
-      "id": 122,
-      "name": "valve-discrepancy",
-      "source": 71,
-      "description": "LV-101 position discrepancy",
-      "group": "valve-lv101"
-    },
-    {
-      "id": 123,
-      "name": "valve-manual-position",
-      "source": 52,
-      "unit": "%",
-      "description": "LV-101 operator manual position",
-      "group": "valve-lv101"
-    },
-    {
-      "id": 124,
-      "name": "valve-manual-select",
-      "source": 53,
-      "description": "LV-101 manual/auto select",
-      "group": "valve-lv101"
-    },
-    {
-      "id": 130,
-      "name": "high-level-switch",
-      "source": 31,
-      "description": "LSH-101 high-high level switch",
-      "group": "interlock-i101"
-    },
-    {
-      "id": 131,
-      "name": "interlock-tripped",
-      "source": 66,
-      "description": "I-101 tripped",
-      "group": "interlock-i101"
-    },
-    {
-      "id": 132,
-      "name": "interlock-trip-count",
-      "source": 72,
-      "description": "I-101 cumulative trips",
-      "group": "interlock-i101"
-    },
-    {
-      "id": 133,
-      "name": "interlock-trips-done",
-      "source": 73,
-      "description": "I-101 trip count at preset",
-      "group": "interlock-i101"
-    },
-    {
-      "id": 134,
-      "name": "trip-counter-reset",
-      "source": 54,
-      "description": "I-101 trip counter reset",
-      "group": "interlock-i101"
-    }
+{ "id": 100, "name": "tank-level-raw", "source": 10, "unit": "mA", "description": "LT-101A tank level transmitter raw output", "group": "tank-t101" },
+{ "id": 101, "name": "tank-level", "source": 60, "unit": "%", "description": "T-101 level \u2014 median of the three redundant transmitters", "group": "tank-t101" },
+{ "id": 102, "name": "level-setpoint", "source": 50, "unit": "%", "description": "LIC-101 operator level setpoint", "group": "tank-t101" },
+{ "id": 103, "name": "level-alarm", "source": 68, "description": "LA-101 high/low level alarm", "group": "tank-t101" },
+{ "id": 104, "name": "alarm-horn", "source": 41, "description": "LA-101 horn field output", "group": "tank-t101" },
+{ "id": 105, "name": "tank-level-b-raw", "source": 12, "unit": "mA", "description": "LT-101B redundant level transmitter raw output", "group": "tank-t101" },
+{ "id": 106, "name": "tank-level-c-raw", "source": 13, "unit": "mA", "description": "LT-101C redundant level transmitter raw output", "group": "tank-t101" },
+{ "id": 107, "name": "tank-level-filtered", "source": 76, "unit": "%", "description": "LIF-101 filtered level feeding the loop and alarms", "group": "tank-t101" },
+{ "id": 108, "name": "level-voter-discrepancy", "source": 74, "description": "LY-101 transmitter spread above tolerance", "group": "tank-t101" },
+{ "id": 110, "name": "pump-start", "source": 51, "description": "P-101 operator start request", "group": "pump-p101" },
+{ "id": 111, "name": "pump-run-feedback", "source": 30, "description": "P-101 field run feedback", "group": "pump-p101" },
+{ "id": 112, "name": "pump-running", "source": 63, "description": "P-101 conditioned run status", "group": "pump-p101" },
+{ "id": 113, "name": "pump-fault", "source": 70, "description": "P-101 run feedback fault", "group": "pump-p101" },
+{ "id": 114, "name": "pump-command", "source": 40, "description": "P-101 starter field command", "group": "pump-p101" },
+{ "id": 120, "name": "valve-command-raw", "source": 20, "unit": "mA", "description": "LV-101 field command", "group": "valve-lv101" },
+{ "id": 121, "name": "valve-position-raw", "source": 11, "unit": "mA", "description": "LY-101 position feedback raw", "group": "valve-lv101" },
+{ "id": 122, "name": "valve-discrepancy", "source": 71, "description": "LV-101 position discrepancy", "group": "valve-lv101" },
+{ "id": 123, "name": "valve-manual-position", "source": 52, "unit": "%", "description": "LV-101 operator manual position", "group": "valve-lv101" },
+{ "id": 124, "name": "valve-manual-select", "source": 53, "description": "LV-101 manual/auto mode select", "group": "valve-lv101" },
+{ "id": 125, "name": "valve-manual-active", "source": 85, "description": "LV-101 station in manual", "group": "valve-lv101" },
+{ "id": 130, "name": "high-level-switch", "source": 31, "description": "LSH-101 high-high level switch", "group": "interlock-i101" },
+{ "id": 131, "name": "interlock-tripped", "source": 66, "description": "I-101 tripped", "group": "interlock-i101" },
+{ "id": 132, "name": "interlock-trip-count", "source": 72, "description": "I-101 cumulative trips", "group": "interlock-i101" },
+{ "id": 133, "name": "interlock-trips-done", "source": 73, "description": "I-101 trip count at preset", "group": "interlock-i101" },
+{ "id": 134, "name": "trip-counter-reset", "source": 54, "description": "I-101 trip counter reset", "group": "interlock-i101" },
+{ "id": 140, "name": "level-alarm-latched", "source": 78, "description": "LAL-102 latching level alarm", "group": "alarm-lal102" },
+{ "id": 141, "name": "level-alarm-unacknowledged", "source": 79, "description": "LAL-102 trip awaiting operator acknowledgment", "group": "alarm-lal102" },
+{ "id": 142, "name": "level-alarm-ack", "source": 58, "description": "LAL-102 operator acknowledgment \u2014 writable internal point", "group": "alarm-lal102" },
+{ "id": 143, "name": "alarm-beacon", "source": 42, "description": "LAL-102 unacknowledged-alarm panel lamp", "group": "alarm-lal102" },
+{ "id": 150, "name": "batch-run", "source": 55, "description": "B-101 batch sequence run request", "group": "batch-b101" },
+{ "id": 151, "name": "batch-reset", "source": 56, "description": "B-101 batch sequence reset", "group": "batch-b101" },
+{ "id": 152, "name": "batch-mode", "source": 57, "description": "B-101 program select \u2014 batch setpoint against the operator's", "group": "batch-b101" },
+{ "id": 153, "name": "batch-program", "source": 81, "unit": "%", "description": "B-101 driven setpoint value", "group": "batch-b101" },
+{ "id": 154, "name": "batch-step", "source": 83, "description": "B-101 active step", "group": "batch-b101" },
+{ "id": 155, "name": "batch-done", "source": 84, "description": "B-101 table complete", "group": "batch-b101" },
+{ "id": 160, "name": "flow-raw", "source": 14, "unit": "mA", "description": "FT-101 inlet flow transmitter raw output", "group": "flow-f101" },
+{ "id": 161, "name": "flow", "source": 86, "unit": "%", "description": "FT-101 inlet flow in engineering units", "group": "flow-f101" },
+{ "id": 162, "name": "flow-total", "source": 88, "description": "FQ-101 accumulated inlet flow", "group": "flow-f101" },
+{ "id": 163, "name": "flow-total-reset", "source": 59, "description": "FQ-101 operator reset", "group": "flow-f101" }
   ],
   "components": [
-    {
+{
       "id": 1,
       "kind": "digital-input",
       "parameters": {
@@ -356,7 +402,7 @@
         "out": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 2,
       "kind": "digital-input",
       "parameters": {
@@ -367,7 +413,7 @@
         "out": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 3,
       "kind": "timer",
       "parameters": {
@@ -378,7 +424,7 @@
         "out": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 4,
       "kind": "motor",
       "parameters": {
@@ -391,7 +437,7 @@
         "fault": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 5,
       "kind": "analog-input",
       "parameters": {
@@ -405,7 +451,7 @@
         "out": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 6,
       "kind": "rate-limiter",
       "parameters": {
@@ -416,13 +462,13 @@
         "out": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 7,
       "kind": "pid",
       "parameters": {
-        "kp": { "Float": 0.5 },
-        "ki": { "Float": 0.3 },
-        "kd": { "Float": 0.0 },
+        "kp": { "Float": 1.0 },
+        "ki": { "Float": 0.35 },
+        "kd": { "Float": 1.5 },
         "dt": { "Float": 0.1 },
         "out_min": { "Float": 0.0 },
         "out_max": { "Float": 100.0 }
@@ -433,7 +479,7 @@
         "out": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 8,
       "kind": "interlock",
       "parameters": {
@@ -447,7 +493,7 @@
         "tripped": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 9,
       "kind": "override-select",
       "parameters": {},
@@ -458,7 +504,7 @@
         "out": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 10,
       "kind": "valve",
       "parameters": {
@@ -472,7 +518,7 @@
         "discrepancy": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 11,
       "kind": "analog-output",
       "parameters": {
@@ -486,7 +532,7 @@
         "raw": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 12,
       "kind": "analog-input",
       "parameters": {
@@ -500,7 +546,7 @@
         "out": { "direction": "out", "value_type": "Float" }
       }
     },
-    {
+{
       "id": 13,
       "kind": "alarm-monitor",
       "parameters": {
@@ -513,7 +559,7 @@
         "alarm": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 14,
       "kind": "counter",
       "parameters": {
@@ -526,8 +572,149 @@
         "done": { "direction": "out", "value_type": "Bool" }
       }
     },
-    {
+{
       "id": 15,
+      "kind": "digital-output",
+      "parameters": {},
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+{
+      "id": 16,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "Float": 4.0 },
+        "raw_max": { "Float": 20.0 },
+        "eng_min": { "Float": 0.0 },
+        "eng_max": { "Float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+{
+      "id": 17,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "Float": 4.0 },
+        "raw_max": { "Float": 20.0 },
+        "eng_min": { "Float": 0.0 },
+        "eng_max": { "Float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+{
+      "id": 18,
+      "kind": "median-voter",
+      "parameters": {
+        "tolerance": { "Float": 8.0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Float" },
+        "in_2": { "direction": "in", "value_type": "Float" },
+        "in_3": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "discrepancy": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+{
+      "id": 19,
+      "kind": "signal-filter",
+      "parameters": {
+        "alpha": { "Float": 0.5 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+{
+      "id": 20,
+      "kind": "sequencer",
+      "parameters": {
+        "step_count": { "Int": 5 },
+        "step_1_ticks": { "Int": 40 },
+        "step_1_out": { "Float": 40.0 },
+        "step_2_ticks": { "Int": 80 },
+        "step_2_out": { "Float": 70.0 },
+        "step_3_ticks": { "Int": 120 },
+        "step_3_out": { "Float": 40.0 },
+        "step_4_ticks": { "Int": 80 },
+        "step_4_out": { "Float": 70.0 },
+        "step_5_ticks": { "Int": 80 },
+        "step_5_out": { "Float": 40.0 }
+      },
+      "ports": {
+        "run": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "step": { "direction": "out", "value_type": "Int" },
+        "done": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+{
+      "id": 21,
+      "kind": "manual-station",
+      "parameters": {
+        "transfer_delta": { "Float": 5.0 }
+      },
+      "ports": {
+        "control": { "direction": "in", "value_type": "Float" },
+        "manual": { "direction": "in", "value_type": "Float" },
+        "mode": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "manual_active": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+{
+      "id": 22,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "Float": 4.0 },
+        "raw_max": { "Float": 20.0 },
+        "eng_min": { "Float": 0.0 },
+        "eng_max": { "Float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+{
+      "id": 23,
+      "kind": "totalizer",
+      "parameters": {
+        "rate_unit": { "Float": 0.1 }
+      },
+      "ports": {
+        "rate": { "direction": "in", "value_type": "Float" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "total": { "direction": "out", "value_type": "Float" }
+      }
+    },
+{
+      "id": 24,
+      "kind": "latching-alarm",
+      "parameters": {
+        "low_limit": { "Float": 10.0 },
+        "high_limit": { "Float": 95.0 },
+        "hysteresis": { "Float": 2.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "ack": { "direction": "in", "value_type": "Bool" },
+        "alarm": { "direction": "out", "value_type": "Bool" },
+        "unacknowledged": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+{
+      "id": 25,
       "kind": "digital-output",
       "parameters": {},
       "ports": {
@@ -550,20 +737,35 @@
     { "from": { "port": { "component": 4, "name": "fault" } }, "to": { "point": 70 } },
     { "from": { "point": 30 }, "to": { "point": 40 } },
     { "from": { "point": 10 }, "to": { "port": { "component": 5, "name": "raw" } } },
-    { "from": { "port": { "component": 5, "name": "out" } }, "to": { "point": 60 } },
-    { "from": { "point": 61 }, "to": { "point": 60 } },
-    { "from": { "point": 62 }, "to": { "point": 60 } },
+    { "from": { "port": { "component": 5, "name": "out" } }, "to": { "port": { "component": 18, "name": "in_1" } } },
+    { "from": { "point": 12 }, "to": { "port": { "component": 16, "name": "raw" } } },
+    { "from": { "port": { "component": 16, "name": "out" } }, "to": { "port": { "component": 18, "name": "in_2" } } },
+    { "from": { "point": 13 }, "to": { "port": { "component": 17, "name": "raw" } } },
+    { "from": { "port": { "component": 17, "name": "out" } }, "to": { "port": { "component": 18, "name": "in_3" } } },
+    { "from": { "port": { "component": 18, "name": "out" } }, "to": { "point": 60 } },
+    { "from": { "port": { "component": 18, "name": "discrepancy" } }, "to": { "point": 74 } },
+    { "from": { "point": 75 }, "to": { "point": 60 } },
+    { "from": { "point": 75 }, "to": { "port": { "component": 19, "name": "in" } } },
+    { "from": { "port": { "component": 19, "name": "out" } }, "to": { "point": 76 } },
+    { "from": { "point": 61 }, "to": { "point": 76 } },
+    { "from": { "point": 62 }, "to": { "point": 76 } },
+    { "from": { "point": 77 }, "to": { "point": 76 } },
     { "from": { "point": 61 }, "to": { "port": { "component": 7, "name": "pv" } } },
     { "from": { "point": 50 }, "to": { "port": { "component": 6, "name": "in" } } },
-    { "from": { "port": { "component": 6, "name": "out" } }, "to": { "port": { "component": 7, "name": "sp" } } },
+    { "from": { "port": { "component": 6, "name": "out" } }, "to": { "port": { "component": 9, "name": "control" } } },
+    { "from": { "point": 82 }, "to": { "point": 81 } },
+    { "from": { "point": 82 }, "to": { "port": { "component": 9, "name": "operator" } } },
+    { "from": { "point": 57 }, "to": { "port": { "component": 9, "name": "select" } } },
+    { "from": { "port": { "component": 9, "name": "out" } }, "to": { "port": { "component": 7, "name": "sp" } } },
     { "from": { "port": { "component": 7, "name": "out" } }, "to": { "port": { "component": 8, "name": "in" } } },
     { "from": { "point": 65 }, "to": { "port": { "component": 8, "name": "permissive" } } },
-    { "from": { "port": { "component": 8, "name": "out" } }, "to": { "port": { "component": 9, "name": "control" } } },
+    { "from": { "port": { "component": 8, "name": "out" } }, "to": { "port": { "component": 21, "name": "control" } } },
     { "from": { "port": { "component": 8, "name": "tripped" } }, "to": { "point": 66 } },
     { "from": { "point": 67 }, "to": { "point": 66 } },
-    { "from": { "point": 52 }, "to": { "port": { "component": 9, "name": "operator" } } },
-    { "from": { "point": 53 }, "to": { "port": { "component": 9, "name": "select" } } },
-    { "from": { "port": { "component": 9, "name": "out" } }, "to": { "port": { "component": 10, "name": "cmd" } } },
+    { "from": { "point": 52 }, "to": { "port": { "component": 21, "name": "manual" } } },
+    { "from": { "point": 53 }, "to": { "port": { "component": 21, "name": "mode" } } },
+    { "from": { "port": { "component": 21, "name": "out" } }, "to": { "port": { "component": 10, "name": "cmd" } } },
+    { "from": { "port": { "component": 21, "name": "manual_active" } }, "to": { "point": 85 } },
     { "from": { "port": { "component": 10, "name": "out" } }, "to": { "port": { "component": 11, "name": "eng" } } },
     { "from": { "point": 11 }, "to": { "port": { "component": 12, "name": "raw" } } },
     { "from": { "port": { "component": 12, "name": "out" } }, "to": { "port": { "component": 10, "name": "fb" } } },
@@ -578,6 +780,24 @@
     { "from": { "point": 67 }, "to": { "port": { "component": 14, "name": "in" } } },
     { "from": { "point": 54 }, "to": { "port": { "component": 14, "name": "reset" } } },
     { "from": { "port": { "component": 14, "name": "count" } }, "to": { "point": 72 } },
-    { "from": { "port": { "component": 14, "name": "done" } }, "to": { "point": 73 } }
+    { "from": { "port": { "component": 14, "name": "done" } }, "to": { "point": 73 } },
+    { "from": { "point": 55 }, "to": { "port": { "component": 20, "name": "run" } } },
+    { "from": { "point": 56 }, "to": { "port": { "component": 20, "name": "reset" } } },
+    { "from": { "port": { "component": 20, "name": "out" } }, "to": { "point": 81 } },
+    { "from": { "port": { "component": 20, "name": "step" } }, "to": { "point": 83 } },
+    { "from": { "port": { "component": 20, "name": "done" } }, "to": { "point": 84 } },
+    { "from": { "point": 14 }, "to": { "port": { "component": 22, "name": "raw" } } },
+    { "from": { "port": { "component": 22, "name": "out" } }, "to": { "point": 86 } },
+    { "from": { "point": 87 }, "to": { "point": 86 } },
+    { "from": { "point": 87 }, "to": { "port": { "component": 23, "name": "rate" } } },
+    { "from": { "point": 59 }, "to": { "port": { "component": 23, "name": "reset" } } },
+    { "from": { "port": { "component": 23, "name": "total" } }, "to": { "point": 88 } },
+    { "from": { "point": 77 }, "to": { "port": { "component": 24, "name": "in" } } },
+    { "from": { "point": 58 }, "to": { "port": { "component": 24, "name": "ack" } } },
+    { "from": { "port": { "component": 24, "name": "alarm" } }, "to": { "point": 78 } },
+    { "from": { "port": { "component": 24, "name": "unacknowledged" } }, "to": { "point": 79 } },
+    { "from": { "point": 80 }, "to": { "point": 79 } },
+    { "from": { "point": 80 }, "to": { "port": { "component": 25, "name": "in" } } },
+    { "from": { "port": { "component": 25, "name": "out" } }, "to": { "point": 42 } }
   ]
 }

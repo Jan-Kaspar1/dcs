@@ -31,8 +31,12 @@
   #health > section { flex: 1 1 24rem; }
   .forced { background: #a60; color: #fff; font-size: 0.75rem;
           padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
-  #pair-summary.good, #io-health-summary.good { color: #060; }
-  #pair-summary.bad, #io-health-summary.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health-summary.good, #alarm-summary.good { color: #060; }
+  #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad { color: #b00; font-weight: bold; }
+  tr.alarm td.value { font-weight: 600; }
+  tr.alarm.bad td, tr.alarm.substituted td, tr.alarm.uncertain td {
+    background: #f4f0fa; font-style: italic; }
+  button.ack { color: #b00; font-weight: bold; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -85,6 +89,27 @@
 </table>
 </section>
 </div>
+
+<section id="alarm-pane" hidden>
+<h2>Alarms</h2>
+<p id="alarm-summary"></p>
+<table>
+  <thead>
+    <tr>
+      <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
+      <th>Last changed</th><th></th>
+    </tr>
+  </thead>
+  <tbody id="alarms"></tbody>
+</table>
+<h3>Alarm journal</h3>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="alarm-journal"></tbody>
+</table>
+</section>
 
 <h2>Components</h2>
 <div id="faceplates"></div>
@@ -157,6 +182,22 @@
 // receipted, active-peer-routed command path as a write. A rejected
 // force or release surfaces its named reason in the receipt pane and
 // the journal like every other rejection.
+//
+// The alarm pane (the alarm-acknowledgment decision's summary slice)
+// lists every status-role Out port currently asserted — the
+// descriptor-to-point wiring join plus live telemetry — with its
+// component, value, quality, and the tick the value last changed,
+// walked back through the point's retained history. A non-good quality
+// draws the whole row distinctly, so a degraded sensor reads as
+// uncertainty rather than a hidden alarm state. Journal entries
+// touching the alarm surface — quality transitions on status-bound
+// points, settled commands on them, the owning components' step
+// failures and tunes — list in tick order as the alarm journal. A
+// component declaring an `ack` input wired to a model-writable point
+// gets an ack affordance issuing an ordinary receipted write_value —
+// no alarm-specific protocol — and because the kind's ack is
+// level-observed the pane pulses it: once the write's apply tick has
+// scanned past, a second receipted write drops the point back to false.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
 // configured with both peers' monitor addresses — the serving origin is
@@ -236,6 +277,11 @@ const paramStatus = new Map();
 function paramKey(component, name) {
   return component + "\n" + name;
 }
+// ack point -> the earliest snapshot tick at which its release write may
+// go: the pulse's second half, armed by submitAck once the acknowledge
+// write is accepted — see the alarm pane's notes on the level-observed
+// input.
+const ackReleases = new Map();
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
 const JOURNAL_LIMIT = 300;
@@ -430,6 +476,23 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
+    // The second half of an ack pulse: a snapshot at or past the
+    // acknowledge write's apply tick means a scan has observed the
+    // level-observed `ack` input held true, so the point goes back to
+    // false through the same receipted write path — held true it would
+    // suppress every later trip's latch.
+    for (const [point, applyTick] of [...ackReleases]) {
+      if (snapshot.tick >= applyTick) {
+        ackReleases.delete(point);
+        try {
+          await submitCommand({ write_value: {
+            point: point, kind: "Bool", value: { Bool: false } } });
+        } catch (error) {
+          document.getElementById("receipt").textContent =
+            "command failed: " + error;
+        }
+      }
+    }
     renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     // The snapshot's force set marks the page's forced points;
@@ -460,6 +523,11 @@ async function refresh() {
       if (input.dataset.point === focusedPoint) input.focus();
     }
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
+    // The alarm pane draws last: its standing list reads this snapshot's
+    // telemetry, the last-changed tick walks the history refreshTrends
+    // just grew, and its journal slice reads the entries refreshJournal
+    // just merged.
+    renderAlarms(snapshot, telemetry, forced);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
@@ -877,6 +945,197 @@ function renderFaceplates(snapshot, telemetry, forced) {
     if (pending.has(key)) control.value = pending.get(key);
     if (key === focused) control.focus();
   }
+}
+
+// ---- Alarm pane ----
+//
+// The alarm-acknowledgment decision's summary slice: the two-flag model
+// an alarm kind declares — a standing `alarm` plus a latched
+// `unacknowledged` — surfaces through ordinary status-role ports, so the
+// pane needs no alarm-specific contract. Every status-role Out port
+// whose live sample asserts lists with its component, value, quality,
+// and last-changed tick; the same join's related points and components
+// filter the merged journal into the alarm journal, and a component
+// declaring an `ack` input bound to a model-writable point gets the
+// acknowledge affordance.
+
+// One snapshot's alarm surface: the status-role Out ports the standing
+// list draws from, plus the sets the journal filter tests against —
+// every point any status-role port binds (the `ack` input included) and
+// every component declaring a status-role port.
+function alarmJoin(snapshot) {
+  const standing = [];
+  const related = new Set();
+  const components = new Set();
+  for (const descriptor of snapshot.descriptors) {
+    for (const port of descriptor.ports) {
+      if (port.role !== "status") continue;
+      components.add(descriptor.name);
+      if (port.point != null) related.add(port.point);
+      if (port.direction === "out") standing.push({ descriptor, port });
+    }
+  }
+  return { standing, related, components };
+}
+
+// A status port stands when its live sample asserts: Bool true or a
+// nonzero number. An unwired or unsampled port asserts nothing.
+function isAsserted(sample) {
+  if (!sample || !sample.value) return false;
+  const value = sample.value;
+  if ("Bool" in value) return value.Bool;
+  if ("Int" in value) return value.Int !== 0;
+  if ("Float" in value) return value.Float !== 0;
+  return false;
+}
+
+// Values are one-key objects; a serialized comparison is exact.
+function sameValue(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// The tick a standing value last changed at: the point's retained
+// history is walked back over samples equal to the current one — a
+// component restamps its output every scan, so the sample's own tick is
+// the latest write, not the transition. The earliest retained equal
+// sample answers when the ring does not reach back to the transition,
+// and the sample's tick stands when no history was retained yet.
+function lastChangedTick(point, sample) {
+  const state = trends.get(point);
+  let tick = sample.tick;
+  if (!state) return tick;
+  for (let i = state.samples.length - 1; i >= 0; i--) {
+    const retained = state.samples[i];
+    if (!sameValue(retained.value, sample.value)) break;
+    tick = retained.tick;
+  }
+  return tick;
+}
+
+// The acknowledge affordance, offered only where the component declares
+// an `ack` input — Bool, In — wired to a point the model marked
+// writable. The gate is the same metadata check every command
+// affordance on the page follows; anything else renders display-only
+// rather than silently commandable.
+function ackAffordance(descriptor) {
+  const ack = descriptor.ports.find(p =>
+    p.name === "ack" && p.direction === "in" && p.kind === "Bool");
+  if (!ack || ack.point == null) return "";
+  const meta = metaByPoint.get(ack.point);
+  if (!meta || !meta.writable) return "";
+  return "<button type=\"button\" class=\"ack\" data-point=\"" + ack.point +
+    "\" title=\"acknowledge " + esc(descriptor.label) +
+    "\">ack</button>";
+}
+
+// Whether a journal entry belongs to the alarm surface: a quality
+// transition on a status-bound point — the trust change that makes a
+// standing value read as uncertain — a settled command targeting one
+// (the ack write included), or a tune or step failure of a component
+// declaring status ports. The merged list is already in tick order.
+function alarmJournalEntry(entry, join) {
+  const event = entry.event;
+  if ("quality_changed" in event) {
+    return join.related.has(event.quality_changed.point);
+  }
+  if ("command_settled" in event) {
+    const command = event.command_settled.receipt.command;
+    const point = commandPoint(command);
+    if (point !== null) return join.related.has(point);
+    return "set_parameter" in command &&
+      join.components.has(command.set_parameter.component);
+  }
+  if ("step_failed" in event) {
+    return join.components.has(event.step_failed.component);
+  }
+  return false;
+}
+
+// The point a point-targeted command names, or null for a
+// component-targeted one.
+function commandPoint(command) {
+  if ("write_value" in command) return command.write_value.point;
+  if ("force_point" in command) return command.force_point.point;
+  if ("unforce_point" in command) return command.unforce_point.point;
+  return null;
+}
+
+// Renders the pane from the polled snapshot plus the history and
+// journal the refresh already fetched. The section shows while any
+// descriptor declares a status-role port; a plant with none hides it.
+function renderAlarms(snapshot, telemetry, forced) {
+  const pane = document.getElementById("alarm-pane");
+  const join = alarmJoin(snapshot);
+  if (join.components.size === 0) {
+    pane.hidden = true;
+    return;
+  }
+  pane.hidden = false;
+  const rows = [];
+  let degraded = 0;
+  // One ack affordance per component per render: a latching kind's
+  // `alarm` and `unacknowledged` can stand together, and both clear
+  // through the same `ack` input.
+  const acked = new Set();
+  for (const { descriptor, port } of join.standing) {
+    const sample = port.point == null
+      ? null : (telemetry.get(port.point) || {}).sample || null;
+    if (!isAsserted(sample)) continue;
+    const cls = qualityClass(sample.quality);
+    if (!isGood(sample.quality)) degraded++;
+    const meta = portMeta(port);
+    const ack = acked.has(descriptor.name) ? "" : ackAffordance(descriptor);
+    if (ack !== "") acked.add(descriptor.name);
+    // The row carries the quality class: a Bad or Uncertain value draws
+    // degraded — italic, tinted — instead of as a clean assertion, so a
+    // bad sensor reads as uncertainty rather than a hidden alarm state.
+    rows.push("<tr class=\"alarm " + cls + "\">" +
+      "<td>" + esc(descriptor.label) + "</td>" +
+      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") + "</td>" +
+      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
+        forcedBadge(port.point, forced) + "</td>" +
+      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
+      "</td>" +
+      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
+      "<td>" + ack + "</td></tr>");
+  }
+  document.getElementById("alarms").innerHTML = rows.join("");
+  const summary = document.getElementById("alarm-summary");
+  summary.textContent = rows.length === 0
+    ? "no standing alarms"
+    : rows.length + " standing" +
+      (degraded > 0 ? " — " + degraded + " degraded" : "");
+  summary.className = rows.length === 0 ? "good" : "bad";
+  document.getElementById("alarm-journal").innerHTML = journalEntries
+    .filter(entry => alarmJournalEntry(entry, join))
+    .map(entry => "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+      "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>")
+    .join("");
+}
+
+// The acknowledge submission: an ordinary receipted write_value of true
+// to the component's `ack` point — no alarm-specific protocol. The
+// kind's ack is level-observed, so the write's apply tick arms
+// `ackReleases`: refresh drops the point back to false once a scan has
+// observed it, and a rejection never arms the release.
+async function submitAck(button) {
+  const point = Number(button.dataset.point);
+  const meta = metaByPoint.get(point);
+  if (!meta || !meta.writable) return;
+  try {
+    const answer = await submitCommand({ write_value: {
+      point: point, kind: meta.value_type, value: { Bool: true } } });
+    if (answer && answer.outcome) {
+      if ("accepted" in answer.outcome) {
+        ackReleases.set(point, answer.outcome.accepted.apply_tick);
+      } else if ("applied" in answer.outcome) {
+        ackReleases.set(point, answer.outcome.applied.tick);
+      }
+    }
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+  }
+  refresh();
 }
 
 // One inline-SVG trend panel per point, built once from the signal index.
@@ -1341,6 +1600,12 @@ async function init() {
       document.getElementById("receipt").textContent = "command failed: " + error;
     }
     refresh();
+  });
+  // The alarm pane's ack affordance takes the same delegated shape —
+  // the rows re-render on every poll.
+  document.getElementById("alarm-pane").addEventListener("click", async event => {
+    const ack = event.target.closest("button.ack");
+    if (ack) await submitAck(ack);
   });
   // The point listing's force and release affordances take the same
   // delegated shape — the rows re-render on every poll.

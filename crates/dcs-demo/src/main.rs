@@ -22,6 +22,19 @@ fn run_showcase() -> ExitCode {
         Ok(run) => {
             let settled = showcase::sample(&run.settled, points::LEVEL_PERCENT);
             let moved = showcase::sample(&run.moved, points::LEVEL_PERCENT);
+            let batched = (
+                showcase::sample(&run.batched, points::BATCH_STEP),
+                showcase::sample(&run.batched, points::BATCH_DONE),
+            );
+            let deviated = showcase::sample(&run.deviated, points::VOTER_DISCREPANCY);
+            let manual = (
+                showcase::sample(&run.manual_engaged, points::STATION_MANUAL),
+                showcase::sample(&run.manual_engaged, points::VALVE_RAW),
+            );
+            let latched = (
+                showcase::sample(&run.tripped, points::LATCH_UNACKNOWLEDGED),
+                showcase::sample(&run.acked, points::LATCH_UNACKNOWLEDGED),
+            );
             let faulted = (
                 showcase::sample(&run.faulted, points::INTERLOCK_TRIPPED),
                 showcase::sample(&run.faulted, points::LEVEL_ALARM),
@@ -40,6 +53,33 @@ fn run_showcase() -> ExitCode {
                     "  commanded: setpoint moved to {:.0}% at the phase boundary; level {:.2}%",
                     showcase::MOVED_SETPOINT,
                     f64::try_from(sample.value).unwrap_or(f64::NAN),
+                );
+            }
+            if let (Some(step), Some(done)) = batched {
+                println!(
+                    "  batched:   sequencer walked to step {} (done {}) through the mid-table retune",
+                    i64::try_from(step.value).unwrap_or_default(),
+                    bool::try_from(done.value).unwrap_or_default(),
+                );
+            }
+            if let Some(sample) = deviated {
+                println!(
+                    "  deviated:  lt101c_raw stuck at full scale — voter discrepancy {}",
+                    bool::try_from(sample.value).unwrap_or_default(),
+                );
+            }
+            if let (Some(active), Some(raw)) = manual {
+                println!(
+                    "  manual:    station slewing the valve command (manual {}, {:.2} mA)",
+                    bool::try_from(active.value).unwrap_or_default(),
+                    f64::try_from(raw.value).unwrap_or(f64::NAN),
+                );
+            }
+            if let (Some(before), Some(after)) = latched {
+                println!(
+                    "  acked:     latching alarm unacknowledged {} before, {} after the ack command",
+                    bool::try_from(before.value).unwrap_or_default(),
+                    bool::try_from(after.value).unwrap_or_default(),
                 );
             }
             if let (Some(tripped), Some(alarm)) = faulted {

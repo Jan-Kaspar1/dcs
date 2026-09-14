@@ -330,14 +330,25 @@ impl BusDriver {
         }
     }
 
-    /// Sends one request and returns the server's response.
+    /// Sends one request and returns the server's response — the raw
+    /// protocol exchange every other driver method wraps, public so
+    /// development tooling can speak the whole documented register
+    /// protocol: the `dcs-sim-bus-ctl` binary drives a device server
+    /// through exactly this.
     ///
     /// The lock serializes exchanges so a response always pairs with the
     /// request that produced it. Any failed exchange drops the
     /// connection and is recorded as the driver's last transport
     /// failure: the response stream's position is unknown afterward,
     /// and a later read could pick up a stale answer.
-    fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+    ///
+    /// The caller matches the [`BusResponse`] against its request. A
+    /// [`BusResponse::Error`] is the server's reported refusal — a
+    /// [`BusError`], not a transport failure — and a decodable response
+    /// whose variant does not correspond to the request means the peer
+    /// is not speaking this protocol; the link can no longer be
+    /// trusted, exactly as after a failed exchange.
+    pub fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
         let mut connection = self.connection.lock().unwrap();
         let Some(stream) = connection.stream.as_mut() else {
             return Err(LinkError::Disconnected);
