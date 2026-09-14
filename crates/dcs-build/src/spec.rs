@@ -144,6 +144,13 @@ pub const NONNEGATIVE_INT: ParameterRange = ParameterRange {
     max: Value::Int(i64::MAX),
 };
 
+/// The inclusive bound a strictly positive `Int` parameter accepts —
+/// an interval in ticks. Mirrors `dcs-blocks`' `describe::POSITIVE_INT`.
+pub const POSITIVE_INT: ParameterRange = ParameterRange {
+    min: Value::Int(1),
+    max: Value::Int(i64::MAX),
+};
+
 /// The inclusive bound a `Float` parameter in `(0, 1]` accepts — a
 /// positive fraction such as a per-tick smoothing constant. The lower
 /// bound is the smallest positive normal double — the tightest

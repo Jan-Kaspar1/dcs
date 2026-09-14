@@ -245,7 +245,7 @@ order.
 | Field | Type | Rule |
 |---|---|---|
 | `id` | `ComponentId` (u64) | Required; unique within `components` — `DuplicateId { collection: "component" }`. |
-| `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
+| `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
 | `ports` | object: name → `{"direction": "in"\|"out", "value_type": "Bool"\|"Int"\|"Float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
 
@@ -254,6 +254,16 @@ exists: kind resolution and parameter checking are assembly's, because
 the registry is a deployment choice. `docs/integration-guide.md` covers
 declaring a kind's parameters; per-kind contracts live beside each
 `dcs-blocks` kind's `KIND`/`from_parameters`/`describe`.
+
+Some kinds are variable-arity: the declared `ports` set fixes the
+instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;
+`pump-group` — the duty/standby group the station decisions record —
+declares the four-member family `cmd_i`, `run_i`, `fault_i`, `avail_i`
+per managed pump `i`. The highest bound index sets the count and every
+index below it must bind the whole family — a gap or partial family is
+`AssemblyError::UnboundPort` naming the missing member. The group's
+rotation policy, staging, and status-output contract live beside
+`PumpGroup::KIND`.
 
 ## `connections`
 

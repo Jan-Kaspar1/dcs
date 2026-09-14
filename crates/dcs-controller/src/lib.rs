@@ -14,8 +14,9 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
-    EdgeTrigger, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid,
-    RateLimiter, Sequencer, SignalFilter, SrLatch, Timer, Totalizer, Valve,
+    EdgeTrigger, GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor,
+    OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter, Sequencer, SignalFilter, SrLatch, Timer,
+    Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -273,6 +274,44 @@ pub fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 inputs,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(PumpGroup::KIND, |spec| {
+            // The pumps are declared `cmd_1` … `cmd_N`, `run_1` …
+            // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`
+            // following the interlock's `trip_N` convention. The pump
+            // count is the highest bound index across the four
+            // families, and every index below it must bind all four —
+            // a partial family or a gap fails `UnboundPort` naming the
+            // missing member.
+            let mut indices = std::collections::BTreeSet::new();
+            for prefix in ["cmd_", "run_", "fault_", "avail_"] {
+                indices.extend(spec.ports.keys().filter_map(|name| {
+                    name.strip_prefix(prefix)
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                }));
+            }
+            let count = indices.iter().next_back().copied().unwrap_or(0);
+            let mut pumps = Vec::with_capacity(count);
+            for index in 1..=count {
+                pumps.push(PumpIo {
+                    cmd: spec.require(&format!("cmd_{index}"))?,
+                    run: spec.require(&format!("run_{index}"))?,
+                    fault: spec.require(&format!("fault_{index}"))?,
+                    avail: spec.require(&format!("avail_{index}"))?,
+                });
+            }
+            boxed(PumpGroup::from_parameters(
+                spec.name.as_str(),
+                spec.require("demand")?,
+                pumps,
+                GroupOutputs {
+                    duty: spec.require("duty")?,
+                    staged: spec.require("staged")?,
+                    none_available: spec.require("none_available")?,
+                    all_faulted: spec.require("all_faulted")?,
+                },
                 spec.parameters,
             ))
         })

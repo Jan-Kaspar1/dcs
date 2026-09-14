@@ -19,16 +19,18 @@ use std::collections::BTreeSet;
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput,
-    DigitalOutput, Edge, EdgeTrigger, GateOperation, Interlock, LatchingAlarm, ManualStation,
-    MedianVoter, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Sequencer,
-    SequencerStep, SignalFilter, SrLatch, Timer, Totalizer, Valve,
+    DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig,
+    PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
+    Timer, Totalizer, Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
     DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec,
-    SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -305,6 +307,45 @@ fn specs_match_registered_kinds_descriptors() {
         )
         .describe(),
     ));
+    // `pump-group`'s per-pump `cmd_i`/`run_i`/`fault_i`/`avail_i`
+    // families are instance-dependent — `N` is the spec's `pumps`,
+    // matching the interlock's `trips` convention.
+    covered.insert(check(
+        &PumpGroupSpec::new(Default::default(), 2),
+        &PumpGroup::new(
+            "pg",
+            point(1),
+            vec![
+                PumpIo {
+                    cmd: point(2),
+                    run: point(3),
+                    fault: point(4),
+                    avail: point(5),
+                },
+                PumpIo {
+                    cmd: point(6),
+                    run: point(7),
+                    fault: point(8),
+                    avail: point(9),
+                },
+            ],
+            GroupOutputs {
+                duty: point(10),
+                staged: point(11),
+                none_available: point(12),
+                all_faulted: point(13),
+            },
+            PumpGroupConfig {
+                rotation: RotationPolicy::AlternateEachCycle,
+                rotation_ticks: 0,
+                start_delay_ticks: 0,
+                restage_delay_ticks: 0,
+                min_off_ticks: 0,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
     covered.insert(check(
         &SrLatchSpec::new(Default::default()),
         &SrLatch::new("srl", point(1), point(2), point(3)).describe(),
@@ -346,6 +387,47 @@ fn interlock_spec_tracks_trip_count() {
         .unwrap();
         check(
             &InterlockSpec::new(Default::default(), trips),
+            &component.describe(),
+        );
+    }
+}
+
+#[test]
+fn pump_group_spec_tracks_pump_count() {
+    // The `cmd_i`/`run_i`/`fault_i`/`avail_i` families are
+    // instance-dependent: the spec's port list must follow the
+    // constructed component's.
+    let config = PumpGroupConfig {
+        rotation: RotationPolicy::AlternateEachCycle,
+        rotation_ticks: 0,
+        start_delay_ticks: 0,
+        restage_delay_ticks: 0,
+        min_off_ticks: 0,
+    };
+    for pumps in [1usize, 2, 5] {
+        let pump_io: Vec<PumpIo> = (0..pumps as u64)
+            .map(|n| PumpIo {
+                cmd: point(10 + n * 4),
+                run: point(11 + n * 4),
+                fault: point(12 + n * 4),
+                avail: point(13 + n * 4),
+            })
+            .collect();
+        let component = PumpGroup::new(
+            "pg",
+            point(1),
+            pump_io,
+            GroupOutputs {
+                duty: point(2),
+                staged: point(3),
+                none_available: point(4),
+                all_faulted: point(5),
+            },
+            config,
+        )
+        .unwrap();
+        check(
+            &PumpGroupSpec::new(Default::default(), pumps),
             &component.describe(),
         );
     }
