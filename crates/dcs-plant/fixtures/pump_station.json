@@ -5,19 +5,19 @@
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "well_level": { "direction": "in", "value_type": "Float" },
-        "well_inflow": { "direction": "in", "value_type": "Float" },
-        "p101_draw": { "direction": "in", "value_type": "Float" },
-        "p102_draw": { "direction": "in", "value_type": "Float" },
-        "net_flow": { "direction": "in", "value_type": "Float" }
+        "well_level": { "direction": "in", "value_type": "float" },
+        "well_inflow": { "direction": "in", "value_type": "float" },
+        "p101_draw": { "direction": "in", "value_type": "float" },
+        "p102_draw": { "direction": "in", "value_type": "float" },
+        "net_flow": { "direction": "in", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "sim-do",
       "channels": {
-        "p101_cmd": { "direction": "out", "value_type": "Bool" },
-        "p102_cmd": { "direction": "out", "value_type": "Bool" }
+        "p101_cmd": { "direction": "out", "value_type": "bool" },
+        "p102_cmd": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -25,44 +25,44 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "well_level" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "well_inflow" },
       "writable": true
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "p101_draw" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "p102_draw" }
     },
     {
       "id": 14,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "net_flow" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 2, "name": "p101_cmd" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 2, "name": "p102_cmd" }
     }
   ],

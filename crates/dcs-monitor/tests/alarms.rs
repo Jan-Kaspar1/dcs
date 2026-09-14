@@ -289,7 +289,7 @@ fn page_serves_alarm_pane_markup_and_the_writable_only_ack_rule() {
             "class=\\\"ack\\\"",
             "function submitAck(",
             "write_value",
-            "{ Bool: true }",
+            "{ bool: true }",
             "await submitCommand(",
             "not_writable",
         ] {
@@ -326,7 +326,7 @@ fn the_ack_affordance_issues_an_ordinary_receipted_write() {
             .request(
                 "POST",
                 "/command",
-                Some(r#"{"write_value":{"point":11,"kind":"Bool","value":{"Bool":true}}}"#),
+                Some(r#"{"write_value":{"point":11,"kind":"bool","value":{"bool":true}}}"#),
             )
             .unwrap();
         assert_eq!(status, 200, "{body}");

@@ -246,8 +246,8 @@ fn field_changes<T: Serialize>(old: &T, new: &T) -> Vec<FieldChange> {
 /// so nested maps — channels, parameters, ports — produce dotted paths;
 /// anything else differing reports the path's two values directly. A
 /// serialized [`Value`](dcs_core::Value) counts as a leaf even though it is
-/// an object: `{"Float": 5.0} -> {"Int": 8}` is one kind change, not a
-/// removed `Float` field plus an added `Int` field.
+/// an object: `{"float": 5.0} -> {"int": 8}` is one kind change, not a
+/// removed `float` field plus an added `int` field.
 fn diff_values(
     path: &str,
     old: &serde_json::Value,
@@ -283,13 +283,14 @@ fn diff_values(
 }
 
 /// Whether a serialized value is a [`Value`](dcs_core::Value): an
-/// externally-tagged enum, so a single-key object whose key names a variant.
+/// externally-tagged enum, so a single-key object whose key names a
+/// variant — the canonical `snake_case` spellings `to_value` emits.
 fn is_signal_value(value: &serde_json::Value) -> bool {
     match value.as_object() {
         Some(map) if map.len() == 1 => {
             matches!(
                 map.keys().next().map(String::as_str),
-                Some("Bool" | "Int" | "Float")
+                Some("bool" | "int" | "float")
             )
         }
         _ => false,

@@ -38,13 +38,17 @@ is the exact identifier those sources read or write.
   one from the controller to the field. For ports, `in` consumes the
   value a connection delivers and `out` produces the value a connection
   carries away.
-- **`value_type`** is `"Bool"`, `"Int"`, or `"Float"` — the `ValueKind`
-  variant names from `dcs-core`.
+- **`value_type`** is `"bool"`, `"int"`, or `"float"` — the `snake_case`
+  wire spellings of the `ValueKind` variant names from `dcs-core`. A
+  document carrying the legacy PascalCase spellings (`"Bool"`, `"Int"`,
+  `"Float"`) still loads — serde accepts them as aliases — but the
+  canonical emitted spelling is `snake_case`.
 - **A typed `Value`** — an io_point's `initial`, a component's
   `parameters` entry, a `sim-bus` register's `initial` — serializes as
-  an externally tagged object: `{"Bool": true}`, `{"Int": -42}`, or
-  `{"Float": 2.5}`. (`sim-scripted` script entries are the one
-  exception: their `value` is a plain JSON scalar — see that kind's
+  an externally tagged object: `{"bool": true}`, `{"int": -42}`, or
+  `{"float": 2.5}` (with the same PascalCase read aliases on the tag:
+  `{"Bool": true}` still loads). (`sim-scripted` script entries are the
+  one exception: their `value` is a plain JSON scalar — see that kind's
   section.)
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
@@ -108,7 +112,7 @@ assembly.
 |---|---|---|
 | `id` | `DeviceId` (u64) | Required; unique within `devices` — `ValidationError::DuplicateId { collection: "device" }`. |
 | `kind` | string | Required; opaque to the model. Resolved by `dcs_assembly::DriverRegistry` at assembly — exact registration first, then prefix in registration order; an unregistered kind is `AssemblyError::UnknownDeviceKind`. The built-in kinds are in the next section. |
-| `channels` | object: name → `{"direction": "in"\|"out", "value_type": "Bool"\|"Int"\|"Float"}` | Required; may be empty. A channel is a physical endpoint an io_point binds to. A channel no io_point binds is lint `unbound_channel`, not an error. |
+| `channels` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. A channel is a physical endpoint an io_point binds to. A channel no io_point binds is lint `unbound_channel`, not an error. |
 | `parameters` | object: name → arbitrary JSON | Optional. Kind-specific addressing and configuration, opaque to the model — the registered device-kind factory owns all validation at assembly (`AssemblyError::InvalidDeviceParameters`). Unlike component parameters these are general JSON values, so a kind can carry strings and structured addressing data. |
 
 Example:
@@ -118,7 +122,7 @@ Example:
   "id": 1,
   "kind": "sim-8ai",
   "channels": {
-    "ch0": { "direction": "in", "value_type": "Float" }
+    "ch0": { "direction": "in", "value_type": "float" }
   }
 }
 ```
@@ -133,9 +137,9 @@ carried by the controller's scan image — decision 14).
 |---|---|---|
 | `id` | `PointId` (u64) | Required; unique within `io_points` — `DuplicateId { collection: "io_point" }`. |
 | `direction` | `"in"` \| `"out"` | Required. `in` points are read into the scan image each scan; `out` points are written from the image to the field (or recorded, for internal points). |
-| `value_type` | `"Bool"` \| `"Int"` \| `"Float"` | Required; drivers reject mismatched writes. |
+| `value_type` | `"bool"` \| `"int"` \| `"float"` | Required; drivers reject mismatched writes. |
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
-| `initial` | tagged `Value`, e.g. `{"Float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
+| `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
 | `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
 
@@ -247,7 +251,7 @@ order.
 | `id` | `ComponentId` (u64) | Required; unique within `components` — `DuplicateId { collection: "component" }`. |
 | `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
-| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "Bool"\|"Int"\|"Float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
+| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
 
 The model does not validate `parameters` contents or that a `kind`
 exists: kind resolution and parameter checking are assembly's, because
@@ -391,8 +395,8 @@ channel name → array of entries. Each entry is an object with keys:
 - `"tick"` — required non-negative integer: the driver tick the entry
   takes effect at, holding until the next entry;
 - `"value"` — required plain JSON scalar matching the channel's
-  `value_type`: a JSON bool for `Bool`, an integer for `Int`, a finite
-  number for `Float`;
+  `value_type`: a JSON bool for `bool`, an integer for `int`, a finite
+  number for `float`;
 - `"quality"` — optional `"good"` (the default), `"uncertain"`, or
   `"bad"`;
 - `"reason"` — optional `snake_case` `QualityReason` name:
@@ -470,8 +474,8 @@ object whose single key is the snake_case element name:
 | `integrator` | `input`, `output`, `initial` | `dy/dt = u`. |
 | `dead_time` | `input`, `output`, `delay`, `initial` | `y(t) = u(t − delay)`; the realized delay rounds up to whole steps and the output holds `initial` until the delay line has filled. |
 | `noise` | `input`, `output`, `amplitude`, `seed`, `initial` | `y = u + amplitude·(2x − 1)`, `x` drawn once per step from a splitmix64 generator seeded by `seed` — the output stays within `u ± amplitude` and identical seeds replay identical deviation sequences. |
-| `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a Bool-gated flow source answering an actuator's run command. `input` is the one non-Float element end: a `Bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
-| `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `Float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
+| `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a bool-gated flow source answering an actuator's run command. `input` is the one non-float element end: a `bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
+| `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
@@ -481,8 +485,8 @@ point it drives):
   points the served map binds — channel-bound io_points on `sim*`
   devices; channel-less internal points are image-carried and
   unreachable for elements (`ConfigError::UnknownPoint`);
-- element ends must be `Float` points (`ElementPointKind`) — except a
-  `bool_flow`'s gate `input`, which must be a `Bool` point
+- element ends must be `float` points (`ElementPointKind`) — except a
+  `bool_flow`'s gate `input`, which must be a `bool` point
   (`ElementGateKind`);
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
@@ -518,7 +522,7 @@ command:
 `crates/dcs-plant/fixtures/tank_loop_second_order_dynamics.json` shows
 `second_order_lag`; `crates/dcs-demo/fixtures/showcase_dynamics.json` is
 the showcase plant's; `crates/dcs-sim/fixtures/pump_station_dynamics.json`
-is the station loop `bool_flow` and `flow_sum` exist for — two Bool-gated
+is the station loop `bool_flow` and `flow_sum` exist for — two bool-gated
 pump draws and a declared inflow summed into an integrator driving the
 well level.
 

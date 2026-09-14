@@ -155,7 +155,7 @@ and documents the treatment.
 ### 7. Instantiate in a model
 
 A `components` entry declares `id`, `kind`, `parameters` (each a typed
-`{"Float": …}` / `{"Int": …}` / `{"Bool": …}` object), and the `ports`
+`{"float": …}` / `{"int": …}` / `{"bool": …}` object), and the `ports`
 signature the model wires; `connections` bind ports to `io_point`s or to
 other ports. Validation (`dcs-model`) enforces that a `from` end produces
 (`In` point or `Out` port) and a `to` end consumes (`Out` point or `In`
@@ -305,27 +305,27 @@ let model = PlantModel::load(
       "devices": [{
         "id": 1, "kind": "sim",
         "channels": {
-          "level": {"direction": "in", "value_type": "Float"},
-          "reset": {"direction": "in", "value_type": "Bool"},
-          "peak":  {"direction": "out", "value_type": "Float"}
+          "level": {"direction": "in", "value_type": "float"},
+          "reset": {"direction": "in", "value_type": "bool"},
+          "peak":  {"direction": "out", "value_type": "float"}
         }
       }],
       "io_points": [
-        {"id": 1, "direction": "in",  "value_type": "Float",
+        {"id": 1, "direction": "in",  "value_type": "float",
          "channel": {"device": 1, "name": "level"}},
-        {"id": 2, "direction": "in",  "value_type": "Bool",
+        {"id": 2, "direction": "in",  "value_type": "bool",
          "channel": {"device": 1, "name": "reset"}},
-        {"id": 3, "direction": "out", "value_type": "Float",
+        {"id": 3, "direction": "out", "value_type": "float",
          "channel": {"device": 1, "name": "peak"}}
       ],
       "signals": [{"id": 1, "name": "level-peak", "source": 3}],
       "components": [{
         "id": 1, "kind": "running-max",
-        "parameters": {"initial": {"Float": 0.0}},
+        "parameters": {"initial": {"float": 0.0}},
         "ports": {
-          "in":    {"direction": "in",  "value_type": "Float"},
-          "reset": {"direction": "in",  "value_type": "Bool"},
-          "out":   {"direction": "out", "value_type": "Float"}
+          "in":    {"direction": "in",  "value_type": "float"},
+          "reset": {"direction": "in",  "value_type": "bool"},
+          "out":   {"direction": "out", "value_type": "float"}
         }
       }],
       "connections": [
@@ -643,26 +643,26 @@ let model = PlantModel::load(
         "id": 1, "kind": "memory",
         "parameters": {"initial": {"raw": 5.0}},
         "channels": {
-          "raw": {"direction": "in",  "value_type": "Float"},
-          "eng": {"direction": "out", "value_type": "Float"}
+          "raw": {"direction": "in",  "value_type": "float"},
+          "eng": {"direction": "out", "value_type": "float"}
         }
       }],
       "io_points": [
-        {"id": 1, "direction": "in",  "value_type": "Float",
+        {"id": 1, "direction": "in",  "value_type": "float",
          "channel": {"device": 1, "name": "raw"}},
-        {"id": 2, "direction": "out", "value_type": "Float",
+        {"id": 2, "direction": "out", "value_type": "float",
          "channel": {"device": 1, "name": "eng"}}
       ],
       "signals": [{"id": 1, "name": "level-eng", "source": 2}],
       "components": [{
         "id": 1, "kind": "analog-input",
         "parameters": {
-          "raw_min": {"Float": 0.0}, "raw_max": {"Float": 10.0},
-          "eng_min": {"Float": 0.0}, "eng_max": {"Float": 100.0}
+          "raw_min": {"float": 0.0}, "raw_max": {"float": 10.0},
+          "eng_min": {"float": 0.0}, "eng_max": {"float": 100.0}
         },
         "ports": {
-          "raw": {"direction": "in",  "value_type": "Float"},
-          "out": {"direction": "out", "value_type": "Float"}
+          "raw": {"direction": "in",  "value_type": "float"},
+          "out": {"direction": "out", "value_type": "float"}
         }
       }],
       "connections": [

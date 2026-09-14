@@ -5,15 +5,15 @@
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "temperature": { "direction": "in", "value_type": "Float" }
+        "temperature": { "direction": "in", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "sim-ao",
       "channels": {
-        "heater": { "direction": "out", "value_type": "Float" },
-        "spare": { "direction": "out", "value_type": "Float" }
+        "heater": { "direction": "out", "value_type": "float" },
+        "spare": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -21,20 +21,20 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "temperature" },
       "writable": true
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "heater" }
     },
     {
       "id": 30,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "spare" }
     }
   ],

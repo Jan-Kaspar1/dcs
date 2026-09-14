@@ -236,6 +236,78 @@ fn a_state_file_resumed_run_appends_in_the_restored_tick_domain() {
 }
 
 #[test]
+fn a_legacy_spelling_journal_file_replays_through_the_aliases() {
+    let dir = scratch("legacy");
+    let journal = dir.join("journal.jsonl");
+
+    // The file a pre-snake_case build wrote verbatim: entries carrying
+    // Quality, QualityReason, ValueKind, and Value in their PascalCase
+    // spellings — a quality transition and a settled write.
+    let lines = [
+        r#"{"run_boundary":{"run":1,"tick":0}}"#,
+        r#"{"entry":{"seq":1,"tick":1,"event":{"quality_changed":{"point":10,"from":null,"to":{"Uncertain":"Substituted"}}}}}"#,
+        r#"{"entry":{"seq":2,"tick":2,"event":{"quality_changed":{"point":10,"from":{"Uncertain":"Substituted"},"to":"Good"}}}}"#,
+        r#"{"entry":{"seq":3,"tick":3,"event":{"command_settled":{"receipt":{"command":{"write_value":{"point":10,"kind":"Float","value":{"Float":2.5}}},"outcome":{"applied":{"tick":3}}}}}}}"#,
+    ];
+    std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
+
+    // Replay accepts every legacy spelling through the aliases: the
+    // entries answer GET /journal identically to their canonical form,
+    // and new entries continue the numbering behind a run-2 marker.
+    let spawned = spawn_driven(&driven_args(&journal, None));
+    let client = MonitorClient::new(spawned.addr);
+    let replayed = client.journal(0).unwrap();
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|entry| (entry.seq, &entry.event))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                1,
+                &dcs_core::JournalEvent::QualityChanged {
+                    point: PointId(10),
+                    from: None,
+                    to: dcs_core::Quality::Uncertain(dcs_core::QualityReason::Substituted),
+                }
+            ),
+            (
+                2,
+                &dcs_core::JournalEvent::QualityChanged {
+                    point: PointId(10),
+                    from: Some(dcs_core::Quality::Uncertain(
+                        dcs_core::QualityReason::Substituted
+                    )),
+                    to: dcs_core::Quality::Good,
+                }
+            ),
+            (
+                3,
+                &dcs_core::JournalEvent::CommandSettled {
+                    receipt: dcs_core::CommandReceipt {
+                        command: Command::WriteValue {
+                            point: PointId(10),
+                            kind: ValueKind::Float,
+                            value: Value::Float(2.5),
+                        },
+                        outcome: dcs_core::CommandOutcome::Applied { tick: Tick(3) },
+                        actor: None,
+                    },
+                }
+            ),
+        ]
+    );
+    client.advance(1).unwrap();
+    let after = client.journal(0).unwrap();
+    assert!(after.len() > replayed.len(), "{after:?}");
+    assert_eq!(&after[..replayed.len()], &replayed[..]);
+    assert_eq!(after[replayed.len()].seq, 4);
+    assert_eq!(file_boundaries(&journal), vec![(1, 0), (2, 0)]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_corrupt_journal_file_fails_startup_naming_the_file_and_record() {
     let dir = scratch("corrupt");
     let journal = dir.join("journal.jsonl");

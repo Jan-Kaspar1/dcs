@@ -491,7 +491,7 @@ fn added_payloads_serde_roundtrip() {
     assert_eq!(serde_json::from_str::<PortDescriptor>(&json).unwrap(), port);
     // Payloads predating the field still parse as unwired.
     let bare: PortDescriptor =
-        serde_json::from_str(r#"{"name":"sp","direction":"in","kind":"Float","role":"setpoint"}"#)
+        serde_json::from_str(r#"{"name":"sp","direction":"in","kind":"float","role":"setpoint"}"#)
             .unwrap();
     assert_eq!(bare.point, None);
 }

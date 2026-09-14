@@ -103,6 +103,104 @@ fn a_restarted_run_resuming_the_state_file_matches_the_uninterrupted_run() {
     let _ = std::fs::remove_dir_all(&again);
 }
 
+/// Rewrites `value`'s canonical `snake_case` enum spellings to the
+/// PascalCase spellings pre-change builds emitted — the shape a legacy
+/// `--state-file` holds. Only the audited enums' names are rewritten;
+/// every other key and string passes through untouched.
+fn legacy_spellings(value: &mut serde_json::Value) {
+    const PASCAL: &[(&str, &str)] = &[
+        ("bool", "Bool"),
+        ("int", "Int"),
+        ("float", "Float"),
+        ("good", "Good"),
+        ("uncertain", "Uncertain"),
+        ("bad", "Bad"),
+        ("unspecified", "Unspecified"),
+        ("substituted", "Substituted"),
+        ("stale", "Stale"),
+        ("out_of_range", "OutOfRange"),
+        ("communication_fault", "CommunicationFault"),
+        ("device_fault", "DeviceFault"),
+        ("configuration_fault", "ConfigurationFault"),
+        ("unknown_point", "UnknownPoint"),
+        ("disconnected", "Disconnected"),
+        ("timeout", "Timeout"),
+        ("type_mismatch", "TypeMismatch"),
+        ("fenced", "Fenced"),
+    ];
+    match value {
+        serde_json::Value::String(name) => {
+            if let Some((_, legacy)) = PASCAL.iter().find(|(snake, _)| snake == name) {
+                *name = (*legacy).to_string();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                legacy_spellings(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // An externally tagged variant's single key — `{"float": …}`,
+            // `{"uncertain": …}` — renames like the bare strings.
+            if map.len() == 1 {
+                let key = map.keys().next().unwrap().clone();
+                if let Some((_, legacy)) = PASCAL.iter().find(|(snake, _)| *snake == key) {
+                    let inner = map.remove(&key).unwrap();
+                    map.insert((*legacy).to_string(), inner);
+                }
+            }
+            for inner in map.values_mut() {
+                legacy_spellings(inner);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn a_legacy_spelling_state_file_resumes_through_the_aliases() {
+    // The uninterrupted reference: one run of WHOLE ticks.
+    let reference = run(&[TANK_LOOP, "--ticks", &WHOLE.to_string()]);
+    assert!(reference.status.success());
+
+    // Capture a canonical checkpoint at HALF, then rewrite it to the
+    // PascalCase spellings a pre-snake_case build persisted — the file
+    // the same run would have produced under the old contract.
+    let dir = scratch("legacy");
+    let state = dir.join("state.json");
+    let first = run(&[
+        TANK_LOOP,
+        "--ticks",
+        &HALF.to_string(),
+        "--state-file",
+        state.to_str().unwrap(),
+    ]);
+    assert!(first.status.success());
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    legacy_spellings(&mut document);
+    let legacy = serde_json::to_string(&document).unwrap();
+    assert!(legacy.contains("\"Float\""), "{legacy}");
+    std::fs::write(&state, legacy).unwrap();
+
+    // The aliases read it back: the resumed run produces the identical
+    // continuation the canonical file would have.
+    let resumed = run(&[
+        TANK_LOOP,
+        "--ticks",
+        &HALF.to_string(),
+        "--state-file",
+        state.to_str().unwrap(),
+    ]);
+    assert!(resumed.status.success());
+    let stderr = String::from_utf8(resumed.stderr).unwrap();
+    assert!(stderr.contains("resumed from state file"), "{stderr}");
+    assert_eq!(resumed.stdout, reference.stdout);
+    assert_eq!(persisted(&state).tick, Tick(WHOLE));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_state_file_from_a_different_model_fails_resume_naming_the_fingerprint() {
     let dir = scratch("fingerprint");

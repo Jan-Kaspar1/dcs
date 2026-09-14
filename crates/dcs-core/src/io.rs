@@ -22,19 +22,28 @@ use std::marker::PhantomData;
 ///
 /// Every variant carries the offending [`PointId`]; [`IoError::point`]
 /// retrieves it uniformly.
+///
+/// Variants serialize in `snake_case` (`{"unknown_point": …}`,
+/// `{"type_mismatch": {…}}`, …); the legacy PascalCase spellings remain
+/// accepted on read.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IoError {
     /// No channel is mapped to this point, or the driver does not serve it.
+    #[serde(alias = "UnknownPoint")]
     UnknownPoint(PointId),
     /// The connection to the field device serving this point is down.
+    #[serde(alias = "Disconnected")]
     Disconnected(PointId),
     /// The device did not answer within the driver's timeout.
+    #[serde(alias = "Timeout")]
     Timeout(PointId),
     /// The value's kind does not match the declared kind of the point.
     ///
     /// Drivers report this when a write supplies the wrong [`Value`] variant;
     /// [`Input`] reports it when the stored sample is not the handle's
     /// declared type. Mismatches are errors: accessors never silently coerce.
+    #[serde(alias = "TypeMismatch")]
     TypeMismatch {
         /// The offending point.
         point: PointId,
@@ -47,6 +56,7 @@ pub enum IoError {
     /// field's write-ownership claim — the fencing verdict of the
     /// single-writer arbitration a redundant pair relies on when a
     /// promoted standby takes the field. Reads are never fenced.
+    #[serde(alias = "Fenced")]
     Fenced(PointId),
 }
 
@@ -567,6 +577,48 @@ mod tests {
         ] {
             let json = serde_json::to_string(&error).unwrap();
             assert_eq!(serde_json::from_str::<IoError>(&json).unwrap(), error);
+        }
+    }
+
+    #[test]
+    fn io_error_emits_snake_case_and_reads_legacy_pascal_case() {
+        // The emitted wire spelling of every variant — including the
+        // snake_case spellings of the nested ValueKind and Value.
+        for (error, emitted) in [
+            (IoError::UnknownPoint(PointId(7)), r#"{"unknown_point":7}"#),
+            (IoError::Disconnected(PointId(8)), r#"{"disconnected":8}"#),
+            (IoError::Timeout(PointId(9)), r#"{"timeout":9}"#),
+            (
+                IoError::TypeMismatch {
+                    point: PointId(4),
+                    expected: ValueKind::Float,
+                    found: Value::Int(1),
+                },
+                r#"{"type_mismatch":{"point":4,"expected":"float","found":{"int":1}}}"#,
+            ),
+            (IoError::Fenced(PointId(5)), r#"{"fenced":5}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&error).unwrap(), emitted);
+        }
+
+        // Persisted artifacts written in the legacy PascalCase spellings
+        // still deserialize through the variant aliases — nested
+        // ValueKind/Value in the old spelling too.
+        for (legacy, error) in [
+            (r#"{"UnknownPoint":7}"#, IoError::UnknownPoint(PointId(7))),
+            (r#"{"Disconnected":8}"#, IoError::Disconnected(PointId(8))),
+            (r#"{"Timeout":9}"#, IoError::Timeout(PointId(9))),
+            (
+                r#"{"TypeMismatch":{"point":4,"expected":"Float","found":{"Int":1}}}"#,
+                IoError::TypeMismatch {
+                    point: PointId(4),
+                    expected: ValueKind::Float,
+                    found: Value::Int(1),
+                },
+            ),
+            (r#"{"Fenced":5}"#, IoError::Fenced(PointId(5))),
+        ] {
+            assert_eq!(serde_json::from_str::<IoError>(legacy).unwrap(), error);
         }
     }
 }

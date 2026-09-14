@@ -9,7 +9,7 @@
         "registers": { "level-raw": 70000 }
       },
       "channels": {
-        "level-raw": { "direction": "in", "value_type": "Float" }
+        "level-raw": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -17,7 +17,7 @@
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "level-raw" }
     }
   ],

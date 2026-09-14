@@ -12,13 +12,21 @@ use std::fmt;
 ///
 /// The variant set is deliberately small; widening conversions that cannot
 /// lose information are available through the `TryFrom<Value>` impls.
+///
+/// Variants serialize in `snake_case` (`{"bool": …}`, `{"int": …}`,
+/// `{"float": …}`); the legacy PascalCase spellings remain accepted on read
+/// through the variant aliases.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Value {
     /// A boolean point, e.g. a digital input, command, or state.
+    #[serde(alias = "Bool")]
     Bool(bool),
     /// A 64-bit signed integer, e.g. a counter or enumerated state.
+    #[serde(alias = "Int")]
     Int(i64),
     /// A 64-bit IEEE-754 float, e.g. an analog measurement.
+    #[serde(alias = "Float")]
     Float(f64),
 }
 
@@ -36,13 +44,20 @@ impl Value {
 /// The kind of a [`Value`] variant. Used wherever a value type must be named
 /// without a concrete value: coercion targets, declared I/O point types, and
 /// type-mismatch reporting.
+///
+/// Variants serialize in `snake_case` (`"bool"`, `"int"`, `"float"`); the
+/// legacy PascalCase spellings remain accepted on read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValueKind {
     /// `bool`
+    #[serde(alias = "Bool")]
     Bool,
     /// `i64`
+    #[serde(alias = "Int")]
     Int,
     /// `f64`
+    #[serde(alias = "Float")]
     Float,
 }
 
@@ -137,22 +152,33 @@ impl TryFrom<Value> for f64 {
 /// Ordering follows declaration order and is only used to make
 /// [`Quality::merge`] deterministic when both inputs share a severity; it
 /// carries no semantic meaning on its own.
+///
+/// Variants serialize in `snake_case` (`"unspecified"`, `"substituted"`, …);
+/// the legacy PascalCase spellings remain accepted on read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QualityReason {
     /// No specific reason was reported.
+    #[serde(alias = "Unspecified")]
     Unspecified,
     /// The value was substituted: forced, manually entered, or simulated
     /// rather than read from the field.
+    #[serde(alias = "Substituted")]
     Substituted,
     /// The value is older than the expected update rate.
+    #[serde(alias = "Stale")]
     Stale,
     /// The raw value fell outside the valid operating range.
+    #[serde(alias = "OutOfRange")]
     OutOfRange,
     /// Communication with the field device failed or timed out.
+    #[serde(alias = "CommunicationFault")]
     CommunicationFault,
     /// The field device or sensor reported a fault.
+    #[serde(alias = "DeviceFault")]
     DeviceFault,
     /// The point is not mapped or is misconfigured.
+    #[serde(alias = "ConfigurationFault")]
     ConfigurationFault,
 }
 
@@ -161,14 +187,21 @@ pub enum QualityReason {
 /// Variant order defines severity (`Good` < `Uncertain` < `Bad`), so the
 /// derived `Ord` ranks worse qualities higher and [`Quality::merge`] is just
 /// `Ord::max`.
+///
+/// Variants serialize in `snake_case` (`"good"`, `{"uncertain": …}`,
+/// `{"bad": …}`); the legacy PascalCase spellings remain accepted on read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Quality {
     /// The value is valid and up to date.
+    #[serde(alias = "Good")]
     Good,
     /// The value is usable but degraded, e.g. substituted or stale.
+    #[serde(alias = "Uncertain")]
     Uncertain(QualityReason),
     /// The value must not be used for control, e.g. a device or
     /// communication fault.
+    #[serde(alias = "Bad")]
     Bad(QualityReason),
 }
 
@@ -290,6 +323,119 @@ mod tests {
             roundtrip(Quality::Bad(reason));
         }
         roundtrip(Quality::Good);
+    }
+
+    #[test]
+    fn value_emits_snake_case_and_reads_legacy_pascal_case() {
+        // The emitted wire spelling of every variant.
+        assert_eq!(
+            serde_json::to_string(&Value::Bool(true)).unwrap(),
+            r#"{"bool":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Value::Int(-3)).unwrap(),
+            r#"{"int":-3}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Value::Float(2.5)).unwrap(),
+            r#"{"float":2.5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ValueKind::Bool).unwrap(),
+            r#""bool""#
+        );
+        assert_eq!(serde_json::to_string(&ValueKind::Int).unwrap(), r#""int""#);
+        assert_eq!(
+            serde_json::to_string(&ValueKind::Float).unwrap(),
+            r#""float""#
+        );
+
+        // Persisted artifacts written in the legacy PascalCase spellings
+        // still deserialize through the variant aliases.
+        assert_eq!(
+            serde_json::from_str::<Value>(r#"{"Bool":true}"#).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(r#"{"Int":-3}"#).unwrap(),
+            Value::Int(-3)
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(r#"{"Float":2.5}"#).unwrap(),
+            Value::Float(2.5)
+        );
+        assert_eq!(
+            serde_json::from_str::<ValueKind>(r#""Bool""#).unwrap(),
+            ValueKind::Bool
+        );
+        assert_eq!(
+            serde_json::from_str::<ValueKind>(r#""Int""#).unwrap(),
+            ValueKind::Int
+        );
+        assert_eq!(
+            serde_json::from_str::<ValueKind>(r#""Float""#).unwrap(),
+            ValueKind::Float
+        );
+    }
+
+    #[test]
+    fn quality_emits_snake_case_and_reads_legacy_pascal_case() {
+        // The emitted wire spelling: good is a bare string; the degraded
+        // severities carry their reason — itself snake_case.
+        assert_eq!(serde_json::to_string(&Quality::Good).unwrap(), r#""good""#);
+        assert_eq!(
+            serde_json::to_string(&Quality::Uncertain(QualityReason::Stale)).unwrap(),
+            r#"{"uncertain":"stale"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Quality::Bad(QualityReason::DeviceFault)).unwrap(),
+            r#"{"bad":"device_fault"}"#
+        );
+        for (reason, emitted, legacy) in [
+            (QualityReason::Unspecified, "unspecified", "Unspecified"),
+            (QualityReason::Substituted, "substituted", "Substituted"),
+            (QualityReason::Stale, "stale", "Stale"),
+            (QualityReason::OutOfRange, "out_of_range", "OutOfRange"),
+            (
+                QualityReason::CommunicationFault,
+                "communication_fault",
+                "CommunicationFault",
+            ),
+            (QualityReason::DeviceFault, "device_fault", "DeviceFault"),
+            (
+                QualityReason::ConfigurationFault,
+                "configuration_fault",
+                "ConfigurationFault",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{emitted}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<QualityReason>(&format!("\"{legacy}\"")).unwrap(),
+                reason
+            );
+        }
+
+        // Legacy spellings on both levels of a quality object.
+        assert_eq!(
+            serde_json::from_str::<Quality>(r#""Good""#).unwrap(),
+            Quality::Good
+        );
+        assert_eq!(
+            serde_json::from_str::<Quality>(r#"{"Uncertain":"Substituted"}"#).unwrap(),
+            Quality::Uncertain(QualityReason::Substituted)
+        );
+        assert_eq!(
+            serde_json::from_str::<Quality>(r#"{"Bad":"CommunicationFault"}"#).unwrap(),
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        // … and a legacy severity can wrap a canonical reason.
+        assert_eq!(
+            serde_json::from_str::<Quality>(r#"{"Uncertain":"stale"}"#).unwrap(),
+            Quality::Uncertain(QualityReason::Stale)
+        );
     }
 
     #[test]

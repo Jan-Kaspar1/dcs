@@ -209,7 +209,7 @@ fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
         .find(|point| point["id"] == SETPOINT.0)
         .unwrap();
     setpoint.as_object_mut().unwrap().remove("channel");
-    setpoint["initial"] = serde_json::json!({ "Float": 25.0 });
+    setpoint["initial"] = serde_json::json!({ "float": 25.0 });
     let path = dir.join(name);
     std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     path

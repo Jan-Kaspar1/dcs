@@ -473,7 +473,7 @@ mod tests {
         let json = serde_json::to_string(&set_parameter()).unwrap();
         assert_eq!(
             json,
-            r#"{"set_parameter":{"component":"level-pid","name":"kp","value":{"Float":3.5}}}"#
+            r#"{"set_parameter":{"component":"level-pid","name":"kp","value":{"float":3.5}}}"#
         );
     }
 
@@ -482,10 +482,41 @@ mod tests {
         let json = serde_json::to_string(&force_point()).unwrap();
         assert_eq!(
             json,
-            r#"{"force_point":{"point":7,"kind":"Float","value":{"Float":42.0}}}"#
+            r#"{"force_point":{"point":7,"kind":"float","value":{"float":42.0}}}"#
         );
         let json = serde_json::to_string(&Command::UnforcePoint { point: PointId(7) }).unwrap();
         assert_eq!(json, r#"{"unforce_point":{"point":7}}"#);
+    }
+
+    #[test]
+    fn commands_read_legacy_pascal_case_value_spellings() {
+        // A command body written before the value-kind spellings
+        // normalized still deserializes through the variant aliases.
+        assert_eq!(
+            serde_json::from_str::<Command>(
+                r#"{"force_point":{"point":7,"kind":"Float","value":{"Float":42.0}}}"#
+            )
+            .unwrap(),
+            force_point()
+        );
+        assert_eq!(
+            serde_json::from_str::<Command>(
+                r#"{"set_parameter":{"component":"level-pid","name":"kp","value":{"Float":3.5}}}"#
+            )
+            .unwrap(),
+            set_parameter()
+        );
+        assert_eq!(
+            serde_json::from_str::<Command>(
+                r#"{"write_value":{"point":1,"kind":"Bool","value":{"Bool":true}}}"#
+            )
+            .unwrap(),
+            Command::WriteValue {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+                value: Value::Bool(true),
+            }
+        );
     }
 
     #[test]

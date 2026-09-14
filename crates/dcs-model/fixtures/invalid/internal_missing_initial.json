@@ -5,7 +5,7 @@
       "id": 1,
       "kind": "sim-8ai",
       "channels": {
-        "ch0": { "direction": "in", "value_type": "Float" }
+        "ch0": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -13,13 +13,13 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ch0" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float"
+      "value_type": "float"
     }
   ],
   "signals": [
