@@ -173,6 +173,7 @@ fn history_ring_respects_capacity_and_tick_order() {
     let config = MonitorConfig {
         history_capacity: 4,
         journal_capacity: 64,
+        ..MonitorConfig::default()
     };
     with_monitor_config(config, vec![Box::new(Scale)], |_driver, client| {
         // Two scans against a capacity-4 ring retain both.
@@ -398,6 +399,7 @@ fn journal_is_bounded_with_visible_eviction() {
     let config = MonitorConfig {
         history_capacity: 8,
         journal_capacity: 3,
+        ..MonitorConfig::default()
     };
     with_monitor_config(config, vec![Box::new(Scale)], |driver, client| {
         client.advance(1).unwrap();

@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "pv1": { "direction": "in", "value_type": "Float" },
+        "pv2": { "direction": "in", "value_type": "Float" },
+        "ack2": { "direction": "in", "value_type": "Bool" },
+        "alarm1": { "direction": "out", "value_type": "Bool" },
+        "unack1": { "direction": "out", "value_type": "Bool" },
+        "alarm2": { "direction": "out", "value_type": "Bool" },
+        "unack2": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "pv1" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "pv2" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "ack2" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "alarm1" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "unack1" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "alarm2" }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "unack2" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "lal-101-pv",
+      "source": 10,
+      "unit": "degC",
+      "description": "Process value the first latching alarm checks"
+    },
+    {
+      "id": 101,
+      "name": "lal-101-ack",
+      "source": 11,
+      "description": "Operator acknowledgment, a model-declared writable internal point"
+    },
+    {
+      "id": 102,
+      "name": "lal-102-pv",
+      "source": 12,
+      "unit": "degC",
+      "description": "Process value the second latching alarm checks"
+    },
+    {
+      "id": 103,
+      "name": "lal-102-ack",
+      "source": 13,
+      "description": "A field-driven ack the model left unmarked — never an affordance"
+    },
+    {
+      "id": 104,
+      "name": "lal-101-alarm",
+      "source": 20,
+      "description": "Standing limit state of the first latching alarm"
+    },
+    {
+      "id": 105,
+      "name": "lal-101-unacknowledged",
+      "source": 21,
+      "description": "Latched from trip until the operator acknowledges"
+    },
+    {
+      "id": 106,
+      "name": "lal-102-alarm",
+      "source": 22,
+      "description": "Standing limit state of the second latching alarm"
+    },
+    {
+      "id": 107,
+      "name": "lal-102-unacknowledged",
+      "source": 23,
+      "description": "Latched from trip until the operator acknowledges"
+    }
+  ],
+  "components": [],
+  "connections": []
+}

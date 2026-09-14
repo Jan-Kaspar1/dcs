@@ -58,6 +58,19 @@
 //! a monotonically increasing `seq`, so a polling consumer detects an
 //! evicted stretch as a numbering gap instead of silently missing it.
 //!
+//! With `journal_file` set on [`MonitorConfig`], every journaled entry is
+//! also appended to that path as one line-delimited JSON record at the
+//! same recording point — the journal-persistence decision's durable
+//! audit trail, monitor-local tooling beside the controller's
+//! `--state-file`: the checkpoint resumes the run's state, the journal
+//! preserves the run's record. Startup replays the file into the ring
+//! and continues `seq` numbering where it left off — a run-boundary
+//! marker line separates process lifetimes within the file — so
+//! `GET /journal` answers continuously across a restart; a file that
+//! cannot be replayed fails startup naming the file and the offending
+//! record, and a missing file is a cold start. Point history stays
+//! volatile; only the journal persists.
+//!
 //! The page is the monitoring and control UI consuming the unified
 //! contract: a static, dependency-free HTML+JavaScript asset ([`PAGE`],
 //! no build toolchain) that fetches `/signals` once for point labels,
@@ -115,6 +128,19 @@
 //! generic name-plus-diagnostics-plus-wired-points faceplate, never an
 //! error.
 //!
+//! The alarm pane applies the same descriptor-to-point join to the
+//! two-flag alarm surface: every status-role `Out` port whose live
+//! sample asserts lists with its component, value, quality, and the
+//! tick the value last changed in the point's retained history — a
+//! non-good quality draws the row degraded rather than as a clean
+//! assertion — and the journal entries touching the alarm-bound points
+//! and their components list in tick order beside it. Where the
+//! component declares an `ack` input wired to a model-declared writable
+//! point the pane offers an acknowledge button issuing an ordinary
+//! receipted `write_value` — no alarm-specific protocol — pulsed back
+//! to `false` once a scan has observed it, because the kind's `ack` is
+//! level-observed.
+//!
 //! ## The pair view
 //!
 //! Under redundancy — the monitoring-under-redundancy decision — the page
@@ -163,6 +189,7 @@
 
 #![warn(missing_docs)]
 
+mod journal_file;
 mod pair;
 mod recorder;
 
@@ -307,24 +334,35 @@ impl<'d> Monitor<'d> {
         peer: Peer<'d>,
         signals: SignalIndex,
     ) -> io::Result<Self> {
-        let mut monitor = Self::bind_peer_with(addr, peer, signals, MonitorConfig::default())?;
-        monitor.paced = true;
-        Ok(monitor)
+        Self::bind_paced_peer_with(addr, peer, signals, MonitorConfig::default())
     }
 
-    /// The shared constructor: `peer` in the lock, `config` retention
-    /// bounds, unpaced.
-    fn bind_peer_with<A: ToSocketAddrs>(
+    /// As [`bind_paced_peer`](Self::bind_paced_peer) with explicit
+    /// `config` retention bounds and journal-file sink.
+    pub fn bind_paced_peer_with<A: ToSocketAddrs>(
         addr: A,
         peer: Peer<'d>,
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
+        let mut monitor = Self::bind_peer_with(addr, peer, signals, config)?;
+        monitor.paced = true;
+        Ok(monitor)
+    }
+
+    /// As [`bind_peer`](Self::bind_peer) with explicit `config`
+    /// retention bounds and journal-file sink. Replaying a configured
+    /// journal file happens at bind: a file that cannot be replayed
+    /// fails startup naming the file and the offending record.
+    pub fn bind_peer_with<A: ToSocketAddrs>(
+        addr: A,
+        peer: Peer<'d>,
+        signals: SignalIndex,
+        config: MonitorConfig,
+    ) -> io::Result<Self> {
+        let recorder = recorder::Recorder::new(config, peer.tick())?;
         Ok(Self {
-            shared: Mutex::new(Shared {
-                peer,
-                recorder: recorder::Recorder::new(config),
-            }),
+            shared: Mutex::new(Shared { peer, recorder }),
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,

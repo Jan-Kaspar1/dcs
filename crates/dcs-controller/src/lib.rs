@@ -13,9 +13,9 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter, Sequencer,
-    SignalFilter, Timer, Totalizer, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
+    EdgeTrigger, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid,
+    RateLimiter, Sequencer, SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -254,6 +254,45 @@ pub fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(BoolGate::KIND, |spec| {
+            // The input set is declared `in_1` … `in_N` following the
+            // interlock's `trip_N` convention; order the bound points by
+            // numeric suffix, not lexically.
+            let mut inputs: Vec<_> = spec
+                .ports
+                .iter()
+                .filter_map(|(name, point)| {
+                    name.strip_prefix("in_")
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                        .map(|index| (index, *point))
+                })
+                .collect();
+            inputs.sort_by_key(|(index, _)| *index);
+            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            boxed(BoolGate::from_parameters(
+                spec.name.as_str(),
+                inputs,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(SrLatch::KIND, |spec| {
+            boxed(SrLatch::from_parameters(
+                spec.name.as_str(),
+                spec.require("set")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(EdgeTrigger::KIND, |spec| {
+            boxed(EdgeTrigger::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
 }
 
 /// What a `--check` run reports: the assembly surface the model built —
@@ -331,4 +370,23 @@ fn count_by_kind<'k>(kinds: impl Iterator<Item = &'k str>) -> BTreeMap<String, u
         *counts.entry(kind.to_string()).or_insert(0) += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry-side pin of the spec-coverage guard: the standard
+    /// registry registers exactly the kinds `dcs-blocks` ships — the
+    /// checked-in [`dcs_blocks::KINDS`] list that
+    /// `dcs-blocks/tests/spec_drift.rs` pins the `dcs-build` spec table
+    /// against. A kind registered here without the list entry — or one
+    /// dropped from here while still listed — fails this test.
+    #[test]
+    fn registry_registers_exactly_the_shipped_kinds() {
+        let registry = registry();
+        let registered: std::collections::BTreeSet<&str> = registry.kinds().collect();
+        let shipped: std::collections::BTreeSet<&str> = dcs_blocks::KINDS.iter().copied().collect();
+        assert_eq!(registered, shipped);
+    }
 }

@@ -6,7 +6,7 @@ use crate::bank::RegisterBank;
 use crate::protocol::{
     BusError, BusRequest, BusResponse, MAX_FRAME, decode_request, encode_response, read_frame,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +27,27 @@ struct Shared {
     /// otherwise notice the server stopping.
     clients: Mutex<HashMap<u64, TcpStream>>,
     next_client: AtomicU64,
+    /// The device's write-ownership claim — `None` while no attachment
+    /// has claimed the field, which stays open to every attachment.
+    /// Unlike `dcs-sim-net`'s plant claim — held by owner token until
+    /// preempted, never released — the register claim is bound to the
+    /// attachments holding it: a holder's disconnect or
+    /// [`BusRequest::ReleaseWriter`] drops it, and the last drop frees
+    /// the device, so a dead owner's silence cannot fence the field
+    /// against a promoted peer's claim.
+    writer: Mutex<Option<WriterClaim>>,
+}
+
+/// A held write-ownership claim: the owner token the last preempting
+/// [`BusRequest::ClaimWriter`] asserted plus the live connections
+/// holding it — one field owner's several attachments claim the same
+/// token so all of them write.
+struct WriterClaim {
+    owner: u64,
+    /// The connection ids holding `owner`. An attachment not in this
+    /// set is fenced: its `write_register` and `step` requests are
+    /// refused while the claim stands.
+    holders: HashSet<u64>,
 }
 
 impl Shared {
@@ -42,16 +63,34 @@ impl Shared {
         }
         let shared = Arc::clone(self);
         thread::spawn(move || {
-            serve_connection(&shared, stream);
+            serve_connection(&shared, stream, id);
+            // The claim is bound to its attachments: the connection's
+            // end — orderly close, broken link, or a protocol-violation
+            // drop — releases its hold, freeing the field when the
+            // last holder goes.
+            release_claim(&shared.writer, id);
             shared.clients.lock().unwrap().remove(&id);
         });
+    }
+}
+
+/// Drops `connection`'s hold on the writer claim, freeing the device
+/// when its last holder goes — the release half of the claim's rule,
+/// shared by [`BusRequest::ReleaseWriter`] and connection teardown.
+fn release_claim(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
+    let mut guard = writer.lock().unwrap();
+    if let Some(claim) = guard.as_mut() {
+        claim.holders.remove(&connection);
+        if claim.holders.is_empty() {
+            *guard = None;
+        }
     }
 }
 
 /// One client connection's request loop: read a frame, dispatch it,
 /// write the response. Ends when the peer goes away, the link fails,
 /// the peer violates the frame bound, or the server stops.
-fn serve_connection(shared: &Shared, stream: TcpStream) {
+fn serve_connection(shared: &Shared, stream: TcpStream, connection: u64) {
     let _ = stream.set_nodelay(true);
     let mut reader = BufReader::new(stream);
     loop {
@@ -65,7 +104,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
             Ok(None) | Err(_) => return,
         };
         let response = match decode_request(&body) {
-            Ok(request) => dispatch(&shared.bank, request),
+            Ok(request) => dispatch(shared, connection, request),
             Err(detail) => BusResponse::Error {
                 error: BusError::InvalidRequest { detail },
             },
@@ -80,25 +119,89 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
     }
 }
 
-/// Applies one parsed request to the shared bank.
+/// The refusal a fenced attachment's field-mutating request answers
+/// with — the driver's `write` path surfaces it as the addressed
+/// point's `IoError::Fenced`, the same named failure a fenced
+/// plant-protocol write produces.
+fn fenced_out() -> BusResponse {
+    BusResponse::Error {
+        error: BusError::Fenced {
+            detail: "another attachment owns register writes".to_string(),
+        },
+    }
+}
+
+/// Applies one parsed request to the shared bank, fencing
+/// field-mutating requests by the caller's claim hold.
 ///
 /// Every request produces exactly one response; a register-level
 /// failure comes back as [`BusResponse::Error`] carrying the bank's
 /// [`BusError`] so the client surfaces it at the point it addressed.
-fn dispatch(bank: &RegisterBank, request: BusRequest) -> BusResponse {
+/// `WriteRegister` and `Step` are the field-mutating operations: while
+/// a claim is held, a connection not holding it sees both refused with
+/// [`BusError::Fenced`] — the old owner's writes stop at the field,
+/// not merely at its own gate.
+fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusResponse {
     match request {
-        BusRequest::ReadRegister { register } => match bank.read(register) {
+        BusRequest::ReadRegister { register } => match shared.bank.read(register) {
             Ok(sample) => BusResponse::Sample { sample },
             Err(error) => BusResponse::Error { error },
         },
-        BusRequest::WriteRegister { register, value } => match bank.write(register, value) {
-            Ok(tick) => BusResponse::Written { tick },
-            Err(error) => BusResponse::Error { error },
-        },
+        BusRequest::WriteRegister { register, value } => {
+            // The claim stays locked across the write itself, keeping a
+            // claim strictly ordered against a write already in flight
+            // on another connection.
+            let writer = shared.writer.lock().unwrap();
+            if writer
+                .as_ref()
+                .is_some_and(|claim| !claim.holders.contains(&connection))
+            {
+                return fenced_out();
+            }
+            match shared.bank.write(register, value) {
+                Ok(tick) => BusResponse::Written { tick },
+                Err(error) => BusResponse::Error { error },
+            }
+        }
+        BusRequest::Step => {
+            let writer = shared.writer.lock().unwrap();
+            if writer
+                .as_ref()
+                .is_some_and(|claim| !claim.holders.contains(&connection))
+            {
+                return fenced_out();
+            }
+            BusResponse::Stepped {
+                tick: shared.bank.step(),
+            }
+        }
         BusRequest::ListRegisters => BusResponse::Registers {
-            registers: bank.registers(),
+            registers: shared.bank.registers(),
         },
-        BusRequest::Step => BusResponse::Stepped { tick: bank.step() },
+        BusRequest::ClaimWriter { owner } => {
+            // The grant is unconditional — the promoted peer's claim
+            // must beat the old owner's, wherever it still lives.
+            // Claiming the held owner joins this attachment to the
+            // claim's holders, so one owner's several connections all
+            // write.
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_mut() {
+                Some(claim) if claim.owner == owner => {
+                    claim.holders.insert(connection);
+                }
+                _ => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                }
+            }
+            BusResponse::Done
+        }
+        BusRequest::ReleaseWriter => {
+            release_claim(&shared.writer, connection);
+            BusResponse::Done
+        }
     }
 }
 
@@ -113,6 +216,15 @@ fn dispatch(bank: &RegisterBank, request: BusRequest) -> BusResponse {
 /// atomic, and because the tick advances only on an explicit
 /// [`BusRequest::Step`], an attached client that only reads sees the
 /// registers exactly as the stepping client left them.
+///
+/// The server arbitrates a single writer for the failover fencing the
+/// crate root documents: a [`BusRequest::ClaimWriter`] grants the
+/// write claim to the requesting attachment — preempting whichever
+/// owner held it — and while a claim stands, `write_register` and
+/// `step` from an attachment not holding it answer
+/// [`BusError::Fenced`]. The claim is bound to its attachments: it
+/// releases on the holder's disconnect or
+/// [`BusRequest::ReleaseWriter`], the last release reopening the field.
 ///
 /// [`serve`](Self::serve) runs the blocking accept loop on the caller's
 /// thread — run it on a dedicated thread — and
@@ -139,6 +251,7 @@ impl BusServer {
                 stopped: AtomicBool::new(false),
                 clients: Mutex::new(HashMap::new()),
                 next_client: AtomicU64::new(0),
+                writer: Mutex::new(None),
             }),
             listener: TcpListener::bind(addr)?,
         })

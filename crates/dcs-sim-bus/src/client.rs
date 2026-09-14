@@ -5,7 +5,9 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo, decode_response, encode_request,
     read_frame,
 };
-use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value, ValueKind,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -52,6 +54,12 @@ pub enum LinkError {
     /// decode as a [`BusRequest`]. `detail` is the server's diagnostic
     /// text.
     InvalidRequest(String),
+    /// The request mutates the shared device but another attachment
+    /// holds the device's write-ownership claim — the fencing verdict
+    /// of the failover decision. Reads still succeed; writing again
+    /// requires taking the claim back with
+    /// [`claim_writer`](Self::claim_writer).
+    Fenced,
 }
 
 impl LinkError {
@@ -64,6 +72,7 @@ impl LinkError {
         match self {
             Self::Disconnected | Self::InvalidRequest(_) => IoError::Disconnected(point),
             Self::Timeout => IoError::Timeout(point),
+            Self::Fenced => IoError::Fenced(point),
         }
     }
 }
@@ -75,6 +84,12 @@ impl fmt::Display for LinkError {
             Self::Timeout => write!(f, "device server did not answer in time"),
             Self::InvalidRequest(detail) => {
                 write!(f, "server refused the request: {detail}")
+            }
+            Self::Fenced => {
+                write!(
+                    f,
+                    "field mutation refused: another attachment owns register writes"
+                )
             }
         }
     }
@@ -99,7 +114,18 @@ impl BusError {
             Self::InvalidRequest { ref detail } => {
                 LinkError::InvalidRequest(detail.clone()).at_point(point)
             }
+            Self::Fenced { .. } => IoError::Fenced(point),
         }
+    }
+}
+
+/// Collapses a server-reported refusal on a non-point request into the
+/// link vocabulary: the fencing verdict is its own named variant;
+/// anything else is a request the server could not serve.
+fn refused(error: BusError) -> LinkError {
+    match error {
+        BusError::Fenced { .. } => LinkError::Fenced,
+        other => LinkError::InvalidRequest(format!("{other:?}")),
     }
 }
 
@@ -154,6 +180,13 @@ fn exchange(
 /// controller paces the bank exactly where a local driver's step call
 /// sat; a second attached client observes the same stepped registers.
 ///
+/// Fencing: the device arbitrates a single writer — the failover
+/// decision's rule that a promoted peer's field writes must beat a
+/// still-alive old owner's. [`claim_writer`](Self::claim_writer) takes
+/// the claim under this attachment and [`release_writer`](Self::release_writer)
+/// drops it; while any attachment holds it, a non-holder's `write`
+/// answers [`IoError::Fenced`] and its `step` [`LinkError::Fenced`].
+///
 /// Failure handling: a point the driver's map does not serve is
 /// [`IoError::UnknownPoint`] without a request; a write carrying the
 /// wrong value kind is [`IoError::TypeMismatch`] likewise. On the wire,
@@ -164,6 +197,15 @@ fn exchange(
 /// arrive after the fact and pair with a later request, so the driver
 /// never reuses a suspect link. `BusDriver` is [`Sync`] through its
 /// internal locks, like the driver contract expects.
+///
+/// Diagnostics: [`IoDriver::diagnostics`] reports the link as
+/// [`LinkState::Disconnected`] once a failed exchange dropped the
+/// connection — the named link degradation a dead device server
+/// produces — with the last transport failure's description. That
+/// surface is link health, distinct from the per-point [`IoError`]s
+/// `read`/`write` return: every point's read failing with
+/// `Disconnected` and the link reporting `disconnected` are the same
+/// event told at the two levels the telemetry contract keeps separate.
 pub struct BusDriver {
     connection: Mutex<Connection>,
     /// Point → register mapping plus the point's declared kind.
@@ -229,10 +271,50 @@ impl BusDriver {
 
     /// Advances the device server's bank one tick — the explicit step
     /// behind the register protocol — and returns the bank's new tick.
+    /// Stepping mutates the shared device, so while an attachment holds
+    /// the write-ownership claim a non-holder's step answers
+    /// [`LinkError::Fenced`].
     pub fn step(&self) -> Result<Tick, LinkError> {
         match self.request(&BusRequest::Step)? {
             BusResponse::Stepped { tick } => Ok(tick),
-            BusResponse::Error { error } => Err(LinkError::InvalidRequest(format!("{error:?}"))),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Takes the device's write-ownership claim for `owner` — the
+    /// single-writer arbitration the failover decision fences a
+    /// superseded active out with.
+    ///
+    /// `owner` is an opaque token the caller picks, unique per field
+    /// owner: one controller's several attachments claim the same
+    /// token so all of them write, while a takeover claims a fresh one.
+    /// The grant is unconditional — it preempts whichever owner held
+    /// the device — and the claim binds to the claiming attachment:
+    /// released when this connection drops or sends
+    /// [`release_writer`](Self::release_writer), the last release
+    /// freeing the field, so a dead owner's claim dies with its link
+    /// rather than fencing the device forever. While the claim is
+    /// held, a `write` from an attachment not holding it answers the
+    /// point's [`IoError::Fenced`] and a `step` answers
+    /// [`LinkError::Fenced`]; reads and the register census stay open
+    /// to every attachment.
+    pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ClaimWriter { owner })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Releases this attachment's hold on the write-ownership claim —
+    /// the explicit half of the claim's release rule; the other is the
+    /// connection dropping. Releasing a claim this attachment does not
+    /// hold is a no-op.
+    pub fn release_writer(&self) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ReleaseWriter)? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -243,19 +325,30 @@ impl BusDriver {
     pub fn list_registers(&self) -> Result<Vec<RegisterInfo>, LinkError> {
         match self.request(&BusRequest::ListRegisters)? {
             BusResponse::Registers { registers } => Ok(registers),
-            BusResponse::Error { error } => Err(LinkError::InvalidRequest(format!("{error:?}"))),
+            BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
     }
 
-    /// Sends one request and returns the server's response.
+    /// Sends one request and returns the server's response — the raw
+    /// protocol exchange every other driver method wraps, public so
+    /// development tooling can speak the whole documented register
+    /// protocol: the `dcs-sim-bus-ctl` binary drives a device server
+    /// through exactly this.
     ///
     /// The lock serializes exchanges so a response always pairs with the
     /// request that produced it. Any failed exchange drops the
     /// connection and is recorded as the driver's last transport
     /// failure: the response stream's position is unknown afterward,
     /// and a later read could pick up a stale answer.
-    fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+    ///
+    /// The caller matches the [`BusResponse`] against its request. A
+    /// [`BusResponse::Error`] is the server's reported refusal — a
+    /// [`BusError`], not a transport failure — and a decodable response
+    /// whose variant does not correspond to the request means the peer
+    /// is not speaking this protocol; the link can no longer be
+    /// trusted, exactly as after a failed exchange.
+    pub fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
         let mut connection = self.connection.lock().unwrap();
         let Some(stream) = connection.stream.as_mut() else {
             return Err(LinkError::Disconnected);
@@ -338,5 +431,20 @@ impl IoDriver for BusDriver {
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }
+    }
+
+    /// The link's transport-level health for the snapshot's I/O-health
+    /// section: `disconnected` once a failed exchange severed the
+    /// connection — permanently, since the driver never reconnects —
+    /// plus the last transport failure's description.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        Some(DriverDiagnostics {
+            link: if self.connected() {
+                LinkState::Connected
+            } else {
+                LinkState::Disconnected
+            },
+            last_error: self.last_failure().map(|error| error.to_string()),
+        })
     }
 }

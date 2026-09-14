@@ -20,6 +20,10 @@
 //!   signal sources or a device channel nothing binds — one `rule element:
 //!   message` line each in model order. Findings are advisory and exit
 //!   zero; `--strict` exits nonzero when any are found.
+//! - `dcs-model schema` emits the plant-model document's JSON Schema
+//!   (draft 2020-12) for non-Rust tooling — covering the structural rules
+//!   the schema language can express while cross-reference and wiring
+//!   checks remain `validate`'s.
 //!
 //! Malformed input — unreadable files, broken JSON, unsupported document
 //! versions, invalid models — produces error output naming the problem and
@@ -38,7 +42,8 @@ commands:
   summary <file>           print model element counts
   signal-index <file>      print the point-to-signal index as JSON
   diff <old> <new>         report what a model revision changes; --json emits it as JSON
-  lint <file>              report advisory engineering-quality findings; --strict exits nonzero on them";
+  lint <file>              report advisory engineering-quality findings; --strict exits nonzero on them
+  schema                   print the plant model's JSON Schema";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -66,6 +71,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "signal-index" => signal_index(one_file(rest)?),
         "diff" => diff(rest),
         "lint" => lint(rest),
+        "schema" => schema(rest),
         _ => Err(format!("unknown command {command:?}\n{USAGE}")),
     }
 }
@@ -188,6 +194,17 @@ fn format_diff(diff: &ModelDiff) -> String {
         }
     }
     output.trim_end().to_owned()
+}
+
+/// `schema` prints the plant-model document's JSON Schema — the
+/// [`PlantModel::json_schema`] document, serialized canonically so the
+/// output is deterministic across runs. It takes no file.
+fn schema(args: &[String]) -> Result<String, String> {
+    if !args.is_empty() {
+        return Err(format!("schema takes no arguments\n{USAGE}"));
+    }
+    serde_json::to_string_pretty(&PlantModel::json_schema())
+        .map_err(|error| format!("cannot serialize the JSON Schema: {error}"))
 }
 
 /// `lint <file> [--strict]` prints the model's advisory
