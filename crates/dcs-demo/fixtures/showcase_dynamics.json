@@ -1,10 +1,35 @@
 [
   {
-    "first_order_lag": {
+    "second_order_lag": {
       "input": 20,
       "output": 10,
-      "time_constant": 2.0,
+      "time_constant": 1.5,
+      "damping_ratio": 0.5,
       "initial": 13.6
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 10,
+      "output": 12,
+      "time_constant": 0.3,
+      "initial": 13.6
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 10,
+      "output": 13,
+      "time_constant": 0.6,
+      "initial": 13.6
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 11,
+      "output": 14,
+      "time_constant": 0.4,
+      "initial": 4.0
     }
   }
 ]

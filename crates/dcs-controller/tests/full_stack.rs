@@ -8,11 +8,12 @@
 //!
 //! Two `dcs-plant-server` processes each serve the showcase model —
 //! `dcs-demo`'s `showcase.json` — merged with its dynamics document
-//! `showcase_dynamics.json`: the tank's first-order lag from the valve's
-//! raw command to the level's raw input, the same element
-//! `dcs_demo::showcase::driver` adds in-process. One plant is the pair's
-//! shared field; the other paces an uninterrupted single-controller
-//! reference run whose outputs the pair's must equal.
+//! `showcase_dynamics.json`: the tank's second-order lag from the
+//! valve's raw command to the level's raw input, the first-order lags
+//! on the two redundant transmitter legs and the flow channel — the
+//! same elements `dcs_demo::showcase::driver` adds in-process. One
+//! plant is the pair's shared field; the other paces an uninterrupted
+//! single-controller reference run whose outputs the pair's must equal.
 //!
 //! The controllers load the same model with its devices re-pointed at
 //! the `sim-tcp` kind: every declared channel merges onto one remote
@@ -110,8 +111,10 @@ const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-demo/fixtures/showcase.json"
 );
-/// The showcase's plant-side dynamics document: the tank's first-order
-/// lag from `lv101_raw` (20) to `lt101_raw` (10), the same element
+/// The showcase's plant-side dynamics document: the tank's second-order
+/// lag from `lv101_raw` (20) to `lt101a_raw` (10), the first-order
+/// transmitter lags to `lt101b_raw`/`lt101c_raw` (12/13), and the flow
+/// lag from `lv101_fb` (11) to `ft101_raw` (14) — the same elements
 /// `dcs_demo::showcase::driver` declares in-process.
 const PLANT_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -463,8 +466,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
     let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
 
-    // The plant tooling lists the served field surface — the seven
-    // channel-bound points of the showcase model.
+    // The plant tooling lists the served field surface — the eleven
+    // channel-bound points of the extended showcase model: the three
+    // redundant level transmitters, the valve position feedback, the
+    // flow input, the valve command, the pump run feedback and the
+    // high-level switch, and the pump, horn, and beacon outputs.
     let listed = plant_ctl(pair_plant.addr, &["list"]);
     let served: BTreeSet<u64> = listed["points"]
         .as_array()
@@ -474,7 +480,9 @@ fn run_full_stack(tag: &str) -> Outcome {
         .collect();
     assert_eq!(
         served,
-        [10, 11, 20, 30, 31, 40, 41].into_iter().collect(),
+        [10, 11, 12, 13, 14, 20, 30, 31, 40, 41, 42]
+            .into_iter()
+            .collect(),
         "the plant serves the showcase's channel-bound points"
     );
 
@@ -888,21 +896,50 @@ fn full_stack_demonstration_repeats_identically() {
 }
 
 /// The dynamics document the plant servers load declares the same
-/// first-order lag `dcs_demo::showcase::driver` adds in-process — the
-/// shared plant and the in-process run simulate identical physics.
+/// elements `dcs_demo::showcase::driver` adds in-process — the shared
+/// plant and the in-process run simulate identical physics: the
+/// underdamped second-order tank, the two first-order transmitter lags,
+/// and the flow lag.
 #[test]
 fn showcase_dynamics_document_declares_the_tank_lag() {
     let document: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(PLANT_DYNAMICS).unwrap()).unwrap();
     assert_eq!(
         document,
-        serde_json::json!([{
-            "first_order_lag": {
-                "input": points::VALVE_RAW.0,
-                "output": points::LEVEL_RAW.0,
-                "time_constant": 2.0,
-                "initial": 13.6,
-            }
-        }])
+        serde_json::json!([
+            {
+                "second_order_lag": {
+                    "input": points::VALVE_RAW.0,
+                    "output": points::LEVEL_RAW.0,
+                    "time_constant": 1.5,
+                    "damping_ratio": 0.5,
+                    "initial": 13.6,
+                }
+            },
+            {
+                "first_order_lag": {
+                    "input": points::LEVEL_RAW.0,
+                    "output": points::LEVEL_B_RAW.0,
+                    "time_constant": 0.3,
+                    "initial": 13.6,
+                }
+            },
+            {
+                "first_order_lag": {
+                    "input": points::LEVEL_RAW.0,
+                    "output": points::LEVEL_C_RAW.0,
+                    "time_constant": 0.6,
+                    "initial": 13.6,
+                }
+            },
+            {
+                "first_order_lag": {
+                    "input": points::VALVE_FEEDBACK_RAW.0,
+                    "output": points::FLOW_RAW.0,
+                    "time_constant": 0.4,
+                    "initial": 4.0,
+                }
+            },
+        ])
     );
 }
