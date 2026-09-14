@@ -19,18 +19,19 @@ use std::collections::BTreeSet;
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput,
-    DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig,
-    PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
-    Timer, Totalizer, Valve,
+    DigitalOutput, Edge, EdgeTrigger, FailoverSelect, GateOperation, GroupOutputs, Interlock,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep,
+    SetpointTable, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer,
+    Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, InterlockSpec,
+    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
+    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -353,6 +354,34 @@ fn specs_match_registered_kinds_descriptors() {
     covered.insert(check(
         &EdgeTriggerSpec::new(Default::default()),
         &EdgeTrigger::new("etr", point(1), point(2), Edge::Rising).describe(),
+    ));
+    covered.insert(check(
+        &ThresholdChainSpec::new(Default::default()),
+        &ThresholdChain::new(
+            "lch",
+            point(1),
+            ThresholdOutputs {
+                demand: point(2),
+                duty_call: point(3),
+                lag_call: point(4),
+                below_cutoff: point(5),
+                high_level: point(6),
+            },
+            SetpointTable {
+                cutoff: 1.0,
+                stop: 2.0,
+                start: 4.0,
+                lag_start: 6.0,
+                high: 8.0,
+                on_bad_demand: 0,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
+    covered.insert(check(
+        &FailoverSelectSpec::new(Default::default()),
+        &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4)).describe(),
     ));
 
     // The coverage guard: the table must pin exactly the kinds the

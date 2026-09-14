@@ -1,0 +1,610 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "level": [
+            { "tick": 0, "value": 0.5 },
+            { "tick": 5, "value": 3.0 },
+            { "tick": 8, "value": 4.5 },
+            { "tick": 11, "value": 5.5 },
+            { "tick": 13, "value": 6.5 },
+            { "tick": 16, "value": 8.5 },
+            { "tick": 19, "value": 6.5 },
+            { "tick": 22, "value": 5.0 },
+            { "tick": 25, "value": 3.5 },
+            { "tick": 28, "value": 2.5 },
+            { "tick": 31, "value": 1.5 },
+            { "tick": 34, "value": 0.8 },
+            { "tick": 37, "value": 3.0 },
+            { "tick": 40, "value": 0.5, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 46, "value": 3.0 },
+            { "tick": 49, "value": 4.5 },
+            { "tick": 55, "value": 1.5 },
+            { "tick": 70, "value": 6.5 },
+            { "tick": 90, "value": 1.5 }
+          ],
+          "backup": [
+            { "tick": 0, "value": 5.0 },
+            { "tick": 43, "value": 5.0, "quality": "bad", "reason": "device_fault" },
+            { "tick": 46, "value": 5.0 }
+          ],
+          "avail-1": [{ "tick": 0, "value": true }],
+          "avail-2": [{ "tick": 0, "value": true }]
+        }
+      },
+      "channels": {
+        "level": { "direction": "in", "value_type": "Float" },
+        "backup": { "direction": "in", "value_type": "Float" },
+        "run-1": { "direction": "in", "value_type": "Bool" },
+        "run-2": { "direction": "in", "value_type": "Bool" },
+        "fault-1": { "direction": "in", "value_type": "Bool" },
+        "fault-2": { "direction": "in", "value_type": "Bool" },
+        "avail-1": { "direction": "in", "value_type": "Bool" },
+        "avail-2": { "direction": "in", "value_type": "Bool" },
+        "cmd-1-echo": { "direction": "in", "value_type": "Bool" },
+        "cmd-2-echo": { "direction": "in", "value_type": "Bool" },
+        "sel-backup": { "direction": "out", "value_type": "Bool" },
+        "duty-call": { "direction": "out", "value_type": "Bool" },
+        "lag-call": { "direction": "out", "value_type": "Bool" },
+        "below-cutoff": { "direction": "out", "value_type": "Bool" },
+        "high-level": { "direction": "out", "value_type": "Bool" },
+        "cmd-1": { "direction": "out", "value_type": "Bool" },
+        "cmd-2": { "direction": "out", "value_type": "Bool" },
+        "duty": { "direction": "out", "value_type": "Int" },
+        "staged": { "direction": "out", "value_type": "Int" },
+        "none-avail": { "direction": "out", "value_type": "Bool" },
+        "all-faulted": { "direction": "out", "value_type": "Bool" },
+        "eff-1": { "direction": "out", "value_type": "Bool" },
+        "eff-2": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "level" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "backup" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "run-1" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "run-2" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "fault-1" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "fault-2" }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "avail-1" }
+    },
+    {
+      "id": 17,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "avail-2" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "Int",
+      "initial": { "Int": 0 }
+    },
+    {
+      "id": 24,
+      "direction": "in",
+      "value_type": "Int",
+      "initial": { "Int": 0 }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 31,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 32,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 33,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "sel-backup" }
+    },
+    {
+      "id": 43,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "duty-call" }
+    },
+    {
+      "id": 44,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "lag-call" }
+    },
+    {
+      "id": 45,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "below-cutoff" }
+    },
+    {
+      "id": 46,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "high-level" }
+    },
+    {
+      "id": 50,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-1" }
+    },
+    {
+      "id": 51,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-2" }
+    },
+    {
+      "id": 52,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "duty" }
+    },
+    {
+      "id": 53,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "staged" }
+    },
+    {
+      "id": 54,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "none-avail" }
+    },
+    {
+      "id": 55,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "all-faulted" }
+    },
+    {
+      "id": 56,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-1-echo" }
+    },
+    {
+      "id": 57,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-2-echo" }
+    },
+    {
+      "id": 60,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "eff-1" }
+    },
+    {
+      "id": 61,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "eff-2" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "station-level-primary",
+      "source": 10,
+      "unit": "m",
+      "description": "Primary station level measurement"
+    },
+    {
+      "id": 101,
+      "name": "station-level-backup",
+      "source": 11,
+      "unit": "m",
+      "description": "Backup station level measurement"
+    },
+    {
+      "id": 102,
+      "name": "station-level-selected",
+      "source": 20,
+      "unit": "m",
+      "description": "The failover-selected level the threshold chain controls on"
+    },
+    {
+      "id": 103,
+      "name": "pump-demand",
+      "source": 23,
+      "description": "Stage-count demand the pump group consumes"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "failover-select",
+      "parameters": {},
+      "ports": {
+        "primary": { "direction": "in", "value_type": "Float" },
+        "backup": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "backup_active": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "threshold-chain",
+      "parameters": {
+        "cutoff": { "Float": 1.0 },
+        "stop": { "Float": 2.0 },
+        "start": { "Float": 4.0 },
+        "lag_start": { "Float": 6.0 },
+        "high": { "Float": 8.0 },
+        "on_bad_demand": { "Int": 0 }
+      },
+      "ports": {
+        "level": { "direction": "in", "value_type": "Float" },
+        "demand": { "direction": "out", "value_type": "Int" },
+        "duty_call": { "direction": "out", "value_type": "Bool" },
+        "lag_call": { "direction": "out", "value_type": "Bool" },
+        "below_cutoff": { "direction": "out", "value_type": "Bool" },
+        "high_level": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "pump-group",
+      "parameters": {
+        "rotation": { "Int": 0 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "Int" },
+        "cmd_1": { "direction": "out", "value_type": "Bool" },
+        "run_1": { "direction": "in", "value_type": "Bool" },
+        "fault_1": { "direction": "in", "value_type": "Bool" },
+        "avail_1": { "direction": "in", "value_type": "Bool" },
+        "cmd_2": { "direction": "out", "value_type": "Bool" },
+        "run_2": { "direction": "in", "value_type": "Bool" },
+        "fault_2": { "direction": "in", "value_type": "Bool" },
+        "avail_2": { "direction": "in", "value_type": "Bool" },
+        "duty": { "direction": "out", "value_type": "Int" },
+        "staged": { "direction": "out", "value_type": "Int" },
+        "none_available": { "direction": "out", "value_type": "Bool" },
+        "all_faulted": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 10,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": { "Bool": true }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 13,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 1 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": { "Bool": true }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 15,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 16,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 17,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 1 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "primary" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "backup" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "backup_active" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "point": 21 },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "point": 21 },
+      "to": { "port": { "component": 2, "name": "level" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "demand" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "duty_call" } },
+      "to": { "point": 43 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "lag_call" } },
+      "to": { "point": 44 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "below_cutoff" } },
+      "to": { "point": 45 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "high_level" } },
+      "to": { "point": 46 }
+    },
+    {
+      "from": { "point": 24 },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "point": 24 },
+      "to": { "port": { "component": 3, "name": "demand" } }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "cmd_1" } },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "cmd_2" } },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 3, "name": "run_1" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 3, "name": "run_2" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 3, "name": "fault_1" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 3, "name": "fault_2" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 3, "name": "avail_1" } }
+    },
+    {
+      "from": { "point": 17 },
+      "to": { "port": { "component": 3, "name": "avail_2" } }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "duty" } },
+      "to": { "point": 52 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "staged" } },
+      "to": { "point": 53 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "none_available" } },
+      "to": { "point": 54 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "all_faulted" } },
+      "to": { "point": 55 }
+    },
+    {
+      "from": { "point": 56 },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "point": 57 },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 10, "name": "in" } }
+    },
+    {
+      "from": { "point": 56 },
+      "to": { "port": { "component": 11, "name": "in_1" } }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "out" } },
+      "to": { "port": { "component": 11, "name": "in_2" } }
+    },
+    {
+      "from": { "point": 31 },
+      "to": { "port": { "component": 12, "name": "in_1" } }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 12, "name": "in_2" } }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "out" } },
+      "to": { "port": { "component": 13, "name": "in_1" } }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "out" } },
+      "to": { "port": { "component": 13, "name": "in_2" } }
+    },
+    {
+      "from": { "port": { "component": 13, "name": "out" } },
+      "to": { "point": 60 }
+    },
+    {
+      "from": { "point": 32 },
+      "to": { "port": { "component": 14, "name": "in" } }
+    },
+    {
+      "from": { "point": 57 },
+      "to": { "port": { "component": 15, "name": "in_1" } }
+    },
+    {
+      "from": { "port": { "component": 14, "name": "out" } },
+      "to": { "port": { "component": 15, "name": "in_2" } }
+    },
+    {
+      "from": { "point": 33 },
+      "to": { "port": { "component": 16, "name": "in_1" } }
+    },
+    {
+      "from": { "point": 32 },
+      "to": { "port": { "component": 16, "name": "in_2" } }
+    },
+    {
+      "from": { "port": { "component": 15, "name": "out" } },
+      "to": { "port": { "component": 17, "name": "in_1" } }
+    },
+    {
+      "from": { "port": { "component": 16, "name": "out" } },
+      "to": { "port": { "component": 17, "name": "in_2" } }
+    },
+    {
+      "from": { "port": { "component": 17, "name": "out" } },
+      "to": { "point": 61 }
+    }
+  ]
+}

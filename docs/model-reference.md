@@ -265,6 +265,27 @@ index below it must bind the whole family — a gap or partial family is
 rotation policy, staging, and status-output contract live beside
 `PumpGroup::KIND`.
 
+The station level-control contract architecture decision 42 records
+adds two fixed-arity kinds. `threshold-chain` reads `level` (`in`,
+`Float`) and drives `demand` (`out`, `Int`) — the stage count a
+`pump-group`'s `demand` consumes — plus the `Bool` flags `duty_call`,
+`lag_call`, `below_cutoff`, and `high_level`. Its `parameters` are the
+ordered setpoint table `cutoff` < `stop` < `start` < `lag_start` <
+`high` (all finite `Float`s, all operator-tunable through
+`SetParameter`, a retune breaking the ordering refused naming the
+parameter) and `on_bad_demand` (`Int`, `0`–`2`): the stage count the
+chain emits while `level` is non-`Good`, the decision's declared
+answer to a failed measurement. `failover-select` is parameterless:
+`primary` and `backup` (`in`, `Float`), `out` (`out`, `Float`)
+carrying the selected sample with its quality, and `backup_active`
+(`out`, `Bool`) asserted while the backup serves. The pair wires
+`failover-select.out` onto `threshold-chain.level` through a linked
+point pair — an internal link carries quality, a field loopback does
+not — and `threshold-chain.demand` onto `pump-group.demand` likewise.
+`crates/dcs-assembly/fixtures/station_level.json` is the recorded
+composition, manual-takeover gates included; per-port semantics live
+beside `ThresholdChain::KIND` and `FailoverSelect::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
