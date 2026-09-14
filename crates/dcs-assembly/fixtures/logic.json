@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "a": { "direction": "in", "value_type": "Bool" },
+        "b": { "direction": "in", "value_type": "Bool" },
+        "c": { "direction": "in", "value_type": "Bool" },
+        "set": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "pulse": { "direction": "in", "value_type": "Bool" },
+        "gated": { "direction": "out", "value_type": "Bool" },
+        "latched": { "direction": "out", "value_type": "Bool" },
+        "pulsed": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "a" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "b" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "c" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "set" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "reset" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "pulse" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "gated" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "latched" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "pulsed" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "gate-input-a",
+      "source": 10,
+      "description": "First gate input"
+    },
+    {
+      "id": 101,
+      "name": "gate-input-b",
+      "source": 11,
+      "description": "Second gate input"
+    },
+    {
+      "id": 102,
+      "name": "gate-input-c",
+      "source": 12,
+      "description": "Third gate input"
+    },
+    {
+      "id": 103,
+      "name": "latch-set",
+      "source": 13,
+      "description": "Latch set command"
+    },
+    {
+      "id": 104,
+      "name": "latch-reset",
+      "source": 14,
+      "description": "Latch reset command, dominant over set"
+    },
+    {
+      "id": 105,
+      "name": "trigger-input",
+      "source": 15,
+      "description": "Signal whose rising edges pulse the trigger"
+    },
+    {
+      "id": 106,
+      "name": "gate-output",
+      "source": 20,
+      "description": "AND fold of the three gate inputs"
+    },
+    {
+      "id": 107,
+      "name": "latch-output",
+      "source": 21,
+      "description": "Latched state"
+    },
+    {
+      "id": 108,
+      "name": "trigger-output",
+      "source": 22,
+      "description": "One-scan pulse on each rising edge"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": { "Int": 0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Bool" },
+        "in_2": { "direction": "in", "value_type": "Bool" },
+        "in_3": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sr-latch",
+      "parameters": {},
+      "ports": {
+        "set": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "edge-trigger",
+      "parameters": {
+        "edge": { "Int": 0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in_1" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "in_2" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "in_3" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 2, "name": "set" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 2, "name": "reset" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 22 }
+    }
+  ]
+}

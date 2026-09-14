@@ -13,9 +13,9 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter, Sequencer,
-    SignalFilter, Timer, Totalizer, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
+    EdgeTrigger, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid,
+    RateLimiter, Sequencer, SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -251,6 +251,45 @@ pub fn registry() -> ComponentRegistry {
                 spec.require("out")?,
                 spec.require("step")?,
                 spec.require("done")?,
+                spec.parameters,
+            ))
+        })
+        .with(BoolGate::KIND, |spec| {
+            // The input set is declared `in_1` … `in_N` following the
+            // interlock's `trip_N` convention; order the bound points by
+            // numeric suffix, not lexically.
+            let mut inputs: Vec<_> = spec
+                .ports
+                .iter()
+                .filter_map(|(name, point)| {
+                    name.strip_prefix("in_")
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                        .map(|index| (index, *point))
+                })
+                .collect();
+            inputs.sort_by_key(|(index, _)| *index);
+            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            boxed(BoolGate::from_parameters(
+                spec.name.as_str(),
+                inputs,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(SrLatch::KIND, |spec| {
+            boxed(SrLatch::from_parameters(
+                spec.name.as_str(),
+                spec.require("set")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(EdgeTrigger::KIND, |spec| {
+            boxed(EdgeTrigger::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
                 spec.parameters,
             ))
         })
