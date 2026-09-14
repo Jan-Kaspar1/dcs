@@ -34,6 +34,7 @@ name = "dcs-runtime"
 version = "0.1.0"
 dependencies = [
  "dcs-core",
+ "serde_json",
 ]
 
 [[package]]

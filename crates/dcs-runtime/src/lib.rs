@@ -15,6 +15,11 @@
 //! advanced by the executor and stamped onto every sample the scan
 //! produces — nothing here or in component code reads a wall clock, so a
 //! run of `N` scans is exactly reproducible.
+//!
+//! [`Executor::snapshot`] is the monitoring read-side: it returns the
+//! `dcs-core` [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot) contract —
+//! the latest sample of every known point plus per-component diagnostics —
+//! serde-serializable so a monitoring UI needs only the shared contracts.
 
 #![warn(missing_docs)]
 

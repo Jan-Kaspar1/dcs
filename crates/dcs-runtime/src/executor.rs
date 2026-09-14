@@ -8,7 +8,8 @@
 
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
-    Direction, IoDriver, IoError, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    ComponentDiagnostics, Direction, IoDriver, IoError, PointId, PointTelemetry, Quality,
+    QualityReason, Sample, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -405,6 +406,43 @@ impl<'d> Executor<'d> {
     /// monitoring and tests.
     pub fn sample(&self, point: PointId) -> Option<Sample> {
         self.image.borrow().get(&point).copied()
+    }
+
+    /// A monitoring snapshot of the run: the executor's tick, the latest
+    /// image sample of every mapped point, and per-component diagnostics.
+    ///
+    /// This is the read-side half of the unified contract — the returned
+    /// [`TelemetrySnapshot`] is defined in `dcs-core` and
+    /// serde-serializable, so a monitoring UI consumes it without
+    /// depending on the runtime. `In` points report the scan's input
+    /// read, `Out` points the last staged write; a mapped point no scan
+    /// has produced a sample for — an output no component has written —
+    /// reports `None`. Points are ordered by ascending id and components
+    /// by scan order, so equal runs snapshot identically.
+    pub fn snapshot(&self) -> TelemetrySnapshot {
+        let image = self.image.borrow();
+        TelemetrySnapshot {
+            tick: self.tick,
+            points: self
+                .map
+                .iter()
+                .map(|(point, spec)| PointTelemetry {
+                    point,
+                    direction: spec.direction,
+                    sample: image.get(&point).copied(),
+                })
+                .collect(),
+            components: self
+                .components
+                .iter()
+                .map(|entry| ComponentDiagnostics {
+                    name: entry.component.name().to_string(),
+                    last_tick: entry.last_tick,
+                    step_errors: entry.step_errors,
+                    last_error: entry.last_error.clone(),
+                })
+                .collect(),
+        }
     }
 
     /// Runs `scans` scans and returns the tick the last one ran at.
@@ -1055,5 +1093,150 @@ mod tests {
         let mut executor = Executor::new(&driver, map, vec![Box::new(Grabby)]).unwrap();
         executor.scan().unwrap();
         assert_eq!(executor.component_statuses()[0].step_errors, 0);
+    }
+
+    #[test]
+    fn snapshot_reports_latest_input_reads_and_output_writes() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap();
+
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        executor.scan().unwrap();
+        let snapshot = executor.snapshot();
+
+        assert_eq!(snapshot.tick, Tick(1));
+        // Every mapped point is reported, ordered by ascending id.
+        let [input, output, unwritten] = snapshot.points.as_slice() else {
+            panic!("three mapped points");
+        };
+        assert_eq!(input.point, PointId(10));
+        assert_eq!(input.direction, Direction::In);
+        assert_eq!(
+            input.sample.unwrap(),
+            Sample::good(Value::Float(5.0), Tick(1))
+        );
+        assert_eq!(output.point, PointId(20));
+        assert_eq!(output.direction, Direction::Out);
+        assert_eq!(
+            output.sample.unwrap(),
+            Sample::good(Value::Float(10.0), Tick(1))
+        );
+        // A mapped output no component has written reports no sample.
+        assert_eq!(unwritten.point, PointId(30));
+        assert_eq!(unwritten.direction, Direction::Out);
+        assert_eq!(unwritten.sample, None);
+
+        let [component] = snapshot.components.as_slice() else {
+            panic!("one registered component");
+        };
+        assert_eq!(component.name, "a");
+        assert_eq!(component.last_tick, Some(Tick(1)));
+        assert_eq!(component.step_errors, 0);
+        assert_eq!(component.last_error, None);
+    }
+
+    #[test]
+    fn snapshot_reports_bad_quality_after_failed_input_read() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        driver.faults.borrow_mut().insert(PointId(10));
+        executor.scan().unwrap();
+
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        // The held value is marked bad in the executor's tick domain.
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(
+            sample.quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        assert_eq!(sample.tick, Tick(2));
+    }
+
+    #[test]
+    fn snapshot_counts_step_errors_per_component() {
+        struct Fragile;
+        impl Component for Fragile {
+            fn name(&self) -> &str {
+                "fragile"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![IoRequirement::output::<f64>("out", PointId(20))]
+            }
+            fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+                Err("computation failed".into())
+            }
+        }
+
+        let driver = StubDriver::new(&[float(20)], &[]);
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, vec![Box::new(Fragile)]).unwrap();
+
+        executor.run(2).unwrap();
+        let component = &executor.snapshot().components[0];
+        assert_eq!(component.name, "fragile");
+        assert_eq!(component.step_errors, 2);
+        assert_eq!(component.last_tick, None);
+        assert_eq!(component.last_error.as_deref(), Some("computation failed"));
+    }
+
+    #[test]
+    fn snapshot_serializes_to_json() {
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap();
+        driver.write(PointId(10), Value::Float(3.0)).unwrap();
+        executor.scan().unwrap();
+
+        let json = serde_json::to_string(&executor.snapshot()).unwrap();
+        let snapshot: TelemetrySnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snapshot, executor.snapshot());
     }
 }

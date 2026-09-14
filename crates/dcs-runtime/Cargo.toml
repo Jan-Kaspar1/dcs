@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 dcs-core = { path = "../dcs-core" }
+
+[dev-dependencies]
+serde_json = "1.0.151"
