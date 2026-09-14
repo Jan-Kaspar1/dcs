@@ -39,7 +39,11 @@
 mod checkpoint;
 mod component;
 mod executor;
+mod gate;
+mod standby;
 
 pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};
+pub use gate::WriteGate;
+pub use standby::{Standby, StandbyState};
