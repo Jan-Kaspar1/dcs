@@ -98,7 +98,11 @@
 //! `IoDriver::diagnostics` for the telemetry snapshot's I/O-health
 //! section. The
 //! `dcs-sim-bus-device` binary in this crate serves one model-declared
-//! `sim-bus` device's registers for integration rigs.
+//! `sim-bus` device's registers for integration rigs, and the
+//! `dcs-sim-bus-ctl` binary is the protocol's development-tooling
+//! client — the register analogue of `dcs-sim-net`'s `dcs-plant-ctl` —
+//! listing, reading, writing, and stepping a running device server's
+//! registers. It is not part of the operator contract.
 
 #![warn(missing_docs)]
 

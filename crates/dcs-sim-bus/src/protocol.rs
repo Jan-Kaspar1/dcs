@@ -12,6 +12,7 @@
 
 use dcs_core::{Sample, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::io::{self, BufReader, Read};
 use std::net::TcpStream;
 
@@ -190,6 +191,28 @@ pub enum BusError {
         detail: String,
     },
 }
+
+impl fmt::Display for BusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownRegister { register } => {
+                write!(f, "the device serves no register {register}")
+            }
+            Self::KindMismatch {
+                register,
+                expected,
+                found,
+            } => write!(
+                f,
+                "register {register} is declared {expected:?}, found {found:?}"
+            ),
+            Self::InvalidRequest { detail } => write!(f, "invalid request: {detail}"),
+            Self::Fenced { detail } => write!(f, "fenced: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for BusError {}
 
 /// Reads one length-prefixed frame of at most `max` payload bytes from
 /// a client or server connection.
