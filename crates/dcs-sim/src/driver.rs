@@ -4,7 +4,7 @@
 use crate::map::{ChannelMap, ConfigError, Loopback, ProcessElement};
 use dcs_core::{IoDriver, IoError, PointId, Quality, Sample, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 /// A fault injected on a simulated point for diagnostics testing.
@@ -67,6 +67,60 @@ struct ElementState {
     element: ProcessElement,
     /// The current output `y`; seeded from the element's `initial`.
     y: f64,
+    /// The delay line a [`ProcessElement::DeadTime`] advances; `None` for
+    /// the scalar elements.
+    delay_line: Option<DelayLine>,
+}
+
+/// A [`ProcessElement::DeadTime`] element's delay line: a ring of past
+/// `(time, input)` samples in `dt` time units, oldest first. Entries a
+/// delay lookup can never reach again are dropped from the front as time
+/// advances, so the ring stays bounded by the samples inside the delay
+/// window.
+struct DelayLine {
+    /// Simulated time elapsed since the driver was built. Advances only
+    /// while the element's input is `Good` — a non-`Good` input freezes
+    /// the whole line.
+    t: f64,
+    /// Past input samples, newest last. Seeded with `(0.0, initial)` so
+    /// lookups before the line has filled read `initial`.
+    history: VecDeque<(f64, f64)>,
+}
+
+impl ElementState {
+    /// Advances the element's state one step of `dt` given a `Good` input
+    /// `u`, returning the new output.
+    ///
+    /// The lag uses the exact discretization `y += (1 - e^{-dt/τ})(u - y)`,
+    /// stable for every non-negative `dt`; the integrator uses Euler's
+    /// `y += u·dt`; the dead-time element pushes `u` onto its delay line
+    /// at the new time and outputs the newest sample at or before
+    /// `t - delay`. All are pure functions of their arguments and stored
+    /// state, keeping stepping deterministic.
+    fn advance(&mut self, u: f64, dt: f64) -> f64 {
+        match self.element {
+            ProcessElement::FirstOrderLag(element) => {
+                self.y + (1.0 - (-dt / element.time_constant).exp()) * (u - self.y)
+            }
+            ProcessElement::Integrator(_) => self.y + u * dt,
+            ProcessElement::DeadTime(element) => {
+                // Constructed in `SimDriver::new` for every dead-time element.
+                let line = self.delay_line.as_mut().unwrap();
+                line.t += dt;
+                line.history.push_back((line.t, u));
+                // The newest sample at or before `t - delay`. The
+                // tolerance absorbs float error accumulated in the
+                // stored times so a sample recorded exactly on the
+                // boundary is delivered on the expected step.
+                let target = line.t - element.delay;
+                let tolerance = 1e-9 * line.t.abs().max(1.0);
+                while line.history.len() > 1 && line.history[1].0 <= target + tolerance {
+                    line.history.pop_front();
+                }
+                line.history[0].1
+            }
+        }
+    }
 }
 
 /// Everything behind the driver's `Mutex` — `SimDriver` is `Sync`, so an
@@ -124,7 +178,18 @@ impl SimDriver {
             // Validated: element outputs are always bound points.
             points.get_mut(&element.output()).unwrap().sample =
                 Sample::good(Value::Float(y), Tick::ZERO);
-            elements.push(ElementState { element, y });
+            let delay_line = match element {
+                ProcessElement::DeadTime(_) => Some(DelayLine {
+                    t: 0.0,
+                    history: VecDeque::from([(0.0, y)]),
+                }),
+                _ => None,
+            };
+            elements.push(ElementState {
+                element,
+                y,
+                delay_line,
+            });
         }
         Ok(Self {
             state: Mutex::new(State {
@@ -152,9 +217,11 @@ impl SimDriver {
     ///    stamped with the new tick;
     /// 3. every [`ProcessElement`], in declaration order, reads its input
     ///    point's effective sample and updates its output point: a `Good`
-    ///    input is integrated and stamps `Good`; a non-`Good` input freezes
-    ///    the element's state and propagates its quality to the output
-    ///    sample, mirroring the contract's quality propagation.
+    ///    input advances the element — for a dead-time element, pushes
+    ///    the input onto its delay line — and stamps `Good`; a
+    ///    non-`Good` input freezes the element's state, delay-line clock
+    ///    included, and propagates its quality to the output sample,
+    ///    mirroring the contract's quality propagation.
     ///
     /// `dt` must be finite and non-negative.
     ///
@@ -182,7 +249,7 @@ impl SimDriver {
                 let Value::Float(u) = input.value else {
                     unreachable!("validated element inputs are Float points")
                 };
-                element.y = element.element.advance(element.y, u, dt);
+                element.y = element.advance(u, dt);
                 output.sample = Sample::good(Value::Float(element.y), tick);
             } else {
                 output.sample = Sample::new(Value::Float(element.y), input.quality, tick);
@@ -259,7 +326,7 @@ impl IoDriver for SimDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{ChannelId, Direction, FirstOrderLag, Integrator, PointBinding};
+    use crate::map::{ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, PointBinding};
     use dcs_core::{Input, Output, QualityReason};
 
     fn binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
@@ -356,6 +423,111 @@ mod tests {
         }
         // y = 0 + 2.0 · 5.0 = 10.0, exactly representable.
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(10.0));
+    }
+
+    fn dead_time_map(delay: f64) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::DeadTime(DeadTime {
+                input: PointId(1),
+                output: PointId(2),
+                delay,
+                initial: -1.0,
+            }))
+    }
+
+    #[test]
+    fn dead_time_reproduces_step_input_at_expected_tick() {
+        // delay = 0.3 = 3 steps of dt = 0.1: a value first read at step k
+        // must appear at the output at step k + 3.
+        let sim = SimDriver::new(dead_time_map(0.3)).unwrap();
+        sim.write(PointId(1), Value::Float(5.0)).unwrap();
+
+        // Steps 1-3: the delay line still holds only its seed.
+        for step in 1..=3 {
+            sim.step(0.1);
+            let sample = sim.read(PointId(2)).unwrap();
+            assert_eq!(sample.value, Value::Float(-1.0), "step {step}");
+            assert!(sample.quality.is_good());
+        }
+        // Step 4: the step input written before step 1 arrives, delayed by
+        // exactly the configured 0.3 time units.
+        sim.step(0.1);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(5.0));
+
+        // A second step written before step 7 arrives at step 10.
+        for _ in 0..2 {
+            sim.step(0.1);
+        }
+        sim.write(PointId(1), Value::Float(7.5)).unwrap();
+        for step in 7..=9 {
+            sim.step(0.1);
+            assert_eq!(
+                sim.read(PointId(2)).unwrap().value,
+                Value::Float(5.0),
+                "step {step}"
+            );
+        }
+        sim.step(0.1);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(7.5));
+    }
+
+    #[test]
+    fn dead_time_rounds_sub_step_delay_up_to_whole_ticks() {
+        // delay = 0.25 is not a multiple of dt = 0.1: the realized delay is
+        // ceil(0.25 / 0.1) = 3 steps, within one dt of the configured delay.
+        let sim = SimDriver::new(dead_time_map(0.25)).unwrap();
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        for step in 1..=3 {
+            sim.step(0.1);
+            assert_eq!(
+                sim.read(PointId(2)).unwrap().value,
+                Value::Float(-1.0),
+                "step {step}"
+            );
+        }
+        sim.step(0.1);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(2.0));
+    }
+
+    #[test]
+    fn non_good_dead_time_input_freezes_output_and_propagates_quality() {
+        // delay = 0.2, dt = 0.1: inputs appear two steps after being read.
+        let sim = SimDriver::new(dead_time_map(0.2)).unwrap();
+        sim.write(PointId(1), Value::Float(4.0)).unwrap();
+        for _ in 0..3 {
+            sim.step(0.1);
+        }
+        let frozen = sim.read(PointId(2)).unwrap().value;
+        assert_eq!(frozen, Value::Float(4.0));
+
+        // While the input is non-Good the delay line freezes: the output
+        // holds the frozen value and reports the input's quality, and a
+        // write behind the fault is not consumed.
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        sim.write(PointId(1), Value::Float(9.0)).unwrap();
+        for _ in 0..2 {
+            sim.step(0.1);
+            let sample = sim.read(PointId(2)).unwrap();
+            assert_eq!(sample.value, frozen);
+            assert_eq!(sample.quality, quality);
+        }
+
+        // Clearing the fault resumes the delay line where it froze: the
+        // 9.0 write is read at the next Good step and arrives two steps
+        // later.
+        sim.clear_fault(PointId(1)).unwrap();
+        for step in 0..2 {
+            sim.step(0.1);
+            let sample = sim.read(PointId(2)).unwrap();
+            assert_eq!(sample.value, frozen, "resumed step {step}");
+            assert!(sample.quality.is_good());
+        }
+        sim.step(0.1);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(9.0));
     }
 
     #[test]
@@ -595,16 +767,53 @@ mod tests {
                 ConfigError::InvalidTimeConstant { .. }
             ));
         }
+
+        // Dead-time delay must be finite and positive.
+        for delay in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let map = ChannelMap::new()
+                .with_point(float_point(1, Direction::In))
+                .with_point(float_point(2, Direction::In))
+                .with_element(ProcessElement::DeadTime(DeadTime {
+                    input: PointId(1),
+                    output: PointId(2),
+                    delay,
+                    initial: 0.0,
+                }));
+            assert!(matches!(
+                map.validate().unwrap_err(),
+                ConfigError::InvalidDelay { point, .. } if point == PointId(2)
+            ));
+        }
+
+        // Dead-time ends must be Float points.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::DeadTime(DeadTime {
+                input: PointId(1),
+                output: PointId(2),
+                delay: 1.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(2),
+                kind: ValueKind::Bool,
+            }
+        );
     }
 
-    /// One scripted run over a map with a loopback, a lag, and an
-    /// integrator: identical writes and steps must replay identically.
+    /// One scripted run over a map with a loopback, a lag, an integrator,
+    /// and a dead time: identical writes and steps must replay
+    /// identically.
     fn scripted_run() -> Vec<Sample> {
         let map = ChannelMap::new()
             .with_point(float_point(10, Direction::In))
             .with_point(float_point(20, Direction::Out))
             .with_point(float_point(30, Direction::In))
             .with_point(float_point(40, Direction::In))
+            .with_point(float_point(50, Direction::In))
             .with_loopback(Loopback {
                 output: PointId(20),
                 input: PointId(10),
@@ -619,6 +828,12 @@ mod tests {
                 input: PointId(10),
                 output: PointId(40),
                 initial: 0.0,
+            }))
+            .with_element(ProcessElement::DeadTime(DeadTime {
+                input: PointId(10),
+                output: PointId(50),
+                delay: 0.5,
+                initial: 0.0,
             }));
         let sim = SimDriver::new(map).unwrap();
         let driver: &dyn IoDriver = &sim;
@@ -627,12 +842,12 @@ mod tests {
         for command in [1.0_f64, 2.0, 2.0, -1.0, 0.0] {
             driver.write(PointId(20), Value::Float(command)).unwrap();
             sim.step(0.25);
-            for point in [10_u64, 30, 40] {
+            for point in [10_u64, 30, 40, 50] {
                 samples.push(driver.read(PointId(point)).unwrap());
             }
         }
         sim.step(0.5);
-        for point in [10_u64, 30, 40] {
+        for point in [10_u64, 30, 40, 50] {
             samples.push(driver.read(PointId(point)).unwrap());
         }
         samples
@@ -645,7 +860,7 @@ mod tests {
         assert_eq!(first, second);
         // The run actually produced distinct, non-trivial samples.
         assert!(first.iter().any(|sample| sample.value != Value::Float(0.0)));
-        assert_eq!(first.len(), 18);
+        assert_eq!(first.len(), 24);
     }
 
     #[test]
@@ -663,6 +878,13 @@ mod tests {
                 output: PointId(30),
                 time_constant: 0.5,
                 initial: 1.0,
+            }))
+            .with_point(float_point(40, Direction::In))
+            .with_element(ProcessElement::DeadTime(DeadTime {
+                input: PointId(10),
+                output: PointId(40),
+                delay: 0.5,
+                initial: 2.0,
             }));
         let json = serde_json::to_string(&map).unwrap();
         assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
