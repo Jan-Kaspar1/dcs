@@ -42,6 +42,16 @@ pub struct PointSpec {
     /// [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable)
     /// regardless.
     pub writable: bool,
+    /// The point's declared freshness budget — the `stale_after_ticks` a
+    /// model `io_point` declaration carries through assembly.
+    /// `Some(budget)` on a field `In` point asks the input phase to land
+    /// the image sample as
+    /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` when the
+    /// driver-returned sample's tick lags the scan tick by more than
+    /// `budget` ticks; `None` disables the check, and the budget is
+    /// inert on internal points (never driver-read) and `Out` points
+    /// (never read).
+    pub stale_after_ticks: Option<u64>,
 }
 
 /// The executor's point map: which logical points exist, whether the
@@ -78,8 +88,18 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: false,
+                stale_after_ticks: None,
             },
         );
+        self
+    }
+
+    /// Adds `point` with the fully-formed `spec` — the escape hatch for
+    /// spec fields the narrow constructors do not take, like a field
+    /// `In` point's `stale_after_ticks` freshness budget. A repeated id
+    /// replaces the earlier spec.
+    pub fn with_spec(mut self, point: PointId, spec: PointSpec) -> Self {
+        self.points.insert(point, spec);
         self
     }
 
@@ -102,6 +122,7 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: true,
+                stale_after_ticks: None,
             },
         );
         self
@@ -124,6 +145,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: false,
+                stale_after_ticks: None,
             },
         );
         self
@@ -149,6 +171,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: true,
+                stale_after_ticks: None,
             },
         );
         self
@@ -501,7 +524,10 @@ enum Resolved {
 /// 3. refreshes the image's `In` points: every field `In` point is read
 ///    from the driver, stamping the new tick — a failed read keeps the
 ///    last known value marked [`Quality::Bad`] rather than aborting the
-///    scan — and every internal link routes its `Out` point's image
+///    scan, and a `stale_after_ticks` budget on the point merges
+///    [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` onto a sample
+///    whose driver-stamped tick lags the scan tick past the budget —
+///    and every internal link routes its `Out` point's image
 ///    sample onto its `In` point, so a port-to-port carrier delivers the
 ///    value one scan after it was written;
 /// 4. steps the components in scan order, each seeing a [`ComponentIo`]
@@ -1669,6 +1695,17 @@ impl<'d> Executor<'d> {
     /// after it was written. Held internal `In` points — unlinked —
     /// keep their image value untouched.
     ///
+    /// A field `In` point carrying a `stale_after_ticks` budget gets the
+    /// freshness check before the re-stamp: when the tick the driver's
+    /// sample carries lags the scan tick by more than the budget, the
+    /// landed sample's quality merges
+    /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
+    /// worst-of merge, so a driver-reported `Bad` or worse-named
+    /// `Uncertain` is never improved to `Stale`, and the first sample
+    /// inside the budget again returns the driver's own quality. The
+    /// driver tick is freshness evidence only; the image stamp stays the
+    /// scan tick either way.
+    ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
     /// and no link routes onto it. The image instead holds the forced
@@ -1693,7 +1730,20 @@ impl<'d> Executor<'d> {
             let sample = match self.driver.read(point) {
                 Ok(sample) => {
                     self.io_health.consecutive_failures = 0;
-                    Sample { tick, ..sample }
+                    // Freshness is judged on the driver-stamped tick —
+                    // evidence only, never the image's timestamp — before
+                    // the scan tick is stamped on.
+                    let quality = match spec.stale_after_ticks {
+                        Some(budget) if tick.0.saturating_sub(sample.tick.0) > budget => sample
+                            .quality
+                            .merge(Quality::Uncertain(QualityReason::Stale)),
+                        _ => sample.quality,
+                    };
+                    Sample {
+                        quality,
+                        tick,
+                        ..sample
+                    }
                 }
                 Err(error) => {
                     self.io_health.failed_reads += 1;
@@ -2486,6 +2536,244 @@ mod tests {
         assert_eq!(health.failed_reads, 2);
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(health.last_error.unwrap().tick, Tick(3));
+    }
+
+    /// A field `In` point map carrying `stale_after_ticks` — the shape
+    /// assembly resolves a budgeted `io_point` declaration into.
+    fn stale_map(point: PointId, budget: u64) -> PointMap {
+        PointMap::new().with_spec(
+            point,
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: false,
+                stale_after_ticks: Some(budget),
+            },
+        )
+    }
+
+    /// Stamps the stub's field sample for `point` at `tick`, as a device
+    /// that refreshed — or stopped refreshing — at that driver tick.
+    fn stamp(driver: &StubDriver, point: u64, sample: Sample) {
+        driver.points.lock().unwrap().insert(PointId(point), sample);
+    }
+
+    #[test]
+    fn field_input_within_freshness_budget_stays_good() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The driver stamped the sample at its tick 0; lags of 1 and 2
+        // sit within the budget — the landed quality stays Good and the
+        // image stamp is the scan tick, not the driver's.
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(0.0), Tick(2)));
+
+        // A lag exactly at the budget is still fresh.
+        stamp(&driver, 10, Sample::good(Value::Float(3.0), Tick(1)));
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(3.0), Tick(3)));
+    }
+
+    #[test]
+    fn lagging_field_input_reports_stale_uncertainty() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The driver stopped refreshing after stamping tick 0; the third
+        // scan's lag of 3 exceeds the budget of 2.
+        executor.run(3).unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        // The value is preserved and the image stamp is the scan tick —
+        // the driver tick is freshness evidence, never the timestamp.
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));
+        assert_eq!(sample.tick, Tick(3));
+    }
+
+    #[test]
+    fn fresh_read_recovers_stale_input_to_good() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.run(3).unwrap();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // The device refreshed at its tick 3; the next scan's lag of 1
+        // returns the driver's own quality on the first fresh read.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(3)));
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(9.0), Tick(4)));
+    }
+
+    #[test]
+    fn stale_check_keeps_driver_reported_quality() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        stamp(
+            &driver,
+            10,
+            Sample::new(
+                Value::Float(7.0),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(0),
+            ),
+        );
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // A lagging Bad sample keeps the driver-reported quality — the
+        // worst-of merge never improves it to Uncertain(Stale).
+        executor.run(3).unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::DeviceFault));
+        assert_eq!(sample.tick, Tick(3));
+
+        // A lagging Uncertain named worse than Stale keeps its reason.
+        stamp(
+            &driver,
+            10,
+            Sample::new(
+                Value::Float(8.0),
+                Quality::Uncertain(QualityReason::OutOfRange),
+                Tick(3),
+            ),
+        );
+        executor.run(2).unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(
+            sample.quality,
+            Quality::Uncertain(QualityReason::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn failed_read_on_budgeted_point_keeps_bad_mapping() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // A failed read is not a stale sample: the held value degrades
+        // to Bad(CommunicationFault) exactly as on a point without a
+        // budget, and the failure counts into I/O health.
+        executor.scan().unwrap();
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(
+            sample.quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        assert_eq!(executor.snapshot().io_health.failed_reads, 1);
+    }
+
+    #[test]
+    fn point_without_freshness_budget_is_never_stale_stamped() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The driver sample's tick lags by any amount — with no declared
+        // budget the landed quality stays Good.
+        executor.run(10).unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(0.0), Tick(10)));
+    }
+
+    #[test]
+    fn forced_budgeted_input_reports_substituted_not_stale() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map = PointMap::new().with_spec(
+            PointId(10),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: true,
+                stale_after_ticks: Some(2),
+            },
+        );
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.run(5).unwrap();
+        // The forced path never reads the driver, so the lagging field
+        // sample cannot reach the image — Substituted stands.
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(
+            sample,
+            Sample::new(
+                Value::Float(5.0),
+                Quality::Uncertain(QualityReason::Substituted),
+                Tick(5)
+            )
+        );
     }
 
     #[test]

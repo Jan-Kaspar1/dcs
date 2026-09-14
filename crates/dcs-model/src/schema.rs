@@ -21,6 +21,9 @@
 //!   `initial`, a bound point forbids a non-null `initial`, `initial`'s
 //!   [`Value`](dcs_core::Value) variant must match `value_type`, and
 //!   `writable` may mark `In` points only;
+//! - the freshness-budget rule: a non-null `stale_after_ticks` may mark a
+//!   field `In` point only — it requires `direction: "in"` and a non-null
+//!   `channel`;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
 //!   additionally requires the `registers` map, and `sim-scripted`
@@ -306,7 +309,10 @@ const SCHEMA_SOURCE: &str = r##"{
         "initial": {
           "anyOf": [{ "$ref": "#/$defs/value" }, { "type": "null" }]
         },
-        "writable": { "type": "boolean" }
+        "writable": { "type": "boolean" },
+        "stale_after_ticks": {
+          "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
+        }
       },
       "allOf": [
         {
@@ -340,6 +346,19 @@ const SCHEMA_SOURCE: &str = r##"{
           },
           "then": {
             "properties": { "direction": { "const": "in" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["stale_after_ticks"],
+            "properties": { "stale_after_ticks": { "type": "integer" } }
+          },
+          "then": {
+            "required": ["channel"],
+            "properties": {
+              "direction": { "const": "in" },
+              "channel": { "not": { "type": "null" } }
+            }
           }
         },
         {

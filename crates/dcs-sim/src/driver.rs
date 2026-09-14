@@ -121,21 +121,24 @@ struct DelayLine {
 }
 
 impl ElementState {
-    /// Advances the element's state one step of `dt` given a `Good` input
-    /// `u`, returning the new output.
+    /// Advances the element's state one step of `dt` given a `Good`
+    /// `Float` input `u`, returning the new output.
     ///
-    /// The lag uses the exact discretization `y += (1 - e^{-dt/τ})(u - y)`,
-    /// stable for every non-negative `dt`; the integrator uses Euler's
-    /// `y += u·dt`; the second-order lag applies the exact
-    /// zero-order-hold update [`second_order_transition`] computes,
-    /// stable for every non-negative `dt`; the dead-time element pushes
-    /// `u` onto its delay line at the new time and outputs the newest
-    /// sample at or before `t - delay`; the noise element draws once from
-    /// its generator and outputs `u + amplitude · (2x − 1)` for the draw
+    /// Serves the `Float` single-input variants only — a `bool_flow`'s
+    /// `Bool` gate and a `flow_sum`'s input list step on `step`'s own
+    /// paths. The lag uses the exact discretization
+    /// `y += (1 - e^{-dt/τ})(u - y)`, stable for every non-negative `dt`;
+    /// the integrator uses Euler's `y += u·dt`; the second-order lag
+    /// applies the exact zero-order-hold update
+    /// [`second_order_transition`] computes, stable for every
+    /// non-negative `dt`; the dead-time element pushes `u` onto its
+    /// delay line at the new time and outputs the newest sample at or
+    /// before `t - delay`; the noise element draws once from its
+    /// generator and outputs `u + amplitude · (2x − 1)` for the draw
     /// `x`, staying within `u ± amplitude`. All are pure functions of
     /// their arguments and stored state, keeping stepping deterministic.
     fn advance(&mut self, u: f64, dt: f64) -> f64 {
-        match self.element {
+        match &self.element {
             ProcessElement::FirstOrderLag(element) => {
                 self.y + (1.0 - (-dt / element.time_constant).exp()) * (u - self.y)
             }
@@ -172,6 +175,9 @@ impl ElementState {
             ProcessElement::Noise(element) => {
                 let x = splitmix64_next(&mut self.rng);
                 u + element.amplitude * (2.0 * x - 1.0)
+            }
+            ProcessElement::BoolFlow(_) | ProcessElement::FlowSum(_) => {
+                unreachable!("bool_flow and flow_sum step on SimDriver::step's own paths")
             }
         }
     }
@@ -363,14 +369,14 @@ impl SimDriver {
             // Validated: element outputs are always bound points.
             points.get_mut(&element.output()).unwrap().sample =
                 Sample::good(Value::Float(y), Tick::ZERO);
-            let delay_line = match element {
+            let delay_line = match &element {
                 ProcessElement::DeadTime(_) => Some(DelayLine {
                     t: 0.0,
                     history: VecDeque::from([(0.0, y)]),
                 }),
                 _ => None,
             };
-            let rng = match element {
+            let rng = match &element {
                 ProcessElement::Noise(noise) => noise.seed,
                 _ => 0,
             };
@@ -407,14 +413,17 @@ impl SimDriver {
     ///    value plus any injected quality — onto its paired `In` point,
     ///    stamped with the new tick;
     /// 3. every [`ProcessElement`], in declaration order, reads its input
-    ///    point's effective sample and updates its output point: a `Good`
-    ///    input advances the element — for a dead-time element, pushes
-    ///    the input onto its delay line; for a noise element, draws the
-    ///    next deviation from its generator — and stamps `Good`; a
-    ///    non-`Good` input freezes the element's state, delay-line clock
-    ///    and generator included, and propagates its quality to the
-    ///    output sample,
-    ///    mirroring the contract's quality propagation.
+    ///    points' effective samples and updates its output point: a
+    ///    `Good` input advances the element — for a dead-time element,
+    ///    pushes the input onto its delay line; for a noise element,
+    ///    draws the next deviation from its generator; a `bool_flow`
+    ///    stands its `on_rate` or `off_rate` by its `Bool` gate; a
+    ///    `flow_sum` sums its declared `Float` inputs plus `bias` — and
+    ///    stamps `Good`; a non-`Good` input freezes the element's state,
+    ///    delay-line clock and generator included, and propagates its
+    ///    quality to the output sample — a `flow_sum` propagating the
+    ///    worst of its inputs' qualities — mirroring the contract's
+    ///    quality propagation.
     ///
     /// `dt` must be finite and non-negative.
     ///
@@ -436,16 +445,60 @@ impl SimDriver {
         }
 
         for element in &mut state.elements {
-            let input = state.points[&element.element.input()].effective_sample();
-            let output = state.points.get_mut(&element.element.output()).unwrap();
-            if input.quality.is_good() {
-                let Value::Float(u) = input.value else {
-                    unreachable!("validated element inputs are Float points")
-                };
-                element.y = element.advance(u, dt);
-                output.sample = Sample::good(Value::Float(element.y), tick);
-            } else {
-                output.sample = Sample::new(Value::Float(element.y), input.quality, tick);
+            match &element.element {
+                ProcessElement::BoolFlow(flow) => {
+                    let input = state.points[&flow.input].effective_sample();
+                    let output = state.points.get_mut(&flow.output).unwrap();
+                    if input.quality.is_good() {
+                        let Value::Bool(gate) = input.value else {
+                            unreachable!("validated bool_flow gates are Bool points")
+                        };
+                        // The gate selects a rate, not an increment:
+                        // `dt` does not scale the output — a downstream
+                        // integrator owns the time base.
+                        element.y = if gate { flow.on_rate } else { flow.off_rate };
+                        output.sample = Sample::good(Value::Float(element.y), tick);
+                    } else {
+                        output.sample = Sample::new(Value::Float(element.y), input.quality, tick);
+                    }
+                }
+                ProcessElement::FlowSum(sum) => {
+                    let mut total = sum.bias;
+                    let mut quality = Quality::Good;
+                    for &point in &sum.inputs {
+                        let sample = state.points[&point].effective_sample();
+                        quality = quality.merge(sample.quality);
+                        let Value::Float(value) = sample.value else {
+                            unreachable!("validated flow_sum inputs are Float points")
+                        };
+                        total += value;
+                    }
+                    let output = state.points.get_mut(&sum.output).unwrap();
+                    if quality.is_good() {
+                        element.y = total;
+                        output.sample = Sample::good(Value::Float(element.y), tick);
+                    } else {
+                        output.sample = Sample::new(Value::Float(element.y), quality, tick);
+                    }
+                }
+                _ => {
+                    // Every remaining variant reads exactly one `Float`
+                    // input point.
+                    let Some(input_point) = element.element.input() else {
+                        unreachable!("multi-input elements step on their own paths")
+                    };
+                    let input = state.points[&input_point].effective_sample();
+                    let output = state.points.get_mut(&element.element.output()).unwrap();
+                    if input.quality.is_good() {
+                        let Value::Float(u) = input.value else {
+                            unreachable!("validated element inputs are Float points")
+                        };
+                        element.y = element.advance(u, dt);
+                        output.sample = Sample::good(Value::Float(element.y), tick);
+                    } else {
+                        output.sample = Sample::new(Value::Float(element.y), input.quality, tick);
+                    }
+                }
             }
         }
         tick
@@ -699,8 +752,8 @@ impl IoDriver for SimDriver {
 mod tests {
     use super::*;
     use crate::map::{
-        ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, Noise, PointBinding,
-        SecondOrderLag,
+        BoolFlow, ChannelId, DeadTime, Direction, FirstOrderLag, FlowSum, Integrator, Noise,
+        PointBinding, SecondOrderLag,
     };
     use dcs_core::{Input, Output, QualityReason};
 
@@ -1891,5 +1944,588 @@ mod tests {
             }));
         let json = serde_json::to_string(&map).unwrap();
         assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    /// A `bool_flow` element gating an actuator command `Out` point
+    /// onto a driven `Float` flow.
+    fn bool_flow_map(on_rate: f64, off_rate: f64) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(2),
+                on_rate,
+                off_rate,
+                initial: -1.0,
+            }))
+    }
+
+    #[test]
+    fn bool_flow_drives_the_declared_rate_while_the_gate_stands() {
+        let sim = SimDriver::new(bool_flow_map(-10.0, 0.5)).unwrap();
+        // Before the first step the output holds the declared initial.
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(-1.0));
+
+        // The released gate drives the off-rate — here a nonzero
+        // trickle — from the first step reading it.
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(0.5));
+
+        // Asserting the command stands the on-rate at the next tick
+        // boundary, step after step, with no ramp and no dt scaling.
+        sim.write(PointId(1), Value::Bool(true)).unwrap();
+        for dt in [1.0, 0.25, 3.0] {
+            sim.step(dt);
+            assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(-10.0));
+        }
+
+        // Releasing the command returns the output to the off-rate at
+        // the next tick boundary.
+        sim.write(PointId(1), Value::Bool(false)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(0.5));
+    }
+
+    #[test]
+    fn non_good_bool_flow_gate_freezes_output_and_propagates_quality() {
+        let sim = SimDriver::new(bool_flow_map(-10.0, 0.0)).unwrap();
+        sim.write(PointId(1), Value::Bool(true)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(-10.0));
+
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        // A write behind the fault is stored but not consumed.
+        sim.write(PointId(1), Value::Bool(false)).unwrap();
+        for _ in 0..2 {
+            sim.step(1.0);
+            let sample = sim.read(PointId(2)).unwrap();
+            // The documented rule: a non-Good gate freezes the output
+            // and propagates its quality.
+            assert_eq!(sample.value, Value::Float(-10.0));
+            assert_eq!(sample.quality, quality);
+        }
+
+        // Clearing the fault resumes the gate on the first Good step:
+        // the stored `false` drives the off-rate.
+        sim.clear_fault(PointId(1)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(2)).unwrap();
+        assert_eq!(sample.value, Value::Float(0.0));
+        assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn bool_flow_rejects_invalid_constants_and_point_kinds() {
+        // Rates must be finite; the rejection names the element's
+        // driven point and which declared rate offended.
+        for (rate, value) in [
+            ("on_rate", f64::NAN),
+            ("on_rate", f64::INFINITY),
+            ("off_rate", f64::NEG_INFINITY),
+        ] {
+            let mut flow = BoolFlow {
+                input: PointId(1),
+                output: PointId(2),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            };
+            match rate {
+                "on_rate" => flow.on_rate = value,
+                _ => flow.off_rate = value,
+            }
+            let map = ChannelMap::new()
+                .with_point(binding(1, Direction::Out, Value::Bool(false)))
+                .with_point(float_point(2, Direction::In))
+                .with_element(ProcessElement::BoolFlow(flow));
+            assert!(matches!(
+                map.validate().unwrap_err(),
+                ConfigError::InvalidRate {
+                    point: PointId(2),
+                    rate: name,
+                    value: rejected,
+                } if name == rate && !rejected.is_finite()
+            ));
+        }
+
+        // A negative rate is a declared draw, not an error.
+        assert!(bool_flow_map(-10.0, 0.0).validate().is_ok());
+
+        // The gate must be a Bool point.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(2),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementGateKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+
+        // The driven point must be Float.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(2),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(2),
+                kind: ValueKind::Bool,
+            }
+        );
+
+        // The initial value must be finite.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(2),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: f64::NAN,
+            }));
+        assert!(matches!(
+            map.validate().unwrap_err(),
+            ConfigError::NonFiniteInitial { point, .. } if point == PointId(2)
+        ));
+    }
+
+    #[test]
+    fn bool_flow_serde_roundtrips() {
+        let map = bool_flow_map(-10.0, 0.5);
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"bool_flow\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    #[test]
+    fn captured_state_restores_bool_flow_output_mid_run() {
+        // The element's only state is its standing output; a captured
+        // run continues identically through a fresh driver.
+        let map = bool_flow_map(-10.0, 0.5);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Bool(true)).unwrap();
+        sim.step(1.0);
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        for _ in 0..5 {
+            sim.step(1.0);
+            fresh.step(1.0);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
+    }
+
+    /// A `flow_sum` reading `inputs` and driving point 20.
+    fn flow_sum_map(inputs: &[u64], bias: f64) -> ChannelMap {
+        let mut map = ChannelMap::new().with_point(float_point(20, Direction::In));
+        for &point in inputs {
+            map = map.with_point(float_point(point, Direction::In));
+        }
+        map.with_element(ProcessElement::FlowSum(FlowSum {
+            inputs: inputs.iter().map(|&point| PointId(point)).collect(),
+            output: PointId(20),
+            bias,
+            initial: -1.0,
+        }))
+    }
+
+    #[test]
+    fn flow_sum_sums_declared_inputs_and_bias() {
+        let sim = SimDriver::new(flow_sum_map(&[1, 2, 3], 4.0)).unwrap();
+        // Before the first step the output holds the declared initial.
+        assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(-1.0));
+
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        sim.write(PointId(2), Value::Float(-5.0)).unwrap();
+        // Point 3 still holds its neutral 0.0.
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(1.0));
+
+        // The sum is read at each tick boundary — a changed input lands
+        // on the next step, and dt does not scale it.
+        sim.write(PointId(3), Value::Float(0.25)).unwrap();
+        sim.step(0.5);
+        assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(1.25));
+    }
+
+    #[test]
+    fn flow_sum_with_no_inputs_outputs_its_bias() {
+        // An empty list declares a constant — the bias alone.
+        let sim = SimDriver::new(flow_sum_map(&[], 4.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(4.0));
+    }
+
+    #[test]
+    fn non_good_flow_sum_input_freezes_output_and_propagates_worst_quality() {
+        let sim = SimDriver::new(flow_sum_map(&[1, 2], 0.0)).unwrap();
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        sim.write(PointId(2), Value::Float(3.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(5.0));
+
+        // One degraded input freezes the sum and propagates its
+        // quality; a write behind the fault is stored but not consumed.
+        let uncertain = Quality::Uncertain(QualityReason::Stale);
+        sim.inject_fault(PointId(1), Fault::Quality(uncertain))
+            .unwrap();
+        sim.write(PointId(1), Value::Float(10.0)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        assert_eq!(sample.value, Value::Float(5.0));
+        assert_eq!(sample.quality, uncertain);
+
+        // With two degraded inputs the output reports the worst of
+        // their qualities.
+        sim.inject_fault(
+            PointId(2),
+            Fault::Quality(Quality::Bad(QualityReason::DeviceFault)),
+        )
+        .unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        assert_eq!(sample.value, Value::Float(5.0));
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::DeviceFault));
+
+        // Clearing one fault leaves the other propagating; clearing
+        // both resumes the sum on the first all-Good step.
+        sim.clear_fault(PointId(2)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        assert_eq!(sample.value, Value::Float(5.0));
+        assert_eq!(sample.quality, uncertain);
+        sim.clear_fault(PointId(1)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        assert_eq!(sample.value, Value::Float(13.0));
+        assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn flow_sum_rejects_invalid_constants_and_point_kinds() {
+        // Inputs must be bound Float points.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Int(0)))
+            .with_point(float_point(20, Direction::In))
+            .with_element(ProcessElement::FlowSum(FlowSum {
+                inputs: vec![PointId(1)],
+                output: PointId(20),
+                bias: 0.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Int,
+            }
+        );
+
+        // An unbound input is unknown, like any element end.
+        let map = ChannelMap::new()
+            .with_point(float_point(20, Direction::In))
+            .with_element(ProcessElement::FlowSum(FlowSum {
+                inputs: vec![PointId(9)],
+                output: PointId(20),
+                bias: 0.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::UnknownPoint(PointId(9))
+        );
+
+        // The driven point must be Float.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(binding(20, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::FlowSum(FlowSum {
+                inputs: vec![PointId(1)],
+                output: PointId(20),
+                bias: 0.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(20),
+                kind: ValueKind::Bool,
+            }
+        );
+
+        // The bias must be finite.
+        for bias in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                flow_sum_map(&[1], bias).validate().unwrap_err(),
+                ConfigError::NonFiniteBias {
+                    point: PointId(20),
+                    value,
+                } if !value.is_finite()
+            ));
+        }
+
+        // The initial value must be finite.
+        let mut map = flow_sum_map(&[1], 0.0);
+        map.elements = vec![ProcessElement::FlowSum(FlowSum {
+            inputs: vec![PointId(1)],
+            output: PointId(20),
+            bias: 0.0,
+            initial: f64::INFINITY,
+        })];
+        assert!(matches!(
+            map.validate().unwrap_err(),
+            ConfigError::NonFiniteInitial { point, .. } if point == PointId(20)
+        ));
+    }
+
+    #[test]
+    fn flow_sum_serde_roundtrips() {
+        let map = flow_sum_map(&[1, 2, 3], 4.0);
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"flow_sum\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+
+        // `bias` is optional in a document, deserializing as zero.
+        let element: ProcessElement =
+            serde_json::from_str(r#"{"flow_sum":{"inputs":[1],"output":20,"initial":0.0}}"#)
+                .unwrap();
+        let ProcessElement::FlowSum(sum) = element else {
+            panic!("the declaration is a flow_sum")
+        };
+        assert_eq!(sum.bias, 0.0);
+    }
+
+    #[test]
+    fn captured_state_restores_flow_sum_output_mid_run() {
+        // The element's only state is its standing output; a captured
+        // run continues identically through a fresh driver.
+        let map = flow_sum_map(&[1, 2], 0.5);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        sim.write(PointId(2), Value::Float(3.0)).unwrap();
+        sim.step(1.0);
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        for _ in 0..5 {
+            sim.step(1.0);
+            fresh.step(1.0);
+            assert_eq!(
+                fresh.read(PointId(20)).unwrap(),
+                sim.read(PointId(20)).unwrap()
+            );
+        }
+    }
+
+    /// The station loop this vocabulary exists for: a declared inflow
+    /// and two Bool-gated pump draws summed into an integrator driving
+    /// the level point — the same declaration
+    /// `fixtures/pump_station_dynamics.json` carries.
+    fn station_map() -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(10, Direction::In)) // well level
+            .with_point(float_point(11, Direction::In)) // inflow
+            .with_point(float_point(12, Direction::In)) // pump-1 draw
+            .with_point(float_point(13, Direction::In)) // pump-2 draw
+            .with_point(float_point(14, Direction::In)) // net flow
+            .with_point(binding(20, Direction::Out, Value::Bool(false))) // pump-1 command
+            .with_point(binding(21, Direction::Out, Value::Bool(false))) // pump-2 command
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(20),
+                output: PointId(12),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            }))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(21),
+                output: PointId(13),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            }))
+            .with_element(ProcessElement::FlowSum(FlowSum {
+                inputs: vec![PointId(11), PointId(12), PointId(13)],
+                output: PointId(14),
+                bias: 4.0,
+                initial: 4.0,
+            }))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(14),
+                output: PointId(10),
+                initial: 50.0,
+            }))
+    }
+
+    fn level(sim: &SimDriver) -> f64 {
+        let Value::Float(level) = sim.read(PointId(10)).unwrap().value else {
+            panic!("the level point is Float")
+        };
+        level
+    }
+
+    #[test]
+    fn asserted_pump_commands_drain_the_integrator_while_they_stand() {
+        let sim = SimDriver::new(station_map()).unwrap();
+        // The integrator seeds the level at its declared initial.
+        assert_eq!(level(&sim), 50.0);
+
+        // Idle station: the declared inflow alone — net +4 per time
+        // unit — climbs the integrator.
+        sim.step(1.0);
+        assert_eq!(level(&sim), 54.0);
+
+        // Asserting pump 1's command drains at the declared draw each
+        // step it stands: net 4 - 10 = -6 per time unit.
+        sim.write(PointId(20), Value::Bool(true)).unwrap();
+        for expected in [48.0, 42.0, 36.0] {
+            sim.step(1.0);
+            assert_eq!(level(&sim), expected);
+        }
+
+        // A second running pump doubles the draw: net 4 - 20 = -16.
+        sim.write(PointId(21), Value::Bool(true)).unwrap();
+        sim.step(1.0);
+        assert_eq!(level(&sim), 20.0);
+
+        // Releasing both commands stops the draw at the next tick
+        // boundary; the level climbs on inflow alone again.
+        sim.write(PointId(20), Value::Bool(false)).unwrap();
+        sim.write(PointId(21), Value::Bool(false)).unwrap();
+        sim.step(1.0);
+        assert_eq!(level(&sim), 24.0);
+
+        // A written inflow joins the same balance: net 8 + 4 = +12.
+        sim.write(PointId(11), Value::Float(8.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(level(&sim), 36.0);
+    }
+
+    /// One scripted run over the station loop, returning the level
+    /// sequence — the output identical runs and restored runs must
+    /// reproduce.
+    fn station_run(sim: &SimDriver) -> Vec<Sample> {
+        let mut samples = Vec::new();
+        for (pump_one, pump_two) in [(false, false), (true, false), (true, true), (false, true)] {
+            sim.write(PointId(20), Value::Bool(pump_one)).unwrap();
+            sim.write(PointId(21), Value::Bool(pump_two)).unwrap();
+            for _ in 0..3 {
+                sim.step(0.5);
+                samples.push(sim.read(PointId(10)).unwrap());
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn identical_station_runs_produce_identical_samples() {
+        let first = station_run(&SimDriver::new(station_map()).unwrap());
+        let second = station_run(&SimDriver::new(station_map()).unwrap());
+        assert_eq!(first, second);
+        // The run actually moved the level in both directions.
+        let levels: Vec<f64> = first
+            .iter()
+            .map(|sample| match sample.value {
+                Value::Float(y) => y,
+                _ => panic!("the level point is Float"),
+            })
+            .collect();
+        let start = levels[0];
+        assert!(levels.iter().any(|&y| y < start), "{levels:?}");
+        assert!(levels.iter().any(|&y| y > start), "{levels:?}");
+    }
+
+    #[test]
+    fn captured_state_restores_the_station_loop_mid_run() {
+        let map = station_map();
+        let sim = SimDriver::new(map.clone()).unwrap();
+        // Capture mid-run, a pump standing: every element's state —
+        // the integrator's level included — crosses to the fresh
+        // driver, which then continues the sequence identically.
+        sim.write(PointId(20), Value::Bool(true)).unwrap();
+        for _ in 0..3 {
+            sim.step(0.5);
+        }
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        assert_eq!(level(&fresh), level(&sim));
+        let continued = station_run(&sim);
+        let restored = station_run(&fresh);
+        assert_eq!(restored, continued);
+    }
+
+    /// The checked-in dynamics document this issue adds: the station
+    /// loop as declared data, the same file `dcs-plant-server
+    /// --dynamics` merges.
+    const STATION_DYNAMICS: &str = include_str!("../fixtures/pump_station_dynamics.json");
+
+    #[test]
+    fn the_station_dynamics_document_declares_the_loop() {
+        let elements: Vec<ProcessElement> = serde_json::from_str(STATION_DYNAMICS)
+            .expect("the document parses as process-element declarations");
+        let [
+            ProcessElement::BoolFlow(first),
+            ProcessElement::BoolFlow(second),
+            ProcessElement::FlowSum(net),
+            ProcessElement::Integrator(well),
+        ] = elements.as_slice()
+        else {
+            panic!("the document is two bool_flows, a flow_sum, and an integrator")
+        };
+        assert_eq!((first.input, first.output), (PointId(20), PointId(12)));
+        assert_eq!((second.input, second.output), (PointId(21), PointId(13)));
+        assert_eq!(
+            (net.inputs.as_slice(), net.output),
+            (&[PointId(11), PointId(12), PointId(13)][..], PointId(14))
+        );
+        assert_eq!((well.input, well.output), (PointId(14), PointId(10)));
+
+        // Merged onto the station's bound points, the document builds
+        // the identical map the coded constructor does.
+        let mut map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(float_point(11, Direction::In))
+            .with_point(float_point(12, Direction::In))
+            .with_point(float_point(13, Direction::In))
+            .with_point(float_point(14, Direction::In))
+            .with_point(binding(20, Direction::Out, Value::Bool(false)))
+            .with_point(binding(21, Direction::Out, Value::Bool(false)));
+        for element in elements {
+            map = map.with_element(element);
+        }
+        assert_eq!(map, station_map());
+
+        // ...and the merged map runs the loop.
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(20), Value::Bool(true)).unwrap();
+        sim.step(1.0);
+        assert_eq!(level(&sim), 44.0);
     }
 }

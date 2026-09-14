@@ -184,12 +184,74 @@ pub struct Noise {
     pub initial: f64,
 }
 
-/// A simulated process element advancing one point's value from another's.
+/// A Bool-gated flow source: `y = on_rate` while the gate stands,
+/// `off_rate` while it is released.
+///
+/// The element answers an actuator's `Bool` run command with the flow
+/// the running actuator produces — a pump's draw on a well, a discharge
+/// flow — so a dynamics document can close a simulated station's loop:
+/// the command moves the level the controller reads back. The gate is a
+/// `Bool` point (typically the controller's `Out` command), the output
+/// a `Float` flow: each step the gate reads `true` the output stands at
+/// `on_rate`, each step it reads `false` at `off_rate`. A pump's draw
+/// is simply a negative `on_rate` — rates are signed, only finiteness
+/// is validated. The element holds no dynamics of its own: `dt` does
+/// not scale the output — rates, not increments, are what a downstream
+/// [`FlowSum`] and [`Integrator`] consume — and `initial` covers only
+/// the reads before the first `Good` step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BoolFlow {
+    /// The point read as the gate; must be a `Bool` point.
+    pub input: PointId,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// The output while the gate reads `true` — a running actuator's
+    /// flow, negative for a draw on a summed balance. Must be finite.
+    pub on_rate: f64,
+    /// The output while the gate reads `false`. Must be finite.
+    pub off_rate: f64,
+    /// The output value before the first step. Must be finite.
+    pub initial: f64,
+}
+
+/// A summing process element: `y = bias + Σ uᵢ` over the declared
+/// `Float` inputs.
+///
+/// The element combines declared flows — an inflow, per-pump draws —
+/// into the single net rate an [`Integrator`] consumes, so a document
+/// expresses a station's balance without coded physics. Every input is
+/// re-read each step in declaration order; `bias` is a declared
+/// constant term, so a fixed inflow or outflow needs no point of its
+/// own — an empty `inputs` list declares exactly a constant. Like a
+/// [`BoolFlow`], the element holds no dynamics: `dt` does not scale the
+/// sum and `initial` covers only the reads before the first all-`Good`
+/// step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowSum {
+    /// The `Float` points summed into the output, in declaration order.
+    pub inputs: Vec<PointId>,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// A constant term added to the sum — a declared inflow or outflow
+    /// with no point of its own. Must be finite; documents may omit it,
+    /// deserializing as zero.
+    #[serde(default)]
+    pub bias: f64,
+    /// The output value before the first step. Must be finite.
+    pub initial: f64,
+}
+
+/// A simulated process element advancing one point's value from other
+/// points'.
 ///
 /// Elements are stepped in declaration order by
 /// [`SimDriver::step`](crate::SimDriver::step), after loopback routing, so
-/// an element observes the input value the current step produced.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// an element observes the input values the current step produced. The
+/// single-input variants read one point — [`input`](Self::input)
+/// reports it; a [`FlowSum`] reads a declared list, the vocabulary's
+/// one multi-input shape, and [`inputs`](Self::inputs) covers every
+/// variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessElement {
     /// A [`FirstOrderLag`].
@@ -202,17 +264,42 @@ pub enum ProcessElement {
     DeadTime(DeadTime),
     /// A [`Noise`].
     Noise(Noise),
+    /// A [`BoolFlow`].
+    BoolFlow(BoolFlow),
+    /// A [`FlowSum`].
+    FlowSum(FlowSum),
 }
 
 impl ProcessElement {
-    /// The point read as the element's input.
-    pub fn input(&self) -> PointId {
+    /// The point read as the element's input — `Some` for the
+    /// single-input variants. A [`FlowSum`] reads a declared list and
+    /// has no single input, so it reports `None` here;
+    /// [`inputs`](Self::inputs) enumerates every variant's input
+    /// points.
+    pub fn input(&self) -> Option<PointId> {
         match self {
-            Self::FirstOrderLag(element) => element.input,
-            Self::SecondOrderLag(element) => element.input,
-            Self::Integrator(element) => element.input,
-            Self::DeadTime(element) => element.input,
-            Self::Noise(element) => element.input,
+            Self::FirstOrderLag(element) => Some(element.input),
+            Self::SecondOrderLag(element) => Some(element.input),
+            Self::Integrator(element) => Some(element.input),
+            Self::DeadTime(element) => Some(element.input),
+            Self::Noise(element) => Some(element.input),
+            Self::BoolFlow(element) => Some(element.input),
+            Self::FlowSum(_) => None,
+        }
+    }
+
+    /// Every point the element reads, in declaration order: the single
+    /// input of the single-input variants, or a [`FlowSum`]'s declared
+    /// list.
+    pub fn inputs(&self) -> &[PointId] {
+        match self {
+            Self::FirstOrderLag(element) => std::slice::from_ref(&element.input),
+            Self::SecondOrderLag(element) => std::slice::from_ref(&element.input),
+            Self::Integrator(element) => std::slice::from_ref(&element.input),
+            Self::DeadTime(element) => std::slice::from_ref(&element.input),
+            Self::Noise(element) => std::slice::from_ref(&element.input),
+            Self::BoolFlow(element) => std::slice::from_ref(&element.input),
+            Self::FlowSum(element) => &element.inputs,
         }
     }
 
@@ -224,6 +311,8 @@ impl ProcessElement {
             Self::Integrator(element) => element.output,
             Self::DeadTime(element) => element.output,
             Self::Noise(element) => element.output,
+            Self::BoolFlow(element) => element.output,
+            Self::FlowSum(element) => element.output,
         }
     }
 
@@ -235,6 +324,8 @@ impl ProcessElement {
             Self::Integrator(element) => element.initial,
             Self::DeadTime(element) => element.initial,
             Self::Noise(element) => element.initial,
+            Self::BoolFlow(element) => element.initial,
+            Self::FlowSum(element) => element.initial,
         }
     }
 }
@@ -296,9 +387,11 @@ impl ChannelMap {
     /// - every loopback and element names bound points only;
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
-    /// - element ends are `Float` points, `time_constant`, `delay`, and
-    ///   `damping_ratio` are finite and positive, `amplitude` is finite
-    ///   and non-negative, and `initial` is finite;
+    /// - element ends are `Float` points — except a `bool_flow`'s gate
+    ///   input, which must be a `Bool` point — `time_constant`, `delay`,
+    ///   and `damping_ratio` are finite and positive, `amplitude` is
+    ///   finite and non-negative, `on_rate`, `off_rate`, and `bias` are
+    ///   finite, and `initial` is finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -349,14 +442,46 @@ impl ChannelMap {
         }
 
         for element in &self.elements {
-            for point in [element.input(), element.output()] {
+            // Every end must name a bound point of the kind the end
+            // requires: Float throughout, except a bool_flow's gate
+            // input, which must be a Bool point.
+            for point in element.inputs().iter().copied().chain([element.output()]) {
                 let bound = binding(&points, point)?;
-                if bound.kind() != ValueKind::Float {
+                let gate = match element {
+                    ProcessElement::BoolFlow(flow) => flow.input == point,
+                    _ => false,
+                };
+                if gate && bound.kind() != ValueKind::Bool {
+                    return Err(ConfigError::ElementGateKind {
+                        point,
+                        kind: bound.kind(),
+                    });
+                }
+                if !gate && bound.kind() != ValueKind::Float {
                     return Err(ConfigError::ElementPointKind {
                         point,
                         kind: bound.kind(),
                     });
                 }
+            }
+            if let ProcessElement::BoolFlow(flow) = element {
+                for (rate, value) in [("on_rate", flow.on_rate), ("off_rate", flow.off_rate)] {
+                    if !value.is_finite() {
+                        return Err(ConfigError::InvalidRate {
+                            point: flow.output,
+                            rate,
+                            value,
+                        });
+                    }
+                }
+            }
+            if let ProcessElement::FlowSum(sum) = element
+                && !sum.bias.is_finite()
+            {
+                return Err(ConfigError::NonFiniteBias {
+                    point: sum.output,
+                    value: sum.bias,
+                });
             }
             if let ProcessElement::FirstOrderLag(lag) = element
                 && (!lag.time_constant.is_finite() || lag.time_constant <= 0.0)
@@ -450,6 +575,14 @@ pub enum ConfigError {
         /// The kind the point declares.
         kind: ValueKind,
     },
+    /// A `bool_flow` element's gate input is bound to a non-`Bool`
+    /// point.
+    ElementGateKind {
+        /// The offending point.
+        point: PointId,
+        /// The kind the point declares.
+        kind: ValueKind,
+    },
     /// A lag's `time_constant` is not finite and positive.
     InvalidTimeConstant {
         /// The lag's output point.
@@ -473,6 +606,22 @@ pub enum ConfigError {
     },
     /// A noise element's `amplitude` is negative or not finite.
     InvalidAmplitude {
+        /// The element's output point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
+    /// A `bool_flow` element's `on_rate` or `off_rate` is not finite.
+    InvalidRate {
+        /// The element's output point.
+        point: PointId,
+        /// Which declared rate is invalid: `"on_rate"` or `"off_rate"`.
+        rate: &'static str,
+        /// The offending value.
+        value: f64,
+    },
+    /// A `flow_sum` element's `bias` is not finite.
+    NonFiniteBias {
         /// The element's output point.
         point: PointId,
         /// The offending value.
@@ -528,7 +677,12 @@ impl fmt::Display for ConfigError {
             ),
             Self::ElementPointKind { point, kind } => write!(
                 f,
-                "process elements drive Float points, but point {} is {kind:?}",
+                "process element ends are Float points, but point {} is {kind:?}",
+                point.0
+            ),
+            Self::ElementGateKind { point, kind } => write!(
+                f,
+                "a bool_flow element's gate must read a Bool point, but point {} is {kind:?}",
                 point.0
             ),
             Self::InvalidTimeConstant { point, value } => write!(
@@ -549,6 +703,16 @@ impl fmt::Display for ConfigError {
             Self::InvalidAmplitude { point, value } => write!(
                 f,
                 "noise element driving point {} has negative or non-finite amplitude {value}",
+                point.0
+            ),
+            Self::InvalidRate { point, rate, value } => write!(
+                f,
+                "bool_flow element driving point {} has non-finite {rate} {value}",
+                point.0
+            ),
+            Self::NonFiniteBias { point, value } => write!(
+                f,
+                "flow_sum element driving point {} has non-finite bias {value}",
                 point.0
             ),
             Self::NonFiniteInitial { point, value } => write!(

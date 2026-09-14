@@ -14,9 +14,11 @@
 //!   paired `In` point at the next [`SimDriver::step`], closing simple
 //!   control loops without a process model;
 //! - [`ProcessElement`]s ([`FirstOrderLag`], [`SecondOrderLag`],
-//!   [`Integrator`], [`DeadTime`], and [`Noise`]) drive `Float` points
-//!   from other points, advanced by the caller-supplied `dt` each step —
-//!   never by wall-clock time;
+//!   [`Integrator`], [`DeadTime`], [`Noise`], [`BoolFlow`], and
+//!   [`FlowSum`]) drive `Float` points from other points — a
+//!   [`BoolFlow`] reads a `Bool` gate, a [`FlowSum`] a declared list —
+//!   advanced by the caller-supplied `dt` each step, never by
+//!   wall-clock time;
 //! - [`SimDriver::inject_fault`] marks points with non-[`Good`](dcs_core::Quality::Good)
 //!   quality or makes accesses fail with an [`IoError`](dcs_core::IoError),
 //!   standing in for field-device failures in diagnostics tests.
@@ -49,7 +51,7 @@ mod scripted;
 
 pub use driver::{Fault, PointInfo, SimDriver};
 pub use map::{
-    ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, Integrator, Loopback,
-    Noise, PointBinding, ProcessElement, SecondOrderLag,
+    BoolFlow, ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, FlowSum,
+    Integrator, Loopback, Noise, PointBinding, ProcessElement, SecondOrderLag,
 };
 pub use scripted::{RecordedWrite, ScriptEntry, ScriptError, ScriptedDriver};

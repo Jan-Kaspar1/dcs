@@ -26,6 +26,11 @@ const NOISE_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/tank_loop_noise_dynamics.json"
 );
+const STATION_MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pump_station.json");
+const STATION_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-sim/fixtures/pump_station_dynamics.json"
+);
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_point.json"
@@ -269,6 +274,55 @@ fn a_declared_noise_element_loads_and_deviates_within_amplitude() {
     }
     // The deviation is real — the element is not a passthrough.
     assert!(first_run.iter().any(|(level, noisy)| noisy != level));
+}
+
+#[test]
+fn a_pump_command_drains_the_well_only_while_it_stands() {
+    // The station loop the vocabulary was added for: two Bool-gated
+    // pump draws and the declared inflow summed into an integrator
+    // driving the level point.
+    let mut plant = spawn(&[
+        STATION_MODEL,
+        "--dynamics",
+        STATION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    let level = |driver: &RemoteDriver| {
+        let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
+            panic!("the level point is Float")
+        };
+        level
+    };
+
+    // The integrator seeds the well at its declared initial level.
+    assert_eq!(level(&driver), 50.0);
+    // Idle, the declared inflow alone — net +4 — climbs the well.
+    driver.step(1.0).unwrap();
+    assert_eq!(level(&driver), 54.0);
+
+    // Asserting pump 1's run command drains at the declared draw —
+    // net 4 - 10 = -6 — each step the command stands.
+    driver.write(PointId(20), Value::Bool(true)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(level(&driver), 48.0);
+    driver.step(1.0).unwrap();
+    assert_eq!(level(&driver), 42.0);
+
+    // A second running pump doubles the draw.
+    driver.write(PointId(21), Value::Bool(true)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(level(&driver), 26.0);
+
+    // Releasing both commands stops the draw at the next tick
+    // boundary; the well climbs on inflow alone again.
+    driver.write(PointId(20), Value::Bool(false)).unwrap();
+    driver.write(PointId(21), Value::Bool(false)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(level(&driver), 30.0);
+
+    assert!(stop(&mut plant).success());
 }
 
 #[test]
