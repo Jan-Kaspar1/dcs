@@ -24,11 +24,26 @@
   .trend circle.uncertain { fill: #a60; }
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
+  tr.source td { font-weight: bold; }
+  #pair-summary.good { color: #060; }
+  #pair-summary.bad { color: #b00; font-weight: bold; }
 </style>
 </head>
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
+
+<section id="pair" hidden>
+<h2>Controller pair</h2>
+<p id="pair-summary"></p>
+<table>
+  <thead>
+    <tr><th>Peer</th><th>Role</th><th>Standby sync</th><th>Tick</th><th>Status</th></tr>
+  </thead>
+  <tbody id="pair-peers"></tbody>
+</table>
+</section>
+
 <table>
   <thead>
     <tr>
@@ -61,13 +76,37 @@
 <script>
 "use strict";
 // The page speaks only the monitor's JSON contract: GET /signals for the
-// loaded model's point metadata, GET /snapshot for live samples, GET
-// /history for each point's retained sample stream, GET /journal for the
-// transition journal, and POST /command for operator writes. Snapshot,
-// history, and journal are polled on one shared one-second cadence; the
-// history and journal fetches carry since-cursors, so each poll transfers
-// only entries newer than the last seen sequence. No dependencies, no
-// build step.
+// loaded model's point metadata, GET /role for a peer's redundancy role,
+// GET /snapshot for live samples, GET /history for each point's retained
+// sample stream, GET /journal for the transition journal, and POST
+// /command for operator writes. Roles, snapshot, history, and journal are
+// polled on one shared one-second cadence; the history and journal
+// fetches carry since-cursors, so each poll transfers only entries newer
+// than the last seen sequence. No dependencies, no build step.
+//
+// Pair view (the monitoring-under-redundancy decision): the page is
+// configured with both peers' monitor addresses — the serving origin is
+// one peer, and each ?peer=<host:port> URL parameter names another. With
+// no ?peer the page is a single-controller view and every fetch stays
+// same-origin. Under a pair, every refresh polls GET /role on each peer,
+// the data endpoints are read from the peer reporting "active" — one
+// logical controller — and the other peer contributes pair health only.
+// Commands submit only to the settled-active peer; a "not_active"
+// rejection means the command landed mid-transition, so roles are
+// re-polled and the command retried once.
+const peers = [{ base: "", name: location.host }];
+for (const raw of new URLSearchParams(location.search).getAll("peer")) {
+  const base = /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "")
+                                       : location.protocol + "//" + raw;
+  if (base !== location.origin && !peers.some(peer => peer.base === base)) {
+    peers.push({ base, name: raw.replace(/^https?:\/\//, "") });
+  }
+}
+// Per-peer last-polled state: { report: RoleReport | null, error } —
+// error non-null is the named unreachable redundancy fault.
+const peerState = peers.map(() => ({ report: null, error: null }));
+// Index of the peer currently sourcing the logical view's data.
+let source = 0;
 
 // Signals declare an optional display group in the model; the point
 // listing organizes itself under those groups. A point whose signal —
@@ -91,10 +130,16 @@ function groupedPoints() {
 }
 
 let index = { points: [] };
-// point id -> { samples: [Sample], lastSeq } — the series a trend draws.
+// point id -> { samples: [Sample], lastSeq, lastTick } — the series a
+// trend draws. lastSeq is the since-cursor in the *current* source's
+// stream; lastTick is the merge watermark that keeps the series
+// continuous across a source switch.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
+// Events already displayed — tick plus serialized event — so a journal
+// re-fetch from the new source after a switch adds each transition once.
+const journalSeen = new Set();
 let journalSince = 0;
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
@@ -146,14 +191,135 @@ function pointName(point) {
   return meta ? meta.name + " (point " + point + ")" : "point " + point;
 }
 
+// Polls GET /role on every configured peer — the role cadence the pair
+// view adds to the normal data polling — then re-selects the data
+// source. A failed poll is recorded as pair health, not thrown: one
+// peer's loss must not interrupt the other peer's data.
+async function pollRoles() {
+  await Promise.all(peers.map(async (peer, i) => {
+    try {
+      const response = await fetch(peer.base + "/role");
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      peerState[i].report = await response.json();
+      peerState[i].error = null;
+    } catch (error) {
+      peerState[i].error = String(error);
+    }
+  }));
+  selectSource();
+}
+
+// The logical view reads from the peer reporting settled "active".
+// During a switchover a "promoting" peer already owns the field and is
+// becoming active, so it sources the view until it settles; otherwise the
+// previous source stays while it remains reachable.
+function selectSource() {
+  const reachable = i => peerState[i].error === null && peerState[i].report !== null;
+  let next = peerState.findIndex((state, i) =>
+    reachable(i) && state.report.role === "active");
+  if (next < 0) next = peerState.findIndex((state, i) =>
+    reachable(i) && state.report.role === "promoting");
+  if (next < 0) {
+    next = reachable(source) ? source : peerState.findIndex((s, i) => reachable(i));
+  }
+  if (next >= 0 && next !== source) switchSource(next);
+}
+
+// Moves the data source to another peer: the new peer's history and
+// journal are re-fetched whole (since 0) and merged by tick — the pair
+// shares one tick domain, so the trend and journal panes continue the
+// same run without duplicating samples.
+function switchSource(next) {
+  source = next;
+  for (const state of trends.values()) state.lastSeq = 0;
+  journalSince = 0;
+}
+
+// The index of a peer reporting settled "active" — the only legitimate
+// command target — or -1 while the pair is mid-transition or its active
+// is lost.
+function activePeer() {
+  return peerState.findIndex(state =>
+    state.error === null && state.report && state.report.role === "active");
+}
+
+// StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
+// {"degraded": {detail}}.
+function describeSync(sync) {
+  if (typeof sync === "string") return sync;
+  if ("tracking" in sync) {
+    return "tracking (aligned at tick " + sync.tracking.aligned + ")";
+  }
+  if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  return JSON.stringify(sync);
+}
+
+// The pair's redundancy summary: healthy, or the named redundancy
+// faults — an unreachable peer, a degraded standby convergence, or no
+// peer reporting active. These are pair health, never plant faults.
+function pairSummary() {
+  const faults = [];
+  let activeName = null;
+  peers.forEach((peer, i) => {
+    const state = peerState[i];
+    if (state.error !== null) {
+      const was = state.report ? state.report.role + " " : "";
+      faults.push(was + peer.name + " unreachable");
+      return;
+    }
+    if (state.report === null) return;
+    if (state.report.role === "active") activeName = peer.name;
+    if (state.report.sync && typeof state.report.sync === "object" &&
+        "degraded" in state.report.sync) {
+      faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+    }
+  });
+  if (activeName === null) faults.push("no peer reports role active");
+  return faults.length === 0
+    ? "redundant pair healthy — active on " + activeName
+    : "redundancy fault: " + faults.join("; ");
+}
+
+// Renders the pair section — one row per peer, plus the summary — when
+// the page is configured for a pair; hidden for a single controller.
+function renderPair() {
+  const section = document.getElementById("pair");
+  if (peers.length < 2) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  document.getElementById("pair-peers").innerHTML = peers.map((peer, i) => {
+    const state = peerState[i];
+    const report = state.report;
+    const unreachable = state.error !== null;
+    return "<tr" + (i === source ? " class=\"source\"" : "") + "><td>" +
+      esc(peer.name) + "</td><td>" + (report ? esc(report.role) : "—") +
+      "</td><td>" + (report && report.sync ? esc(describeSync(report.sync)) : "—") +
+      "</td><td>" + (report ? report.tick : "—") + "</td><td class=\"" +
+      (unreachable ? "bad" : "good") + "\">" +
+      (unreachable ? "unreachable" : (i === source ? "serving" : "reachable")) +
+      "</td></tr>";
+  }).join("");
+  const summary = document.getElementById("pair-summary");
+  summary.textContent = pairSummary();
+  summary.className = activePeer() >= 0 &&
+    peerState.every(state => state.error === null) ? "good" : "bad";
+}
+
 let polling = false;
 async function refresh() {
   if (polling) return;
   polling = true;
   try {
-    const snapshot = await (await fetch("/snapshot")).json();
+    await pollRoles();
+    renderPair();
+    const base = peers[source].base;
+    const snapshot = await (await fetch(base + "/snapshot")).json();
+    const peerNote = peers.length > 1 ? " — active peer " + peers[source].name : "";
     document.getElementById("status").textContent =
-      "tick " + snapshot.tick + " — polled " + new Date().toLocaleTimeString();
+      "tick " + snapshot.tick + peerNote + " — polled " +
+      new Date().toLocaleTimeString();
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
@@ -162,7 +328,7 @@ async function refresh() {
       for (const meta of metas) rows.push(pointRow(meta, telemetry));
     }
     document.getElementById("points").innerHTML = rows.join("");
-    await Promise.all([refreshTrends(), refreshJournal()]);
+    await Promise.all([refreshTrends(base), refreshJournal(base)]);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
@@ -190,28 +356,33 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0 });
+    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null });
   }
 }
 
-// Fetches each point's history increments. Every point's ring shares the
-// scan cadence, so the smallest seen seq is a safe common cursor; each
-// point's own lastSeq still dedupes what the fetch returns.
-async function refreshTrends() {
+// Fetches each point's history increments from the current source.
+// Every point's ring shares the scan cadence, so the smallest seen seq
+// is a safe common cursor; each point's own lastSeq still dedupes what
+// the fetch returns, and lastTick dedupes across a source switch — the
+// new peer's ring re-serves ticks already drawn, which are skipped.
+async function refreshTrends(base) {
   const states = [...trends.values()];
   let since = 0;
   if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
     since = Math.min(...states.map(state => state.lastSeq));
   }
-  const histories = await (await fetch("/history?since=" + since)).json();
+  const histories = await (await fetch(base + "/history?since=" + since)).json();
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
     for (const entry of history.samples) {
-      if (entry.seq > state.lastSeq) {
-        state.samples.push(entry.sample);
-        state.lastSeq = entry.seq;
+      if (entry.seq <= state.lastSeq) continue;
+      state.lastSeq = entry.seq;
+      if (state.lastTick !== null && entry.sample.tick <= state.lastTick) {
+        continue;
       }
+      state.samples.push(entry.sample);
+      state.lastTick = entry.sample.tick;
     }
     if (state.samples.length > TREND_LIMIT) {
       state.samples.splice(0, state.samples.length - TREND_LIMIT);
@@ -266,16 +437,26 @@ function drawTrend(meta) {
   svg.innerHTML = body;
 }
 
-// Fetches the journal increment and re-renders the pane in tick order —
-// the endpoint already returns entries oldest-first.
-async function refreshJournal() {
-  const entries = await (await fetch("/journal?since=" + journalSince)).json();
+// Fetches the journal increment from the current source and re-renders
+// the pane in tick order — the endpoint returns entries oldest-first.
+// Entries merge by tick plus event identity, so a whole-journal re-fetch
+// after a source switch adds each transition once: both peers journal
+// the same run's events, and each journals its own role changes.
+async function refreshJournal(base) {
+  const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
-    journalEntries.push(entry);
+    const key = entry.tick + " " + JSON.stringify(entry.event);
+    if (!journalSeen.has(key)) {
+      journalSeen.add(key);
+      journalEntries.push(entry);
+    }
   }
+  journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
   if (journalEntries.length > JOURNAL_LIMIT) {
-    journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT);
+    for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {
+      journalSeen.delete(entry.tick + " " + JSON.stringify(entry.event));
+    }
   }
   document.getElementById("journal").innerHTML = journalEntries.map(entry =>
     "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
@@ -283,7 +464,8 @@ async function refreshJournal() {
 }
 
 // Journal events serialize as {"quality_changed": ...} |
-// {"command_settled": ...} | {"step_failed": ...}.
+// {"command_settled": ...} | {"step_failed": ...} |
+// {"role_changed": {from, to}}.
 function describeEvent(event) {
   if ("quality_changed" in event) {
     const change = event.quality_changed;
@@ -299,6 +481,10 @@ function describeEvent(event) {
   if ("step_failed" in event) {
     const failure = event.step_failed;
     return "component " + failure.component + " step failed: " + failure.error;
+  }
+  if ("role_changed" in event) {
+    const change = event.role_changed;
+    return "reported role " + change.from + " → " + change.to;
   }
   return JSON.stringify(event);
 }
@@ -333,8 +519,8 @@ function describeOutcome(outcome) {
 
 // A rejection reason serializes as {"unknown_point": {point}} |
 // {"type_mismatch": {point, expected, found}} |
-// {"driver_rejected": {point, error}} |
-// {"not_active": {point, role}} | the parameter-command reasons
+// {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
+// the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component.
@@ -353,7 +539,7 @@ function describeReason(reason) {
       describeIoError(rejection.error);
   }
   if ("not_active" in reason) {
-    return "refused: instance reports role " + reason.not_active.role +
+    return "refused: peer reports role " + reason.not_active.role +
       "; commands apply only on the active peer";
   }
   if ("unknown_component" in reason) {
@@ -401,6 +587,51 @@ function commandValue(kind, text) {
   return { Float: parseFloat(text) };
 }
 
+// POSTs the Command JSON to a peer. Content-Type text/plain keeps a
+// cross-origin POST a simple request — no preflight — while the endpoint
+// parses the same JSON body regardless of the declared type.
+async function postCommand(base, command) {
+  const response = await fetch(base + "/command", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(command),
+  });
+  return response.json();
+}
+
+function isNotActive(receipt) {
+  return receipt && receipt.outcome && receipt.outcome.rejected &&
+    receipt.outcome.rejected.reason &&
+    "not_active" in receipt.outcome.rejected.reason;
+}
+
+// Submits an operator command to the peer reporting settled "active" —
+// never to a standby. A not_active rejection means the pair moved
+// mid-flight: roles are re-polled and the command retried once against
+// the peer now reporting active, per the pair-view rule.
+async function submitCommand(command) {
+  const receipt = document.getElementById("receipt");
+  let target = activePeer();
+  if (target < 0) {
+    await pollRoles();
+    renderPair();
+    target = activePeer();
+  }
+  if (target < 0) {
+    receipt.textContent =
+      "not sent: no peer reports role active — the pair is mid-transition";
+    return;
+  }
+  let answer = await postCommand(peers[target].base, command);
+  if (isNotActive(answer)) {
+    await pollRoles();
+    renderPair();
+    target = activePeer();
+    if (target >= 0) answer = await postCommand(peers[target].base, command);
+  }
+  receipt.textContent = JSON.stringify(answer, null, 2);
+}
+
 async function init() {
   index = await (await fetch("/signals")).json();
   const select = document.getElementById("command-point");
@@ -417,13 +648,11 @@ async function init() {
       kind: meta.value_type,
       value: commandValue(meta.value_type, document.getElementById("command-value").value),
     } };
-    const response = await fetch("/command", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(command),
-    });
-    document.getElementById("receipt").textContent =
-      JSON.stringify(await response.json(), null, 2);
+    try {
+      await submitCommand(command);
+    } catch (error) {
+      document.getElementById("receipt").textContent = "command failed: " + error;
+    }
     refresh();
   });
   refresh();

@@ -48,6 +48,13 @@
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
 //!
+//! The monitoring page presents the pair as one logical controller: open
+//! it on either peer's `--listen` address and pass the other peer's
+//! address as `?peer=<host:port>` — e.g.
+//! `http://active:8080/?peer=standby:8081`. The page polls `GET /role`
+//! on each peer, renders the active's telemetry plus pair health, and
+//! submits commands only to the peer reporting `active`.
+//!
 //! The binary holds no control logic: the `dcs-blocks` component kinds
 //! are registered with the `ComponentRegistry` [`dcs_controller::registry`]
 //! builds, and everything inside the executor remains virtual ticks.

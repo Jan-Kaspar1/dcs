@@ -71,6 +71,25 @@
 //! command receipts in tick order — and submits `write_value` commands to
 //! `/command` through a form, displaying the returned receipt.
 //!
+//! ## The pair view
+//!
+//! Under redundancy — the monitoring-under-redundancy decision — the page
+//! presents an active/standby pair as one logical controller. It is
+//! configured with both peers' monitor addresses: the serving origin is
+//! one peer, and each `?peer=host:port` URL parameter names another —
+//! e.g. `http://active:8080/?peer=standby:8081`. Every refresh polls
+//! `GET /role` on each configured peer; data fetches go to the peer
+//! reporting `active`, so the point listing, trends, and journal are the
+//! one logical controller's, while the pair section renders per-peer
+//! role, convergence, and reachability — an unreachable peer is a named
+//! redundancy fault, not a plant fault. Commands submit only to the
+//! settled-active peer; a `not_active` rejection — the command landed
+//! mid-transition — triggers a role re-poll and one retry. The contract
+//! endpoints answer cross-origin reads (`Access-Control-Allow-Origin: *`)
+//! so the page can reach a peer on another host. [`PairClient`] is the
+//! same pair view for in-process consumers — tests and tooling — and
+//! carries the testable half of the routing rules.
+//!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow
 //! isn't `'static` — and [`Monitor::shutdown`] stops it.
@@ -94,8 +113,10 @@
 
 #![warn(missing_docs)]
 
+mod pair;
 mod recorder;
 
+pub use pair::{PairClient, PairError, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
 
 use dcs_core::{
@@ -503,13 +524,20 @@ fn html(body: &'static str) -> Response<Cursor<Vec<u8>>> {
         )
 }
 
-/// A JSON response with a `Content-Type: application/json` header.
+/// A JSON response with `Content-Type: application/json` and
+/// `Access-Control-Allow-Origin: *` headers — the latter so the
+/// monitoring page, configured with both peers' addresses, can poll a
+/// peer whose monitor sits on another origin.
 fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(value).expect("monitoring contract types serialize");
     Response::from_data(body)
         .with_status_code(status)
         .with_header(
             Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header is valid"),
+        )
+        .with_header(
+            Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..])
                 .expect("static header is valid"),
         )
 }
