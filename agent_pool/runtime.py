@@ -94,7 +94,7 @@ class Runtime:
         prompt_path = invocation / 'prompt.txt'
         prompt_path.write_text(prompt)
         command = [self.devin, '-p', '--model', 'swe-2-high', '--permission-mode',
-                   'smart', '--respect-workspace-trust', 'false', '--prompt-file',
+                   'dangerous', '--respect-workspace-trust', 'false', '--prompt-file',
                    str(prompt_path), '--export', str(invocation / 'conversation.json')]
         if resume_session:
             command.extend(['--resume', resume_session])

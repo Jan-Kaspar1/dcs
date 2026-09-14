@@ -1,6 +1,6 @@
 # Local agent pool operations
 
-Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation explicitly selects `swe-2-high` with smart permissions; model fallback is rejected.
+Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation explicitly selects `swe-2-high` with `--permission-mode dangerous`, authorized by the user on 2026-09-14. This gives local Devin full tool access as the WSL user; clones provide work separation, not a security sandbox. Model fallback is rejected.
 
 ## Installation and startup
 
@@ -66,6 +66,6 @@ The supervisor serializes squash merges and requires the named `rust-format`, `r
 This is supervisor policy, not server-side branch protection. If GitHub branch protection is unavailable for the repository's plan, an unrelated direct push or manual merge can bypass it. Workers operate on software and simulated I/O only; physical equipment access and live deployment are outside the autonomous loop.
 
 Before calling rollout complete, record a real issue-to-PR-to-CI-to-merge-to-closure cycle, repeated worker assignment, process-restart reconciliation, and a real Windows login recovery check. Passing unit tests or registering a service/task establishes only those individual checks, not end-to-end acceptance.
-# Smart-mode Git ownership
+# Git ownership and permissions
 
-Live validation found that Devin smart mode always prompts for mutating Git commands. Workers therefore edit and test files; the supervisor stages and commits the completed edits before publishing. Permission rejections, including those accompanied by a zero exit status, block the issue and preserve its workspace. This intentionally adapts the original worker-commit design without broadening Devin permissions.
+Workers edit and test files; the supervisor stages and commits completed edits before publishing. This ownership remains explicit even with full Devin tool access. Permission rejections, including those accompanied by a zero exit status, block the issue and preserve its workspace. Initial smart-mode restrictions were replaced with user-authorized full tool access after live validation.

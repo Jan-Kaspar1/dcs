@@ -94,8 +94,8 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.poll(metadata)  # Reap child owned by original instance.
         spec = json.loads((Path(metadata['invocation']) / 'spec.json').read_text())
         self.assertIn('swe-2-high', spec['command'])
-        self.assertIn('smart', spec['command'])
-        self.assertNotIn('dangerous', spec['command'])
+        self.assertIn('dangerous', spec['command'])
+        self.assertNotIn('smart', spec['command'])
 
     def test_lost_process_is_not_success(self):
         result = self.runtime.poll({'pid': 999999999, 'identity': 'missing',

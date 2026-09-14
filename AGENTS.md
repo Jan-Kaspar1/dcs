@@ -16,5 +16,5 @@ Adding a new device should follow the same model. Once its device integration an
 - Implement only the assigned issue and its acceptance criteria. Read `docs/architecture.md` and `docs/plan.md` before making design decisions; planners maintain those documents through reviewed CI-gated changes.
 - Develop software against simulated I/O. Physical equipment access and live infrastructure deployment are outside this autonomous workflow.
 - Run `python3 scripts/verify.py` before reporting completion. Route heavy Rust builds through this command so shared build limits apply.
-- Leave implementation edits in the assigned clone and report verification results and unresolved criteria. The supervisor owns staging, committing, publishing PRs, issue reservations, and merging; workers leave all Git operations to it because smart mode prompts for mutating Git commands.
+- Leave implementation edits in the assigned clone and report verification results and unresolved criteria. The supervisor owns staging, committing, publishing PRs, issue reservations, and merging; workers leave these Git operations to it.
 - Preserve unrelated files and incomplete work. Report denied permissions or missing credentials as blockers; never escalate permissions or switch models to bypass a failure.
