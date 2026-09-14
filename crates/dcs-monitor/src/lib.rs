@@ -7,15 +7,27 @@
 //! never observe a half-run scan and commands always interleave between
 //! scans, where the executor's documented boundary applies them.
 //!
-//! All bodies are JSON and all protocol types are `dcs-core` contracts:
+//! All bodies are JSON and all protocol types are shared serde contracts:
 //!
 //! - `GET /snapshot` → `200` [`TelemetrySnapshot`]
+//! - `GET /signals` → `200` [`SignalIndex`] — the loaded model's
+//!   point-to-signal metadata: every known point's signal name, unit,
+//!   description, direction, and value type
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
 //!   receipt log, retrievable alongside the snapshot
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`
+//! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
+//!   page described below
+//!
+//! The page is the first slice of the monitoring and control UI consuming
+//! the unified contract: a static, dependency-free HTML+JavaScript asset
+//! ([`PAGE`], no build toolchain) that fetches `/signals` once for point
+//! labels and units, polls `/snapshot` to refresh each point's value,
+//! quality, and tick, and submits `write_value` commands to `/command`
+//! through a form, displaying the returned receipt.
 //!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow
@@ -28,6 +40,7 @@
 #![warn(missing_docs)]
 
 use dcs_core::{Command, CommandReceipt, TelemetrySnapshot};
+use dcs_model::SignalIndex;
 use dcs_runtime::Executor;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
@@ -42,24 +55,35 @@ pub struct ScanRequest {
     pub scans: u64,
 }
 
+/// The monitoring page served at `GET /` — see the crate docs.
+pub const PAGE: &str = include_str!("page.html");
+
 /// A monitoring server sharing one executor over HTTP+JSON.
 ///
 /// See the crate docs for the endpoint contract and the single-lock
 /// concurrency model.
 pub struct Monitor<'d> {
     executor: Mutex<Executor<'d>>,
+    signals: SignalIndex,
     server: Server,
 }
 
 impl<'d> Monitor<'d> {
     /// Binds an HTTP listener on `addr` and returns a monitor sharing
-    /// `executor`.
+    /// `executor` and the loaded model's `signals` index — typically
+    /// [`PlantModel::signal_index`](dcs_model::PlantModel::signal_index)
+    /// applied to the model the executor was assembled from.
     ///
     /// `("127.0.0.1", 0)` binds an ephemeral port;
     /// [`local_addr`](Self::local_addr) reports the bound address.
-    pub fn bind<A: ToSocketAddrs>(addr: A, executor: Executor<'d>) -> io::Result<Self> {
+    pub fn bind<A: ToSocketAddrs>(
+        addr: A,
+        executor: Executor<'d>,
+        signals: SignalIndex,
+    ) -> io::Result<Self> {
         Ok(Self {
             executor: Mutex::new(executor),
+            signals,
             server: Server::http(addr).map_err(io::Error::other)?,
         })
     }
@@ -97,6 +121,8 @@ impl<'d> Monitor<'d> {
             .unwrap_or_default()
             .to_string();
         let response = match (method, path.as_str()) {
+            (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
+            (Method::Get, "/signals") => json(200, &self.signals),
             (Method::Get, "/snapshot") => json(200, &self.executor.lock().unwrap().snapshot()),
             (Method::Get, "/receipts") => json(200, self.executor.lock().unwrap().receipts()),
             (Method::Post, "/command") => match read_json::<Command>(&mut request) {
@@ -131,6 +157,16 @@ fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<C
     serde_json::from_str(&body).map_err(|error| json(400, &error.to_string()))
 }
 
+/// An HTML response with a `Content-Type: text/html` header.
+fn html(body: &'static str) -> Response<Cursor<Vec<u8>>> {
+    Response::from_data(body.as_bytes().to_vec())
+        .with_status_code(200)
+        .with_header(
+            Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header is valid"),
+        )
+}
+
 /// A JSON response with a `Content-Type: application/json` header.
 fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(value).expect("monitoring contract types serialize");
@@ -156,6 +192,20 @@ impl MonitorClient {
     /// [`Monitor::local_addr`]).
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
+    }
+
+    /// `GET /`: the monitoring page's HTML source.
+    pub fn page(&self) -> io::Result<String> {
+        let (status, body) = self.request("GET", "/", None)?;
+        if status != 200 {
+            return Err(io::Error::other(format!("HTTP {status}: {body}")));
+        }
+        Ok(body)
+    }
+
+    /// `GET /signals`: the loaded model's point-to-signal metadata index.
+    pub fn signals(&self) -> io::Result<SignalIndex> {
+        self.get_json("/signals")
     }
 
     /// `GET /snapshot`: the executor's current telemetry snapshot.
