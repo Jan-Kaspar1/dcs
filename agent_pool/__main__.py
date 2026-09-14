@@ -17,6 +17,8 @@ def main():
         commands.add_parser(name)
     retry = commands.add_parser('retry')
     retry.add_argument('issue', type=int)
+    review_cmd = commands.add_parser('review')
+    review_cmd.add_argument('action', nargs='?', choices=('run',))
     upgrade = commands.add_parser('upgrade')
     upgrade.add_argument('source', help='Reviewed source checkout to install')
     args = parser.parse_args()
@@ -34,7 +36,15 @@ def main():
     elif args.command == 'stop':
         subprocess.run(['systemctl', '--user', 'stop', 'dcs-agents.service'], check=True)
     elif args.command == 'status':
-        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'jobs':state.jobs()}, indent=2))
+        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'review':state.review_summary(), 'jobs':state.jobs()}, indent=2))
+    elif args.command == 'review':
+        if args.action == 'run':
+            if state.paused():
+                parser.error('Resume before requesting a manual review')
+            state.set('review:manual', True)
+            print('Manual architecture review queued; the supervisor runs it at the next cycle.')
+        else:
+            print(json.dumps(state.review_summary(), indent=2, default=str))
     elif args.command == 'logs':
         subprocess.run(['tail', '-n', '100', str(Path(config['state_root']) / 'supervisor.log')], check=True)
     elif args.command == 'retry':
