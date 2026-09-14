@@ -282,20 +282,6 @@ pub fn level_percent(scaling: &Scaling, raw: f64) -> f64 {
             / (scaling.raw_max - scaling.raw_min)
 }
 
-fn core_direction(direction: dcs_model::Direction) -> dcs_core::Direction {
-    match direction {
-        dcs_model::Direction::In => dcs_core::Direction::In,
-        dcs_model::Direction::Out => dcs_core::Direction::Out,
-    }
-}
-
-fn sim_direction(direction: dcs_model::Direction) -> dcs_sim::Direction {
-    match direction {
-        dcs_model::Direction::In => dcs_sim::Direction::In,
-        dcs_model::Direction::Out => dcs_sim::Direction::Out,
-    }
-}
-
 /// A point's value before the first write or element step; the variant is
 /// the point's declared kind.
 fn neutral(kind: ValueKind) -> Value {
@@ -335,16 +321,16 @@ impl Wiring {
         &mut self,
         point: PointId,
         channel: ChannelId,
-        direction: dcs_model::Direction,
+        direction: dcs_core::Direction,
         kind: ValueKind,
     ) {
         self.bindings.push(PointBinding {
             point,
             channel,
-            direction: sim_direction(direction),
+            direction,
             initial: neutral(kind),
         });
-        self.specs.push((point, core_direction(direction), kind));
+        self.specs.push((point, direction, kind));
         self.kinds.insert(point, kind);
     }
 
@@ -353,12 +339,11 @@ impl Wiring {
     fn add_internal(
         &mut self,
         point: PointId,
-        direction: dcs_model::Direction,
+        direction: dcs_core::Direction,
         kind: ValueKind,
         initial: Value,
     ) {
-        self.internals
-            .push((point, core_direction(direction), kind, initial));
+        self.internals.push((point, direction, kind, initial));
         self.kinds.insert(point, kind);
     }
 }
@@ -476,7 +461,7 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
                         device: INTERNAL_DEVICE,
                         name: format!("link-{index}-out"),
                     },
-                    dcs_model::Direction::Out,
+                    dcs_core::Direction::Out,
                     kind,
                 );
                 wiring.add_point(
@@ -485,7 +470,7 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
                         device: INTERNAL_DEVICE,
                         name: format!("link-{index}-in"),
                     },
-                    dcs_model::Direction::In,
+                    dcs_core::Direction::In,
                     kind,
                 );
                 wiring.loopbacks.push(Loopback {

@@ -42,6 +42,8 @@ dcs-agents retry 123
 
 The personal `/home/kaspar/workspace/dcs` checkout is separate from managed clones under `/home/kaspar/workspace/dcs-agent-pool`. Worker clones are allocated as needed. Successful automated merge-and-issue-closure reconciliations raise capacity from five to ten after five merges, and to twenty after fifteen. One planner may run alongside workers. Dependencies and occupied concurrency groups can leave slots idle.
 
+The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/` files, and cited notes under `docs/research/` before proposing work. Product issue scopes begin with stable requirement IDs. When customer-specific semantics or measurable acceptance criteria lack evidence, the planner creates a `docs/research` issue first. The assigned worker then runs as the research role: it updates a cited research note and requirement status, and implementation waits for a later planning pass. This separates evidence gathering from the planner's backlog and dependency decisions without requiring a permanently running research session.
+
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
 
 ## Architecture review lane

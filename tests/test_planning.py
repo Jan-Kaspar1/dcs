@@ -1,5 +1,5 @@
 import unittest
-from agent_pool.planning import validate, body, metadata
+from agent_pool.planning import validate, body, metadata, prompt
 
 class PlanningTests(unittest.TestCase):
     def item(self):
@@ -37,5 +37,14 @@ class PlanningTests(unittest.TestCase):
             validate({'issues':[],'dispositions':[{'key':'x','decision':'defer','reason':'vague'}]})
         with self.assertRaises(ValueError):
             validate({'issues':[],'dispositions':[{'key':'x','decision':'maybe','reason':'r'}]})
+
+    def test_prompt_loads_product_context_and_research_gate(self):
+        text = prompt([], [], '/tmp/proposal.json')
+        self.assertIn('docs/product-strategy.md', text)
+        self.assertIn('docs/requirements/README.md', text)
+        self.assertIn('docs/research/', text)
+        self.assertIn('Requirements: ID, ID', text)
+        self.assertIn('documentation-only research issue first', text)
+        self.assertIn('batch control as deferred', text)
 
 if __name__ == '__main__': unittest.main()

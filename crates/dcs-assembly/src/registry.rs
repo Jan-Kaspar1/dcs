@@ -97,6 +97,12 @@ impl ComponentRegistry {
         self
     }
 
+    /// The registered kind strings, in sorted order — the set a
+    /// coverage guard (e.g. `dcs-build`'s spec drift test) enumerates.
+    pub fn kinds(&self) -> impl Iterator<Item = &str> {
+        self.constructors.keys().map(String::as_str)
+    }
+
     /// The constructor registered for `kind`.
     pub(crate) fn constructor(&self, kind: &str) -> Option<&Constructor> {
         self.constructors.get(kind)

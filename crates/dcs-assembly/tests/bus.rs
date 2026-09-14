@@ -12,10 +12,13 @@ use dcs_assembly::{
     StepError, assemble, resolve_drivers, sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{IoDriver, IoError, PointId, Quality, QualityReason, Value};
+use dcs_core::{
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason,
+    TelemetrySnapshot, Value, ValueKind,
+};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
-use dcs_sim_bus::{BusDriver, BusServer, RegisterBank, RegisterDecl};
+use dcs_sim_bus::{BusDriver, BusServer, PointRegister, RegisterBank, RegisterDecl};
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
 
@@ -193,6 +196,43 @@ fn mixed_sim_and_bus_kinds_assemble_scan_and_route() {
 }
 
 #[test]
+fn the_bus_backend_arbitrates_the_single_writer_claim() {
+    with_server(device_bank(), |_, addr| {
+        let model = mixed_model(addr);
+        let driver = build_driver(&model);
+
+        // The register-mapped kind arbitrates through the device
+        // server's claim: no unfenceable field-facing device remains,
+        // so a model built on it may arm automatic failover — while the
+        // manual promotion path, which runs the same claim before the
+        // gate lifts, is unaffected.
+        assert!(driver.is_field_point(LEVEL_RAW));
+        assert!(driver.unfenced_field_devices().is_empty());
+
+        // The promotion path's claim lands on the device server: the
+        // claimed fan-out keeps writing while a second attachment's
+        // register writes are refused with the named fenced error.
+        driver.claim_field_writer(7).unwrap();
+        driver.write(LEVEL_RAW, Value::Float(8.5)).unwrap();
+        let fenced = BusDriver::connect(
+            addr,
+            &[PointRegister {
+                point: PointId(11),
+                register: LEVEL_REGISTER,
+                kind: ValueKind::Float,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fenced.write(PointId(11), Value::Float(0.0)),
+            Err(IoError::Fenced(PointId(11)))
+        );
+        // Reads stay open to the fenced attachment.
+        assert_eq!(fenced.read(PointId(11)).unwrap().value, Value::Float(8.5));
+    });
+}
+
+#[test]
 fn sim_bus_run_matches_the_all_local_reference() {
     // The single-backend reference: the all-`sim` tank-loop model
     // through `sim_driver`, exactly as before the registry existed.
@@ -221,10 +261,27 @@ fn sim_bus_run_matches_the_all_local_reference() {
             executor.scan().unwrap();
             driver.step(0.1).unwrap();
         }
-        serde_json::to_string(&executor.snapshot()).unwrap()
+        executor.snapshot()
     });
 
-    assert_eq!(reference, mixed);
+    // The mixed run's bus backend reports its link — the live
+    // connection the reference's all-local driver has no transport to
+    // report on. That is the one legitimate difference between the two
+    // snapshots' health sections; every other field, including the
+    // executor-collected counters, is identical.
+    assert_eq!(
+        mixed.io_health.driver,
+        Some(DriverDiagnostics {
+            link: LinkState::Connected,
+            last_error: None,
+        })
+    );
+    let mut normalized = mixed;
+    normalized.io_health.driver = None;
+    assert_eq!(
+        serde_json::from_str::<TelemetrySnapshot>(&reference).unwrap(),
+        normalized
+    );
 }
 
 #[test]
@@ -266,6 +323,15 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
                 .quality,
             Quality::Good
         );
+        // While the device server is live the fan-out's aggregate
+        // reports the bus backend's link as connected, no last error.
+        assert_eq!(
+            executor.snapshot().io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+            })
+        );
 
         server.shutdown();
         // The lost device surfaces named IoErrors through the fan-out —
@@ -282,6 +348,15 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         let bus = driver.inspect::<BusDriver>(BUS_DEVICE).unwrap();
         assert!(!bus.connected());
         assert!(bus.last_failure().is_some());
+        // The fan-out's aggregate names the dead backend's last failure
+        // by the device it serves.
+        assert_eq!(
+            driver.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("device 2: no live connection to the device server".to_string()),
+            })
+        );
         // Stepping fails on the cross-backend wire first: the route's
         // write to the dead register surfaces the same named IoError.
         assert_eq!(
@@ -293,8 +368,8 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         // degrades the remote input to Bad rather than panicking.
         driver.write(SETPOINT, Value::Float(40.0)).unwrap();
         executor.scan().unwrap();
-        let sample = executor
-            .snapshot()
+        let snapshot = executor.snapshot();
+        let sample = snapshot
             .points
             .iter()
             .find(|telemetry| telemetry.point == LEVEL_RAW)
@@ -303,6 +378,16 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         assert_eq!(
             sample.quality,
             Quality::Bad(QualityReason::CommunicationFault)
+        );
+        // The same dead link reaches the snapshot's I/O-health driver
+        // section through the aggregate — the link-level report beside
+        // the per-point quality the event left on the input sample.
+        assert_eq!(
+            snapshot.io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("device 2: no live connection to the device server".to_string()),
+            })
         );
     });
 }

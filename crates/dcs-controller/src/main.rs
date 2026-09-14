@@ -4,9 +4,19 @@
 //! the deterministic scan — as the active instance, or as a standby
 //! tracking an active peer's checkpoints.
 //!
-//! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]
-//!         [--auto-promote N] [--state-file PATH]`
+//! Usage: `dcs-controller <model-file> [--check] [--ticks N]
+//!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
+//!         [--remote ADDR] [--driven] [--auto-promote N]
+//!         [--state-file PATH] [--journal-file PATH]`
+//!
+//! `--check` is the engineering compile-check: the model is loaded,
+//! validated, and assembled through the standard registries — device
+//! kinds resolved, channels mapped, ports bound, parameters
+//! constructed — and a summary of what assembled prints, answering
+//! "does this model assemble" without starting a run. No scan executes
+//! and no listener binds; a load, validation, or assembly failure exits
+//! nonzero naming the element exactly as a run would. Run-mode options
+//! do not apply and are rejected as usage errors.
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -56,6 +66,22 @@
 //! a redundant peer exists it remains the preferred recovery story, its
 //! checkpoint stream converging a standby continuously rather than at
 //! the last persisted cycle.
+//!
+//! `--journal-file PATH` persists the transition journal the monitor
+//! records — the journal-persistence decision's durable audit trail:
+//! every journaled entry is appended to `PATH` as one line-delimited
+//! JSON record at the same recording point, and startup replays the
+//! file into the served ring with `seq` numbering continued where it
+//! left off, so `GET /journal` answers continuously across a restart.
+//! A run-boundary marker line separates process lifetimes within one
+//! file; a file that cannot be replayed exits nonzero naming the file
+//! and the offending record, and a missing file is a cold start. The
+//! journal requires `--listen` — the recorder lives in the monitor —
+//! and stays deliberately separate from `--state-file`: the checkpoint
+//! is overwritten per save and consumed by restore, the journal is
+//! append-only and consumed by review; a `--state-file`-resumed run
+//! keeps appending to the same journal file in the restored tick
+//! domain.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -109,7 +135,7 @@ use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
-use dcs_monitor::{Driven, Monitor, MonitorClient};
+use dcs_monitor::{Driven, Monitor, MonitorClient, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, WriteGate};
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
@@ -210,6 +236,9 @@ fn owner_token() -> u64 {
 struct Options {
     /// The plant model document to load.
     model: PathBuf,
+    /// Assemble and report without running a scan — the engineering
+    /// compile-check mode.
+    check: bool,
     /// How many scans to run; `None` runs until stopped.
     ticks: Option<u64>,
     /// Wall-clock scan period in milliseconds; `None` runs unpaced.
@@ -237,17 +266,28 @@ struct Options {
     /// scan cycle, and resume from it at startup when it exists — the
     /// restart-recovery path for a controller with no redundant peer.
     state_file: Option<PathBuf>,
+    /// Persist the transition journal to this append-only file and
+    /// replay it at startup — the run's audit record surviving a
+    /// restart. Requires `--listen`: the journal's recorder lives in
+    /// the monitor.
+    journal_file: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
-Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-                      [--listen ADDR] [--standby ADDR] [--remote ADDR]
-                      [--driven] [--auto-promote N] [--state-file PATH]
+Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
+                      [--dt T] [--listen ADDR] [--standby ADDR]
+                      [--remote ADDR] [--driven] [--auto-promote N]
+                      [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
 controller scan.
 
+  --check         assemble the model without running it: load, validate,
+                  resolve devices, and construct components through the
+                  standard registries, then print what assembled and
+                  exit; no scan runs and no listener binds. Run-mode
+                  options do not apply
   --ticks N       run N deterministic ticks, then print the telemetry snapshot
   --scan-ms MS    pace scans to a wall-clock period of MS milliseconds;
                   runs until stopped, or for N scans when --ticks is given too
@@ -272,7 +312,8 @@ controller scan.
                   consecutive failed checkpoint pulls self-promote the
                   standby at that scan boundary. Requires the model's
                   field-facing devices to arbitrate a single writer —
-                  sim-tcp does through the plant server's claim
+                  sim-tcp does through the plant server's claim, sim-bus
+                  through the device server's
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle — atomically, by write-then-rename —
@@ -281,6 +322,14 @@ controller scan.
                   unsupported format version, or a fingerprint/structural
                   mismatch with the loaded model) exits nonzero naming
                   the reason; a missing file is a cold start
+  --journal-file PATH
+                  persist the transition journal to PATH — one
+                  line-delimited JSON record per journaled entry — and
+                  replay it at startup, seeding the served ring and
+                  continuing seq numbering across a restart; a
+                  run-boundary marker separates process lifetimes, a
+                  corrupt record exits nonzero naming it, and a missing
+                  file is a cold start. Requires --listen
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -291,6 +340,7 @@ way, so exactly one peer writes the shared plant.";
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut model = None;
+        let mut check = false;
         let mut ticks = None;
         let mut scan_ms = None;
         let mut dt = None;
@@ -300,6 +350,7 @@ impl Options {
         let mut driven = false;
         let mut auto_promote = None;
         let mut state_file = None;
+        let mut journal_file = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -307,6 +358,7 @@ impl Options {
                     .ok_or_else(|| format!("{flag} requires a value"))
             };
             match arg.as_str() {
+                "--check" => check = true,
                 "--ticks" => {
                     ticks = Some(
                         value("--ticks")?
@@ -340,6 +392,9 @@ impl Options {
                     );
                 }
                 "--state-file" => state_file = Some(PathBuf::from(value("--state-file")?)),
+                "--journal-file" => {
+                    journal_file = Some(PathBuf::from(value("--journal-file")?));
+                }
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -352,7 +407,35 @@ impl Options {
             }
         }
         let model = model.ok_or_else(|| "missing <model-file>".to_string())?;
-        if !driven && ticks.is_none() && scan_ms.is_none() {
+        if check {
+            // Check mode assembles and reports; it runs no scan and
+            // binds no listener, so the run-mode options have no meaning
+            // and are rejected rather than silently ignored.
+            let mut rejected = Vec::new();
+            for (flag, present) in [
+                ("--ticks", ticks.is_some()),
+                ("--scan-ms", scan_ms.is_some()),
+                ("--dt", dt.is_some()),
+                ("--listen", listen.is_some()),
+                ("--standby", standby.is_some()),
+                ("--remote", remote.is_some()),
+                ("--driven", driven),
+                ("--auto-promote", auto_promote.is_some()),
+                ("--state-file", state_file.is_some()),
+                ("--journal-file", journal_file.is_some()),
+            ] {
+                if present {
+                    rejected.push(flag);
+                }
+            }
+            if !rejected.is_empty() {
+                return Err(format!(
+                    "--check assembles the model without scanning or serving; {} do not apply",
+                    rejected.join(", ")
+                ));
+            }
+        }
+        if !check && !driven && ticks.is_none() && scan_ms.is_none() {
             scan_ms = Some(100);
         }
         if let Some(period) = scan_ms
@@ -385,8 +468,15 @@ impl Options {
                 "--listen requires --scan-ms: monitoring runs alongside the paced scan".to_string(),
             );
         }
+        if journal_file.is_some() && listen.is_none() {
+            return Err(
+                "--journal-file requires --listen: the transition journal lives in the monitor"
+                    .to_string(),
+            );
+        }
         Ok(Self {
             model,
+            check,
             ticks,
             scan_ms,
             dt,
@@ -396,6 +486,7 @@ impl Options {
             driven,
             auto_promote,
             state_file,
+            journal_file,
         })
     }
 }
@@ -484,6 +575,22 @@ fn main() -> ExitCode {
         Ok(model) => model,
         Err(error) => return fail(error),
     };
+
+    // The compile-check mode: driver resolution and assembly run exactly
+    // as they do below — the same standard registries, the same named
+    // failures — then the run stops at the summary. No gate, no peer, no
+    // scan, no listener.
+    if options.check {
+        return match dcs_controller::check(&model) {
+            Ok(report) => {
+                println!("check ok: {}", options.model.display());
+                print!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(error),
+        };
+    }
+
     // The field driver: the registry-resolved fan-out — local simulated
     // backends plus any `sim-tcp` devices the model declares — or the
     // shared simulated plant a redundant pair observes together.
@@ -592,6 +699,13 @@ fn main() -> ExitCode {
         .unwrap_or(1.0);
     let period = options.scan_ms.map(Duration::from_millis);
 
+    // The monitor's recorder configuration: default retention bounds,
+    // plus the durable journal-file sink --journal-file names.
+    let monitor_config = || MonitorConfig {
+        journal_file: options.journal_file.clone(),
+        ..MonitorConfig::default()
+    };
+
     // The externally paced mode: serve the monitor unpaced and let
     // `POST /scan` requests drive the run — each requested scan carries
     // a tracking standby's checkpoint pull and the plant step the
@@ -607,12 +721,13 @@ fn main() -> ExitCode {
             },
             None => None,
         };
-        let monitor = match Monitor::bind_peer(addr, peer, model.signal_index()) {
-            Ok(monitor) => monitor,
-            Err(error) => {
-                return fail(format!("cannot bind monitor on {addr}: {error}"));
-            }
-        };
+        let monitor =
+            match Monitor::bind_peer_with(addr, peer, model.signal_index(), monitor_config()) {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    return fail(format!("cannot bind monitor on {addr}: {error}"));
+                }
+            };
         let monitor = monitor.driven(Driven {
             track,
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
@@ -643,13 +758,17 @@ fn main() -> ExitCode {
         let client = MonitorClient::new(active_addr);
         match &options.listen {
             Some(addr) => {
-                let monitor =
-                    match Monitor::bind_paced_peer(addr.as_str(), peer, model.signal_index()) {
-                        Ok(monitor) => monitor,
-                        Err(error) => {
-                            return fail(format!("cannot bind monitor on {addr}: {error}"));
-                        }
-                    };
+                let monitor = match Monitor::bind_paced_peer_with(
+                    addr.as_str(),
+                    peer,
+                    model.signal_index(),
+                    monitor_config(),
+                ) {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        return fail(format!("cannot bind monitor on {addr}: {error}"));
+                    }
+                };
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 run_monitored(
@@ -751,13 +870,17 @@ fn main() -> ExitCode {
     } else {
         match &options.listen {
             Some(addr) => {
-                let monitor =
-                    match Monitor::bind_paced_peer(addr.as_str(), peer, model.signal_index()) {
-                        Ok(monitor) => monitor,
-                        Err(error) => {
-                            return fail(format!("cannot bind monitor on {addr}: {error}"));
-                        }
-                    };
+                let monitor = match Monitor::bind_paced_peer_with(
+                    addr.as_str(),
+                    peer,
+                    model.signal_index(),
+                    monitor_config(),
+                ) {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        return fail(format!("cannot bind monitor on {addr}: {error}"));
+                    }
+                };
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.

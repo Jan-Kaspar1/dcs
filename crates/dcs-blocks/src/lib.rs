@@ -49,7 +49,13 @@
 //! - [`Totalizer`] — a rate input accumulated into a running total with
 //!   reset and rollover;
 //! - [`Sequencer`] — a declared table of steps walked in order while a
-//!   `run` input holds, each driving `out` for its tick duration.
+//!   `run` input holds, each driving `out` for its tick duration;
+//! - [`BoolGate`] — an N-input `and`/`or`/`xor` truth fold over its
+//!   `in_N` inputs;
+//! - [`SrLatch`] — a set/reset latch, reset-dominant on simultaneous
+//!   assertion;
+//! - [`EdgeTrigger`] — a one-scan pulse on the rising, falling, or both
+//!   edges of a Boolean input.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -65,10 +71,12 @@
 mod alarm_monitor;
 mod analog_input;
 mod analog_output;
+mod bool_gate;
 mod counter;
 pub mod describe;
 mod digital_input;
 mod digital_output;
+mod edge_trigger;
 mod interlock;
 mod latching_alarm;
 mod manual_station;
@@ -80,6 +88,7 @@ mod pid;
 mod rate_limiter;
 mod sequencer;
 mod signal_filter;
+mod sr_latch;
 mod timer;
 mod totalizer;
 mod valve;
@@ -87,9 +96,11 @@ mod valve;
 pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
 pub use analog_output::{AnalogOutput, RawOutput};
+pub use bool_gate::{BoolGate, GateOperation};
 pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
+pub use edge_trigger::{Edge, EdgeTrigger};
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
@@ -101,9 +112,45 @@ pub use pid::{Pid, PidConfig};
 pub use rate_limiter::RateLimiter;
 pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
+pub use sr_latch::SrLatch;
 pub use timer::Timer;
 pub use totalizer::Totalizer;
 pub use valve::Valve;
+
+/// Every component kind the library ships — the set `dcs-controller`'s
+/// standard registry registers.
+///
+/// This is the checked-in kind list the spec-coverage guard is recorded
+/// against: `dcs-blocks/tests/spec_drift.rs` asserts the `dcs-build`
+/// spec table covers exactly these kinds, and `dcs-controller`'s
+/// registry test asserts the standard registry registers exactly these.
+/// Adding a kind means adding its `KIND` here, its registry entry, and
+/// its `dcs-build` spec — the two tests keep the three in step, so a
+/// registered kind without a spec fails.
+pub const KINDS: &[&str] = &[
+    AnalogInput::<f64>::KIND,
+    AnalogOutput::<f64>::KIND,
+    Pid::KIND,
+    DigitalInput::KIND,
+    DigitalOutput::KIND,
+    AlarmMonitor::KIND,
+    LatchingAlarm::KIND,
+    Interlock::KIND,
+    OverrideSelect::KIND,
+    Valve::KIND,
+    Motor::KIND,
+    Timer::KIND,
+    Counter::KIND,
+    RateLimiter::KIND,
+    ManualStation::KIND,
+    SignalFilter::KIND,
+    MedianVoter::KIND,
+    Totalizer::KIND,
+    Sequencer::KIND,
+    BoolGate::KIND,
+    SrLatch::KIND,
+    EdgeTrigger::KIND,
+];
 
 #[cfg(test)]
 pub(crate) mod testutil {
