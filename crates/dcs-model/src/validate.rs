@@ -130,6 +130,22 @@ pub enum ValidationError {
         /// The offending point.
         point: PointId,
     },
+    /// A point declares a `stale_after_ticks` freshness budget but has
+    /// direction `Out`. The budget lands on the input image during the
+    /// read phase, which only `In` points take part in — an `Out`
+    /// point's declaration has nothing to attach to.
+    StaleOut {
+        /// The offending point.
+        point: PointId,
+    },
+    /// A point declares a `stale_after_ticks` freshness budget but binds
+    /// no channel. The budget measures the lag of a driver-returned
+    /// sample's tick, and an internal point is never driver-read — it
+    /// can never go stale, so the declaration is meaningless there.
+    StaleInternal {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -254,6 +270,16 @@ impl fmt::Display for ValidationError {
             Self::WritableOut { point } => write!(
                 f,
                 "io point {} declares writable but has direction out",
+                point.0
+            ),
+            Self::StaleOut { point } => write!(
+                f,
+                "io point {} declares stale_after_ticks but has direction out",
+                point.0
+            ),
+            Self::StaleInternal { point } => write!(
+                f,
+                "io point {} declares stale_after_ticks but binds no channel",
                 point.0
             ),
             Self::ChannelTypeMismatch {
@@ -423,6 +449,9 @@ impl PlantModel {
     /// - `writable` marks only `In` points: the command path refuses
     ///   `Out`-point writes outright, so an `Out` point carrying the flag
     ///   is reported, whether the point is channel-bound or internal;
+    /// - `stale_after_ticks` marks only field `In` points: the freshness
+    ///   budget applies where a driver read happens, so an `Out` point or
+    ///   a channel-less internal point carrying it is reported;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
     ///   port), with matching value types on both ends — internal points
@@ -463,6 +492,19 @@ impl PlantModel {
             // point — field or internal — is a declaration error.
             if point.writable && point.direction == Direction::Out {
                 errors.push(ValidationError::WritableOut { point: point.id });
+            }
+            // `stale_after_ticks` interacts with both the direction and
+            // the channel rules: the freshness check runs on driver
+            // reads in the input phase, so only a field `In` point can
+            // carry the budget — an `Out` point or a channel-less
+            // internal point declaring it is a declaration error.
+            if point.stale_after_ticks.is_some() {
+                if point.direction == Direction::Out {
+                    errors.push(ValidationError::StaleOut { point: point.id });
+                }
+                if point.channel.is_none() {
+                    errors.push(ValidationError::StaleInternal { point: point.id });
+                }
             }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
@@ -882,5 +924,42 @@ mod tests {
                 .validate()
                 .contains(&ValidationError::WritableOut { point: PointId(11) })
         );
+    }
+
+    #[test]
+    fn stale_after_ticks_marks_only_field_in_points() {
+        // A field `In` point — the point a driver read serves — is the
+        // only declaration the budget is valid on.
+        let mut model = minimal();
+        model.io_points[0].stale_after_ticks = Some(2);
+        assert!(model.validate().is_empty());
+
+        // On an `Out` point the budget has no read phase to apply to.
+        let mut model = minimal();
+        model.io_points[1].stale_after_ticks = Some(2);
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::StaleOut { point: PointId(11) })
+        );
+
+        // On a channel-less internal point the driver is never read, so
+        // the budget can never apply — rejected as meaningless.
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Float(2.0)));
+        model.io_points[0].stale_after_ticks = Some(2);
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::StaleInternal { point: PointId(10) })
+        );
+
+        // An internal `Out` point violates both rules.
+        let mut model = minimal();
+        make_internal(&mut model, 1, Some(Value::Float(0.0)));
+        model.io_points[1].stale_after_ticks = Some(2);
+        let errors = model.validate();
+        assert!(errors.contains(&ValidationError::StaleOut { point: PointId(11) }));
+        assert!(errors.contains(&ValidationError::StaleInternal { point: PointId(11) }));
     }
 }

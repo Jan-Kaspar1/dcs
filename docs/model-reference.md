@@ -137,6 +137,7 @@ carried by the controller's scan image — decision 14).
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
 | `initial` | tagged `Value`, e.g. `{"Float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
+| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
 
 ### Internal points
 
@@ -180,6 +181,38 @@ reviewing, so lint flags it (`writable_field_point`); writable internal
 points are the ordinary mechanism and are not flagged. Writability joins
 the point metadata the monitoring surface serves, so the page offers
 command affordances only where commands can succeed.
+
+### `stale_after_ticks` and input freshness
+
+`stale_after_ticks` declares how fresh a field `in` point's samples must
+stay: the number of executor scan ticks a driver-stamped sample tick may
+lag before the point's data is stale (decision 41). The budget lives in
+the point map assembly produces, and the *executor's input phase*
+applies the rule — each scan, for a budgeted field `in` point, it
+compares the tick the driver returned on the sample against the scan
+tick before re-stamping:
+
+- a lag within the budget leaves the driver-returned quality untouched;
+- a lag exceeding it merges `Uncertain(Stale)` by the worst-of rule, so
+  a driver-reported `Bad` or worse-named `Uncertain` is never improved,
+  while a held `Good` value degrades to `Uncertain(Stale)` until the
+  first sample inside the budget returns it to `Good`;
+- the landed image sample always carries the scan tick — the executor
+  is the only timestamp authority; the driver tick is freshness
+  evidence, never an image timestamp;
+- a failed read is not a stale sample: the documented `Bad` mapping and
+  last-known-value behavior stand, and a forced point never reads the
+  driver, so `Substituted` stands too.
+
+A budget of `0` requires a sample stamped at the current scan tick —
+the strictest declaration, for sources expected to refresh every scan.
+The sim bank, the remote plant, and the sim-bus register bank all stamp
+their writes with a device tick the driver protocols carry, so field
+devices integrated through them supply freshness evidence without
+protocol changes. A driver whose samples carry no usable freshness
+signal — one that stamps every read with the current tick, or a fixed
+tick — simply makes the declaration inert or always-stale; declare the
+field only where the source distinguishes fresh samples from held ones.
 
 ## `signals`
 

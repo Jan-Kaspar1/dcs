@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "measurement": { "direction": "in", "value_type": "Float" },
+        "ambient": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-bus",
+      "parameters": {
+        "address": "__BUS_ADDR__",
+        "registers": { "level-raw": 4 }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "measurement" },
+      "stale_after_ticks": 2
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "level-raw" },
+      "stale_after_ticks": 3
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "ambient" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "measurement",
+      "source": 10,
+      "unit": "mA",
+      "description": "Field measurement declared fresh for two ticks"
+    },
+    {
+      "id": 101,
+      "name": "level-raw",
+      "source": 11,
+      "unit": "m",
+      "description": "Bus-served level declared fresh for three ticks"
+    },
+    {
+      "id": 102,
+      "name": "ambient",
+      "source": 12,
+      "unit": "degC",
+      "description": "Field input declaring no freshness budget"
+    }
+  ],
+  "components": [],
+  "connections": []
+}

@@ -208,6 +208,27 @@ fn schema_rejects_documents_with_structural_violations() {
             {"id": 1, "kind": "sim-tcp", "parameters": {"timeout_ms": 250},
              "channels": {"ch0": {"direction": "in", "value_type": "Float"}}}
         ], "io_points": [], "signals": [], "components": [], "connections": []}),
+        // A freshness budget on an out point.
+        serde_json::json!({"version": 1, "devices": [
+            {"id": 1, "kind": "sim", "channels":
+                {"ch0": {"direction": "out", "value_type": "Float"}}}
+        ], "io_points": [
+            {"id": 1, "direction": "out", "value_type": "Float",
+             "channel": {"device": 1, "name": "ch0"}, "stale_after_ticks": 2}
+        ], "signals": [], "components": [], "connections": []}),
+        // A freshness budget on a channel-less internal point.
+        serde_json::json!({"version": 1, "devices": [], "io_points": [
+            {"id": 1, "direction": "in", "value_type": "Float",
+             "initial": {"Float": 0.0}, "stale_after_ticks": 2}
+        ], "signals": [], "components": [], "connections": []}),
+        // A negative freshness budget.
+        serde_json::json!({"version": 1, "devices": [
+            {"id": 1, "kind": "sim", "channels":
+                {"ch0": {"direction": "in", "value_type": "Float"}}}
+        ], "io_points": [
+            {"id": 1, "direction": "in", "value_type": "Float",
+             "channel": {"device": 1, "name": "ch0"}, "stale_after_ticks": -1}
+        ], "signals": [], "components": [], "connections": []}),
     ];
     for (index, document) in cases.iter().enumerate() {
         assert!(

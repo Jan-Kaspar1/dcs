@@ -9,7 +9,7 @@ use dcs_core::{
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig};
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, PointSpec, StepError,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -144,15 +144,27 @@ fn with_monitor_config<T>(
     components: Vec<Box<dyn Component>>,
     body: impl FnOnce(&StubDriver, &MonitorClient) -> T,
 ) -> T {
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    with_monitor_map(config, map, components, body)
+}
+
+/// As [`with_monitor_config`] with an explicit point map — the rig for
+/// spec fields the default map does not declare, like an input's
+/// `stale_after_ticks` freshness budget.
+fn with_monitor_map<T>(
+    config: MonitorConfig,
+    map: PointMap,
+    components: Vec<Box<dyn Component>>,
+    body: impl FnOnce(&StubDriver, &MonitorClient) -> T,
+) -> T {
     let driver = StubDriver::new(&[
         (PointId(10), Value::Float(0.0)),
         (PointId(20), Value::Float(0.0)),
         (PointId(30), Value::Float(0.0)),
     ]);
-    let map = PointMap::new()
-        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
-        .with_point(PointId(20), Direction::Out, ValueKind::Float)
-        .with_point(PointId(30), Direction::Out, ValueKind::Float);
     let executor = Executor::new(&driver, map, components).unwrap();
     let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
@@ -439,6 +451,110 @@ fn identical_scripted_runs_produce_identical_history_and_journal() {
                 serde_json::to_string(&client.journal(0).unwrap()).unwrap(),
             )
         })
+    };
+
+    assert_eq!(run(), run());
+}
+
+/// The point map carrying a two-tick freshness budget on `In` point 10 —
+/// what assembly resolves a `stale_after_ticks: 2` declaration into.
+fn stale_map() -> PointMap {
+    PointMap::new()
+        .with_spec(
+            PointId(10),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: false,
+                stale_after_ticks: Some(2),
+            },
+        )
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float)
+}
+
+/// One scripted stale-and-recover run: the stub never advances its own
+/// tick, so the field sample stamped at driver tick 0 lags further
+/// behind every scan — past the budget at scan 3 — until a write stamped
+/// at driver tick 3 refreshes it inside the budget again.
+fn stale_run(client: &MonitorClient, driver: &StubDriver) {
+    client.advance(3).unwrap();
+    driver.tick.store(3, Ordering::Relaxed);
+    driver.write(PointId(10), Value::Float(9.0)).unwrap();
+    client.advance(1).unwrap();
+}
+
+#[test]
+fn stale_quality_is_journaled_at_the_scan_tick() {
+    with_monitor_map(
+        MonitorConfig::default(),
+        stale_map(),
+        vec![Box::new(Scale)],
+        |driver, client| {
+            stale_run(client, driver);
+            let journal = client.journal(0).unwrap();
+            let stale = journal
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry.event,
+                        JournalEvent::QualityChanged {
+                            point,
+                            to: Quality::Uncertain(QualityReason::Stale),
+                            ..
+                        } if point == PointId(10)
+                    )
+                })
+                .expect("the stale transition is journaled");
+            // The transition is attributed to the scan that stamped it —
+            // lag 3 first exceeded the budget at tick 3.
+            assert_eq!(stale.tick, Tick(3));
+            let recovered = journal
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry.event,
+                        JournalEvent::QualityChanged {
+                            point,
+                            from: Some(Quality::Uncertain(QualityReason::Stale)),
+                            to: Quality::Good,
+                        } if point == PointId(10)
+                    )
+                })
+                .expect("the recovery transition is journaled");
+            assert_eq!(recovered.tick, Tick(4));
+
+            // The image sample itself carried Uncertain(Stale) at the
+            // scan tick — the named reason the page renders.
+            let history = client.history(&[PointId(10)], 0).unwrap();
+            assert_eq!(
+                history[0].samples[2].sample,
+                Sample::new(
+                    Value::Float(0.0),
+                    Quality::Uncertain(QualityReason::Stale),
+                    Tick(3)
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn identical_stale_runs_produce_identical_history_and_journal() {
+    let run = || {
+        with_monitor_map(
+            MonitorConfig::default(),
+            stale_map(),
+            vec![Box::new(Scale)],
+            |driver, client| {
+                stale_run(client, driver);
+                (
+                    serde_json::to_string(&client.history(&[], 0).unwrap()).unwrap(),
+                    serde_json::to_string(&client.journal(0).unwrap()).unwrap(),
+                )
+            },
+        )
     };
 
     assert_eq!(run(), run());
