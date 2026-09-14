@@ -4,7 +4,7 @@
 //! identical to the uninterrupted run — the bumpless-switchover
 //! acceptance criterion.
 
-use dcs_blocks::{DigitalOutput, Pid, PidConfig};
+use dcs_blocks::{OverrideSelect, Pid, PidConfig};
 use dcs_core::{
     Direction, IoDriver, IoError, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
@@ -289,39 +289,54 @@ impl IoDriver for FlatDriver {
 
 #[test]
 fn stateless_components_and_drivers_are_unaffected() {
-    // A stateless component (DigitalOutput) behind a driver that does not
-    // capture state: the checkpoint carries an empty component map and no
-    // driver section, and restore still works.
-    const COMMAND: PointId = PointId(30);
-    const FIELD: PointId = PointId(31);
+    // A stateless, parameterless component (OverrideSelect) behind a
+    // driver that does not capture state: the checkpoint carries an
+    // empty component map and no driver section, and restore still works.
+    const CONTROL: PointId = PointId(30);
+    const OPERATOR: PointId = PointId(31);
+    const SELECT: PointId = PointId(32);
+    const FIELD: PointId = PointId(33);
     let map: PointMap = [
-        (COMMAND, Direction::In, ValueKind::Bool),
-        (FIELD, Direction::Out, ValueKind::Bool),
+        (CONTROL, Direction::In, ValueKind::Float),
+        (OPERATOR, Direction::In, ValueKind::Float),
+        (SELECT, Direction::In, ValueKind::Bool),
+        (FIELD, Direction::Out, ValueKind::Float),
     ]
     .into_iter()
     .collect();
-    let block = || DigitalOutput::new("do", COMMAND, FIELD);
+    let block = || OverrideSelect::new("ovr", CONTROL, OPERATOR, SELECT, FIELD);
 
-    let driver = FlatDriver::new(&[(COMMAND, Value::Bool(false)), (FIELD, Value::Bool(false))]);
-    driver.write(COMMAND, Value::Bool(true)).unwrap();
+    let driver = FlatDriver::new(&[
+        (CONTROL, Value::Float(0.0)),
+        (OPERATOR, Value::Float(0.0)),
+        (SELECT, Value::Bool(false)),
+        (FIELD, Value::Float(0.0)),
+    ]);
+    driver.write(CONTROL, Value::Float(7.0)).unwrap();
+    driver.write(OPERATOR, Value::Float(9.0)).unwrap();
+    driver.write(SELECT, Value::Bool(true)).unwrap();
     let mut executor = Executor::new(&driver, map.clone(), vec![Box::new(block())]).unwrap();
     executor.scan().unwrap();
     let checkpoint = executor.checkpoint();
 
-    assert!(checkpoint.components["do"].is_empty());
+    assert!(checkpoint.components["ovr"].is_empty());
     assert_eq!(checkpoint.driver, None);
     assert_eq!(
         checkpoint.outputs[&FIELD],
-        Sample::good(Value::Bool(true), Tick(1))
+        Sample::good(Value::Float(9.0), Tick(1))
     );
 
     // The standby driver observes the field itself: it holds the live
-    // command value rather than a restored one.
-    let standby_driver =
-        FlatDriver::new(&[(COMMAND, Value::Bool(true)), (FIELD, Value::Bool(false))]);
+    // input values rather than restored ones.
+    let standby_driver = FlatDriver::new(&[
+        (CONTROL, Value::Float(7.0)),
+        (OPERATOR, Value::Float(9.0)),
+        (SELECT, Value::Bool(true)),
+        (FIELD, Value::Float(0.0)),
+    ]);
     let mut restored =
         Executor::restore(&standby_driver, map, vec![Box::new(block())], &checkpoint).unwrap();
     restored.scan().unwrap();
     assert_eq!(restored.tick(), Tick(2));
-    assert_eq!(standby_driver.read(FIELD).unwrap().value, Value::Bool(true));
+    assert_eq!(standby_driver.read(FIELD).unwrap().value, Value::Float(9.0));
 }

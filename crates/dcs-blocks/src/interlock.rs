@@ -4,7 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -189,6 +190,51 @@ impl Component for Interlock {
                 Some(describe::FINITE_F64),
             )],
         )
+    }
+
+    /// Tunes `safe_value` at the scan boundary. The declared
+    /// `FINITE_F64` bound already bars non-finite values; the hook
+    /// re-checks so a caller bypassing the executor cannot install a
+    /// `NaN` the fail-safe path would then drive.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "safe_value" => {
+                let tuned = params::tune_f64(&self.name, parameter, value)?;
+                if !tuned.is_finite() {
+                    return Err(params::invalid_parameter(
+                        &self.name,
+                        parameter,
+                        "must be finite",
+                    ));
+                }
+                self.safe_value = tuned;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the tuned `safe_value` — the interlock is otherwise
+    /// stateless, but runtime tuning is run state a standby must
+    /// inherit.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("safe_value", Value::Float(self.safe_value));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["safe_value"])?;
+        let safe_value = state.require_f64(&self.name, "safe_value")?;
+        if !safe_value.is_finite() {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "safe_value".to_string(),
+                value: Value::Float(safe_value),
+            });
+        }
+        self.safe_value = safe_value;
+        Ok(())
     }
 }
 

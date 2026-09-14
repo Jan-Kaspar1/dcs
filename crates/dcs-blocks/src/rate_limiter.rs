@@ -4,8 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, StateError, StateMap,
-    Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -151,20 +151,41 @@ impl Component for RateLimiter {
         )
     }
 
+    /// Tunes `max_delta` at the scan boundary; the new bound applies to
+    /// the next slew step.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "max_delta" => {
+                let tuned = params::tune_f64(&self.name, parameter, value)?;
+                if !tuned.is_finite() || tuned <= 0.0 {
+                    return Err(params::invalid_parameter(
+                        &self.name,
+                        parameter,
+                        "must be finite and positive",
+                    ));
+                }
+                self.max_delta = tuned;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
     /// Captures the value `out` is slewing from — absent before the
-    /// first finite input — so a checkpointed limiter continues
-    /// mid-slew.
+    /// first finite input — plus the tuned `max_delta`, so a
+    /// checkpointed limiter continues mid-slew under the same bound.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         if let Some(current) = self.current {
             state.insert("current", Value::Float(current));
         }
+        state.insert("max_delta", Value::Float(self.max_delta));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["current"])?;
-        self.current = match state.optional_f64(&self.name, "current")? {
+        state.ensure_known_fields(&self.name, &["current", "max_delta"])?;
+        let current = match state.optional_f64(&self.name, "current")? {
             Some(current) if current.is_finite() => Some(current),
             Some(current) => {
                 return Err(StateError::InvalidValue {
@@ -175,6 +196,16 @@ impl Component for RateLimiter {
             }
             None => None,
         };
+        let max_delta = state.require_f64(&self.name, "max_delta")?;
+        if !max_delta.is_finite() || max_delta <= 0.0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "max_delta".to_string(),
+                value: Value::Float(max_delta),
+            });
+        }
+        self.current = current;
+        self.max_delta = max_delta;
         Ok(())
     }
 }
@@ -363,9 +394,10 @@ mod tests {
         standby.step(&io, Tick(3)).unwrap();
         assert_eq!(driven(&io), 5.0);
 
-        // An uninitialized capture restores an uninitialized limiter.
+        // An uninitialized capture restores an uninitialized limiter:
+        // `current` is absent while the tuned bound rides along.
         let state = component().capture_state();
-        assert!(state.is_empty());
+        assert_eq!(state.get("current"), None);
         let mut fresh = component();
         fresh.restore_state(&state).unwrap();
         let fresh_io = TestIo::new(&[

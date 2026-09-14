@@ -7,8 +7,8 @@
 //! exactly the declared set.
 
 use dcs_core::{
-    ComponentDescriptor, Direction, IoDriver, IoError, PointId, PointType, PortDescriptor, Sample,
-    StateError, StateMap, Tick, TypedSample, ValueKind,
+    CommandError, ComponentDescriptor, Direction, IoDriver, IoError, PointId, PointType,
+    PortDescriptor, Sample, StateError, StateMap, Tick, TypedSample, Value, ValueKind,
 };
 
 /// The error type a component's [`step`](Component::step) reports.
@@ -186,6 +186,40 @@ pub trait Component: Send {
                 .collect(),
             parameters: Vec::new(),
         }
+    }
+
+    /// Applies an operator's parameter tuning — the component half of
+    /// [`Command::SetParameter`](dcs_core::Command).
+    ///
+    /// The executor calls this at the scan boundary, in deterministic
+    /// submission order, after validating the command against
+    /// [`describe`](Component::describe): `parameter` is a declared
+    /// parameter name, `value`'s kind matches its declared
+    /// [`ValueKind`], and a declared
+    /// [`ParameterRange`](dcs_core::ParameterRange) is already enforced.
+    /// The implementation still owns the kind's own invariants — limits
+    /// that must stay ordered, counts that must stay non-negative — and
+    /// refuses a value that would break them with a
+    /// [`CommandError`] naming this component; a refused parameter
+    /// changes nothing.
+    ///
+    /// The default returns [`CommandError::UnsupportedParameter`]: kinds
+    /// opt into tuning by overriding the hook, and only for the
+    /// parameters their descriptor declares — an undeclared name must be
+    /// rejected, never silently accepted or ignored.
+    ///
+    /// **Checkpoint obligation:** a tuned parameter is run state. An
+    /// implementation that accepts tuning must fold every writable
+    /// parameter into its [`capture_state`](Component::capture_state)
+    /// vocabulary so [`restore_state`](Component::restore_state) brings
+    /// it back — a tracking standby inherits runtime tuning through the
+    /// ordinary checkpoint, and a parameter tuned without being captured
+    /// diverges on switchover.
+    fn apply_parameter(&mut self, parameter: &str, _value: Value) -> Result<(), CommandError> {
+        Err(CommandError::UnsupportedParameter {
+            component: self.name().to_string(),
+            parameter: parameter.to_string(),
+        })
     }
 
     /// Captures the component's internal state into a [`StateMap`].

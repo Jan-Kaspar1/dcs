@@ -3,7 +3,10 @@
 
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{ComponentDescriptor, PointId, PortRole, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
+    Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A motor: drives the boolean `cmd` start/stop request onto the field
@@ -153,6 +156,51 @@ impl Component for Motor {
                 Some(describe::NONNEGATIVE_INT),
             )],
         )
+    }
+
+    /// Tunes `fault_ticks` at the scan boundary; retuning below the
+    /// banked `disagreeing` count asserts `fault` on the next scan.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "fault_ticks" => {
+                self.fault_ticks = params::tune_u64(&self.name, parameter, value)?;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the banked disagreeing-scan count and the tuned
+    /// `fault_ticks` so a tracking standby continues the count under
+    /// the same tuning.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("disagreeing", Value::Int(self.disagreeing as i64));
+        state.insert("fault_ticks", Value::Int(self.fault_ticks as i64));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["disagreeing", "fault_ticks"])?;
+        let disagreeing = state.require_i64(&self.name, "disagreeing")?;
+        if disagreeing < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "disagreeing".to_string(),
+                value: Value::Int(disagreeing),
+            });
+        }
+        let fault_ticks = state.require_i64(&self.name, "fault_ticks")?;
+        if fault_ticks < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "fault_ticks".to_string(),
+                value: Value::Int(fault_ticks),
+            });
+        }
+        self.disagreeing = disagreeing as u64;
+        self.fault_ticks = fault_ticks as u64;
+        Ok(())
     }
 }
 

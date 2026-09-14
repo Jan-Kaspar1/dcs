@@ -303,11 +303,17 @@ function describeEvent(event) {
   return JSON.stringify(event);
 }
 
-// A command serializes as {"write_value": {point, kind, value}}.
+// A command serializes as {"write_value": {point, kind, value}} |
+// {"set_parameter": {component, name, value}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
     return "write " + pointName(write.point) + " := " + formatValue(write.value);
+  }
+  if ("set_parameter" in command) {
+    const tuning = command.set_parameter;
+    return "tune " + tuning.component + "." + tuning.name + " := " +
+      formatValue(tuning.value);
   }
   return JSON.stringify(command);
 }
@@ -327,7 +333,10 @@ function describeOutcome(outcome) {
 
 // A rejection reason serializes as {"unknown_point": {point}} |
 // {"type_mismatch": {point, expected, found}} |
-// {"driver_rejected": {point, error}}.
+// {"driver_rejected": {point, error}} | the parameter-command reasons
+// {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
+// "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
+// each carrying the offending component.
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
@@ -341,6 +350,34 @@ function describeReason(reason) {
     const rejection = reason.driver_rejected;
     return "driver rejected " + pointName(rejection.point) + ": " +
       describeIoError(rejection.error);
+  }
+  if ("unknown_component" in reason) {
+    return "unknown component " + reason.unknown_component.component;
+  }
+  if ("unknown_parameter" in reason) {
+    const rejection = reason.unknown_parameter;
+    return rejection.component + " declares no parameter " + rejection.parameter;
+  }
+  if ("unsupported_parameter" in reason) {
+    const rejection = reason.unsupported_parameter;
+    return rejection.component + " exposes no writable parameters, refused " +
+      rejection.parameter;
+  }
+  if ("parameter_type_mismatch" in reason) {
+    const rejection = reason.parameter_type_mismatch;
+    return "parameter " + rejection.component + "." + rejection.parameter +
+      " expects " + rejection.expected + ", found " + formatValue(rejection.found);
+  }
+  if ("out_of_range" in reason) {
+    const rejection = reason.out_of_range;
+    return "parameter " + rejection.component + "." + rejection.parameter +
+      " value " + formatValue(rejection.value) + " outside declared range [" +
+      formatValue(rejection.range.min) + ", " + formatValue(rejection.range.max) + "]";
+  }
+  if ("invalid_parameter" in reason) {
+    const rejection = reason.invalid_parameter;
+    return rejection.component + " rejected parameter " + rejection.parameter +
+      ": " + rejection.detail;
   }
   return JSON.stringify(reason);
 }

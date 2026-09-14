@@ -264,7 +264,7 @@ impl<'d> Monitor<'d> {
                     let receipt = executor.submit_command(command);
                     let index = executor.receipts().len() - 1;
                     let tick = executor.tick();
-                    recorder.note_command(index, receipt, tick);
+                    recorder.note_command(index, receipt.clone(), tick);
                     json(200, &receipt)
                 }
                 Err(response) => response,
