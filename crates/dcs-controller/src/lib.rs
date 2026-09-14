@@ -12,7 +12,7 @@
 use dcs_assembly::{BuildError, ComponentRegistry};
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    Motor, OverrideSelect, Pid, RateLimiter, Timer, Valve,
+    LatchingAlarm, Motor, OverrideSelect, Pid, RateLimiter, Timer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_runtime::Component;
@@ -105,6 +105,16 @@ pub fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("alarm")?,
+                spec.parameters,
+            ))
+        })
+        .with(LatchingAlarm::KIND, |spec| {
+            boxed(LatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
                 spec.parameters,
             ))
         })

@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "pv": { "direction": "in", "value_type": "Float" },
+        "alarm": { "direction": "out", "value_type": "Bool" },
+        "unack": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "pv" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "alarm" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "unack" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "measured-value",
+      "source": 10,
+      "description": "Process value the latching alarm checks against its limits"
+    },
+    {
+      "id": 101,
+      "name": "alarm-ack",
+      "source": 11,
+      "description": "Operator acknowledgment, held internally until a command writes it"
+    },
+    {
+      "id": 102,
+      "name": "alarm-state",
+      "source": 20,
+      "description": "Limit state following the hysteresis rule"
+    },
+    {
+      "id": 103,
+      "name": "alarm-unacknowledged",
+      "source": 21,
+      "description": "Latched from trip until the operator acknowledges"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "latching-alarm",
+      "parameters": {
+        "low_limit": { "Float": 10.0 },
+        "high_limit": { "Float": 90.0 },
+        "hysteresis": { "Float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "ack": { "direction": "in", "value_type": "Bool" },
+        "alarm": { "direction": "out", "value_type": "Bool" },
+        "unacknowledged": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "ack" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "alarm" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "unacknowledged" } },
+      "to": { "point": 21 }
+    }
+  ]
+}

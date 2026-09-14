@@ -5,7 +5,8 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
-    Interlock, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Timer, Valve,
+    Interlock, LatchingAlarm, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Timer,
+    Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -170,12 +171,27 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            LatchingAlarm::new(
+                "lal",
+                point(&mut specs, 140, Direction::In, ValueKind::Float),
+                point(&mut specs, 141, Direction::In, ValueKind::Bool),
+                point(&mut specs, 142, Direction::Out, ValueKind::Bool),
+                point(&mut specs, 143, Direction::Out, ValueKind::Bool),
+                AlarmLimits {
+                    low: 10.0,
+                    high: 90.0,
+                    hysteresis: 5.0,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 13] = [
+const EXPECTED_KINDS: [&str; 14] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -189,6 +205,7 @@ const EXPECTED_KINDS: [&str; 13] = [
     Timer::KIND,
     Counter::KIND,
     RateLimiter::KIND,
+    LatchingAlarm::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {
