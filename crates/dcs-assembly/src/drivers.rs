@@ -21,7 +21,7 @@
 //! contract — registering a device integration is what "adding a new
 //! device" means.
 
-use crate::assembly::{neutral, resolve, sim_direction};
+use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
     DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
@@ -243,8 +243,8 @@ pub struct DeviceBackend {
     pub step: Option<StepHook>,
     /// Claims the backend's field write-ownership — meaningful only on a
     /// `field_facing` backend; `None` when the field kind cannot
-    /// arbitrate a single writer (`sim-bus` today), which keeps
-    /// automatic failover off for models built on it.
+    /// arbitrate a single writer, which keeps automatic failover off
+    /// for models built on it.
     pub claim: Option<ClaimHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
@@ -389,7 +389,7 @@ pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceEr
                 device: spec.id.0,
                 name: point.channel.clone(),
             },
-            direction: sim_direction(point.direction),
+            direction: point.direction,
             initial: neutral(point.kind),
         });
     }
@@ -559,6 +559,7 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
+    let claiming = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -569,10 +570,16 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
-        // The bus server has no write-ownership arbitration — an
-        // unfenceable field kind, so models built on it keep manual
-        // promotion only.
-        claim: None,
+        // The device server's single-writer claim — the fencing a
+        // promoted peer takes out on the old field owner.
+        claim: Some(Arc::new(move |owner| {
+            claiming
+                .claim_writer(owner)
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -748,7 +755,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 device: spec.id.0,
                 name: point.channel.clone(),
             },
-            direction: sim_direction(point.direction),
+            direction: point.direction,
             initial: neutral(point.kind),
         })
         .collect();

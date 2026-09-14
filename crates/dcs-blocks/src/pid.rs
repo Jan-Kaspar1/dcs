@@ -634,9 +634,9 @@ mod tests {
         // registered Pid at the next scan boundary and the output moves
         // deterministically — e = 4 with ki = kd = 0 gives u = kp·4.
         let channel_map = ChannelMap::new()
-            .with_point(sim_point(PV, dcs_sim::Direction::In))
-            .with_point(sim_point(SP, dcs_sim::Direction::In))
-            .with_point(sim_point(OUT, dcs_sim::Direction::Out));
+            .with_point(sim_point(PV, Direction::In))
+            .with_point(sim_point(SP, Direction::In))
+            .with_point(sim_point(OUT, Direction::Out));
         let sim = SimDriver::new(channel_map).unwrap();
         let point_map: dcs_runtime::PointMap = [
             (PV, Direction::In, dcs_core::ValueKind::Float),
@@ -752,7 +752,7 @@ mod tests {
         );
     }
 
-    fn sim_point(point: PointId, direction: dcs_sim::Direction) -> PointBinding {
+    fn sim_point(point: PointId, direction: Direction) -> PointBinding {
         PointBinding {
             point,
             channel: ChannelId {
@@ -769,9 +769,9 @@ mod tests {
         // Closed loop: the executor reads pv/sp and writes u; the sim's
         // first-order lag (tau = 1) reads u and drives pv.
         let channel_map = ChannelMap::new()
-            .with_point(sim_point(PV, dcs_sim::Direction::In))
-            .with_point(sim_point(SP, dcs_sim::Direction::In))
-            .with_point(sim_point(OUT, dcs_sim::Direction::Out))
+            .with_point(sim_point(PV, Direction::In))
+            .with_point(sim_point(SP, Direction::In))
+            .with_point(sim_point(OUT, Direction::Out))
             .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
                 input: OUT,
                 output: PV,

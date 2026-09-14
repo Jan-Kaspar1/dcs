@@ -25,7 +25,7 @@ const DT: f64 = 0.1;
 const CHECKPOINT_AT: u64 = 30;
 const CONTINUED: u64 = 40;
 
-fn sim_point(point: PointId, direction: dcs_sim::Direction) -> PointBinding {
+fn sim_point(point: PointId, direction: Direction) -> PointBinding {
     PointBinding {
         point,
         channel: ChannelId {
@@ -42,9 +42,9 @@ fn sim_point(point: PointId, direction: dcs_sim::Direction) -> PointBinding {
 /// from `out`.
 fn channel_map() -> ChannelMap {
     ChannelMap::new()
-        .with_point(sim_point(PV, dcs_sim::Direction::In))
-        .with_point(sim_point(SP, dcs_sim::Direction::In))
-        .with_point(sim_point(OUT, dcs_sim::Direction::Out))
+        .with_point(sim_point(PV, Direction::In))
+        .with_point(sim_point(SP, Direction::In))
+        .with_point(sim_point(OUT, Direction::Out))
         .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
             input: OUT,
             output: PV,

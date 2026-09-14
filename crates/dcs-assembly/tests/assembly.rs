@@ -8,8 +8,9 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{
-    AnalogInput, AnalogOutput, Counter, DigitalOutput, LatchingAlarm, ManualStation, MedianVoter,
-    Pid, RateLimiter, Sequencer, SignalFilter, Timer, Totalizer,
+    AnalogInput, AnalogOutput, BoolGate, Counter, DigitalOutput, EdgeTrigger, LatchingAlarm,
+    ManualStation, MedianVoter, Pid, RateLimiter, Sequencer, SignalFilter, SrLatch, Timer,
+    Totalizer,
 };
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
@@ -36,6 +37,9 @@ const VOTING_TOTALIZER: &str = include_str!("../fixtures/voting_totalizer.json")
 /// The sequence-control fixture: a sequencer walking a declared
 /// three-step table while `run` holds.
 const SEQUENCER: &str = include_str!("../fixtures/sequencer.json");
+/// The logic-vocabulary fixture: a three-input `bool-gate`, an
+/// `sr-latch`, and an `edge-trigger`.
+const LOGIC: &str = include_str!("../fixtures/logic.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
@@ -94,6 +98,18 @@ const SEQ_RESET: PointId = PointId(11);
 const SEQ_OUT: PointId = PointId(20);
 const SEQ_STEP: PointId = PointId(21);
 const SEQ_DONE: PointId = PointId(22);
+
+// `logic.json`: the gate inputs, latch commands, and trigger input, and
+// the three field-side outputs the logic kinds drive.
+const GATE_A: PointId = PointId(10);
+const GATE_B: PointId = PointId(11);
+const GATE_C: PointId = PointId(12);
+const LATCH_SET: PointId = PointId(13);
+const LATCH_RESET: PointId = PointId(14);
+const TRIG_IN: PointId = PointId(15);
+const GATED: PointId = PointId(20);
+const LATCHED: PointId = PointId(21);
+const PULSED: PointId = PointId(22);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -247,6 +263,42 @@ fn registry() -> ComponentRegistry {
                 spec.require("out")?,
                 spec.require("step")?,
                 spec.require("done")?,
+                spec.parameters,
+            ))
+        })
+        .with(BoolGate::KIND, |spec| {
+            let mut inputs: Vec<_> = spec
+                .ports
+                .iter()
+                .filter_map(|(name, point)| {
+                    name.strip_prefix("in_")
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                        .map(|index| (index, *point))
+                })
+                .collect();
+            inputs.sort_by_key(|(index, _)| *index);
+            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            boxed(BoolGate::from_parameters(
+                spec.name.as_str(),
+                inputs,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(SrLatch::KIND, |spec| {
+            boxed(SrLatch::from_parameters(
+                spec.name.as_str(),
+                spec.require("set")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(EdgeTrigger::KIND, |spec| {
+            boxed(EdgeTrigger::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
                 spec.parameters,
             ))
         })
@@ -691,6 +743,106 @@ fn sequencer_fixture_advances_holds_at_end_and_restores() {
     assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(10.0));
     assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(1));
     assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn logic_fixture_folds_latches_pulses_and_restores() {
+    let model = model(LOGIC);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The registry built all three declared kinds, in scan order.
+    let snapshot = executor.snapshot();
+    let kinds: Vec<&str> = snapshot
+        .descriptors
+        .iter()
+        .map(|descriptor| descriptor.kind.as_str())
+        .collect();
+    assert_eq!(kinds, [BoolGate::KIND, SrLatch::KIND, EdgeTrigger::KIND]);
+
+    // The `and` gate needs every input: partial assertion stays low,
+    // the third input opens it.
+    driver.write(GATE_A, Value::Bool(true)).unwrap();
+    driver.write(GATE_B, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(GATED).unwrap().value, Value::Bool(false));
+    driver.write(GATE_C, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(GATED).unwrap().value, Value::Bool(true));
+
+    // Simultaneous set and reset exercises the latch's recorded
+    // precedence — reset wins — while the trigger pulses on its
+    // input's first rising read.
+    driver.write(LATCH_SET, Value::Bool(true)).unwrap();
+    driver.write(LATCH_RESET, Value::Bool(true)).unwrap();
+    driver.write(TRIG_IN, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(LATCHED).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(true));
+
+    // Releasing reset lets the still-asserted set latch; the held
+    // pulse level produces no second pulse.
+    driver.write(LATCH_RESET, Value::Bool(false)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(LATCHED).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(false));
+
+    // Mid-state checkpoint — the latch set, the trigger's previous
+    // level high — transfers to a standby assembled from the same
+    // model, which continues identically.
+    let checkpoint = executor.checkpoint();
+    let standby_driver = sim_driver(&model).unwrap();
+    let mut standby = assemble(&model, &registry(), &standby_driver).unwrap();
+    standby.apply(&checkpoint).unwrap();
+    assert_eq!(standby.tick(), Tick(4));
+    for point in [GATE_A, GATE_B, GATE_C, LATCH_SET, TRIG_IN] {
+        standby_driver.write(point, Value::Bool(true)).unwrap();
+    }
+    for _ in 0..3 {
+        executor.scan().unwrap();
+        standby.scan().unwrap();
+        for point in [GATED, LATCHED, PULSED] {
+            assert_eq!(
+                standby_driver.read(point).unwrap(),
+                driver.read(point).unwrap()
+            );
+        }
+    }
+
+    // The latched state survived and the held pulse level never
+    // re-pulsed on either run.
+    assert_eq!(driver.read(LATCHED).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(false));
+
+    // The next rising edge pulses exactly once on both runs.
+    driver.write(TRIG_IN, Value::Bool(false)).unwrap();
+    standby_driver.write(TRIG_IN, Value::Bool(false)).unwrap();
+    executor.scan().unwrap();
+    standby.scan().unwrap();
+    driver.write(TRIG_IN, Value::Bool(true)).unwrap();
+    standby_driver.write(TRIG_IN, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    standby.scan().unwrap();
+    assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(true));
+    assert_eq!(
+        standby_driver.read(PULSED).unwrap().value,
+        Value::Bool(true)
+    );
+    executor.scan().unwrap();
+    standby.scan().unwrap();
+    assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(false));
+    assert_eq!(
+        standby_driver.read(PULSED).unwrap().value,
+        Value::Bool(false)
+    );
 
     assert!(
         executor

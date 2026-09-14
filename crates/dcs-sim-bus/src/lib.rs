@@ -31,6 +31,8 @@
 //! | `0x02` | write register | `u16 register`, `u8 kind`, value bytes |
 //! | `0x03` | list registers | none |
 //! | `0x04` | step | none |
+//! | `0x05` | claim writer | `u64 owner` |
+//! | `0x06` | release writer | none |
 //!
 //! A value's `kind` byte is `0x01` bool, `0x02` int, `0x03` float,
 //! followed by its payload: one byte (`0x00`/`0x01`) for bool, eight
@@ -50,19 +52,48 @@
 //! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick` |
 //! | `0x04` | stepped | `u64 tick` — the bank's new tick |
 //! | `0x05` | error | `u8 code`, code body |
+//! | `0x06` | done | none — a claim or release applied |
 //!
 //! Error codes: `0x01` unknown register (`u16 register`), `0x02` kind
 //! mismatch (`u16 register`, `u8 expected kind`, found value bytes),
-//! `0x03` invalid request (`u16 detail length`, UTF-8 detail). A
-//! malformed request payload is answered with an `invalid_request`
-//! error — the connection stays live — while a frame violating the
-//! length bound ends the connection.
+//! `0x03` invalid request (`u16 detail length`, UTF-8 detail), `0x04`
+//! fenced (`u16 detail length`, UTF-8 detail). A malformed request
+//! payload is answered with an `invalid_request` error — the
+//! connection stays live — while a frame violating the length bound
+//! ends the connection.
+//!
+//! ## Write-ownership fencing
+//!
+//! The device arbitrates a single writer — the failover decision's
+//! fencing rule carried onto the register protocol, so a partitioned
+//! old active cannot keep writing registers beside a promoted peer.
+//! `claim_writer` grants the write claim to the requesting attachment
+//! under an opaque `owner` token, the grant unconditional: it preempts
+//! whichever owner held the device, and one owner's several
+//! attachments claim the same token so all of them write. While a
+//! claim stands, `write_register` and `step` from an attachment not
+//! holding it answer the `fenced` error — surfaced through
+//! [`BusDriver`] as `IoError::Fenced` on the addressed point and
+//! [`LinkError::Fenced`] on a step — while reads and the register
+//! census stay open to every attachment. An unclaimed device stays
+//! open to all, the pre-claim behavior.
+//!
+//! The claim is bound to the attachments holding it: `release_writer`
+//! drops the requesting connection's hold — a no-op when it holds
+//! nothing — and a connection's drop releases it likewise, the last
+//! release freeing the field so a dead owner's claim cannot fence a
+//! promoted peer's. Where the claim cannot be held — an attachment
+//! whose link is down holds nothing — the field-claim failure refuses
+//! the promotion as `SwitchError::FieldClaimFailed`, and a field kind
+//! that cannot arbitrate at all keeps automatic self-promotion
+//! disabled per the failover decision.
 //!
 //! `BusDriver` maps the failure surface: a dead or severed link and
 //! any incoherent answer surface as `IoError::Disconnected`, an
 //! unanswered request as `IoError::Timeout`, an unmapped point as
-//! `IoError::UnknownPoint`, and a kind-mismatched write as
-//! `IoError::TypeMismatch` — the first failure drops the connection
+//! `IoError::UnknownPoint`, a kind-mismatched write as
+//! `IoError::TypeMismatch`, and a fenced-out write as
+//! `IoError::Fenced` — the first failure drops the connection
 //! for good, and [`BusDriver::connected`]/[`BusDriver::last_failure`]
 //! report link health for the driver-diagnostics surface. The
 //! `dcs-sim-bus-device` binary in this crate serves one model-declared

@@ -96,6 +96,10 @@ struct ElementState {
     /// [`ProcessElement::SecondOrderLag`] advances it — the other
     /// elements keep it at its zero seed.
     v: f64,
+    /// The generator state a [`ProcessElement::Noise`] draws from,
+    /// seeded from the element's `seed`; the other elements hold no
+    /// generator and keep it at its zero seed.
+    rng: u64,
     /// The delay line a [`ProcessElement::DeadTime`] advances; `None` for
     /// the scalar elements.
     delay_line: Option<DelayLine>,
@@ -126,8 +130,10 @@ impl ElementState {
     /// zero-order-hold update [`second_order_transition`] computes,
     /// stable for every non-negative `dt`; the dead-time element pushes
     /// `u` onto its delay line at the new time and outputs the newest
-    /// sample at or before `t - delay`. All are pure functions of their
-    /// arguments and stored state, keeping stepping deterministic.
+    /// sample at or before `t - delay`; the noise element draws once from
+    /// its generator and outputs `u + amplitude · (2x − 1)` for the draw
+    /// `x`, staying within `u ± amplitude`. All are pure functions of
+    /// their arguments and stored state, keeping stepping deterministic.
     fn advance(&mut self, u: f64, dt: f64) -> f64 {
         match self.element {
             ProcessElement::FirstOrderLag(element) => {
@@ -163,8 +169,29 @@ impl ElementState {
                 }
                 line.history[0].1
             }
+            ProcessElement::Noise(element) => {
+                let x = splitmix64_next(&mut self.rng);
+                u + element.amplitude * (2.0 * x - 1.0)
+            }
         }
     }
+}
+
+/// The next draw from a splitmix64 generator, scaled into `[0, 1)`.
+///
+/// The recorded generator [`ProcessElement::Noise`] runs: the state
+/// advances by the golden-ratio increment `0x9E3779B97F4A7C15`, then the
+/// standard splitmix64 mix scrambles it — a pure function of the `u64`
+/// state alone, so a carried state replays the identical sequence and
+/// nothing reads a wall clock or OS entropy. The mix's top 53 bits scale
+/// into `[0, 1)`; every IEEE-754 double in the range is a possible draw.
+fn splitmix64_next(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
 }
 
 /// A [`ProcessElement::SecondOrderLag`]'s exact step transition.
@@ -343,10 +370,15 @@ impl SimDriver {
                 }),
                 _ => None,
             };
+            let rng = match element {
+                ProcessElement::Noise(noise) => noise.seed,
+                _ => 0,
+            };
             elements.push(ElementState {
                 element,
                 y,
                 v: 0.0,
+                rng,
                 delay_line,
             });
         }
@@ -377,9 +409,11 @@ impl SimDriver {
     /// 3. every [`ProcessElement`], in declaration order, reads its input
     ///    point's effective sample and updates its output point: a `Good`
     ///    input advances the element — for a dead-time element, pushes
-    ///    the input onto its delay line — and stamps `Good`; a
+    ///    the input onto its delay line; for a noise element, draws the
+    ///    next deviation from its generator — and stamps `Good`; a
     ///    non-`Good` input freezes the element's state, delay-line clock
-    ///    included, and propagates its quality to the output sample,
+    ///    and generator included, and propagates its quality to the
+    ///    output sample,
     ///    mirroring the contract's quality propagation.
     ///
     /// `dt` must be finite and non-negative.
@@ -509,7 +543,8 @@ impl IoDriver for SimDriver {
     ///
     /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
     /// / `.fault` (the last only while a fault is active), and
-    /// `element.{id}` — plus `element.{id}.v` for second-order lags —
+    /// `element.{id}` — plus `element.{id}.v` for second-order lags and
+    /// `element.{id}.rng` for noise elements' generator state —
     /// keyed by the element's driven point id. Loopbacks and element
     /// definitions are map configuration, not state, so they are not
     /// captured. This is what transfers the simulated process to a
@@ -541,6 +576,12 @@ impl IoDriver for SimDriver {
             captured.insert(format!("element.{output}"), Value::Float(element.y));
             if let ProcessElement::SecondOrderLag(_) = element.element {
                 captured.insert(format!("element.{output}.v"), Value::Float(element.v));
+            }
+            if let ProcessElement::Noise(_) = element.element {
+                captured.insert(
+                    format!("element.{output}.rng"),
+                    Value::Int(element.rng as i64),
+                );
             }
         }
         Some(captured)
@@ -625,7 +666,15 @@ impl IoDriver for SimDriver {
                 }
                 known.push(field);
             }
-            ys.push((y, v));
+            let mut rng = 0;
+            if let ProcessElement::Noise(_) = element.element {
+                let field = format!("element.{output}.rng");
+                // Every bit pattern is a legal generator state, so a
+                // decoded i64 restores as its u64 bits.
+                rng = state.require_i64(STATE_ELEMENT, &field)? as u64;
+                known.push(field);
+            }
+            ys.push((y, v, rng));
         }
 
         let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
@@ -637,9 +686,10 @@ impl IoDriver for SimDriver {
             point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
             point_state.fault = fault;
         }
-        for (element, (y, v)) in current.elements.iter_mut().zip(ys) {
+        for (element, (y, v, rng)) in current.elements.iter_mut().zip(ys) {
             element.y = y;
             element.v = v;
+            element.rng = rng;
         }
         Ok(())
     }
@@ -649,7 +699,8 @@ impl IoDriver for SimDriver {
 mod tests {
     use super::*;
     use crate::map::{
-        ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, PointBinding, SecondOrderLag,
+        ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, Noise, PointBinding,
+        SecondOrderLag,
     };
     use dcs_core::{Input, Output, QualityReason};
 
@@ -1091,6 +1142,220 @@ mod tests {
         }
         sim.step(0.1);
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(9.0));
+    }
+
+    fn noise_map(amplitude: f64, seed: u64) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Noise(Noise {
+                input: PointId(1),
+                output: PointId(2),
+                amplitude,
+                seed,
+                initial: 0.0,
+            }))
+    }
+
+    fn noise_output(sim: &SimDriver) -> f64 {
+        let Value::Float(y) = sim.read(PointId(2)).unwrap().value else {
+            panic!("noise output must be Float")
+        };
+        y
+    }
+
+    fn noise_sequence(seed: u64, ticks: usize) -> Vec<f64> {
+        let sim = SimDriver::new(noise_map(0.5, seed)).unwrap();
+        sim.write(PointId(1), Value::Float(10.0)).unwrap();
+        (0..ticks)
+            .map(|_| {
+                sim.step(0.1);
+                noise_output(&sim)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn identical_noise_runs_produce_identical_sequences() {
+        let first = noise_sequence(42, 40);
+        let second = noise_sequence(42, 40);
+        assert_eq!(first, second);
+        // The run produced real deviation, not a constant passthrough.
+        assert!(first.iter().any(|&y| y != 10.0));
+    }
+
+    #[test]
+    fn distinct_seeds_produce_distinct_noise_sequences() {
+        assert_ne!(noise_sequence(1, 40), noise_sequence(2, 40));
+    }
+
+    #[test]
+    fn noise_output_stays_within_amplitude_of_input() {
+        let sim = SimDriver::new(noise_map(0.5, 7)).unwrap();
+        // A moving input still bounds every step's output: the documented
+        // contract is y within u ± amplitude.
+        for (step, u) in [10.0, -3.0, 0.0, 4.25].into_iter().enumerate() {
+            for _ in 0..10 {
+                sim.write(PointId(1), Value::Float(u)).unwrap();
+                sim.step(0.1);
+                let y = noise_output(&sim);
+                assert!(
+                    (y - u).abs() <= 0.5,
+                    "input block {step}: y={y} outside u={u} ± 0.5"
+                );
+            }
+        }
+        // Zero amplitude passes the input through unchanged.
+        let quiet = SimDriver::new(noise_map(0.0, 99)).unwrap();
+        quiet.write(PointId(1), Value::Float(3.0)).unwrap();
+        quiet.step(0.1);
+        assert_eq!(noise_output(&quiet), 3.0);
+    }
+
+    #[test]
+    fn non_good_noise_input_freezes_generator_and_propagates_quality() {
+        // A clean reference run: the deviation sequence the faulted run
+        // must rejoin once the fault clears.
+        let clean = SimDriver::new(noise_map(0.5, 5)).unwrap();
+        clean.write(PointId(1), Value::Float(4.0)).unwrap();
+        let mut reference = Vec::new();
+        for _ in 0..20 {
+            clean.step(0.1);
+            reference.push(noise_output(&clean) - 4.0);
+        }
+
+        let sim = SimDriver::new(noise_map(0.5, 5)).unwrap();
+        sim.write(PointId(1), Value::Float(4.0)).unwrap();
+        for _ in 0..10 {
+            sim.step(0.1);
+        }
+        let frozen = noise_output(&sim);
+
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        // A write behind the fault is stored but not consumed.
+        sim.write(PointId(1), Value::Float(9.0)).unwrap();
+        for _ in 0..3 {
+            sim.step(0.1);
+            let sample = sim.read(PointId(2)).unwrap();
+            // The documented rule: a non-Good input freezes the
+            // element's state — generator included — and propagates
+            // its quality.
+            assert_eq!(sample.value, Value::Float(frozen));
+            assert_eq!(sample.quality, quality);
+        }
+        sim.clear_fault(PointId(1)).unwrap();
+
+        // The generator froze through the fault: the resumed run draws
+        // the reference run's eleventh deviation onward, now around the
+        // stored 9.0 input.
+        for step in 14..=20_usize {
+            sim.step(0.1);
+            let sample = sim.read(PointId(2)).unwrap();
+            assert!(sample.quality.is_good());
+            // The deviation matches the reference draw within a rounding
+            // slack — `9.0 + d` rounds in a coarser binade than `4.0 + d`.
+            let Value::Float(y) = sample.value else {
+                panic!("noise output must be Float")
+            };
+            assert!(
+                (y - 9.0 - reference[step - 4]).abs() < 1e-12,
+                "step {step}: y={y} reference deviation {}",
+                reference[step - 4]
+            );
+        }
+    }
+
+    #[test]
+    fn noise_rejects_invalid_constants_and_point_kinds() {
+        // The amplitude must be finite and non-negative.
+        for amplitude in [
+            -1.0,
+            -f64::MIN_POSITIVE,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(matches!(
+                noise_map(amplitude, 0).validate().unwrap_err(),
+                ConfigError::InvalidAmplitude { point, .. } if point == PointId(2)
+            ));
+        }
+        // Element ends must be Float points.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Int(0)))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Noise(Noise {
+                input: PointId(1),
+                output: PointId(2),
+                amplitude: 1.0,
+                seed: 0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Int,
+            }
+        );
+        // The initial value must be finite.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Noise(Noise {
+                input: PointId(1),
+                output: PointId(2),
+                amplitude: 1.0,
+                seed: 0,
+                initial: f64::INFINITY,
+            }));
+        assert!(matches!(
+            map.validate().unwrap_err(),
+            ConfigError::NonFiniteInitial { point, .. } if point == PointId(2)
+        ));
+    }
+
+    #[test]
+    fn noise_serde_roundtrips() {
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Noise(Noise {
+                input: PointId(1),
+                output: PointId(2),
+                amplitude: 0.5,
+                seed: 42,
+                initial: 1.25,
+            }));
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"noise\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    #[test]
+    fn captured_state_restores_noise_generator_mid_sequence() {
+        let map = noise_map(0.5, 42);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(4.0)).unwrap();
+        // Capture mid-sequence: the generator state is part of the
+        // transferred field state.
+        for _ in 0..8 {
+            sim.step(0.1);
+        }
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        for _ in 0..20 {
+            sim.step(0.1);
+            fresh.step(0.1);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
     }
 
     #[test]

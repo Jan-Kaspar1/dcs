@@ -11,9 +11,9 @@
 use crate::error::{AssemblyError, BuildError, InternalPointError};
 use crate::registry::{ComponentRegistry, ComponentSpec};
 use dcs_core::{Direction, IoDriver, PointId, Value, ValueKind};
-use dcs_model::{ComponentId, Direction as ModelDirection, Endpoint, PlantModel, PortRef};
+use dcs_model::{ComponentId, Endpoint, PlantModel, PortRef};
 use dcs_runtime::{Component, Executor, PointMap};
-use dcs_sim::{ChannelMap, Direction as SimDirection, Loopback, SimDriver};
+use dcs_sim::{ChannelMap, Loopback, SimDriver};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
@@ -36,20 +36,6 @@ pub(crate) fn neutral(kind: ValueKind) -> Value {
         ValueKind::Bool => Value::Bool(false),
         ValueKind::Int => Value::Int(0),
         ValueKind::Float => Value::Float(0.0),
-    }
-}
-
-fn core_direction(direction: ModelDirection) -> Direction {
-    match direction {
-        ModelDirection::In => Direction::In,
-        ModelDirection::Out => Direction::Out,
-    }
-}
-
-pub(crate) fn sim_direction(direction: ModelDirection) -> SimDirection {
-    match direction {
-        ModelDirection::In => SimDirection::In,
-        ModelDirection::Out => SimDirection::Out,
     }
 }
 
@@ -140,7 +126,7 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
     let mut point_map = PointMap::new();
     let mut binding_error = None;
     for point in &model.io_points {
-        let direction = core_direction(point.direction);
+        let direction = point.direction;
         match (&point.channel, point.initial) {
             // A field point: a driver serves it through the declared
             // channel, starting at the neutral value of its kind.
