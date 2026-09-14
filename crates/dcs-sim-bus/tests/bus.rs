@@ -4,11 +4,11 @@
 //! identical behavior for a scripted executor run local and
 //! register-mapped.
 
-use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
-use dcs_sim::{ChannelId, ChannelMap, Direction, PointBinding, SimDriver};
+use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
 use dcs_sim_bus::{
     BusDriver, BusError, BusRequest, BusResponse, BusServer, LinkError, PointRegister,
     RegisterBank, RegisterDecl,

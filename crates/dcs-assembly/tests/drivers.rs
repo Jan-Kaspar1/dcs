@@ -10,7 +10,7 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{IoDriver, LinkState, PointId, TelemetrySnapshot, Value};
+use dcs_core::{Direction, IoDriver, LinkState, PointId, TelemetrySnapshot, Value};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
@@ -75,7 +75,7 @@ fn remote_map() -> ChannelMap {
             device: 2,
             name: "level-raw".to_string(),
         },
-        direction: dcs_sim::Direction::In,
+        direction: Direction::In,
         initial: Value::Float(0.0),
     })
 }
@@ -342,7 +342,7 @@ fn a_remote_device_serving_wrong_points_fails_assembly() {
             device: 2,
             name: "level-raw".to_string(),
         },
-        direction: dcs_sim::Direction::In,
+        direction: Direction::In,
         initial: Value::Float(0.0),
     });
     with_server(wrong_map, |_, addr| {
