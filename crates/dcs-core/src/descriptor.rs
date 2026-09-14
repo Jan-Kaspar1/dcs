@@ -13,7 +13,7 @@
 //! serde-serializable, so a UI needs only the shared contracts.
 
 use crate::io::Direction;
-use crate::signal::{Value, ValueKind};
+use crate::signal::{PointId, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 
 /// What a port carries in the process, as a hint to faceplate layout.
@@ -40,7 +40,10 @@ pub enum PortRole {
 ///
 /// The monitoring-facing form of the runtime's `IoRequirement`: the
 /// port's name, its [`Direction`], and its declared [`ValueKind`], plus
-/// an optional [`PortRole`] hint.
+/// an optional [`PortRole`] hint. `point` is the serving layer's
+/// annotation — the logical point this instance's port is bound to —
+/// so a monitoring UI can join the port to live point telemetry and
+/// point metadata without re-resolving the plant model's wiring.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortDescriptor {
     /// The port's name within the component, matching the component's
@@ -52,6 +55,20 @@ pub struct PortDescriptor {
     pub kind: ValueKind,
     /// What the port carries in the process, when the component says.
     pub role: Option<PortRole>,
+    /// The logical point the port is bound to on this instance.
+    ///
+    /// A bare `describe()` — or any producer describing a kind without
+    /// an instance — reports `None`; the serving layer annotates the
+    /// descriptor it serves, joining each port to the point its
+    /// same-named declared I/O requirement resolved to, so a
+    /// [`TelemetrySnapshot`](crate::TelemetrySnapshot) descriptor
+    /// always carries the wiring. A port that survives with `None` is
+    /// unwired and renders without a live value.
+    ///
+    /// Optional like `Signal::unit` in the plant model: serialized only
+    /// when populated, so payloads predating the field still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<PointId>,
 }
 
 /// The inclusive bounds a tunable parameter accepts.
@@ -140,30 +157,35 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: Some(PointId(10)),
                 },
                 PortDescriptor {
                     name: "sp".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Setpoint),
+                    point: Some(PointId(11)),
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: Some(PointId(20)),
                 },
                 PortDescriptor {
                     name: "tripped".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: Some(PointId(21)),
                 },
                 PortDescriptor {
                     name: "unhinted".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Int,
                     role: None,
+                    point: None,
                 },
             ],
             parameters: vec![
@@ -243,5 +265,18 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&role).unwrap(), format!("\"{name}\""));
         }
+    }
+
+    #[test]
+    fn port_point_is_optional_on_the_wire() {
+        // Payloads predating `point` still parse, and `None` serializes
+        // back without the key — the bound point is serving-layer
+        // annotation, not part of the kind's static interface.
+        let port: PortDescriptor = serde_json::from_str(
+            r#"{"name":"pv","direction":"in","kind":"Float","role":"process_value"}"#,
+        )
+        .unwrap();
+        assert_eq!(port.point, None);
+        assert!(!serde_json::to_string(&port).unwrap().contains("point"));
     }
 }

@@ -553,36 +553,42 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "permissive".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "trip_1".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "trip_2".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "tripped".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
             ]
         );

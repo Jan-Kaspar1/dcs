@@ -168,7 +168,9 @@ pub trait Component: Send {
     /// and no parameters are declared — so existing components need no
     /// changes. Components override this to report their model `kind`,
     /// [`PortRole`](dcs_core::PortRole) hints, and tunable-parameter
-    /// metadata.
+    /// metadata. A [`PortDescriptor::point`] is always reported `None`
+    /// here — the bound point is the serving layer's annotation, joined
+    /// in when the descriptor is served in a snapshot.
     fn describe(&self) -> ComponentDescriptor {
         ComponentDescriptor {
             name: self.name().to_string(),
@@ -182,6 +184,7 @@ pub trait Component: Send {
                     direction: requirement.direction,
                     kind: requirement.kind,
                     role: None,
+                    point: None,
                 })
                 .collect(),
             parameters: Vec::new(),

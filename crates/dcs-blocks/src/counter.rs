@@ -464,24 +464,28 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "reset".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "count".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Int,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "done".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
             ]
         );

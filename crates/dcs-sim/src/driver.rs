@@ -92,6 +92,10 @@ struct ElementState {
     element: ProcessElement,
     /// The current output `y`; seeded from the element's `initial`.
     y: f64,
+    /// The output's rate of change `dy/dt`. Only a
+    /// [`ProcessElement::SecondOrderLag`] advances it — the other
+    /// elements keep it at its zero seed.
+    v: f64,
     /// The delay line a [`ProcessElement::DeadTime`] advances; `None` for
     /// the scalar elements.
     delay_line: Option<DelayLine>,
@@ -118,14 +122,29 @@ impl ElementState {
     ///
     /// The lag uses the exact discretization `y += (1 - e^{-dt/τ})(u - y)`,
     /// stable for every non-negative `dt`; the integrator uses Euler's
-    /// `y += u·dt`; the dead-time element pushes `u` onto its delay line
-    /// at the new time and outputs the newest sample at or before
-    /// `t - delay`. All are pure functions of their arguments and stored
-    /// state, keeping stepping deterministic.
+    /// `y += u·dt`; the second-order lag applies the exact
+    /// zero-order-hold update [`second_order_transition`] computes,
+    /// stable for every non-negative `dt`; the dead-time element pushes
+    /// `u` onto its delay line at the new time and outputs the newest
+    /// sample at or before `t - delay`. All are pure functions of their
+    /// arguments and stored state, keeping stepping deterministic.
     fn advance(&mut self, u: f64, dt: f64) -> f64 {
         match self.element {
             ProcessElement::FirstOrderLag(element) => {
                 self.y + (1.0 - (-dt / element.time_constant).exp()) * (u - self.y)
+            }
+            ProcessElement::SecondOrderLag(element) => {
+                // The held input shifts the equilibrium: the deviation
+                // state (e = y - u, v = dy/dt) evolves by e^{A dt}.
+                let (e, v) = second_order_transition(
+                    self.y - u,
+                    self.v,
+                    1.0 / element.time_constant,
+                    element.damping_ratio,
+                    dt,
+                );
+                self.v = v;
+                u + e
             }
             ProcessElement::Integrator(_) => self.y + u * dt,
             ProcessElement::DeadTime(element) => {
@@ -145,6 +164,50 @@ impl ElementState {
                 line.history[0].1
             }
         }
+    }
+}
+
+/// A [`ProcessElement::SecondOrderLag`]'s exact step transition.
+///
+/// Evolves the deviation state `(e, v)` — output minus the held input,
+/// and the output rate — over one step of `dt` by `e^{A dt}` for
+/// `A = [[0, 1], [-ω², -2ζω]]`, the zero-order-hold-exact
+/// discretization of `τ² y'' + 2ζτ y' + y = u` with `ω = 1/τ`. A
+/// damping ratio within `1e-9` of critical (by `ζ² - 1`) steps with the
+/// critically damped coefficients; the three branches are continuous
+/// there, so the hand-off is invisible at tick resolution.
+fn second_order_transition(e: f64, v: f64, omega: f64, zeta: f64, dt: f64) -> (f64, f64) {
+    let sigma = zeta * omega;
+    let decay = (-sigma * dt).exp();
+    let deviation = zeta * zeta - 1.0;
+    if deviation.abs() < 1e-9 {
+        // Critically damped: Φ = e^{-ωdt} [[1 + ωdt, dt], [-ω²dt, 1 - ωdt]].
+        let x = omega * dt;
+        (
+            decay * ((1.0 + x) * e + dt * v),
+            decay * (-omega * x * e + (1.0 - x) * v),
+        )
+    } else if deviation < 0.0 {
+        // Underdamped, ωd = ω√(1-ζ²): Φ = e^{-σdt}
+        // [[c + (σ/ωd)s, s/ωd], [-(ω²/ωd)s, c - (σ/ωd)s]].
+        let wd = omega * (-deviation).sqrt();
+        let (s, c) = (wd * dt).sin_cos();
+        let k = sigma / wd * s;
+        (
+            decay * ((c + k) * e + s / wd * v),
+            decay * (-omega * omega / wd * s * e + (c - k) * v),
+        )
+    } else {
+        // Overdamped, β = ω√(ζ²-1): the cosh/sinh analog of the
+        // underdamped coefficients.
+        let beta = omega * deviation.sqrt();
+        let sh = (beta * dt).sinh();
+        let ch = (beta * dt).cosh();
+        let k = sigma / beta * sh;
+        (
+            decay * ((ch + k) * e + sh / beta * v),
+            decay * (-omega * omega / beta * sh * e + (ch - k) * v),
+        )
     }
 }
 
@@ -283,6 +346,7 @@ impl SimDriver {
             elements.push(ElementState {
                 element,
                 y,
+                v: 0.0,
                 delay_line,
             });
         }
@@ -445,11 +509,12 @@ impl IoDriver for SimDriver {
     ///
     /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
     /// / `.fault` (the last only while a fault is active), and
-    /// `element.{output}.y` keyed by the element's driven point.
-    /// Loopbacks and element definitions are map configuration, not
-    /// state, so they are not captured. This is what transfers the
-    /// simulated process to a standby; a real driver leaves the contract
-    /// unimplemented and observes the actual field instead.
+    /// `element.{id}` — plus `element.{id}.v` for second-order lags —
+    /// keyed by the element's driven point id. Loopbacks and element
+    /// definitions are map configuration, not state, so they are not
+    /// captured. This is what transfers the simulated process to a
+    /// standby; a real driver leaves the contract unimplemented and
+    /// observes the actual field instead.
     fn capture_state(&self) -> Option<StateMap> {
         let state = self.state.lock().unwrap();
         let mut captured = StateMap::new();
@@ -472,10 +537,11 @@ impl IoDriver for SimDriver {
             }
         }
         for element in &state.elements {
-            captured.insert(
-                format!("element.{}", element.element.output().0),
-                Value::Float(element.y),
-            );
+            let output = element.element.output().0;
+            captured.insert(format!("element.{output}"), Value::Float(element.y));
+            if let ProcessElement::SecondOrderLag(_) = element.element {
+                captured.insert(format!("element.{output}.v"), Value::Float(element.v));
+            }
         }
         Some(captured)
     }
@@ -543,13 +609,23 @@ impl IoDriver for SimDriver {
 
         let mut ys = Vec::with_capacity(current.elements.len());
         for element in &current.elements {
-            let field = format!("element.{}", element.element.output().0);
+            let output = element.element.output().0;
+            let field = format!("element.{output}");
             let y = state.require_f64(STATE_ELEMENT, &field)?;
             if !y.is_finite() {
                 return Err(invalid(field, Value::Float(y)));
             }
-            ys.push(y);
             known.push(field);
+            let mut v = 0.0;
+            if let ProcessElement::SecondOrderLag(_) = element.element {
+                let field = format!("element.{output}.v");
+                v = state.require_f64(STATE_ELEMENT, &field)?;
+                if !v.is_finite() {
+                    return Err(invalid(field, Value::Float(v)));
+                }
+                known.push(field);
+            }
+            ys.push((y, v));
         }
 
         let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
@@ -561,8 +637,9 @@ impl IoDriver for SimDriver {
             point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
             point_state.fault = fault;
         }
-        for (element, y) in current.elements.iter_mut().zip(ys) {
+        for (element, (y, v)) in current.elements.iter_mut().zip(ys) {
             element.y = y;
+            element.v = v;
         }
         Ok(())
     }
@@ -571,7 +648,9 @@ impl IoDriver for SimDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::{ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, PointBinding};
+    use crate::map::{
+        ChannelId, DeadTime, Direction, FirstOrderLag, Integrator, PointBinding, SecondOrderLag,
+    };
     use dcs_core::{Input, Output, QualityReason};
 
     fn binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
@@ -668,6 +747,245 @@ mod tests {
         }
         // y = 0 + 2.0 · 5.0 = 10.0, exactly representable.
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(10.0));
+    }
+
+    fn second_order_map(time_constant: f64, damping_ratio: f64) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::SecondOrderLag(SecondOrderLag {
+                input: PointId(1),
+                output: PointId(2),
+                time_constant,
+                damping_ratio,
+                initial: 0.0,
+            }))
+    }
+
+    /// The continuous-time step response of
+    /// `τ² y'' + 2ζτ y' + y = u` to input `u` from rest at `y = 0` —
+    /// what the exact zero-order-hold discretization must reproduce at
+    /// every tick boundary `t = k·dt`.
+    fn second_order_step_response(u: f64, tau: f64, zeta: f64, t: f64) -> f64 {
+        let omega = 1.0 / tau;
+        let sigma = zeta * omega;
+        let deviation = zeta * zeta - 1.0;
+        if deviation.abs() < 1e-9 {
+            u * (1.0 - (-omega * t).exp() * (1.0 + omega * t))
+        } else if deviation < 0.0 {
+            let wd = omega * (-deviation).sqrt();
+            u * (1.0 - (-sigma * t).exp() * ((wd * t).cos() + sigma / wd * (wd * t).sin()))
+        } else {
+            // y = u + c1·e^{r1·t} + c2·e^{r2·t} with y(0) = y'(0) = 0.
+            let beta = omega * deviation.sqrt();
+            let r1 = -sigma + beta;
+            let r2 = -sigma - beta;
+            let c1 = u * r2 / (r1 - r2);
+            let c2 = -u * r1 / (r1 - r2);
+            u + c1 * (r1 * t).exp() + c2 * (r2 * t).exp()
+        }
+    }
+
+    fn second_order_output(sim: &SimDriver) -> f64 {
+        let Value::Float(y) = sim.read(PointId(2)).unwrap().value else {
+            panic!("second-order output must be Float")
+        };
+        y
+    }
+
+    #[test]
+    fn second_order_lag_step_response_matches_continuous_time_at_tick_boundaries() {
+        // τ = 0.5, ζ = 0.3: underdamped, ~37% overshoot, peak near
+        // t ≈ 1.65; 160 steps of dt = 0.05 reach t = 8 = 16τ.
+        let sim = SimDriver::new(second_order_map(0.5, 0.3)).unwrap();
+        sim.write(PointId(1), Value::Float(10.0)).unwrap();
+
+        let dt = 0.05;
+        let mut peak = f64::MIN;
+        for tick in 1..=160_u64 {
+            sim.step(dt);
+            let y = second_order_output(&sim);
+            peak = peak.max(y);
+            let expected = second_order_step_response(10.0, 0.5, 0.3, tick as f64 * dt);
+            // Stated tolerance: the exact discretization reproduces the
+            // continuous-time response at tick boundaries within 1e-9.
+            assert!(
+                (y - expected).abs() < 1e-9,
+                "tick {tick}: y={y} expected={expected}"
+            );
+        }
+        // The underdamped response overshot its input by more than 30%...
+        assert!(peak > 13.0, "peak {peak}");
+        // ...then settled to it: within 1% of the 10-unit step.
+        assert!((second_order_output(&sim) - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn second_order_lag_critical_and_overdamped_approach_monotonically() {
+        // ζ = 1 critically damped, ζ = 2 overdamped: no overshoot, and
+        // every tick-boundary sample still matches continuous time.
+        for zeta in [1.0, 2.0] {
+            let sim = SimDriver::new(second_order_map(0.5, zeta)).unwrap();
+            sim.write(PointId(1), Value::Float(10.0)).unwrap();
+            let dt = 0.05;
+            let mut previous = 0.0;
+            for tick in 1..=160_u64 {
+                sim.step(dt);
+                let y = second_order_output(&sim);
+                let expected = second_order_step_response(10.0, 0.5, zeta, tick as f64 * dt);
+                assert!(
+                    (y - expected).abs() < 1e-9,
+                    "zeta={zeta} tick {tick}: y={y} expected={expected}"
+                );
+                assert!(
+                    y >= previous - 1e-12 && y <= 10.0 + 1e-9,
+                    "zeta={zeta} tick {tick}: non-monotone y={y}"
+                );
+                previous = y;
+            }
+            // The overdamped run is still rising where the critical run
+            // has converged — the sluggish approach is visible.
+            assert!(second_order_output(&sim) < 10.0 + 1e-9);
+        }
+    }
+
+    #[test]
+    fn non_good_second_order_input_freezes_output_and_rate_then_resumes() {
+        // A clean reference run: the trajectory the faulted run must
+        // rejoin once the fault clears.
+        let clean = SimDriver::new(second_order_map(0.5, 0.3)).unwrap();
+        clean.write(PointId(1), Value::Float(10.0)).unwrap();
+        let mut reference = Vec::new();
+        for _ in 0..30 {
+            clean.step(0.05);
+            reference.push(second_order_output(&clean));
+        }
+
+        let sim = SimDriver::new(second_order_map(0.5, 0.3)).unwrap();
+        sim.write(PointId(1), Value::Float(10.0)).unwrap();
+        // Freeze mid-swing, while the output rate is nonzero.
+        for _ in 0..10 {
+            sim.step(0.05);
+        }
+        let frozen = second_order_output(&sim);
+
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        for _ in 0..3 {
+            sim.step(0.05);
+            let sample = sim.read(PointId(2)).unwrap();
+            // The documented rule: a non-Good input freezes the
+            // element's state and propagates its quality.
+            assert_eq!(sample.value, Value::Float(frozen));
+            assert_eq!(sample.quality, quality);
+        }
+        sim.clear_fault(PointId(1)).unwrap();
+
+        // Both accumulators froze: the resumed run rejoins the
+        // reference trajectory exactly three ticks late.
+        for step in 14..=30_usize {
+            sim.step(0.05);
+            let sample = sim.read(PointId(2)).unwrap();
+            assert_eq!(
+                sample.value,
+                Value::Float(reference[step - 4]),
+                "resumed step {step}"
+            );
+            assert!(sample.quality.is_good());
+        }
+    }
+
+    #[test]
+    fn second_order_lag_rejects_invalid_constants_and_point_kinds() {
+        // The time constant must be finite and positive.
+        for time_constant in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                second_order_map(time_constant, 1.0).validate().unwrap_err(),
+                ConfigError::InvalidTimeConstant { point, .. } if point == PointId(2)
+            ));
+        }
+        // The damping ratio must be finite and positive.
+        for damping_ratio in [0.0, -0.5, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                second_order_map(1.0, damping_ratio).validate().unwrap_err(),
+                ConfigError::InvalidDamping { point, .. } if point == PointId(2)
+            ));
+        }
+        // Element ends must be Float points.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Int(0)))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::SecondOrderLag(SecondOrderLag {
+                input: PointId(1),
+                output: PointId(2),
+                time_constant: 1.0,
+                damping_ratio: 1.0,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Int,
+            }
+        );
+        // The initial value must be finite.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::SecondOrderLag(SecondOrderLag {
+                input: PointId(1),
+                output: PointId(2),
+                time_constant: 1.0,
+                damping_ratio: 1.0,
+                initial: f64::NAN,
+            }));
+        assert!(matches!(
+            map.validate().unwrap_err(),
+            ConfigError::NonFiniteInitial { point, .. } if point == PointId(2)
+        ));
+    }
+
+    #[test]
+    fn second_order_lag_serde_roundtrips() {
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::SecondOrderLag(SecondOrderLag {
+                input: PointId(1),
+                output: PointId(2),
+                time_constant: 0.5,
+                damping_ratio: 0.3,
+                initial: 1.25,
+            }));
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"second_order_lag\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    #[test]
+    fn captured_state_restores_second_order_rate_mid_swing() {
+        let map = second_order_map(0.5, 0.3);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(10.0)).unwrap();
+        // Capture mid-swing, while the output rate is nonzero: the rate
+        // accumulator is part of the transferred field state.
+        for _ in 0..8 {
+            sim.step(0.05);
+        }
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        for _ in 0..20 {
+            sim.step(0.05);
+            fresh.step(0.05);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
     }
 
     fn dead_time_map(delay: f64) -> ChannelMap {
@@ -1216,9 +1534,9 @@ mod tests {
         );
     }
 
-    /// One scripted run over a map with a loopback, a lag, an integrator,
-    /// and a dead time: identical writes and steps must replay
-    /// identically.
+    /// One scripted run over a map with a loopback, both lags, an
+    /// integrator, and a dead time: identical writes and steps must
+    /// replay identically.
     fn scripted_run() -> Vec<Sample> {
         let map = ChannelMap::new()
             .with_point(float_point(10, Direction::In))
@@ -1226,6 +1544,7 @@ mod tests {
             .with_point(float_point(30, Direction::In))
             .with_point(float_point(40, Direction::In))
             .with_point(float_point(50, Direction::In))
+            .with_point(float_point(60, Direction::In))
             .with_loopback(Loopback {
                 output: PointId(20),
                 input: PointId(10),
@@ -1246,6 +1565,13 @@ mod tests {
                 output: PointId(50),
                 delay: 0.5,
                 initial: 0.0,
+            }))
+            .with_element(ProcessElement::SecondOrderLag(SecondOrderLag {
+                input: PointId(10),
+                output: PointId(60),
+                time_constant: 0.25,
+                damping_ratio: 0.4,
+                initial: 0.0,
             }));
         let sim = SimDriver::new(map).unwrap();
         let driver: &dyn IoDriver = &sim;
@@ -1254,12 +1580,12 @@ mod tests {
         for command in [1.0_f64, 2.0, 2.0, -1.0, 0.0] {
             driver.write(PointId(20), Value::Float(command)).unwrap();
             sim.step(0.25);
-            for point in [10_u64, 30, 40, 50] {
+            for point in [10_u64, 30, 40, 50, 60] {
                 samples.push(driver.read(PointId(point)).unwrap());
             }
         }
         sim.step(0.5);
-        for point in [10_u64, 30, 40, 50] {
+        for point in [10_u64, 30, 40, 50, 60] {
             samples.push(driver.read(PointId(point)).unwrap());
         }
         samples
@@ -1272,7 +1598,7 @@ mod tests {
         assert_eq!(first, second);
         // The run actually produced distinct, non-trivial samples.
         assert!(first.iter().any(|sample| sample.value != Value::Float(0.0)));
-        assert_eq!(first.len(), 24);
+        assert_eq!(first.len(), 30);
     }
 
     #[test]

@@ -116,6 +116,37 @@ pub struct Integrator {
     pub initial: f64,
 }
 
+/// A second-order lag process element:
+/// `time_constant² · y'' + 2·damping_ratio·time_constant·y' + y = u`.
+///
+/// The parameterization is a time constant τ — the inverse of the
+/// undamped natural frequency ωₙ — and a dimensionless damping ratio ζ.
+/// ζ < 1 gives an underdamped step response that overshoots its input,
+/// ζ = 1 is critically damped, and ζ > 1 gives the sluggish approach a
+/// cascade of two first-order lags produces. The element starts at
+/// rest: the output holds `initial` with zero rate until the first
+/// step. Stepping applies the exact zero-order-hold discretization —
+/// the input read at each step is held across it — so the output at
+/// every tick equals the continuous-time response at `t = n·dt` to
+/// within floating-point round-off.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SecondOrderLag {
+    /// The point read as input `u`; must be a `Float` point.
+    pub input: PointId,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// The time constant τ = 1/ωₙ, in the same time units as `step`'s
+    /// `dt`. Must be finite and positive.
+    pub time_constant: f64,
+    /// The damping ratio ζ: below 1 underdamped (the step response
+    /// overshoots), 1 critically damped, above 1 overdamped. Must be
+    /// finite and positive.
+    pub damping_ratio: f64,
+    /// The output value before the first step; the initial rate is
+    /// zero. Must be finite.
+    pub initial: f64,
+}
+
 /// A transport-delay process element: `y(t) = u(t - delay)`.
 ///
 /// The element keeps a deterministic delay line — a ring of past
@@ -148,6 +179,8 @@ pub struct DeadTime {
 pub enum ProcessElement {
     /// A [`FirstOrderLag`].
     FirstOrderLag(FirstOrderLag),
+    /// A [`SecondOrderLag`].
+    SecondOrderLag(SecondOrderLag),
     /// An [`Integrator`].
     Integrator(Integrator),
     /// A [`DeadTime`].
@@ -159,6 +192,7 @@ impl ProcessElement {
     pub fn input(&self) -> PointId {
         match self {
             Self::FirstOrderLag(element) => element.input,
+            Self::SecondOrderLag(element) => element.input,
             Self::Integrator(element) => element.input,
             Self::DeadTime(element) => element.input,
         }
@@ -168,6 +202,7 @@ impl ProcessElement {
     pub fn output(&self) -> PointId {
         match self {
             Self::FirstOrderLag(element) => element.output,
+            Self::SecondOrderLag(element) => element.output,
             Self::Integrator(element) => element.output,
             Self::DeadTime(element) => element.output,
         }
@@ -177,6 +212,7 @@ impl ProcessElement {
     pub fn initial(&self) -> f64 {
         match self {
             Self::FirstOrderLag(element) => element.initial,
+            Self::SecondOrderLag(element) => element.initial,
             Self::Integrator(element) => element.initial,
             Self::DeadTime(element) => element.initial,
         }
@@ -240,8 +276,9 @@ impl ChannelMap {
     /// - every loopback and element names bound points only;
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
-    /// - element ends are `Float` points, `time_constant` and `delay`
-    ///   are finite and positive, and `initial` is finite;
+    /// - element ends are `Float` points, `time_constant`, `delay`, and
+    ///   `damping_ratio` are finite and positive, and `initial` is
+    ///   finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -308,6 +345,20 @@ impl ChannelMap {
                     point: lag.output,
                     value: lag.time_constant,
                 });
+            }
+            if let ProcessElement::SecondOrderLag(lag) = element {
+                if !lag.time_constant.is_finite() || lag.time_constant <= 0.0 {
+                    return Err(ConfigError::InvalidTimeConstant {
+                        point: lag.output,
+                        value: lag.time_constant,
+                    });
+                }
+                if !lag.damping_ratio.is_finite() || lag.damping_ratio <= 0.0 {
+                    return Err(ConfigError::InvalidDamping {
+                        point: lag.output,
+                        value: lag.damping_ratio,
+                    });
+                }
             }
             if let ProcessElement::DeadTime(dead_time) = element
                 && (!dead_time.delay.is_finite() || dead_time.delay <= 0.0)
@@ -378,6 +429,13 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A second-order lag's `damping_ratio` is not finite and positive.
+    InvalidDamping {
+        /// The element's output point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// A dead-time element's `delay` is not finite and positive.
     InvalidDelay {
         /// The element's output point.
@@ -441,6 +499,11 @@ impl fmt::Display for ConfigError {
             Self::InvalidTimeConstant { point, value } => write!(
                 f,
                 "lag driving point {} has non-positive or non-finite time constant {value}",
+                point.0
+            ),
+            Self::InvalidDamping { point, value } => write!(
+                f,
+                "second-order lag driving point {} has non-positive or non-finite damping ratio {value}",
                 point.0
             ),
             Self::InvalidDelay { point, value } => write!(

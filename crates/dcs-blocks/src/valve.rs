@@ -540,24 +540,28 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Setpoint),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "fb".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "discrepancy".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
             ]
         );

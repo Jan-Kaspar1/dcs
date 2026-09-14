@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-8ai",
+      "channels": {
+        "ch0": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-4ao",
+      "channels": {
+        "ch0": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "ch0" }
+    },
+    {
+      "id": 11,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "ch0" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 20.0 },
+      "writable": true
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "reactor-temperature",
+      "source": 10,
+      "unit": "degC",
+      "description": "Reactor core temperature",
+      "group": "reactor"
+    },
+    {
+      "id": 101,
+      "name": "valve-command",
+      "source": 11,
+      "unit": "%",
+      "description": "Control valve position command",
+      "group": "reactor"
+    },
+    {
+      "id": 102,
+      "name": "level-setpoint",
+      "source": 12,
+      "unit": "degC",
+      "description": "Operator level setpoint",
+      "group": "reactor"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "pid",
+      "parameters": { "kp": { "Float": 1.5 }, "ti": { "Float": 10.0 } },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "setpoint": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "setpoint" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 11 }
+    }
+  ]
+}
