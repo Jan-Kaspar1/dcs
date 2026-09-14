@@ -12,7 +12,7 @@ One controller runs a deterministic fixed-step scan entirely against simulated I
 
 | Crate | Layer | Status |
 |---|---|---|
-| `dcs-core` | Shared contracts: signal (value + quality + tick timestamp), component and logical I/O traits | Planned — crate stub exists, contracts not implemented |
+| `dcs-core` | Shared contracts: signal (value + quality + tick timestamp), component and logical I/O traits | In progress — signal model implemented (#5); component and logical I/O traits planned |
 | `dcs-model` | Plant model types, device/logical-I/O mapping, versioned JSON serialization | Planned |
 | `dcs-runtime` | Fixed-step cyclic executor and component model driven by a virtual tick | Planned |
 | `dcs-sim` | Simulated I/O backend implementing the driver boundary | Planned |

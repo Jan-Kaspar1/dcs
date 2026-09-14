@@ -23,7 +23,7 @@ When choosing a shared contract, module boundary, persistence format, or runtime
 
 ### 2. Signal representation
 
-- **Status:** Accepted as proposed behavior; no signal type is implemented yet.
+- **Status:** Accepted and implemented in `dcs-core` (issue #5): `Sample { value: Value, quality: Quality, tick: Tick }` with `Value` = `Bool`/`Int`/`Float`, `Quality` = `Good`/`Uncertain`/`Bad` carrying a `QualityReason`, and `Tick` a logical `u64` counter.
 - **Problem:** Control logic and the monitoring UI need one uniform way to represent a process value that may be good, bad, stale, or substituted, and to know when it was sampled — bare scalars cannot express this.
 - **Chosen approach:** A signal is a typed value plus a quality flag plus a timestamp: conceptually `Signal<T> { value: T, quality: Quality, timestamp: Tick }`, defined in `dcs-core`. `Quality` starts as a small enum (good, bad, uncertain/substituted) and may grow. The timestamp is a virtual tick count (see decision 4), not wall-clock time.
 - **Alternatives considered:** Bare typed values with no quality (loses diagnostics the vision requires); OPC UA-style status codes and source/server timestamps (broad but heavyweight for a first contract); bespoke per-signal structs (no uniform handling in the executor or UI).
