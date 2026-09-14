@@ -16,7 +16,7 @@
 //! or `demoting` until the first scan under the new mode completes, when
 //! the reported role settles to `active` or `standby`.
 
-use crate::signal::Tick;
+use crate::signal::{PointId, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -58,6 +58,27 @@ impl fmt::Display for Role {
     }
 }
 
+/// One staged-output mismatch the standby's divergence check found: the
+/// value the tracking peer's own scan staged for a field `Out` point
+/// against the value the field actually carried at that tick — the
+/// evidence behind a reported [`StandbySync::Diverged`].
+///
+/// Both sides come from the standby's own view: `staged` is what its
+/// executor's write phase would have issued, `field` is the standby's
+/// read of the same point through its driver surface (the shared plant
+/// for a field-observing driver). The per-kind comparison rule — exact
+/// equality for `Bool`/`Int`, a documented tolerance for `Float` — lives
+/// with the runtime's divergence check.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Divergence {
+    /// The mismatched field `Out` point.
+    pub point: PointId,
+    /// The value the standby's scan staged for it.
+    pub staged: Value,
+    /// The value the field carried for it at the same tick.
+    pub field: Value,
+}
+
 /// How far a tracking peer has converged to the active's run — the
 /// standby half of a [`RoleReport`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +101,15 @@ pub enum StandbySync {
         /// What the failed transfer reported, for diagnostics.
         detail: String,
     },
+    /// Checkpoints apply cleanly but the outputs the standby's own scan
+    /// stages no longer match what the field carries — a converged peer
+    /// whose takeover would write a different field than the active's.
+    /// Promotion is refused until a fresh checkpoint resynchronizes it.
+    /// `mismatches` lists the diverging points with both sides' values.
+    Diverged {
+        /// The mismatched field `Out` points.
+        mismatches: Vec<Divergence>,
+    },
 }
 
 impl fmt::Display for StandbySync {
@@ -88,6 +118,15 @@ impl fmt::Display for StandbySync {
             Self::Unsynchronized => f.write_str("unsynchronized"),
             Self::Tracking { aligned } => write!(f, "tracking (aligned at tick {})", aligned.0),
             Self::Degraded { detail } => write!(f, "degraded: {detail}"),
+            Self::Diverged { mismatches } => write!(
+                f,
+                "diverged: staged outputs mismatch the field at {}",
+                mismatches
+                    .iter()
+                    .map(|mismatch| mismatch.point.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -183,6 +222,24 @@ mod tests {
                     detail: "fetch failed".to_string(),
                 }),
             },
+            RoleReport {
+                role: Role::Standby,
+                tick: Tick(40),
+                sync: Some(StandbySync::Diverged {
+                    mismatches: vec![
+                        Divergence {
+                            point: PointId(20),
+                            staged: Value::Float(4.5),
+                            field: Value::Float(6.0),
+                        },
+                        Divergence {
+                            point: PointId(21),
+                            staged: Value::Bool(true),
+                            field: Value::Bool(false),
+                        },
+                    ],
+                }),
+            },
         ];
         for report in reports {
             let json = serde_json::to_string(&report).unwrap();
@@ -213,6 +270,15 @@ mod tests {
             SwitchError::AlreadyActive,
             SwitchError::NotConverged {
                 sync: StandbySync::Unsynchronized,
+            },
+            SwitchError::NotConverged {
+                sync: StandbySync::Diverged {
+                    mismatches: vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(4.5),
+                        field: Value::Float(6.0),
+                    }],
+                },
             },
             SwitchError::NotActive,
             SwitchError::OwnsField,

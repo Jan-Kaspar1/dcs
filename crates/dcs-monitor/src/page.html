@@ -245,19 +245,24 @@ function activePeer() {
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}}.
+// {"degraded": {detail}} | {"diverged": {mismatches}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
     return "tracking (aligned at tick " + sync.tracking.aligned + ")";
   }
   if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  if ("diverged" in sync) {
+    return "diverged: staged outputs mismatch the field at " +
+      sync.diverged.mismatches.map(m => m.point).join(", ");
+  }
   return JSON.stringify(sync);
 }
 
 // The pair's redundancy summary: healthy, or the named redundancy
-// faults — an unreachable peer, a degraded standby convergence, or no
-// peer reporting active. These are pair health, never plant faults.
+// faults — an unreachable peer, a degraded or diverged standby
+// convergence, or no peer reporting active. These are pair health,
+// never plant faults.
 function pairSummary() {
   const faults = [];
   let activeName = null;
@@ -270,9 +275,14 @@ function pairSummary() {
     }
     if (state.report === null) return;
     if (state.report.role === "active") activeName = peer.name;
-    if (state.report.sync && typeof state.report.sync === "object" &&
-        "degraded" in state.report.sync) {
-      faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+    if (state.report.sync && typeof state.report.sync === "object") {
+      if ("degraded" in state.report.sync) {
+        faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+      }
+      if ("diverged" in state.report.sync) {
+        faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
+          state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
+      }
     }
   });
   if (activeName === null) faults.push("no peer reports role active");
@@ -515,7 +525,8 @@ async function refreshJournal(base) {
 
 // Journal events serialize as {"quality_changed": ...} |
 // {"command_settled": ...} | {"step_failed": ...} |
-// {"role_changed": {from, to}}.
+// {"role_changed": {from, to}} |
+// {"divergence_detected": {mismatches}}.
 function describeEvent(event) {
   if ("quality_changed" in event) {
     const change = event.quality_changed;
@@ -535,6 +546,12 @@ function describeEvent(event) {
   if ("role_changed" in event) {
     const change = event.role_changed;
     return "reported role " + change.from + " → " + change.to;
+  }
+  if ("divergence_detected" in event) {
+    return "standby diverged: staged outputs mismatch the field at " +
+      event.divergence_detected.mismatches.map(m =>
+        pointName(m.point) + " (staged " + formatValue(m.staged) +
+        ", field " + formatValue(m.field) + ")").join(", ");
   }
   return JSON.stringify(event);
 }

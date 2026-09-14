@@ -51,7 +51,7 @@ pub use io::{
     TypedSample,
 };
 pub use journal::{JournalEntry, JournalEvent};
-pub use role::{Role, RoleReport, StandbySync, SwitchError};
+pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
