@@ -166,7 +166,18 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
                 Err(error) => BusResponse::Error { error },
             }
         }
-        BusRequest::Step => {
+        BusRequest::Step { dt } => {
+            // `RegisterBank::step` panics on a non-finite or negative
+            // dt; the protocol turns that contract violation into a
+            // named refusal — the same rule the plant protocol's step
+            // applies.
+            if !dt.is_finite() || dt < 0.0 {
+                return BusResponse::Error {
+                    error: BusError::InvalidRequest {
+                        detail: format!("step dt must be finite and non-negative, got {dt}"),
+                    },
+                };
+            }
             let writer = shared.writer.lock().unwrap();
             if writer
                 .as_ref()
@@ -175,7 +186,7 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
                 return fenced_out();
             }
             BusResponse::Stepped {
-                tick: shared.bank.step(),
+                tick: shared.bank.step(dt),
             }
         }
         BusRequest::ListRegisters => BusResponse::Registers {
@@ -226,13 +237,14 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
 /// [`BusDriver`](crate::BusDriver) client — a register-mapped simulated
 /// fieldbus device.
 ///
-/// The server owns the device's visible state: all register values and
-/// the logical tick live here, so two attached clients observe — and,
-/// stepping aside, drive — the same device. Each connection is served
-/// on its own thread; the bank's internal mutex makes every request
-/// atomic, and because the tick advances only on an explicit
-/// [`BusRequest::Step`], an attached client that only reads sees the
-/// registers exactly as the stepping client left them.
+/// The server owns the device's visible state: all register values,
+/// the logical tick, and any declared dynamics' element state live
+/// here, so two attached clients observe — and, stepping aside, drive
+/// — the same device. Each connection is served on its own thread; the
+/// bank's internal mutex makes every request atomic, and because the
+/// tick advances only on an explicit [`BusRequest::Step`], an attached
+/// client that only reads sees the registers exactly as the stepping
+/// client left them.
 ///
 /// The server arbitrates a single writer for the failover fencing the
 /// crate root documents: a [`BusRequest::ClaimWriter`] grants the

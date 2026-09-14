@@ -9,7 +9,8 @@
 //! controller in the loop: list the served registers, read and write
 //! them by address, inject and clear a register's reported quality —
 //! the bus analogue of `dcs-plant-ctl`'s `fault`/`clear-fault` — and
-//! step the bank's logical tick explicitly. It is development tooling,
+//! step the bank's logical tick explicitly, carrying the step's `dt`
+//! for any declared dynamics. It is development tooling,
 //! not part of the operator contract.
 //!
 //! Each invocation connects, sends its request, and prints the server's
@@ -38,8 +39,9 @@ commands:
                             `write 4 1` stores 1.0 on a float register; a
                             literal of another kind is still sent, and the
                             server names the kind mismatch
-  step [n]                  advance the device's logical tick n times
-                            (default: 1)
+  step <dt> [n]             advance the device's logical tick n times
+                            (default: 1), stepping any declared
+                            dynamics <dt> time units per tick
   inject-quality <register> <quality>
                             stamp a register's stored sample with a
                             declared quality — good,
@@ -90,7 +92,7 @@ enum Action {
     /// already accepted — the declared-kind interpretation waits for
     /// the register's kind, which only the server knows.
     Write(u16, String, Value),
-    Step(u64),
+    Step(f64, u64),
     InjectQuality(u16, Quality),
     ClearQuality(u16),
 }
@@ -135,8 +137,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             value.clone(),
             parse_literal(value).map_err(usage)?,
         ),
-        ("step", []) => Action::Step(1),
-        ("step", [count]) => Action::Step(parse_count(count).map_err(usage)?),
+        ("step", [dt]) => Action::Step(parse_dt(dt).map_err(usage)?, 1),
+        ("step", [dt, count]) => Action::Step(
+            parse_dt(dt).map_err(usage)?,
+            parse_count(count).map_err(usage)?,
+        ),
         ("inject-quality", [register, quality]) => Action::InjectQuality(
             parse_register(register).map_err(usage)?,
             parse_quality(quality).map_err(usage)?,
@@ -177,7 +182,7 @@ fn expect(
 }
 
 /// Runs the command's exchange and returns the server's answer — for
-/// `step [n]`, the last of `n` step answers.
+/// `step <dt> [n]`, the last of `n` step answers.
 fn execute(driver: &BusDriver, action: &Action) -> Result<BusResponse, Failure> {
     match action {
         Action::List => expect(driver, &BusRequest::ListRegisters, |response| {
@@ -216,10 +221,10 @@ fn execute(driver: &BusDriver, action: &Action) -> Result<BusResponse, Failure> 
                 |response| matches!(response, BusResponse::Written { .. }),
             )
         }
-        Action::Step(count) => {
+        Action::Step(dt, count) => {
             let mut answer = BusResponse::Stepped { tick: Tick::ZERO };
             for _ in 0..*count {
-                answer = expect(driver, &BusRequest::Step, |response| {
+                answer = expect(driver, &BusRequest::Step { dt: *dt }, |response| {
                     matches!(response, BusResponse::Stepped { .. })
                 })?;
             }
@@ -280,6 +285,16 @@ fn parse_reason(arg: Option<&str>) -> Result<QualityReason, String> {
         Some("device_fault") => Ok(QualityReason::DeviceFault),
         Some("configuration_fault") => Ok(QualityReason::ConfigurationFault),
         Some(other) => Err(format!("invalid quality reason {other:?}")),
+    }
+}
+
+/// Parses `step`'s `<dt>`: a finite number of time units per step —
+/// the same argument `dcs-plant-ctl`'s `step` takes. The server's own
+/// check refuses a negative dt.
+fn parse_dt(arg: &str) -> Result<f64, String> {
+    match arg.parse::<f64>() {
+        Ok(dt) if dt.is_finite() => Ok(dt),
+        _ => Err(format!("invalid step {arg:?}: expected a finite number")),
     }
 }
 

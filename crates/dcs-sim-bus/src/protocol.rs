@@ -92,9 +92,16 @@ pub enum BusRequest {
     /// Lists every register the device serves, ordered by address.
     ListRegisters,
     /// Advances the device's logical tick by one — the explicit
-    /// simulation step. The bank holds no time-dependent dynamics, so
-    /// the request carries no `dt`.
-    Step,
+    /// simulation step — stepping any declared dynamics by `dt` time
+    /// units. `dt` must be finite and non-negative; a step carrying
+    /// one that is not is refused with
+    /// [`BusError::InvalidRequest`].
+    Step {
+        /// The simulated time this step advances the declared dynamics
+        /// by — the same caller-supplied time base the plant
+        /// protocol's `step` carries.
+        dt: f64,
+    },
     /// Takes the device's write-ownership claim for `owner` — the
     /// single-writer arbitration the failover decision fences a
     /// superseded active out with.
@@ -465,7 +472,10 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
             push_value(&mut body, value);
         }
         BusRequest::ListRegisters => body.push(OP_LIST_REGISTERS),
-        BusRequest::Step => body.push(OP_STEP),
+        BusRequest::Step { dt } => {
+            body.push(OP_STEP);
+            body.extend_from_slice(&dt.to_be_bytes());
+        }
         BusRequest::ClaimWriter { owner } => {
             body.push(OP_CLAIM_WRITER);
             body.extend_from_slice(&owner.to_be_bytes());
@@ -563,7 +573,9 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
             value: reader.value().ok_or_else(short)?,
         },
         OP_LIST_REGISTERS => BusRequest::ListRegisters,
-        OP_STEP => BusRequest::Step,
+        OP_STEP => BusRequest::Step {
+            dt: f64::from_be_bytes(reader.take(8).ok_or_else(short)?.try_into().unwrap()),
+        },
         OP_CLAIM_WRITER => BusRequest::ClaimWriter {
             owner: reader.u64().ok_or_else(short)?,
         },
@@ -676,7 +688,7 @@ mod tests {
                 value: Value::Int(-3),
             },
             BusRequest::ListRegisters,
-            BusRequest::Step,
+            BusRequest::Step { dt: 0.1 },
             BusRequest::ClaimWriter { owner: 42 },
             BusRequest::ReleaseWriter,
             BusRequest::InjectQuality {
@@ -714,10 +726,19 @@ mod tests {
             serde_json::to_string(&BusRequest::ReleaseWriter).unwrap(),
             r#"{"op":"release_writer"}"#
         );
-        // The wire form of a read is exactly tag plus register.
+        // The wire form of a read is exactly tag plus register, and a
+        // step is tag plus the eight-byte dt.
         assert_eq!(
             encode_request(&BusRequest::ReadRegister { register: 4 }),
             vec![0, 3, 0x01, 0, 4]
+        );
+        assert_eq!(
+            encode_request(&BusRequest::Step { dt: 0.5 }),
+            [&[0, 9, 0x04][..], &0.5f64.to_be_bytes()[..],].concat()
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::Step { dt: 0.5 }).unwrap(),
+            r#"{"op":"step","dt":0.5}"#
         );
         // A claim is tag plus the eight-byte owner token.
         assert_eq!(
@@ -867,21 +888,24 @@ mod tests {
         // client drops the link; neither panics.
         for body in [
             &[][..],
-            &[0x01][..],                   // read register, missing address
-            &[0x02, 0, 1][..],             // write, missing value
-            &[0x02, 0, 1, 0x09][..],       // write, unknown kind tag
-            &[0x03, 0][..],                // trailing byte after list
-            &[0xff][..],                   // unknown request tag
-            &[0x01, 0][..],                // read, truncated address
-            &[0x05, 0, 0][..],             // claim, truncated owner
-            &[0x06, 0][..],                // trailing byte after release
-            &[0x07, 0][..],                // inject, truncated register
-            &[0x07, 0, 4][..],             // inject, missing quality
-            &[0x07, 0, 4, 0x09][..],       // inject, unknown severity
-            &[0x07, 0, 4, 0x02][..],       // inject, missing reason
-            &[0x07, 0, 4, 0x02, 0x09][..], // inject, unknown reason
-            &[0x08][..],                   // clear, missing register
-            &[0x08, 0, 4, 0][..],          // trailing byte after clear
+            &[0x01][..],                            // read register, missing address
+            &[0x02, 0, 1][..],                      // write, missing value
+            &[0x02, 0, 1, 0x09][..],                // write, unknown kind tag
+            &[0x03, 0][..],                         // trailing byte after list
+            &[0x04][..],                            // step, missing dt
+            &[0x04, 0, 0][..],                      // step, truncated dt
+            &[0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0][..], // step, trailing byte after dt
+            &[0xff][..],                            // unknown request tag
+            &[0x01, 0][..],                         // read, truncated address
+            &[0x05, 0, 0][..],                      // claim, truncated owner
+            &[0x06, 0][..],                         // trailing byte after release
+            &[0x07, 0][..],                         // inject, truncated register
+            &[0x07, 0, 4][..],                      // inject, missing quality
+            &[0x07, 0, 4, 0x09][..],                // inject, unknown severity
+            &[0x07, 0, 4, 0x02][..],                // inject, missing reason
+            &[0x07, 0, 4, 0x02, 0x09][..],          // inject, unknown reason
+            &[0x08][..],                            // clear, missing register
+            &[0x08, 0, 4, 0][..],                   // trailing byte after clear
         ] {
             assert!(decode_request(body).is_err(), "{body:02x?}");
         }
