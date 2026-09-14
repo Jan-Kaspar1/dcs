@@ -66,7 +66,14 @@
 //! ungrouped points filed under the documented `"ungrouped"` default —
 //! then polls `/snapshot`, `/history`, and `/journal` on one shared
 //! one-second cadence — the snapshot refreshes each point's value,
-//! quality, and tick, and badges each point in its force set; the
+//! quality, and tick, and marks each point in its force set: the forced
+//! badge beside the point's value in the listing and on every faceplate
+//! element bound to it, the `Substituted` quality drawn distinctly from
+//! ordinary `Uncertain`, a release affordance issuing `unforce_point`,
+//! and a force affordance on every model-declared writable `In` point —
+//! the force contract's only legal target — issuing `force_point`, both
+//! through the same receipted command path with rejections surfaced in
+//! the receipt pane and the journal; the
 //! history increments grow each point's
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
