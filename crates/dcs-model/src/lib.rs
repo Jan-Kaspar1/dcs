@@ -17,7 +17,10 @@
 //! removes, or changes as a structured [`ModelDiff`]. For
 //! engineering-quality review, [`PlantModel::lint`] reports advisory
 //! [`LintFinding`]s — valid but probably unfinished declarations, like an
-//! io_point no signal sources.
+//! io_point no signal sources. For non-Rust tooling,
+//! [`PlantModel::json_schema`] emits the document's JSON Schema — covering
+//! the structural and intra-element rules the schema language can express
+//! while cross-reference and wiring checks stay with `load`.
 
 #![warn(missing_docs)]
 
@@ -25,6 +28,7 @@ mod diff;
 mod index;
 mod lint;
 mod model;
+mod schema;
 mod validate;
 
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
