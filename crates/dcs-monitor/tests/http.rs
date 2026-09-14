@@ -5,7 +5,8 @@ use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError, PointId,
     Sample, Tick, Value, ValueKind,
 };
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_model::{PlantModel, SignalIndex};
+use dcs_monitor::{Monitor, MonitorClient, PAGE};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
@@ -92,6 +93,15 @@ impl Component for Scale {
     }
 }
 
+/// The model fixture behind the monitor: points 10/20/30 match the rig's
+/// point map, and signals give points 10 and 20 names and units.
+const MODEL: &str = include_str!("../fixtures/monitor.json");
+
+/// The signal index a controller built from [`MODEL`] would serve.
+fn signal_index() -> SignalIndex {
+    PlantModel::load(MODEL).unwrap().signal_index()
+}
+
 fn write_value(point: u64, kind: ValueKind, value: Value) -> Command {
     Command::WriteValue {
         point: PointId(point),
@@ -116,7 +126,7 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
     .into_iter()
     .collect();
     let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
-    let monitor = Monitor::bind("127.0.0.1:0", executor).unwrap();
+    let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
     thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
@@ -273,6 +283,99 @@ fn identical_scripted_runs_produce_identical_receipts() {
     };
 
     assert_eq!(run(), run());
+}
+
+#[test]
+fn signals_endpoint_serves_the_models_metadata() {
+    with_monitor(|_driver, client| {
+        let index = client.signals().unwrap();
+        // The served payload is exactly the loaded model's SignalIndex,
+        // so it serde-roundtrips over the wire.
+        assert_eq!(index, signal_index());
+        assert_eq!(index.points.len(), 3);
+
+        let input = index.get(PointId(10)).unwrap();
+        assert_eq!(input.name, "reactor-temperature");
+        assert_eq!(input.unit.as_deref(), Some("degC"));
+        assert_eq!(
+            input.description.as_deref(),
+            Some("Reactor temperature measurement")
+        );
+        assert_eq!(input.direction, dcs_model::Direction::In);
+        assert_eq!(input.value_type, ValueKind::Float);
+
+        let output = index.get(PointId(20)).unwrap();
+        assert_eq!(output.name, "heater-command");
+        assert_eq!(output.unit.as_deref(), Some("%"));
+        assert_eq!(output.direction, dcs_model::Direction::Out);
+
+        // A point no signal sources still gets a default entry.
+        let spare = index.get(PointId(30)).unwrap();
+        assert_eq!(spare.signal, None);
+        assert_eq!(spare.name, "point-30");
+        assert_eq!(spare.unit, None);
+    });
+}
+
+#[test]
+fn monitoring_page_is_served() {
+    with_monitor(|_driver, client| {
+        assert_eq!(client.page().unwrap(), PAGE);
+        for path in ["/", "/index.html"] {
+            let (status, body) = client.request("GET", path, None).unwrap();
+            assert_eq!(status, 200, "{path}");
+            assert!(body.contains("<title>dcs-monitor</title>"), "{path}");
+            // The page drives only the JSON contract endpoints.
+            for endpoint in ["/signals", "/snapshot", "/command"] {
+                assert!(body.contains(endpoint), "{path} lacks {endpoint}");
+            }
+        }
+    });
+}
+
+#[test]
+fn page_json_feed_tracks_snapshots_and_commands() {
+    with_monitor(|driver, client| {
+        driver.write(PointId(10), Value::Float(3.0)).unwrap();
+        client.advance(1).unwrap();
+
+        // The join the page performs: metadata from /signals names and
+        // units each point; /snapshot carries its live sample.
+        let index = client.signals().unwrap();
+        let snapshot = client.snapshot().unwrap();
+        let meta = index.get(PointId(10)).unwrap();
+        let telemetry = snapshot
+            .points
+            .iter()
+            .find(|point| point.point == meta.point)
+            .unwrap();
+        assert_eq!(meta.name, "reactor-temperature");
+        assert_eq!(telemetry.sample.unwrap().value, Value::Float(3.0));
+        assert_eq!(telemetry.sample.unwrap().tick, Tick(1));
+
+        // The exact body the page's command form serializes is a Command.
+        let (status, body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(r#"{"write_value":{"point":10,"kind":"Float","value":{"Float":7.5}}}"#),
+            )
+            .unwrap();
+        assert_eq!(status, 200);
+        let receipt: CommandReceipt = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+
+        // The commanded value is what later snapshots — and so the page —
+        // display for that point.
+        let snapshot = client.advance(1).unwrap();
+        assert_eq!(point_value(&snapshot, 10), Some(Value::Float(7.5)));
+        assert_eq!(point_value(&snapshot, 20), Some(Value::Float(15.0)));
+    });
 }
 
 #[test]

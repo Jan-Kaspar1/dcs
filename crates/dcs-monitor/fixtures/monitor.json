@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "temperature": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-ao",
+      "channels": {
+        "heater": { "direction": "out", "value_type": "Float" },
+        "spare": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "temperature" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "heater" }
+    },
+    {
+      "id": 30,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "spare" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "reactor-temperature",
+      "source": 10,
+      "unit": "degC",
+      "description": "Reactor temperature measurement"
+    },
+    {
+      "id": 101,
+      "name": "heater-command",
+      "source": 20,
+      "unit": "%",
+      "description": "Heater power command"
+    }
+  ],
+  "components": [],
+  "connections": []
+}

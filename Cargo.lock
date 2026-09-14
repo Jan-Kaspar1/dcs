@@ -59,6 +59,7 @@ name = "dcs-monitor"
 version = "0.1.0"
 dependencies = [
  "dcs-core",
+ "dcs-model",
  "dcs-runtime",
  "serde",
  "serde_json",
