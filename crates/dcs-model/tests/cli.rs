@@ -234,11 +234,7 @@ fn diff_lists_added_removed_and_changed_elements_in_every_class() {
 
 #[test]
 fn diff_of_identical_documents_is_empty_and_exits_zero() {
-    let output = run_diff(
-        &fixture("diff/base.json"),
-        &fixture("diff/base.json"),
-        &[],
-    );
+    let output = run_diff(&fixture("diff/base.json"), &fixture("diff/base.json"), &[]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output).trim(), "no changes");
 }
@@ -287,10 +283,7 @@ fn diff_json_mode_parses_and_names_the_elements() {
     assert!(elements("io_points").contains(&"io_point 10"));
     assert!(elements("signals").contains(&"signal 102 \"valve-command\""));
     assert!(elements("components").contains(&"component 9 \"spare-gain\""));
-    assert!(
-        elements("connections")
-            .contains(&"port \"out\" on component 1 -> point 10")
-    );
+    assert!(elements("connections").contains(&"port \"out\" on component 1 -> point 10"));
     // The change kind and field detail are machine-readable too.
     let device1 = diff["devices"]
         .as_array()
@@ -318,7 +311,13 @@ fn diff_json_mode_parses_and_names_the_elements() {
     );
     assert!(output.status.success());
     let diff: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
-    for class in ["devices", "io_points", "signals", "components", "connections"] {
+    for class in [
+        "devices",
+        "io_points",
+        "signals",
+        "components",
+        "connections",
+    ] {
         assert_eq!(diff[class], serde_json::json!([]), "{class}");
     }
 }

@@ -255,9 +255,7 @@ fn diff_values(
     out: &mut Vec<FieldChange>,
 ) {
     match (old.as_object(), new.as_object()) {
-        (Some(old_map), Some(new_map))
-            if !is_signal_value(old) && !is_signal_value(new) =>
-        {
+        (Some(old_map), Some(new_map)) if !is_signal_value(old) && !is_signal_value(new) => {
             let keys: BTreeSet<&String> = old_map.keys().chain(new_map.keys()).collect();
             for key in keys {
                 let field = if path.is_empty() {
@@ -326,7 +324,10 @@ fn describe_endpoint(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Point(id) => format!("point {}", id.0),
         Endpoint::Port(reference) => {
-            format!("port {:?} on component {}", reference.name, reference.component.0)
+            format!(
+                "port {:?} on component {}",
+                reference.name, reference.component.0
+            )
         }
     }
 }
