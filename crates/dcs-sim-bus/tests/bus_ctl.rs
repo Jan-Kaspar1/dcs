@@ -166,13 +166,14 @@ fn read_write_and_step_roundtrip() {
             }
         );
 
-        // `step` advances the bank's tick once; `step n` n times.
+        // `step <dt>` advances the bank's tick once; `step <dt> n`
+        // n times.
         assert_eq!(
-            ctl_ok(addr, &["step"]),
+            ctl_ok(addr, &["step", "0.1"]),
             BusResponse::Stepped { tick: Tick(1) }
         );
         assert_eq!(
-            ctl_ok(addr, &["step", "3"]),
+            ctl_ok(addr, &["step", "0.1", "3"]),
             BusResponse::Stepped { tick: Tick(4) }
         );
         assert_eq!(server.bank().tick(), Tick(4));
@@ -296,7 +297,7 @@ fn injection_is_open_while_the_writer_claim_is_held() {
         // Arbitration is undisturbed: the ctl attachment is still
         // fenced out of writes and steps.
         assert!(!ctl(addr, &["write", "4", "1.0"]).status.success());
-        assert!(!ctl(addr, &["step"]).status.success());
+        assert!(!ctl(addr, &["step", "0.1"]).status.success());
         assert_eq!(ctl_ok(addr, &["clear-quality", "4"]), BusResponse::Done);
         assert!(holder.read(PointId(1)).unwrap().quality.is_good());
     });
@@ -332,6 +333,13 @@ fn server_error_answers_exit_nonzero_naming_the_error() {
         let text = stderr(&output);
         assert!(text.contains("no register 99"), "{text}");
 
+        // A negative step dt parses at the tool and is refused by the
+        // server's own named check.
+        let output = ctl(addr, &["step", "-1"]);
+        assert!(!output.status.success());
+        let text = stderr(&output);
+        assert!(text.contains("step dt"), "{text}");
+
         // A literal of another kind is still sent, and the server names
         // the kind mismatch.
         let output = ctl(addr, &["write", "4", "true"]);
@@ -354,7 +362,7 @@ fn server_error_answers_exit_nonzero_naming_the_error() {
         )
         .unwrap();
         holder.claim_writer(7).unwrap();
-        let output = ctl(addr, &["step"]);
+        let output = ctl(addr, &["step", "0.1"]);
         assert!(!output.status.success());
         let text = stderr(&output);
         assert!(text.contains("fenced"), "{text}");
@@ -386,11 +394,14 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "write", "4", "abc"],
         vec![dead, "write", "4", "nan"],
         vec![dead, "write", "4", "1", "extra"],
-        vec![dead, "step", "0"],
-        vec![dead, "step", "-1"],
-        vec![dead, "step", "1.5"],
+        vec![dead, "step"],
         vec![dead, "step", "abc"],
-        vec![dead, "step", "1", "extra"],
+        vec![dead, "step", "nan"],
+        vec![dead, "step", "0.5", "0"],
+        vec![dead, "step", "0.5", "-1"],
+        vec![dead, "step", "0.5", "1.5"],
+        vec![dead, "step", "0.5", "abc"],
+        vec![dead, "step", "0.5", "1", "extra"],
         vec![dead, "inject-quality"],
         vec![dead, "inject-quality", "4"],
         vec![dead, "inject-quality", "abc", "bad"],
@@ -421,11 +432,11 @@ fn identical_request_sequences_produce_identical_output() {
             vec!["read", "4"],
             vec!["inject-quality", "4", "bad:device_fault"],
             vec!["read", "4"],
-            vec!["step"],
+            vec!["step", "0.1"],
             vec!["write", "9", "-3"],
             vec!["write", "7", "true"],
             vec!["clear-quality", "4"],
-            vec!["step", "2"],
+            vec!["step", "0.1", "2"],
             vec!["list"],
             vec!["read", "9"],
         ]

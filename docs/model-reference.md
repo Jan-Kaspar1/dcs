@@ -137,6 +137,7 @@ carried by the controller's scan image — decision 14).
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
 | `initial` | tagged `Value`, e.g. `{"Float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
+| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
 
 ### Internal points
 
@@ -180,6 +181,38 @@ reviewing, so lint flags it (`writable_field_point`); writable internal
 points are the ordinary mechanism and are not flagged. Writability joins
 the point metadata the monitoring surface serves, so the page offers
 command affordances only where commands can succeed.
+
+### `stale_after_ticks` and input freshness
+
+`stale_after_ticks` declares how fresh a field `in` point's samples must
+stay: the number of executor scan ticks a driver-stamped sample tick may
+lag before the point's data is stale (decision 45). The budget lives in
+the point map assembly produces, and the *executor's input phase*
+applies the rule — each scan, for a budgeted field `in` point, it
+compares the tick the driver returned on the sample against the scan
+tick before re-stamping:
+
+- a lag within the budget leaves the driver-returned quality untouched;
+- a lag exceeding it merges `Uncertain(Stale)` by the worst-of rule, so
+  a driver-reported `Bad` or worse-named `Uncertain` is never improved,
+  while a held `Good` value degrades to `Uncertain(Stale)` until the
+  first sample inside the budget returns it to `Good`;
+- the landed image sample always carries the scan tick — the executor
+  is the only timestamp authority; the driver tick is freshness
+  evidence, never an image timestamp;
+- a failed read is not a stale sample: the documented `Bad` mapping and
+  last-known-value behavior stand, and a forced point never reads the
+  driver, so `Substituted` stands too.
+
+A budget of `0` requires a sample stamped at the current scan tick —
+the strictest declaration, for sources expected to refresh every scan.
+The sim bank, the remote plant, and the sim-bus register bank all stamp
+their writes with a device tick the driver protocols carry, so field
+devices integrated through them supply freshness evidence without
+protocol changes. A driver whose samples carry no usable freshness
+signal — one that stamps every read with the current tick, or a fixed
+tick — simply makes the declaration inert or always-stale; declare the
+field only where the source distinguishes fresh samples from held ones.
 
 ## `signals`
 
@@ -415,19 +448,30 @@ object whose single key is the snake_case element name:
 | `second_order_lag` | `input`, `output`, `time_constant`, `damping_ratio`, `initial` | `τ²y″ + 2ζτy′ + y = u` with `time_constant` = τ and `damping_ratio` = ζ — ζ < 1 underdamped (overshoots), ζ = 1 critical, ζ > 1 overdamped; the output starts at `initial` at rest. Stepped by the exact zero-order-hold discretization. |
 | `integrator` | `input`, `output`, `initial` | `dy/dt = u`. |
 | `dead_time` | `input`, `output`, `delay`, `initial` | `y(t) = u(t − delay)`; the realized delay rounds up to whole steps and the output holds `initial` until the delay line has filled. |
+| `noise` | `input`, `output`, `amplitude`, `seed`, `initial` | `y = u + amplitude·(2x − 1)`, `x` drawn once per step from a splitmix64 generator seeded by `seed` — the output stays within `u ± amplitude` and identical seeds replay identical deviation sequences. |
+| `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a Bool-gated flow source answering an actuator's run command. `input` is the one non-Float element end: a `Bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
+| `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `Float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
 point it drives):
 
-- `input` and `output` are io_point ids (`PointId`s) naming points the
-  served map binds — channel-bound io_points on `sim*` devices;
-  channel-less internal points are image-carried and unreachable for
-  elements (`ConfigError::UnknownPoint`);
-- both ends must be `Float` points (`ElementPointKind`);
+- `input`/`inputs` and `output` are io_point ids (`PointId`s) naming
+  points the served map binds — channel-bound io_points on `sim*`
+  devices; channel-less internal points are image-carried and
+  unreachable for elements (`ConfigError::UnknownPoint`);
+- element ends must be `Float` points (`ElementPointKind`) — except a
+  `bool_flow`'s gate `input`, which must be a `Bool` point
+  (`ElementGateKind`);
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
-  and `initial` finite (`NonFiniteInitial`);
+  `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
+  `off_rate`, and `bias` finite (`InvalidRate`, `NonFiniteBias` — rates
+  are signed flows, so a negative draw is legal), and `initial` finite
+  (`NonFiniteInitial`);
+- a non-`Good` input freezes the element's state and propagates its
+  quality to the output sample — a `flow_sum` propagating the worst of
+  its inputs' qualities;
 - no point may be driven by more than one loopback or element
   (`ConflictingDriver`);
 - elements step in declaration order, after loopback routing, so an
@@ -452,7 +496,10 @@ command:
 
 `crates/dcs-plant/fixtures/tank_loop_second_order_dynamics.json` shows
 `second_order_lag`; `crates/dcs-demo/fixtures/showcase_dynamics.json` is
-the showcase plant's.
+the showcase plant's; `crates/dcs-sim/fixtures/pump_station_dynamics.json`
+is the station loop `bool_flow` and `flow_sum` exist for — two Bool-gated
+pump draws and a declared inflow summed into an integrator driving the
+well level.
 
 ## Which layer checks what
 

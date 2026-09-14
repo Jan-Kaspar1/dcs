@@ -14,7 +14,7 @@ use dcs_runtime::{
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
 use dcs_sim_bus::{
     BusDriver, BusError, BusRequest, BusResponse, BusServer, LinkError, PointRegister,
-    RegisterBank, RegisterDecl,
+    ProcessElement, RegisterBank, RegisterDecl,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -99,11 +99,13 @@ impl Drop for ShutdownOnDrop<'_> {
 /// duration of `test`, then shuts the server down and joins its accept
 /// thread.
 fn with_server<R>(decls: &[RegisterDecl], test: impl FnOnce(&BusServer, SocketAddr) -> R) -> R {
-    let server = BusServer::bind(
-        ("127.0.0.1", 0),
-        RegisterBank::new(decls.iter().copied()).unwrap(),
-    )
-    .unwrap();
+    with_bank(RegisterBank::new(decls.iter().copied()).unwrap(), test)
+}
+
+/// Serves `bank` — declarations plus any merged dynamics — the same
+/// way [`with_server`] does.
+fn with_bank<R>(bank: RegisterBank, test: impl FnOnce(&BusServer, SocketAddr) -> R) -> R {
+    let server = BusServer::bind(("127.0.0.1", 0), bank).unwrap();
     let addr = server.local_addr().unwrap();
     thread::scope(|scope| {
         scope.spawn(|| server.serve());
@@ -215,7 +217,7 @@ fn write_then_read_through_the_register_protocol_roundtrips_a_value() {
 
         // The explicit step advances the device tick; the next write
         // stamps it.
-        assert_eq!(bus.step(), Ok(Tick(1)));
+        assert_eq!(bus.step(0.1), Ok(Tick(1)));
         driver.write(PointId(2), Value::Float(5.5)).unwrap();
         assert_eq!(
             driver.read(PointId(2)).unwrap(),
@@ -256,7 +258,7 @@ fn a_second_client_observes_the_same_stepped_registers() {
 
         // The explicit step advances the shared bank's tick; a write
         // the active makes then stamps it, and the standby sees that.
-        let tick = active.step().unwrap();
+        let tick = active.step(0.1).unwrap();
         active.write(PointId(2), Value::Float(4.5)).unwrap();
         assert_eq!(
             standby.read(PointId(2)).unwrap(),
@@ -403,7 +405,7 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
             bus.write(PointId(2), Value::Float(1.0)),
             Err(IoError::Disconnected(PointId(2)))
         );
-        assert_eq!(bus.step(), Err(LinkError::Disconnected));
+        assert_eq!(bus.step(0.1), Err(LinkError::Disconnected));
         assert!(!bus.connected());
         assert_eq!(bus.last_failure(), Some(LinkError::Disconnected));
         assert_eq!(bus.read(PointId(1)), Err(IoError::Disconnected(PointId(1))));
@@ -512,7 +514,7 @@ fn protocol_contract_types_serde_roundtrip() {
             value: Value::Float(1.5),
         },
         BusRequest::ListRegisters,
-        BusRequest::Step,
+        BusRequest::Step { dt: 0.1 },
         BusRequest::ClaimWriter { owner: 42 },
         BusRequest::ReleaseWriter,
         BusRequest::InjectQuality {
@@ -567,7 +569,7 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
 
         // Unclaimed, every attachment writes — the pre-claim behavior.
         old_a.write(PointId(2), Value::Float(1.0)).unwrap();
-        old_b.step().unwrap();
+        old_b.step(0.1).unwrap();
         assert_eq!(observer.read(PointId(2)).unwrap().value, Value::Float(1.0));
 
         // The old owner's several attachments claim the same token; all
@@ -575,7 +577,7 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
         old_a.claim_writer(1).unwrap();
         old_b.claim_writer(1).unwrap();
         old_a.write(PointId(2), Value::Float(2.0)).unwrap();
-        old_b.step().unwrap();
+        old_b.step(0.1).unwrap();
 
         // The takeover claim preempts unconditionally — after it, the
         // old owner's writes and steps are refused at the field, not
@@ -586,7 +588,7 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
             old_a.write(PointId(2), Value::Float(9.0)),
             Err(IoError::Fenced(PointId(2)))
         );
-        assert_eq!(old_b.step(), Err(LinkError::Fenced));
+        assert_eq!(old_b.step(0.1), Err(LinkError::Fenced));
         assert_eq!(
             server.bank().read(9).unwrap(),
             Sample::good(Value::Float(2.0), Tick(1))
@@ -596,7 +598,7 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
         // second attachment claims the same token and writes.
         new_b.claim_writer(2).unwrap();
         new_b.write(PointId(2), Value::Float(3.0)).unwrap();
-        new_a.step().unwrap();
+        new_a.step(0.1).unwrap();
         assert_eq!(observer.read(PointId(2)).unwrap().value, Value::Float(3.0));
 
         // Reads and the register census stay open to a fenced
@@ -729,7 +731,7 @@ fn injection_is_open_while_another_attachment_holds_the_writer_claim() {
             tool.write(PointId(2), Value::Float(1.0)),
             Err(IoError::Fenced(PointId(2)))
         );
-        assert_eq!(tool.step(), Err(LinkError::Fenced));
+        assert_eq!(tool.step(0.1), Err(LinkError::Fenced));
 
         tool.inject_quality(4, Quality::Bad(QualityReason::DeviceFault))
             .unwrap();
@@ -747,12 +749,12 @@ fn injection_is_open_while_another_attachment_holds_the_writer_claim() {
         // Arbitration is undisturbed: the holder still writes and
         // steps, the tool is still fenced out of both.
         holder.write(PointId(2), Value::Float(2.0)).unwrap();
-        assert_eq!(holder.step(), Ok(Tick(1)));
+        assert_eq!(holder.step(0.1), Ok(Tick(1)));
         assert_eq!(
             tool.write(PointId(2), Value::Float(9.0)),
             Err(IoError::Fenced(PointId(2)))
         );
-        assert_eq!(tool.step(), Err(LinkError::Fenced));
+        assert_eq!(tool.step(0.1), Err(LinkError::Fenced));
 
         tool.clear_quality(4).unwrap();
         assert_eq!(
@@ -772,7 +774,7 @@ fn identical_scripted_runs_with_injection_produce_identical_samples() {
             bus.inject_quality(4, Quality::Bad(QualityReason::CommunicationFault))
                 .unwrap();
             trace.push(bus.read(PointId(1)).unwrap());
-            bus.step().unwrap();
+            bus.step(0.1).unwrap();
             bus.write(PointId(2), Value::Float(1.5)).unwrap();
             // The injection stands across a step and an unrelated write.
             trace.push(bus.read(PointId(1)).unwrap());
@@ -832,7 +834,7 @@ fn executor_runs_unchanged_with_identical_behavior_local_and_register_mapped() {
     let bus_trace = with_server(&fixture_decls(), |_, addr| {
         let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
         scripted_run(&bus, || {
-            bus.step().unwrap();
+            bus.step(0.1).unwrap();
         })
     });
     // Same components, same script, same point map — only the transport
@@ -846,11 +848,234 @@ fn two_identical_scripted_runs_produce_identical_sample_sequences() {
         with_server(&fixture_decls(), |_, addr| {
             let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
             scripted_run(&bus, || {
-                bus.step().unwrap();
+                bus.step(0.1).unwrap();
             })
         })
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn a_step_with_an_invalid_dt_is_a_named_refusal_not_a_link_failure() {
+    with_server(&fixture_decls(), |_, addr| {
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        // The server refuses a negative or non-finite dt rather than
+        // letting the bank's contract panic.
+        assert!(matches!(bus.step(-0.5), Err(LinkError::InvalidRequest(_))));
+        assert!(matches!(
+            bus.step(f64::NAN),
+            Err(LinkError::InvalidRequest(_))
+        ));
+        // The refusal is a protocol answer, not a transport failure:
+        // the link stays live and a well-formed step still lands.
+        assert!(bus.connected());
+        assert_eq!(bus.last_failure(), None);
+        assert_eq!(bus.step(0.1), Ok(Tick(1)));
+    });
+}
+
+// ------------------------------------------------------------------
+// Declared dynamics over registers: a `ProcessElement` document bound
+// to register addresses, merged into the bank and advanced by the
+// protocol's explicit step.
+// ------------------------------------------------------------------
+
+/// The station-loop dynamics document — the shared fixture the
+/// `dcs-sim-bus-device --dynamics` path merges: Bool-gated pump draws
+/// from command registers 20 and 21 into flow registers 12 and 13, a
+/// flow sum of registers 11–13 plus a 4.0 inflow bias into net register
+/// 14, and an integrator from 14 into level register 10.
+const STATION_DYNAMICS: &str = include_str!("../../dcs-sim/fixtures/pump_station_dynamics.json");
+
+/// The register bank the station document drives: level, declared
+/// inflow, per-pump draws, net flow, and the two Bool run commands.
+fn station_decls() -> Vec<RegisterDecl> {
+    [
+        (10, Value::Float(0.0)),
+        (11, Value::Float(0.0)),
+        (12, Value::Float(0.0)),
+        (13, Value::Float(0.0)),
+        (14, Value::Float(0.0)),
+        (20, Value::Bool(false)),
+        (21, Value::Bool(false)),
+    ]
+    .into_iter()
+    .map(|(register, initial)| RegisterDecl { register, initial })
+    .collect()
+}
+
+/// The document parsed into the element list `with_dynamics` merges.
+fn station_elements() -> Vec<ProcessElement> {
+    serde_json::from_str(STATION_DYNAMICS).unwrap()
+}
+
+/// The client-side point map: point 1 reads the level register, point 2
+/// writes pump A's run command, point 3 reads pump A's draw.
+fn station_points() -> Vec<PointRegister> {
+    vec![
+        PointRegister {
+            point: PointId(1),
+            register: 10,
+            kind: ValueKind::Float,
+        },
+        PointRegister {
+            point: PointId(2),
+            register: 20,
+            kind: ValueKind::Bool,
+        },
+        PointRegister {
+            point: PointId(3),
+            register: 12,
+            kind: ValueKind::Float,
+        },
+    ]
+}
+
+/// Serves the station bank with the fixture dynamics merged.
+fn with_station<R>(test: impl FnOnce(&BusServer, SocketAddr) -> R) -> R {
+    with_bank(
+        RegisterBank::with_dynamics(station_decls(), station_elements()).unwrap(),
+        test,
+    )
+}
+
+#[test]
+fn a_command_register_write_moves_the_level_only_while_the_command_stands() {
+    with_station(|server, addr| {
+        let bus = BusDriver::connect(addr, &station_points()).unwrap();
+        let driver: &dyn IoDriver = &bus;
+        let level = PointId(1);
+        let pump = PointId(2);
+        let draw = PointId(3);
+
+        // Element initials seed their output registers: the level
+        // starts at 50.0 and the net flow at the 4.0 inflow bias.
+        assert_eq!(
+            driver.read(level).unwrap(),
+            Sample::good(Value::Float(50.0), Tick::ZERO)
+        );
+
+        // Pump released: a step fills the well at the inflow rate —
+        // 4.0 × 0.5 — and nothing moves without the explicit step.
+        bus.step(0.5).unwrap();
+        assert_eq!(driver.read(level).unwrap().value, Value::Float(52.0));
+
+        // The command standing, each step draws the level down:
+        // on-rate -10 plus the 4.0 bias is net -6, so -3 per 0.5 step.
+        driver.write(pump, Value::Bool(true)).unwrap();
+        assert_eq!(driver.read(level).unwrap().value, Value::Float(52.0));
+        bus.step(0.5).unwrap();
+        assert_eq!(driver.read(level).unwrap().value, Value::Float(49.0));
+        assert_eq!(
+            driver.read(draw).unwrap(),
+            Sample::good(Value::Float(-10.0), Tick(2))
+        );
+        bus.step(0.5).unwrap();
+        assert_eq!(driver.read(level).unwrap().value, Value::Float(46.0));
+
+        // Releasing the command stands the off-rate: the draw register
+        // returns to 0.0 and the level climbs at the inflow rate again.
+        driver.write(pump, Value::Bool(false)).unwrap();
+        bus.step(0.5).unwrap();
+        assert_eq!(driver.read(draw).unwrap().value, Value::Float(0.0));
+        assert_eq!(driver.read(level).unwrap().value, Value::Float(48.0));
+
+        // The server-side bank — the shared field — reports the same
+        // samples the client read.
+        assert_eq!(
+            server.bank().read(10).unwrap(),
+            Sample::good(Value::Float(48.0), Tick(4))
+        );
+        // The dynamics are field state, not controller state: the
+        // driver captures nothing.
+        assert!(bus.capture_state().is_none());
+    });
+}
+
+#[test]
+fn injected_register_quality_freezes_the_elements_and_propagates() {
+    with_station(|_, addr| {
+        let bus = BusDriver::connect(addr, &station_points()).unwrap();
+        let driver: &dyn IoDriver = &bus;
+
+        // The pump running, one step draws the level to 47.
+        driver.write(PointId(2), Value::Bool(true)).unwrap();
+        bus.step(0.5).unwrap();
+        assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(47.0));
+
+        // Fault the command register: the bool_flow's gate reads
+        // non-Good, so it freezes its standing -10 draw and stamps the
+        // fault on its output; the sum propagates the worst of its
+        // inputs, and the integrator freezes the level with it.
+        bus.inject_quality(20, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        bus.step(0.5).unwrap();
+        assert_eq!(
+            driver.read(PointId(3)).unwrap(),
+            Sample::new(
+                Value::Float(-10.0),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(2),
+            )
+        );
+        assert_eq!(
+            server_bank(&bus, 10),
+            Sample::new(
+                Value::Float(47.0),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(2),
+            )
+        );
+
+        // Clearing the fault resumes the loop: the draw stands again
+        // and the level falls.
+        bus.clear_quality(20).unwrap();
+        bus.step(0.5).unwrap();
+        assert_eq!(
+            driver.read(PointId(1)).unwrap(),
+            Sample::good(Value::Float(44.0), Tick(3))
+        );
+    });
+}
+
+/// Reads `register` through the register census — the
+/// non-point-mapped view of the shared bank.
+fn server_bank(bus: &BusDriver, register: u16) -> Sample {
+    bus.list_registers()
+        .unwrap()
+        .into_iter()
+        .find(|info| info.register == register)
+        .unwrap()
+        .sample
+}
+
+#[test]
+fn identical_write_step_scripts_produce_identical_register_traces() {
+    let run = || {
+        with_station(|_, addr| {
+            let bus = BusDriver::connect(addr, &station_points()).unwrap();
+            let mut trace = Vec::new();
+            for scan in 0..6 {
+                // The script: pump A runs on even scans, rests on odd.
+                bus.write(PointId(2), Value::Bool(scan % 2 == 0)).unwrap();
+                bus.step(0.5).unwrap();
+                trace.push(bus.read(PointId(1)).unwrap());
+                trace.push(bus.read(PointId(3)).unwrap());
+            }
+            trace
+        })
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn the_dynamics_document_serde_roundtrips() {
+    let elements = station_elements();
+    let json = serde_json::to_string_pretty(&elements).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<ProcessElement>>(&json).unwrap(),
+        elements
+    );
 }
 
 /// `kill` and `wait` on drop, so a panicking test never leaves the
@@ -864,15 +1089,22 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Writes `document` to a scratch model file and returns its path.
-fn model_file(document: &str) -> std::path::PathBuf {
+/// Writes `document` to a scratch file named for `kind` and returns its
+/// path — one per test per kind, so a model and a dynamics document in
+/// the same test never collide.
+fn scratch_file(kind: &str, document: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "dcs-sim-bus-test-{}-{}.json",
+        "dcs-sim-bus-test-{}-{}-{kind}.json",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
     std::fs::write(&path, document).unwrap();
     path
+}
+
+/// Writes `document` to a scratch model file and returns its path.
+fn model_file(document: &str) -> std::path::PathBuf {
+    scratch_file("model", document)
 }
 
 /// A minimal model declaring one `sim-bus` device: `level-raw` at
@@ -901,25 +1133,7 @@ const BIN_MODEL: &str = r#"{
 #[test]
 fn the_device_binary_serves_the_models_declared_registers() {
     let path = model_file(BIN_MODEL);
-    let mut child = KillOnDrop(
-        Command::new(DEVICE_BIN)
-            .arg(&path)
-            .arg("--device")
-            .arg("2")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("dcs-sim-bus-device runs"),
-    );
-
-    // The serving line on stderr carries the bound address.
-    let mut stderr = BufReader::new(child.0.stderr.take().unwrap());
-    let mut line = String::new();
-    stderr.read_line(&mut line).unwrap();
-    let addr: SocketAddr = line
-        .split_whitespace()
-        .nth(4)
-        .and_then(|token| token.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected serving line: {line:?}"));
+    let (_child, addr) = spawn_device(&path, 2, None);
 
     // The register map came from the model: register 4 holds the
     // declared initial, and a register-protocol client can drive it.
@@ -960,4 +1174,145 @@ fn the_device_binary_reports_named_startup_failures() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("device 7"), "{stderr}");
+}
+
+/// A model declaring one `sim-bus` device carrying the station-loop
+/// register map the shared dynamics document drives: level register 10,
+/// inflow 11, pump draws 12 and 13, net flow 14, run commands 20 and
+/// 21.
+const STATION_MODEL: &str = r#"{
+  "version": 1,
+  "devices": [
+    {
+      "id": 3,
+      "kind": "sim-bus",
+      "parameters": {
+        "address": "127.0.0.1:0",
+        "registers": {
+          "level": 10,
+          "inflow": 11,
+          "pump-a-flow": 12,
+          "pump-b-flow": 13,
+          "net-flow": 14,
+          "pump-a-run": 20,
+          "pump-b-run": 21
+        }
+      },
+      "channels": {
+        "level": { "direction": "in", "value_type": "Float" },
+        "inflow": { "direction": "in", "value_type": "Float" },
+        "pump-a-flow": { "direction": "in", "value_type": "Float" },
+        "pump-b-flow": { "direction": "in", "value_type": "Float" },
+        "net-flow": { "direction": "in", "value_type": "Float" },
+        "pump-a-run": { "direction": "out", "value_type": "Bool" },
+        "pump-b-run": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [],
+  "signals": [],
+  "components": [],
+  "connections": []
+}"#;
+
+/// Spawns the device binary on `model` serving device `id` with any
+/// `dynamics` document, and reads the bound address off its serving
+/// line.
+fn spawn_device(
+    model: &std::path::Path,
+    id: u64,
+    dynamics: Option<&std::path::Path>,
+) -> (KillOnDrop, SocketAddr) {
+    let mut command = Command::new(DEVICE_BIN);
+    command.arg(model).arg("--device").arg(id.to_string());
+    if let Some(dynamics) = dynamics {
+        command.arg("--dynamics").arg(dynamics);
+    }
+    let mut child = KillOnDrop(
+        command
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("dcs-sim-bus-device runs"),
+    );
+    let mut stderr = BufReader::new(child.0.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    let addr: SocketAddr = line
+        .split_whitespace()
+        .nth(4)
+        .and_then(|token| token.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected serving line: {line:?}"));
+    (child, addr)
+}
+
+#[test]
+fn the_device_binary_serves_a_dynamics_document_over_registers() {
+    let model = model_file(STATION_MODEL);
+    let dynamics = scratch_file("dynamics", STATION_DYNAMICS);
+    let (_child, addr) = spawn_device(&model, 3, Some(&dynamics));
+
+    // The merged document seeded the level register at the
+    // integrator's initial, and a controller's command write moves it
+    // on the next explicit step — the station loop over the bus.
+    let bus = BusDriver::connect(addr, &station_points()).unwrap();
+    let driver: &dyn IoDriver = &bus;
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(50.0));
+    driver.write(PointId(2), Value::Bool(true)).unwrap();
+    bus.step(0.5).unwrap();
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(47.0));
+}
+
+#[test]
+fn the_device_binary_reports_named_dynamics_failures() {
+    let model = model_file(STATION_MODEL);
+
+    // A malformed document fails the parse naming the file.
+    let dynamics = scratch_file("dynamics", "not json");
+    let output = Command::new(DEVICE_BIN)
+        .arg(&model)
+        .arg("--device")
+        .arg("3")
+        .arg("--dynamics")
+        .arg(&dynamics)
+        .output()
+        .expect("binary runs");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid dynamics document"), "{stderr}");
+
+    // A wrongly-kinded endpoint — a bool_flow gate on the Float net
+    // register — fails the merge naming the element and its registers.
+    let dynamics = scratch_file(
+        "dynamics",
+        r#"[{"bool_flow": {"input": 14, "output": 12, "on_rate": -1.0, "off_rate": 0.0, "initial": 0.0}}]"#,
+    );
+    let output = Command::new(DEVICE_BIN)
+        .arg(&model)
+        .arg("--device")
+        .arg("3")
+        .arg("--dynamics")
+        .arg(&dynamics)
+        .output()
+        .expect("binary runs");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dynamics element 0"), "{stderr}");
+    assert!(stderr.contains("register 14"), "{stderr}");
+
+    // An endpoint register the device does not declare is named too.
+    let dynamics = scratch_file(
+        "dynamics",
+        r#"[{"integrator": {"input": 14, "output": 99, "initial": 0.0}}]"#,
+    );
+    let output = Command::new(DEVICE_BIN)
+        .arg(&model)
+        .arg("--device")
+        .arg("3")
+        .arg("--dynamics")
+        .arg(&dynamics)
+        .output()
+        .expect("binary runs");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("driving register 99"), "{stderr}");
 }

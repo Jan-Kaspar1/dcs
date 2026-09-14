@@ -107,6 +107,14 @@ fn is_false(writable: &bool) -> bool {
 /// outright, so validation rejects `writable` on an `Out` point — operator
 /// influence on an output is engineered through components, not raw point
 /// writes.
+///
+/// `stale_after_ticks` declares a freshness budget on a field `In`
+/// point: the executor's input phase compares the tick the driver's
+/// returned sample carries against the scan tick and lands the image
+/// sample `Quality::Uncertain(QualityReason::Stale)` once the lag exceeds
+/// the budget. Only field inputs can declare one — the check reads the
+/// driver, so validation rejects the field on an `Out` point and on a
+/// channel-less internal point, which is never driver-read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -140,6 +148,16 @@ pub struct IoPoint {
     /// documents predating the flag load with `writable` unset.
     #[serde(default, skip_serializing_if = "is_false")]
     pub writable: bool,
+    /// The point's freshness budget in ticks, if declared: how far the
+    /// driver-stamped tick on a returned sample may lag the scan tick
+    /// before the image sample lands `Uncertain(Stale)` — `0` demands a
+    /// sample stamped this scan. Valid only on field `In` points —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports the
+    /// field on an `Out` point or a channel-less internal point.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_after_ticks: Option<u64>,
 }
 
 impl IoPoint {
@@ -445,6 +463,36 @@ mod tests {
             ),
             other => panic!("expected invalid model, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn documents_predating_stale_after_ticks_load_unchanged() {
+        // Points without the optional field deserialize
+        // `stale_after_ticks` as `None`, and `None` serializes back
+        // without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(
+            model
+                .io_points
+                .iter()
+                .all(|point| point.stale_after_ticks.is_none())
+        );
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"stale_after_ticks\""), "{json}");
+    }
+
+    #[test]
+    fn stale_after_ticks_parses_and_roundtrips() {
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].stale_after_ticks = Some(3);
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"stale_after_ticks\": 3"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert_eq!(reloaded.io_points[0].stale_after_ticks, Some(3));
+        assert_eq!(reloaded.io_points[1].stale_after_ticks, None);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
     }
 
     #[test]

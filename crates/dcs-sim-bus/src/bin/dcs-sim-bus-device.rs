@@ -1,7 +1,7 @@
 //! `dcs-sim-bus-device`: a register-mapped simulated fieldbus device as
 //! its own process.
 //!
-//! Usage: `dcs-sim-bus-device <model-file> --device <id> [--listen <addr>]`
+//! Usage: `dcs-sim-bus-device <model-file> --device <id> [--dynamics <file>] [--listen <addr>]`
 //!
 //! The binary loads and validates the plant model, finds the declared
 //! `sim-bus` device, and serves its register bank through
@@ -14,17 +14,30 @@
 //! identical request sequences produce identical responses on every
 //! run.
 //!
+//! `--dynamics` merges a device-side dynamics document: a JSON list of
+//! [`ProcessElement`] declarations (`first_order_lag`,
+//! `second_order_lag`, `integrator`, `dead_time`, `noise`, `bool_flow`,
+//! `flow_sum`) standing in for field physics — the same seam
+//! `dcs-plant-server --dynamics` serves, with the document's
+//! point-valued fields carrying register addresses. Each element is
+//! validated as it merges, so a rejection names the element and the
+//! register it drives. Element state is bank state — the served field,
+//! not checkpointed controller state — and each `step` request's `dt`
+//! advances it.
+//!
 //! Load, validation, device-selection, and bind failures exit nonzero
 //! naming the offending element or address; argument errors print usage
 //! and exit 2. Shutdown is graceful: SIGINT or SIGTERM stops the accept
 //! loop and closes client connections before the process exits.
 
 use dcs_model::{DeviceId, PlantModel};
-use dcs_sim_bus::{BusServer, DEVICE_KIND, DeviceParameters, RegisterBank, RegisterDecl};
+use dcs_sim_bus::{
+    BusServer, DEVICE_KIND, DeviceParameters, ProcessElement, RegisterBank, RegisterDecl,
+};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Parsed command line.
@@ -33,29 +46,38 @@ struct Options {
     model: PathBuf,
     /// The `sim-bus` device to serve.
     device: u64,
+    /// The optional process-element list to merge over the bank's
+    /// registers.
+    dynamics: Option<PathBuf>,
     /// The address the register protocol is served on; defaults to the
     /// device's declared `address` parameter.
     listen: Option<String>,
 }
 
 const USAGE: &str = "\
-Usage: dcs-sim-bus-device <model-file> --device <id> [--listen <addr>]
+Usage: dcs-sim-bus-device <model-file> --device <id> [--dynamics <file>] [--listen <addr>]
 
 Loads and validates the plant model, builds the register bank the
 declared sim-bus device's parameters describe — one register per
 channel, at its declared index and optional initial value — and serves
 it on ADDR until signaled (SIGINT/SIGTERM).
 
-  --device ID     the sim-bus device to serve (required)
-  --listen ADDR   serve the register protocol on ADDR; defaults to the
-                  device's declared \"address\" parameter — a port of 0
-                  binds an ephemeral port, reported on stderr
-  -h, --help      show this text";
+  --device ID      the sim-bus device to serve (required)
+  --dynamics FILE  merge a JSON list of process-element declarations —
+                   first_order_lag, second_order_lag, integrator,
+                   dead_time, noise, bool_flow, flow_sum — over the
+                   bank's registers; an element's point-valued fields
+                   carry register addresses
+  --listen ADDR    serve the register protocol on ADDR; defaults to the
+                   device's declared \"address\" parameter — a port of 0
+                   binds an ephemeral port, reported on stderr
+  -h, --help       show this text";
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut model = None;
         let mut device = None;
+        let mut dynamics = None;
         let mut listen = None;
         let mut args = args;
         while let Some(arg) = args.next() {
@@ -71,6 +93,7 @@ impl Options {
                             .map_err(|error| format!("--device {id:?}: {error}"))?,
                     );
                 }
+                "--dynamics" => dynamics = Some(PathBuf::from(value("--dynamics")?)),
                 "--listen" => listen = Some(value("--listen")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -88,6 +111,7 @@ impl Options {
         Ok(Self {
             model,
             device,
+            dynamics,
             listen,
         })
     }
@@ -96,6 +120,22 @@ impl Options {
 fn fail(message: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {message}");
     ExitCode::FAILURE
+}
+
+fn read_file(path: &Path, what: &str) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {what} file {}: {error}", path.display()))
+}
+
+/// Parses the dynamics document — a JSON list of [`ProcessElement`]
+/// declarations whose point-valued fields carry register addresses —
+/// for merging over the bank's registers. The parse itself is the only
+/// failure here; the bank's merge names the element a rejection
+/// belongs to.
+fn load_dynamics(path: &Path) -> Result<Vec<ProcessElement>, String> {
+    let source = read_file(path, "dynamics")?;
+    serde_json::from_str(&source)
+        .map_err(|error| format!("invalid dynamics document {}: {error}", path.display()))
 }
 
 /// Loads the inputs and binds the server — every failure the process
@@ -137,7 +177,12 @@ fn build(options: &Options) -> Result<(BusServer, String), String> {
                 .initial
                 .unwrap_or_else(|| neutral(channels[name.as_str()])),
         });
-    let bank = RegisterBank::new(decls).map_err(|error| error.to_string())?;
+    let decls: Vec<RegisterDecl> = decls.collect();
+    let bank = match &options.dynamics {
+        Some(path) => RegisterBank::with_dynamics(decls, load_dynamics(path)?)
+            .map_err(|error| error.to_string())?,
+        None => RegisterBank::new(decls).map_err(|error| error.to_string())?,
+    };
     let listen = options
         .listen
         .clone()

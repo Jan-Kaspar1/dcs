@@ -11,6 +11,10 @@ dcs-core = { path = "../dcs-core" }
 # controller assembles, so the served register map and the driver's
 # mapping come from one declaration.
 dcs-model = { path = "../dcs-model" }
+# The register bank is a SimDriver whose point ids are the register
+# addresses, so a declared dynamics document steps over registers with
+# the driver's own element semantics.
+dcs-sim = { path = "../dcs-sim" }
 serde = { version = "1.0.229", features = ["derive"] }
 # `float_roundtrip` is required, not optional: protocol contract types
 # must carry f64 point values bit-exactly under serde, matching the
@@ -20,4 +24,3 @@ signal-hook = "0.3.18"
 
 [dev-dependencies]
 dcs-runtime = { path = "../dcs-runtime" }
-dcs-sim = { path = "../dcs-sim" }

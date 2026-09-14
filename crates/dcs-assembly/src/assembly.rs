@@ -12,7 +12,7 @@ use crate::error::{AssemblyError, BuildError, InternalPointError};
 use crate::registry::{ComponentRegistry, ComponentSpec};
 use dcs_core::{Direction, IoDriver, PointId, Value, ValueKind};
 use dcs_model::{ComponentId, Endpoint, PlantModel, PortRef};
-use dcs_runtime::{Component, Executor, PointMap};
+use dcs_runtime::{Component, Executor, PointMap, PointSpec};
 use dcs_sim::{ChannelMap, Loopback, SimDriver};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -114,8 +114,10 @@ fn is_internal(point_map: &PointMap, point: PointId) -> bool {
 /// image carries at their declared `initial` — a malformed declaration
 /// defers [`AssemblyError::InvalidInternalPoint`]. Both carry their
 /// declared `writable` flag into the map, the executor's command-surface
-/// authority; the point pairs port-to-port wires synthesize are not
-/// declared points and stay unmarked. Connections then bind ports to
+/// authority, and a field `In` point's declared `stale_after_ticks`
+/// freshness budget rides its spec along — validation confines the field
+/// to channel-bound inputs; the point pairs port-to-port wires
+/// synthesize are not declared points and stay unmarked. Connections then bind ports to
 /// points, collect field wires for field point-to-point connections and
 /// internal links for internal ones — a mixed pair defers
 /// [`AssemblyError::MixedPointLink`] — and synthesize linked internal
@@ -129,13 +131,21 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
         let direction = point.direction;
         match (&point.channel, point.initial) {
             // A field point: a driver serves it through the declared
-            // channel, starting at the neutral value of its kind.
+            // channel, starting at the neutral value of its kind. The
+            // declared freshness budget rides the spec — `None` for a
+            // point that never declared one, so the input phase skips
+            // the check entirely.
             (Some(_), _) => {
-                point_map = if point.writable {
-                    point_map.with_writable_point(point.id, direction, point.value_type)
-                } else {
-                    point_map.with_point(point.id, direction, point.value_type)
-                };
+                point_map = point_map.with_spec(
+                    point.id,
+                    PointSpec {
+                        direction,
+                        kind: point.value_type,
+                        internal: None,
+                        writable: point.writable,
+                        stale_after_ticks: point.stale_after_ticks,
+                    },
+                );
             }
             // An internal point: image-carried at its declared initial.
             (None, Some(initial)) if initial.kind() == point.value_type => {

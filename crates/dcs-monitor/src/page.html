@@ -58,6 +58,7 @@
   button.force { color: #70a; }
   button.unforce { margin-left: 0.3rem; color: #70a; font-weight: bold; }
   .faceplate .param-value { width: 6.5rem; }
+  .faceplate .param-current { font-variant-numeric: tabular-nums; }
   .faceplate select.param-value { width: auto; }
   .faceplate button.tune { margin-left: 0.3rem; }
   .faceplate .param-status { font-size: 0.8rem; color: #666; }
@@ -177,11 +178,14 @@
 // display, setpoint field, driven output, status flag), `port.point`
 // joins the port to its live point telemetry and signal metadata, and a
 // command affordance appears only where that metadata marks the bound
-// point writable. Each declared parameter renders an edit control
-// typed to its declared value kind and labeled with its declared
-// range; submitting issues a set_parameter command through the
-// receipted path, with the applied tick or named rejection surfaced on
-// the parameter's row and in the journal pane. A descriptor with no
+// point writable. Each declared parameter renders its current value —
+// joined by component and parameter name from the same snapshot's
+// parameters section, empty when the section or the entry is absent —
+// beside an edit control typed to its declared value kind and labeled
+// with its declared range; submitting issues a set_parameter command
+// through the receipted path, with the applied tick or named rejection
+// surfaced on the parameter's row and in the journal pane — and the
+// next poll's parameters section shows the standing tune. A descriptor with no
 // role hints and no parameters — a kind that shipped no custom
 // describe — degrades to a generic
 // name-plus-diagnostics-plus-wired-points view, never an error.
@@ -942,12 +946,13 @@ function pointRow(meta, telemetry, forced) {
 // command surface — and a command attempted anywhere else rejects with
 // not_writable, the rejection visible in the receipt pane and the
 // journal. The parameter list is the other editable surface: each
-// declared parameter renders an edit control typed to its declared
-// kind, its submission issues a set_parameter command addressed to the
-// instance through the same receipted path, and the answer — applied
-// tick or named rejection — lands on the parameter's row. A kind
-// declaring no parameters renders no parameter table at all: no edit
-// affordance.
+// declared parameter renders its current value — the same snapshot's
+// parameters section, joined by component and parameter name — beside
+// an edit control typed to its declared kind, its submission issues a
+// set_parameter command addressed to the instance through the same
+// receipted path, and the answer — applied tick or named rejection —
+// lands on the parameter's row. A kind declaring no parameters renders
+// no parameter table at all: no edit affordance.
 
 // The live sample a bound port shows, or null when unwired/unseen.
 function portSample(port, telemetry) {
@@ -1042,13 +1047,19 @@ function portTable(ports, telemetry, forced) {
 }
 
 // The parameter list: each ParameterDescriptor renders its name, value
-// kind, the declared range a tuning must satisfy, and an edit control
+// kind, the declared range a tuning must satisfy, the current value the
+// snapshot's parameters section reports for it, and an edit control
 // typed to the kind — a true/false select for Bool, a text input for
 // Int and Float — plus a status cell carrying the receipted path's
-// latest answer for that tunable.
-function parameterTable(descriptor) {
+// latest answer for that tunable. `values` is the component's
+// ComponentParameters map — parameter name to Value — joined by
+// component name from the same snapshot the descriptor came from; a
+// snapshot lacking the section or the component's entry passes nothing
+// and the column renders empty rather than failing.
+function parameterTable(descriptor, values) {
   return "<table class=\"params\"><thead><tr>" +
-    "<th>Parameter</th><th>Kind</th><th>Range</th><th>Set</th><th></th>" +
+    "<th>Parameter</th><th>Kind</th><th>Range</th><th>Current</th>" +
+    "<th>Set</th><th></th>" +
     "</tr></thead><tbody>" +
     descriptor.parameters.map(param => {
       const status = paramStatus.get(paramKey(descriptor.name, param.name));
@@ -1058,6 +1069,9 @@ function parameterTable(descriptor) {
           ? esc(formatValue(param.range.min)) + " … " +
             esc(formatValue(param.range.max))
           : "unbounded") +
+        "</td><td class=\"param-current\">" +
+        (values && Object.prototype.hasOwnProperty.call(values, param.name)
+          ? esc(formatValue(values[param.name])) : "") +
         "</td><td>" + parameterControl(descriptor.name, param) +
         "<button type=\"button\" class=\"tune\" data-component=\"" +
         esc(descriptor.name) + "\" data-param=\"" + esc(param.name) +
@@ -1171,7 +1185,7 @@ function isGeneric(descriptor) {
     !descriptor.ports.some(port => port.role != null);
 }
 
-function faceplateMarkup(descriptor, diag, telemetry, forced) {
+function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
   const generic = isGeneric(descriptor);
   const parts = [
     "<section class=\"faceplate" + (generic ? " generic" : "") + "\">",
@@ -1189,7 +1203,7 @@ function faceplateMarkup(descriptor, diag, telemetry, forced) {
     if (unhinted.length > 0) parts.push(portTable(unhinted, telemetry, forced));
   }
   if (descriptor.parameters.length > 0) {
-    parts.push(parameterTable(descriptor));
+    parts.push(parameterTable(descriptor, parameters.get(descriptor.name)));
   }
   parts.push(diagnosticsMarkup(diag));
   parts.push("</section>");
@@ -1217,9 +1231,17 @@ function renderFaceplates(snapshot, telemetry, forced) {
     descriptorByName.set(descriptor.name, descriptor);
   }
   const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
+  // Component name -> its ComponentParameters.values map: the join the
+  // parameter table's current-value column reads. The section is
+  // serde-defaulted — a snapshot serialized before it existed carries
+  // none, and the join simply finds no entry, rendering the column
+  // empty rather than failing.
+  const parameters = new Map(
+    (snapshot.parameters || []).map(p => [p.name, p.values]));
   document.getElementById("faceplates").innerHTML = snapshot.descriptors
     .map(descriptor =>
-      faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced))
+      faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry,
+        forced, parameters))
     .join("");
   for (const input of document.querySelectorAll("#faceplates input.command-value")) {
     if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);

@@ -122,3 +122,90 @@ Alternatively the model can declare `sim-tcp` devices whose
 `parameters.address` names the plant listener; the registry then builds
 the attachment itself and `--remote` is not needed — the form the
 hot-swap test (`crates/dcs-controller/tests/hot_swap.rs`) exercises.
+
+## The demonstration rig
+
+`compose.yaml` at the repository root is the checked-in rig definition
+— the same topology the commands above describe, declared as data:
+one `dcs-plant` service carrying the model and dynamics mounts, the
+`ctrl-a`/`ctrl-b` redundant pair attaching to its listener with the
+standby wired to the active's monitor, and the pair's monitor ports
+published on the host. The plant service's healthcheck orders the
+controllers' one-shot `--remote` attach behind the listener actually
+serving. The file is a statically inspectable declaration —
+`docker compose config` checks it — and like the Dockerfiles it is a
+checked-in packaging artifact: a single-host orchestration
+declaration that defines no deployment.
+
+### Build
+
+`docker compose build` runs both Dockerfile builds and tags them
+`dcs-controller` and `dcs-plant-server` — the same images the
+individual `docker build` commands above produce:
+
+```sh
+docker compose build
+```
+
+### Run
+
+```sh
+docker compose up -d
+```
+
+`docker compose ps` shows the three services; `docker compose logs -f
+ctrl-b` follows the standby's tracking. The monitoring page presents
+the pair as one logical controller — open either peer's published
+monitor port and pass the other as `?peer=`:
+
+```
+http://localhost:8080/?peer=localhost:8081
+```
+
+The page polls `GET /role` on both peers, renders the settled-active
+peer's telemetry plus per-peer pair health, and submits commands only
+to the peer reporting `active`.
+
+### Demonstrating a promotion
+
+Wait for the standby to converge — `GET /role` on its published port
+reports `standby` with a `tracking` convergence:
+
+```sh
+curl -s http://localhost:8081/role
+```
+
+Then switch over in the documented order — demote the field-owning
+peer first, then promote the converged standby; each `POST` answers
+with the peer's post-change `RoleReport`:
+
+```sh
+curl -s -X POST http://localhost:8080/demote
+curl -s -X POST http://localhost:8081/promote
+```
+
+The pair view keeps serving the one logical controller — its data now
+sources from `ctrl-b`, and `ctrl-a` reports `standby`. `dcs-ctl`
+(`cargo run -p dcs-monitor --bin dcs-ctl -- <addr> role|demote|promote`)
+runs the same contract from the host against the published ports.
+
+### Teardown
+
+```sh
+docker compose down
+```
+
+removes the containers and the `dcs-rig` network; the images remain
+for the next `up`.
+
+### The two-machine form
+
+The rig is a single-host declaration. The two-machine demonstration
+the vision describes is the same services spread across hosts with
+the published-address variant the run commands above record: the plant
+publishes `9001` on its host, each controller runs on its own machine
+with `--remote <plant-host>:9001`, and the standby's `--standby` names
+the active's reachable monitor address — the network names
+`dcs-plant:9001` and `ctrl-a:8080` replaced by the hosts' published
+`host:port`s. An actual second machine stays outside the workflow, per
+the no-live-deployment bound.

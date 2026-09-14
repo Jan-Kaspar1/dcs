@@ -564,8 +564,8 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: bus,
-        step: Some(Arc::new(move |_dt| {
-            stepping.step().map_err(|error| StepError::Backend {
+        step: Some(Arc::new(move |dt| {
+            stepping.step(dt).map_err(|error| StepError::Backend {
                 backend: format!("device {device}"),
                 detail: error.to_string(),
             })
