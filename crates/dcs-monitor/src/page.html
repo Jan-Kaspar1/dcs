@@ -25,15 +25,43 @@
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
   tr.source td { font-weight: bold; }
-  #pair-summary.good, #io-health.good { color: #060; }
-  #pair-summary.bad, #io-health.bad { color: #b00; font-weight: bold; }
+  #health { display: flex; flex-wrap: wrap; gap: 1rem 3rem; align-items: flex-start; }
+  #health > section { flex: 1 1 24rem; }
+  .forced { background: #a60; color: #fff; font-size: 0.75rem;
+          padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
+  #pair-summary.good, #io-health-summary.good { color: #060; }
+  #pair-summary.bad, #io-health-summary.bad { color: #b00; font-weight: bold; }
+  #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+  .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
+    min-width: 16rem; background: #fdfdfd; }
+  .faceplate h3 { margin: 0.2rem 0 0.5rem; }
+  .faceplate h3 .kind { font-size: 0.75rem; font-weight: normal; color: #777; }
+  .faceplate .role { display: flex; justify-content: space-between; align-items: baseline;
+    gap: 0.6rem; margin: 0.25rem 0; }
+  .faceplate .role .value { font-variant-numeric: tabular-nums; }
+  .faceplate .role-process_value .value { font-size: 1.35rem; font-weight: 600; }
+  .faceplate .flag { display: inline-block; margin: 0.15rem 0.3rem 0.15rem 0;
+    padding: 0 0.45rem; border: 1px solid #ccc; border-radius: 3px;
+    background: #eee; color: #555; }
+  .faceplate .flag.on { background: #fee; border-color: #b00; color: #b00; font-weight: bold; }
+  .faceplate table { margin-top: 0.4rem; font-size: 0.85rem; }
+  .faceplate .diag { margin-top: 0.45rem; font-size: 0.8rem; color: #666; }
+  .faceplate .diag .errors { color: #b00; font-weight: bold; }
+  .command input { width: 6rem; }
+  .command button { margin-left: 0.3rem; }
+  .faceplate .param-value { width: 6.5rem; }
+  .faceplate select.param-value { width: auto; }
+  .faceplate button.tune { margin-left: 0.3rem; }
+  .faceplate .param-status { font-size: 0.8rem; color: #666; }
+  .faceplate .param-status.warn { color: #a60; }
+  .faceplate .param-status.bad { color: #b00; font-weight: bold; }
 </style>
 </head>
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
-<p id="io-health" hidden></p>
 
+<div id="health">
 <section id="pair" hidden>
 <h2>Controller pair</h2>
 <p id="pair-summary"></p>
@@ -44,6 +72,18 @@
   <tbody id="pair-peers"></tbody>
 </table>
 </section>
+
+<section id="io-health" hidden>
+<h2>I/O health</h2>
+<p id="io-health-summary"></p>
+<table>
+  <tbody id="io-health-rows"></tbody>
+</table>
+</section>
+</div>
+
+<h2>Components</h2>
+<div id="faceplates"></div>
 
 <table>
   <thead>
@@ -78,12 +118,28 @@
 "use strict";
 // The page speaks only the monitor's JSON contract: GET /signals for the
 // loaded model's point metadata, GET /role for a peer's redundancy role,
-// GET /snapshot for live samples, GET /history for each point's retained
-// sample stream, GET /journal for the transition journal, and POST
-// /command for operator writes. Roles, snapshot, history, and journal are
-// polled on one shared one-second cadence; the history and journal
-// fetches carry since-cursors, so each poll transfers only entries newer
-// than the last seen sequence. No dependencies, no build step.
+// GET /snapshot for live samples and per-component descriptors, GET
+// /history for each point's retained sample stream, GET /journal for the
+// transition journal, and POST /command for operator writes. Roles,
+// snapshot, history, and journal are polled on one shared one-second
+// cadence; the history and journal fetches carry since-cursors, so each
+// poll transfers only entries newer than the last seen sequence. No
+// dependencies, no build step.
+//
+// Component faceplates render generically from the snapshot's
+// descriptors — one per component instance, no per-kind page code. A
+// port's role hint picks the conventional element (process-value
+// display, setpoint field, driven output, status flag), `port.point`
+// joins the port to its live point telemetry and signal metadata, and a
+// command affordance appears only where that metadata marks the bound
+// point writable. Each declared parameter renders an edit control
+// typed to its declared value kind and labeled with its declared
+// range; submitting issues a set_parameter command through the
+// receipted path, with the applied tick or named rejection surfaced on
+// the parameter's row and in the journal pane. A descriptor with no
+// role hints and no parameters — a kind that shipped no custom
+// describe — degrades to a generic
+// name-plus-diagnostics-plus-wired-points view, never an error.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
 // configured with both peers' monitor addresses — the serving origin is
@@ -94,7 +150,12 @@
 // logical controller — and the other peer contributes pair health only.
 // Commands submit only to the settled-active peer; a "not_active"
 // rejection means the command landed mid-transition, so roles are
-// re-polled and the command retried once.
+// re-polled and the command retried once. Beside the pair's role and
+// convergence reporting the I/O-health pane renders the snapshot's
+// io_health section — the executor's boundary counters and attributed
+// last fault, the driver's volunteered link diagnostics, and the pacing
+// shell's scan-overrun count — so operator-facing health reads as one
+// surface.
 const peers = [{ base: "", name: location.host }];
 for (const raw of new URLSearchParams(location.search).getAll("peer")) {
   const base = /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "")
@@ -131,6 +192,9 @@ function groupedPoints() {
 }
 
 let index = { points: [] };
+// point id -> PointSignal metadata, built once from the fetched index:
+// the writable flag that gates every command affordance lives here.
+const metaByPoint = new Map();
 // point id -> { samples: [Sample], lastSeq, lastTick } — the series a
 // trend draws. lastSeq is the since-cursor in the *current* source's
 // stream; lastTick is the merge watermark that keeps the series
@@ -142,6 +206,19 @@ const journalEntries = [];
 // re-fetch from the new source after a switch adds each transition once.
 const journalSeen = new Set();
 let journalSince = 0;
+// component name -> its served descriptor, rebuilt on every poll: the
+// parameter edit path reads declared kinds and ranges from it — the
+// descriptor is the page's authority for what a tunable accepts.
+const descriptorByName = new Map();
+// paramKey(component, name) -> { text, warn, bad }: the receipted
+// path's latest answer for that tunable — what its row's status cell
+// shows. "accepted for tick N" at submission; "applied at tick N" or
+// "rejected: <named reason>" once the journal reports the settled
+// receipt. The map survives the per-poll faceplate re-render.
+const paramStatus = new Map();
+function paramKey(component, name) {
+  return component + "\n" + name;
+}
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
 const JOURNAL_LIMIT = 300;
@@ -333,11 +410,15 @@ async function refresh() {
       new Date().toLocaleTimeString();
     renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+    // The snapshot's force set badges the point's row; ForcedPoint
+    // serializes as {point, value}.
+    const forced = new Set((snapshot.forces || []).map(f => f.point));
+    renderFaceplates(snapshot, telemetry);
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
       rows.push("<tr class=\"point-group\"><th colspan=\"8\">" + esc(group) +
         "</th></tr>");
-      for (const meta of metas) rows.push(pointRow(meta, telemetry));
+      for (const meta of metas) rows.push(pointRow(meta, telemetry, forced));
     }
     document.getElementById("points").innerHTML = rows.join("");
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
@@ -348,12 +429,15 @@ async function refresh() {
   }
 }
 
-// The snapshot's I/O health section, rendered as its own line so link
-// degradation reads as link health — visibly separate from the
-// per-point quality column below. IoFault serializes as
-// {tick, point, direction, error} and an IoError as
+// The snapshot's I/O health section, rendered as its own pane beside
+// the pair view's role and convergence reporting — one surface for
+// operator-facing health. The driver's volunteered diagnostics get rows
+// of their own: a dead transport names link degradation there, visibly
+// separate from the per-point quality column below. IoFault serializes
+// as {tick, point, direction, error}, an IoError as
 // {"Disconnected": id} | {"Timeout": id} | {"UnknownPoint": id} |
-// {"TypeMismatch": {point, expected, found}}.
+// {"TypeMismatch": {point, expected, found}}, a LinkState as
+// "connected" | "disconnected", and a Direction as "in" | "out".
 function describeIoError(error) {
   const [variant, detail] = Object.entries(error)[0];
   const name = variant.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
@@ -364,48 +448,348 @@ function describeIoError(error) {
   return name + " on point " + detail;
 }
 
-function renderIoHealth(health) {
-  const el = document.getElementById("io-health");
-  if (!health) { el.hidden = true; return; }
-  const parts = [];
-  let troubled = false;
-  if (health.driver) {
-    parts.push("link " + health.driver.link);
-    if (health.driver.link !== "connected") troubled = true;
-    if (health.driver.last_error) {
-      parts.push("last link failure: " + health.driver.last_error);
-    }
-  }
-  if (health.failed_reads || health.failed_writes) {
-    troubled = true;
-    parts.push("failed reads " + health.failed_reads +
-      ", failed writes " + health.failed_writes +
-      ", " + health.consecutive_failures + " in a row");
-  }
-  if (health.last_error) {
-    const fault = health.last_error;
-    parts.push("last I/O fault " + describeIoError(fault.error) +
-      " (" + fault.direction + ", tick " + fault.tick + ")");
-  }
-  if (health.scan_overruns) {
-    parts.push("scan overruns " + health.scan_overruns);
-  }
-  if (parts.length === 0) { el.hidden = true; return; }
-  el.hidden = false;
-  el.textContent = "I/O health: " + parts.join(" — ");
-  el.className = troubled ? "bad" : "good";
+function healthRow(label, value) {
+  return "<tr><th>" + esc(label) + "</th><td>" + esc(value) + "</td></tr>";
 }
 
-// One point's row in the listing table.
-function pointRow(meta, telemetry) {
+function renderIoHealth(health) {
+  const pane = document.getElementById("io-health");
+  if (!health) { pane.hidden = true; return; }
+  const rows = [];
+  let troubled = false;
+  if (health.driver) {
+    // Link health is transport health, not point health: a dead plant
+    // server names "disconnected" here while the same event only marks
+    // individual points' samples Bad below.
+    rows.push(healthRow("link", health.driver.link));
+    if (health.driver.link !== "connected") troubled = true;
+    if (health.driver.last_error) {
+      rows.push(healthRow("last link failure", health.driver.last_error));
+    }
+  }
+  rows.push(healthRow("failed reads", health.failed_reads));
+  rows.push(healthRow("failed writes", health.failed_writes));
+  rows.push(healthRow("consecutive failures", health.consecutive_failures));
+  if (health.failed_reads || health.failed_writes) troubled = true;
+  if (health.last_error) {
+    const fault = health.last_error;
+    rows.push(healthRow("last I/O fault",
+      describeIoError(fault.error) + " — " +
+      (fault.direction === "in" ? "read" : "write") + " boundary, " +
+      pointName(fault.point) + ", tick " + fault.tick));
+    troubled = true;
+  }
+  // The pacing shell's overrun count, displayed when nonzero.
+  if (health.scan_overruns) {
+    rows.push(healthRow("scan overruns", health.scan_overruns));
+    troubled = true;
+  }
+  document.getElementById("io-health-rows").innerHTML = rows.join("");
+  const summary = document.getElementById("io-health-summary");
+  summary.textContent = troubled ? "I/O degraded" : "I/O healthy";
+  summary.className = troubled ? "bad" : "good";
+  pane.hidden = false;
+}
+
+// One point's row in the listing table. A forced point — one in the
+// snapshot's force set — carries a badge beside its name; its Substituted
+// quality already shows in the quality column.
+function pointRow(meta, telemetry, forced) {
   const sample = (telemetry.get(meta.point) || {}).sample;
   const quality = sample ? formatQuality(sample.quality) : "no sample";
   const cls = sample ? qualityClass(sample.quality) : "nosample";
-  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
+  const badge = forced.has(meta.point)
+    ? " <span class=\"forced\">forced</span>" : "";
+  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + badge +
+    "</td><td>" +
     meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
     (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
     esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
     (sample ? sample.tick : "") + "</td></tr>";
+}
+
+// ---- Faceplates ----
+//
+// One faceplate per component instance, drawn generically from the
+// snapshot's descriptors (the component self-description contract): the
+// descriptor supplies the instance's name, kind, ports with role hints,
+// and parameter metadata; the serving layer already annotated each port
+// with its bound point, so port.point joins straight into live
+// telemetry and the signal index. Command affordances attach only where
+// the bound point's metadata is marked writable — the model-declared
+// command surface — and a command attempted anywhere else rejects with
+// not_writable, the rejection visible in the receipt pane and the
+// journal. The parameter list is the other editable surface: each
+// declared parameter renders an edit control typed to its declared
+// kind, its submission issues a set_parameter command addressed to the
+// instance through the same receipted path, and the answer — applied
+// tick or named rejection — lands on the parameter's row. A kind
+// declaring no parameters renders no parameter table at all: no edit
+// affordance.
+
+// The live sample a bound port shows, or null when unwired/unseen.
+function portSample(port, telemetry) {
+  return port.point == null ? null : (telemetry.get(port.point) || {}).sample || null;
+}
+
+// The port's bound point metadata — null when the port is unwired or
+// its point has no index entry (e.g. a synthesized port-to-port link
+// point, which is never a command target).
+function portMeta(port) {
+  return port.point == null ? null : metaByPoint.get(port.point) || null;
+}
+
+// A write affordance is offered only on a point the model marks
+// writable: an unbound port, an unmarked point, or a point with no
+// metadata is display-only — never silently commandable.
+function commandAffordance(port, sample) {
+  const meta = portMeta(port);
+  if (!meta || !meta.writable) return "";
+  return "<span class=\"command\"><input class=\"command-value\"" +
+    " data-point=\"" + port.point + "\" size=\"9\"" +
+    (sample ? " placeholder=\"" + esc(formatValue(sample.value)) + "\"" : "") +
+    "><button type=\"button\" class=\"write\" data-point=\"" + port.point +
+    "\">write</button></span>";
+}
+
+// The conventional element a role hint picks. Every element shows the
+// port's bound-point metadata name, live value, unit, and quality; the
+// command affordance follows the bound point's writable mark, not the
+// role.
+const ROLE_ORDER = { process_value: 0, setpoint: 1, output: 2, status: 3 };
+function roleElement(port, telemetry) {
+  const sample = portSample(port, telemetry);
+  const meta = portMeta(port);
+  const label = esc(port.name) + (meta ? " · " + esc(meta.name) : "");
+  const unit = meta && meta.unit ? " " + esc(meta.unit) : "";
+  const cls = sample ? qualityClass(sample.quality) : "nosample";
+  const value = sample ? esc(formatValue(sample.value)) : "—";
+  if (port.role === "status") {
+    // A bool draws as an on/off flag; any other kind shows its value.
+    const on = sample && sample.value && "Bool" in sample.value
+      ? sample.value.Bool : null;
+    const text = on === null
+      ? port.name + ": " + (sample ? formatValue(sample.value) : "—")
+      : port.name;
+    return "<span class=\"flag" + (on ? " on" : "") + "\" title=\"" +
+      esc(port.name) + (sample ? " — " + esc(formatQuality(sample.quality)) : "") +
+      "\">" + esc(text) + "</span>" + commandAffordance(port, sample);
+  }
+  return "<div class=\"role role-" + esc(port.role) + "\">" +
+    "<span class=\"caption\">" + label + "</span>" +
+    "<span class=\"value " + cls + "\">" + value + unit + "</span>" +
+    commandAffordance(port, sample) + "</div>";
+}
+
+// The generic per-port rows: unhinted ports inside a custom faceplate,
+// or every port of a fallback faceplate.
+function portTable(ports, telemetry) {
+  if (ports.length === 0) return "";
+  return "<table class=\"ports\"><thead><tr>" +
+    "<th>Port</th><th>Dir</th><th>Point</th><th>Value</th><th>Quality</th><th></th>" +
+    "</tr></thead><tbody>" +
+    ports.map(port => {
+      const sample = portSample(port, telemetry);
+      const meta = portMeta(port);
+      return "<tr><td>" + esc(port.name) + "</td><td>" + esc(port.direction) +
+        "</td><td>" + (port.point == null ? "unwired"
+          : "point " + port.point + (meta ? " · " + esc(meta.name) : "")) +
+        "</td><td class=\"value\">" + (sample ? esc(formatValue(sample.value)) : "") +
+        (meta && meta.unit ? " " + esc(meta.unit) : "") +
+        "</td><td class=\"" + (sample ? qualityClass(sample.quality) : "nosample") +
+        "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
+        "</td><td>" + commandAffordance(port, sample) + "</td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+// The parameter list: each ParameterDescriptor renders its name, value
+// kind, the declared range a tuning must satisfy, and an edit control
+// typed to the kind — a true/false select for Bool, a text input for
+// Int and Float — plus a status cell carrying the receipted path's
+// latest answer for that tunable.
+function parameterTable(descriptor) {
+  return "<table class=\"params\"><thead><tr>" +
+    "<th>Parameter</th><th>Kind</th><th>Range</th><th>Set</th><th></th>" +
+    "</tr></thead><tbody>" +
+    descriptor.parameters.map(param => {
+      const status = paramStatus.get(paramKey(descriptor.name, param.name));
+      return "<tr><td>" + esc(param.name) + "</td><td>" + esc(param.kind) +
+        "</td><td>" +
+        (param.range
+          ? esc(formatValue(param.range.min)) + " … " +
+            esc(formatValue(param.range.max))
+          : "unbounded") +
+        "</td><td>" + parameterControl(descriptor.name, param) +
+        "<button type=\"button\" class=\"tune\" data-component=\"" +
+        esc(descriptor.name) + "\" data-param=\"" + esc(param.name) +
+        "\">set</button></td>" +
+        "<td class=\"param-status" + (status && status.warn ? " warn" : "") +
+        (status && status.bad ? " bad" : "") + "\" data-component=\"" +
+        esc(descriptor.name) + "\" data-param=\"" + esc(param.name) + "\">" +
+        (status ? esc(status.text) : "") + "</td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+// One parameter's edit control, typed to the declared ValueKind and
+// labeled with the declared range where present — as the control's
+// tooltip, beside the Range column that states it outright. The
+// data-component/data-param/data-kind attributes are what the submit
+// handler reads.
+function parameterControl(component, param) {
+  const attrs = " data-component=\"" + esc(component) + "\" data-param=\"" +
+    esc(param.name) + "\" data-kind=\"" + esc(param.kind) + "\"" +
+    (param.range
+      ? " title=\"" + esc(formatValue(param.range.min)) + " … " +
+        esc(formatValue(param.range.max)) + "\""
+      : "");
+  if (param.kind === "Bool") {
+    return "<select class=\"param-value\"" + attrs + ">" +
+      "<option value=\"true\">true</option>" +
+      "<option value=\"false\">false</option></select>";
+  }
+  return "<input class=\"param-value\"" + attrs + " size=\"9\"" +
+    (param.kind === "Int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
+    ">";
+}
+
+// Records the receipted path's latest answer for one parameter and
+// paints it into every matching status cell — the map is the store and
+// survives re-renders, the cell only displays it.
+function setParamStatus(component, name, status) {
+  paramStatus.set(paramKey(component, name), status);
+  for (const cell of document.querySelectorAll("#faceplates .param-status")) {
+    if (cell.dataset.component === component && cell.dataset.param === name) {
+      cell.textContent = status.text;
+      cell.className = "param-status" + (status.warn ? " warn" : "") +
+        (status.bad ? " bad" : "");
+    }
+  }
+}
+
+// The client-side check against the descriptor's declared range —
+// advisory only: a failing entry is warned and still sent, the
+// receipted path staying the authority that names the rejection.
+// Mirrors the contract's rule: the bounds carry the parameter's kind,
+// so a value of a different kind — or a non-finite Float — is outside
+// every range.
+function inDeclaredRange(range, value) {
+  if ("Bool" in range.min && "Bool" in range.max && "Bool" in value) {
+    return true;
+  }
+  if ("Int" in range.min && "Int" in range.max && "Int" in value) {
+    return range.min.Int <= value.Int && value.Int <= range.max.Int;
+  }
+  if ("Float" in range.min && "Float" in range.max && "Float" in value) {
+    return range.min.Float <= value.Float && value.Float <= range.max.Float;
+  }
+  return false;
+}
+
+// Parses an operator entry into a Value of the parameter's declared
+// kind, collecting the client-side warnings the entry draws — text that
+// is not such a value, or a value outside the declared range. The
+// warnings never block: the submission still goes through the receipted
+// path, whose named rejection is what a refused edit displays.
+function parameterValue(param, text) {
+  const warnings = [];
+  let value;
+  if (param.kind === "Bool") {
+    value = { Bool: text === "true" };
+  } else if (param.kind === "Int") {
+    if (!/^[-+]?\d+$/.test(text)) warnings.push("not an Int value");
+    value = { Int: parseInt(text, 10) };
+  } else {
+    const parsed = Number(text);
+    if (Number.isNaN(parsed)) warnings.push("not a Float value");
+    value = { Float: parsed };
+  }
+  if (warnings.length === 0 && param.range &&
+      !inDeclaredRange(param.range, value)) {
+    warnings.push("outside declared range " +
+      formatValue(param.range.min) + " … " + formatValue(param.range.max));
+  }
+  return { value, warnings };
+}
+
+// The instance's diagnostics row, joined from the snapshot's components
+// section by name.
+function diagnosticsMarkup(diag) {
+  const ok = diag && diag.last_tick != null
+    ? "last ok tick " + diag.last_tick
+    : "no successful step";
+  const errors = diag && diag.step_errors > 0
+    ? " — <span class=\"errors\">" + diag.step_errors + " step error(s)" +
+      (diag.last_error ? ": " + esc(diag.last_error) : "") + "</span>"
+    : "";
+  return "<div class=\"diag\">" + ok + errors + "</div>";
+}
+
+// A descriptor with no role hints and no parameters carries no custom
+// faceplate information — it degrades to the generic
+// name-plus-diagnostics-plus-wired-points view rather than an error.
+function isGeneric(descriptor) {
+  return descriptor.parameters.length === 0 &&
+    !descriptor.ports.some(port => port.role != null);
+}
+
+function faceplateMarkup(descriptor, diag, telemetry) {
+  const generic = isGeneric(descriptor);
+  const parts = [
+    "<section class=\"faceplate" + (generic ? " generic" : "") + "\">",
+    "<h3>" + esc(descriptor.label) +
+      " <span class=\"kind\">" + esc(descriptor.kind) + "</span></h3>",
+  ];
+  if (generic) {
+    parts.push(portTable(descriptor.ports, telemetry));
+  } else {
+    const hinted = descriptor.ports
+      .filter(port => port.role != null)
+      .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role]);
+    parts.push(hinted.map(port => roleElement(port, telemetry)).join(""));
+    const unhinted = descriptor.ports.filter(port => port.role == null);
+    if (unhinted.length > 0) parts.push(portTable(unhinted, telemetry));
+  }
+  if (descriptor.parameters.length > 0) {
+    parts.push(parameterTable(descriptor));
+  }
+  parts.push(diagnosticsMarkup(diag));
+  parts.push("</section>");
+  return parts.join("");
+}
+
+// Re-renders every faceplate from the polled snapshot. Values an
+// operator is mid-edit on — and an input's focus — survive the
+// re-render, keyed by bound point for the write affordances and by
+// component-plus-parameter for the tuning controls.
+function renderFaceplates(snapshot, telemetry) {
+  const pending = new Map();
+  let focused = null;
+  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
+    pending.set(input.dataset.point, input.value);
+    if (input === document.activeElement) focused = input.dataset.point;
+  }
+  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    pending.set(key, control.value);
+    if (control === document.activeElement) focused = key;
+  }
+  descriptorByName.clear();
+  for (const descriptor of snapshot.descriptors) {
+    descriptorByName.set(descriptor.name, descriptor);
+  }
+  const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
+  document.getElementById("faceplates").innerHTML = snapshot.descriptors
+    .map(descriptor => faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry))
+    .join("");
+  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
+    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
+    if (input.dataset.point === focused) input.focus();
+  }
+  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    if (pending.has(key)) control.value = pending.get(key);
+    if (key === focused) control.focus();
+  }
 }
 
 // One inline-SVG trend panel per point, built once from the signal index.
@@ -510,6 +894,19 @@ async function refreshJournal(base) {
     if (!journalSeen.has(key)) {
       journalSeen.add(key);
       journalEntries.push(entry);
+      // A settled set_parameter receipt is the authority's final word on
+      // a tuning submission: the applied tick or the named rejection
+      // surfaces on the parameter's faceplate row as well as in this
+      // pane, replacing any advisory warning the entry drew.
+      const settled = entry.event.command_settled;
+      if (settled && settled.receipt.command.set_parameter) {
+        const tuning = settled.receipt.command.set_parameter;
+        setParamStatus(tuning.component, tuning.name, {
+          text: describeOutcome(settled.receipt.outcome),
+          warn: false,
+          bad: "rejected" in settled.receipt.outcome,
+        });
+      }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
@@ -557,11 +954,19 @@ function describeEvent(event) {
 }
 
 // A command serializes as {"write_value": {point, kind, value}} |
+// {"force_point": {point, kind, value}} | {"unforce_point": {point}} |
 // {"set_parameter": {component, name, value}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
     return "write " + pointName(write.point) + " := " + formatValue(write.value);
+  }
+  if ("force_point" in command) {
+    const force = command.force_point;
+    return "force " + pointName(force.point) + " := " + formatValue(force.value);
+  }
+  if ("unforce_point" in command) {
+    return "release force on " + pointName(command.unforce_point.point);
   }
   if ("set_parameter" in command) {
     const tuning = command.set_parameter;
@@ -645,14 +1050,6 @@ function describeReason(reason) {
   return JSON.stringify(reason);
 }
 
-// An IoError serializes as {"UnknownPoint": id} | {"Disconnected": id} |
-// {"Timeout": id} | {"TypeMismatch": {point, expected, found}}.
-function describeIoError(error) {
-  const [name, detail] = Object.entries(error)[0];
-  if (typeof detail === "number") return name + " on point " + detail;
-  return name + " " + JSON.stringify(detail);
-}
-
 function commandValue(kind, text) {
   if (kind === "Bool") return { Bool: /^(true|1|on)$/i.test(text.trim()) };
   if (kind === "Int") return { Int: parseInt(text, 10) };
@@ -680,7 +1077,10 @@ function isNotActive(receipt) {
 // Submits an operator command to the peer reporting settled "active" —
 // never to a standby. A not_active rejection means the pair moved
 // mid-flight: roles are re-polled and the command retried once against
-// the peer now reporting active, per the pair-view rule.
+// the peer now reporting active, per the pair-view rule. Answers the
+// peer's response — normally the command's receipt — so the caller can
+// surface it beside the control that submitted; null when nothing was
+// sent.
 async function submitCommand(command) {
   const receipt = document.getElementById("receipt");
   let target = activePeer();
@@ -692,7 +1092,7 @@ async function submitCommand(command) {
   if (target < 0) {
     receipt.textContent =
       "not sent: no peer reports role active — the pair is mid-transition";
-    return;
+    return null;
   }
   let answer = await postCommand(peers[target].base, command);
   if (isNotActive(answer)) {
@@ -702,10 +1102,58 @@ async function submitCommand(command) {
     if (target >= 0) answer = await postCommand(peers[target].base, command);
   }
   receipt.textContent = JSON.stringify(answer, null, 2);
+  return answer;
+}
+
+// A parameter edit submits a set_parameter command addressed to the
+// instance — {set_parameter: {component, name, value}} — through the
+// same receipted, active-peer-routed path every operator command takes.
+// The descriptor is the page's authority for kind and range: an
+// unparseable or out-of-range entry is warned client-side on the row
+// but still sent — the receipted path stays the authority, and a named
+// rejection displays rather than the edit dropping silently.
+async function submitParameter(button) {
+  const component = button.dataset.component;
+  const name = button.dataset.param;
+  const control = button.parentElement.querySelector(".param-value");
+  const descriptor = descriptorByName.get(component);
+  const param = descriptor &&
+    descriptor.parameters.find(candidate => candidate.name === name);
+  if (!control || !param) return;
+  const text = control.value.trim();
+  if (param.kind !== "Bool" && text === "") {
+    setParamStatus(component, name,
+      { text: "enter a value", warn: true, bad: false });
+    return;
+  }
+  const parsed = parameterValue(param, text);
+  const command = { set_parameter: {
+    component: component, name: name, value: parsed.value } };
+  let answer;
+  try {
+    answer = await submitCommand(command);
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+    setParamStatus(component, name,
+      { text: "command failed: " + error, warn: false, bad: true });
+    return;
+  }
+  const verdict = answer && answer.outcome
+    ? describeOutcome(answer.outcome)
+    : answer === null
+      ? "not sent: no peer reports role active"
+      : String(answer);
+  setParamStatus(component, name, {
+    text: (parsed.warnings.length > 0
+      ? "warning: " + parsed.warnings.join("; ") + " — " : "") + verdict,
+    warn: parsed.warnings.length > 0,
+    bad: !answer || !answer.outcome || "rejected" in answer.outcome,
+  });
 }
 
 async function init() {
   index = await (await fetch("/signals")).json();
+  for (const meta of index.points) metaByPoint.set(meta.point, meta);
   const select = document.getElementById("command-point");
   // The command form offers only the model-declared writable points —
   // the index carries each io_point's `writable` mark, and writes to
@@ -714,6 +1162,57 @@ async function init() {
     "<option value=\"" + p.point + "\">" + esc(p.name) +
     " (point " + p.point + ")</option>").join("");
   buildTrends();
+  // Faceplate command affordances: one delegated listener — the
+  // affordances themselves re-render on every poll. The writable gate
+  // is the same metadata check the renderer applied: a point the model
+  // did not mark writable is never commanded from the page. A tune
+  // button submits its parameter's edit through submitParameter — the
+  // same receipted path.
+  const faceplates = document.getElementById("faceplates");
+  faceplates.addEventListener("click", async event => {
+    const tune = event.target.closest("button.tune");
+    if (tune) {
+      await submitParameter(tune);
+      refresh();
+      return;
+    }
+    const button = event.target.closest("button.write");
+    if (!button) return;
+    const input = button.parentElement.querySelector("input.command-value");
+    const meta = metaByPoint.get(Number(button.dataset.point));
+    if (!meta || !meta.writable || !input) return;
+    if (input.value.trim() === "") {
+      document.getElementById("receipt").textContent =
+        "enter a value for " + meta.name;
+      return;
+    }
+    const command = { write_value: {
+      point: meta.point,
+      kind: meta.value_type,
+      value: commandValue(meta.value_type, input.value),
+    } };
+    try {
+      await submitCommand(command);
+      input.value = "";
+    } catch (error) {
+      document.getElementById("receipt").textContent = "command failed: " + error;
+    }
+    refresh();
+  });
+  // Enter inside an affordance input submits like its button.
+  faceplates.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    const input = event.target.closest("input.command-value");
+    if (input) {
+      const button = input.parentElement.querySelector("button.write");
+      if (button) button.click();
+      return;
+    }
+    const control = event.target.closest(".param-value");
+    if (!control) return;
+    const tune = control.parentElement.querySelector("button.tune");
+    if (tune) tune.click();
+  });
   document.getElementById("command-form").addEventListener("submit", async event => {
     event.preventDefault();
     const point = Number(select.value);

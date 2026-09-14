@@ -46,6 +46,13 @@ pub const NONNEGATIVE_INT: ParameterRange = ParameterRange {
     max: Value::Int(i64::MAX),
 };
 
+/// The inclusive bound a strictly positive `Int` parameter accepts — a
+/// count or size that must be at least 1.
+pub const POSITIVE_INT: ParameterRange = ParameterRange {
+    min: Value::Int(1),
+    max: Value::Int(i64::MAX),
+};
+
 /// The inclusive bound a `Float` parameter in `(0, 1]` accepts — a
 /// positive fraction such as a per-tick smoothing constant. The lower
 /// bound is the smallest positive normal double — the tightest
@@ -113,6 +120,10 @@ pub fn component<S: AsRef<str>>(
                     .iter()
                     .find(|(port, _)| port.as_ref() == requirement.name)
                     .map(|(_, role)| *role),
+                // The bound point is the serving layer's annotation:
+                // the executor joins it in when the descriptor is
+                // served in a snapshot.
+                point: None,
             })
             .collect(),
         parameters,
@@ -161,12 +172,14 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
             ]
         );

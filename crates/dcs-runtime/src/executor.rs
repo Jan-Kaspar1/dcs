@@ -6,12 +6,14 @@
 //! [`Executor::run`] then advance a virtual [`Tick`] and cycle read → step
 //! → write deterministically.
 
-use crate::checkpoint::{Checkpoint, RestoreError};
+use crate::checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    IoDriver, IoError, IoFault, IoHealth, PointId, PointTelemetry, Quality, QualityReason, Sample,
-    StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
+    ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry,
+    Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -478,6 +480,10 @@ enum Resolved {
         name: String,
         value: Value,
     },
+    /// `ForcePoint` on a mapped writable `In` point of the declared kind.
+    Force { point: PointId, value: Value },
+    /// `UnforcePoint` on a mapped writable `In` point.
+    Unforce { point: PointId },
 }
 
 /// A deterministic fixed-step executor over registered components.
@@ -548,6 +554,23 @@ enum Resolved {
 /// the next scan, where a component-side refusal turns the receipt
 /// `Rejected` without changing anything.
 ///
+/// The forcing pair — [`Command::ForcePoint`] /
+/// [`Command::UnforcePoint`] — is the persistent sibling of a write:
+/// it targets the same writable `In` surface and applies at the same
+/// boundary, but instead of staging one value it pins the point. While
+/// a force stands, the scan's input phase never reads the driver for
+/// that point — the image holds the forced value stamped
+/// [`Quality::Uncertain`]`(`[`QualityReason::Substituted`]`)` every
+/// scan, so components and monitoring see substitution rather than
+/// false `Good` data — and an internal-link route onto the point is
+/// likewise overridden. A `WriteValue` to a forced field point still
+/// reaches the driver — the force overrides the image, not the field —
+/// so the release observes whatever the field then carries. Release is
+/// the same boundary in reverse: the applying scan's input phase reads
+/// the driver again. Forces are run state — listed in
+/// [`snapshot`](Executor::snapshot)'s `forces` section and carried in
+/// [`checkpoint`](Executor::checkpoint) so a standby preserves them.
+///
 /// Nothing reads a wall clock: identical driver behavior over identical
 /// scans produces identical samples on every host.
 pub struct Executor<'d> {
@@ -555,6 +578,10 @@ pub struct Executor<'d> {
     map: PointMap,
     components: Vec<Entry>,
     image: RefCell<HashMap<PointId, Sample>>,
+    /// The active force set: each point pinned to the value the input
+    /// phase substitutes for its driver read, in ascending id order so
+    /// snapshots and checkpoints serialize deterministically.
+    forces: BTreeMap<PointId, Value>,
     /// Indices into `receipts` of the queued commands awaiting their scan
     /// boundary; the command itself rides inside its receipt.
     pending_commands: VecDeque<usize>,
@@ -564,6 +591,10 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// The fingerprint of the model this run was assembled from, when
+    /// the assembling layer supplied one: stamped into every checkpoint
+    /// and the value a restored checkpoint's fingerprint must equal.
+    model_fingerprint: Option<ModelFingerprint>,
     tick: Tick,
 }
 
@@ -681,9 +712,31 @@ impl<'d> Executor<'d> {
             image,
             pending_commands: VecDeque::new(),
             receipts: Vec::new(),
+            forces: BTreeMap::new(),
             io_health: IoHealth::default(),
+            model_fingerprint: None,
             tick: Tick::ZERO,
         })
+    }
+
+    /// Records the fingerprint of the model this run was assembled from.
+    ///
+    /// The assembling layer supplies it — the executor is model-agnostic
+    /// and never derives one. Once set, every
+    /// [`checkpoint`](Executor::checkpoint) carries it and every
+    /// [`restore`](Executor::restore)/[`apply`](Executor::apply) requires
+    /// the incoming checkpoint's fingerprint to equal it, so a standby
+    /// rejects a checkpoint captured under a different model by name
+    /// rather than discovering the skew through structural drift.
+    pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
+        self.model_fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// The fingerprint this run was assembled with — the value
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) recorded.
+    pub fn model_fingerprint(&self) -> Option<ModelFingerprint> {
+        self.model_fingerprint
     }
 
     /// The executor's current virtual tick: [`Tick::ZERO`] before the first
@@ -757,7 +810,13 @@ impl<'d> Executor<'d> {
     /// [`describe`](Component::describe) result in the same scan order as
     /// `components` — one descriptor per registered component, so
     /// `descriptors[i]` describes the component `components[i]`
-    /// diagnoses.
+    /// diagnoses — with each port annotated by its bound point: the
+    /// serving layer joins a port to the point its same-named declared
+    /// [`IoRequirement`] resolved to, so a monitoring UI renders the
+    /// port's live value without re-resolving the model's wiring.
+    /// The `forces` section lists the active force set — each forced
+    /// point with the value the image substitutes — so a monitoring
+    /// consumer can badge forced points.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
         TelemetrySnapshot {
@@ -784,21 +843,43 @@ impl<'d> Executor<'d> {
             descriptors: self
                 .components
                 .iter()
-                .map(|entry| entry.component.describe())
+                .map(|entry| {
+                    let mut descriptor = entry.component.describe();
+                    // Serving-layer annotation: a port's `point` is the
+                    // bound point of its same-named declared I/O
+                    // requirement; a port naming no declared requirement
+                    // is unwired and reports `None`.
+                    let bound: HashMap<String, PointId> = entry
+                        .component
+                        .io_requirements()
+                        .into_iter()
+                        .map(|requirement| (requirement.name, requirement.point))
+                        .collect();
+                    for port in &mut descriptor.ports {
+                        port.point = bound.get(&port.name).copied();
+                    }
+                    descriptor
+                })
                 .collect(),
             io_health: IoHealth {
                 driver: self.driver.diagnostics(),
                 ..self.io_health.clone()
             },
+            forces: self
+                .forces
+                .iter()
+                .map(|(&point, &value)| ForcedPoint { point, value })
+                .collect(),
         }
     }
 
     /// Queues `command` for application at the start of the next scan and
     /// returns its receipt.
     ///
-    /// Submission validates the command statically — a `WriteValue`
-    /// against the point map (the point must be served, must be a
-    /// writable `In` point, and the declared kind must match both the
+    /// Submission validates the command statically — a `WriteValue`,
+    /// `ForcePoint`, or `UnforcePoint` against the point map (the point
+    /// must be served, must be a writable `In` point, and for the
+    /// value-carrying pair the declared kind must match both the
     /// map's kind and the supplied value's variant), a `SetParameter`
     /// against the addressed component's
     /// descriptor (the component must be registered, the parameter
@@ -895,6 +976,8 @@ impl<'d> Executor<'d> {
     pub fn checkpoint(&self) -> Checkpoint {
         let image = self.image.borrow();
         Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: self.model_fingerprint,
             tick: self.tick,
             components: self
                 .components
@@ -919,6 +1002,7 @@ impl<'d> Executor<'d> {
                 .filter(|(_, spec)| spec.direction == Direction::In && spec.internal.is_some())
                 .filter_map(|(point, _)| image.get(&point).map(|sample| (point, *sample)))
                 .collect(),
+            forces: self.forces.clone(),
         }
     }
 
@@ -926,25 +1010,35 @@ impl<'d> Executor<'d> {
     ///
     /// `driver`, `map`, and `components` are the same inputs
     /// [`Executor::new`] takes — on a standby they are built from the same
-    /// plant model. Restore wires the components, checks that the
-    /// checkpoint's component set equals the registered set by name,
-    /// applies the driver state when the checkpoint carries one, restores
-    /// each component's state, then resumes the tick and the output image.
-    /// The result is an executor whose next [`scan`](Executor::scan)
-    /// produces outputs identical to the captured run's.
+    /// plant model — and `model_fingerprint` is the fingerprint that
+    /// model carries, supplied by the assembling layer exactly as
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) records
+    /// it. Restore wires the components, negotiates the checkpoint's
+    /// format version and fingerprint against `model_fingerprint`, checks
+    /// that the checkpoint's component set equals the registered set by
+    /// name, applies the driver state when the checkpoint carries one,
+    /// restores each component's state, then resumes the tick and the
+    /// output image. The result is an executor whose next
+    /// [`scan`](Executor::scan) produces outputs identical to the
+    /// captured run's, itself fingerprinted so the checkpoints it later
+    /// emits carry the same identity.
     ///
     /// Any incompatibility fails with a [`RestoreError`] naming the
-    /// element at fault: a [`WiringError`], a component-name mismatch, a
-    /// component's [`StateError`](dcs_core::StateError), or the driver's.
-    /// No partially restored executor is returned; the supplied driver is
+    /// element at fault: an unsupported format version or a fingerprint
+    /// mismatch before any state is examined, then a [`WiringError`], a
+    /// component-name mismatch, a component's
+    /// [`StateError`](dcs_core::StateError), or the driver's. No
+    /// partially restored executor is returned; the supplied driver is
     /// asked to validate before applying its state section.
     pub fn restore(
         driver: &'d (dyn IoDriver + Sync),
         map: PointMap,
         components: Vec<Box<dyn Component>>,
         checkpoint: &Checkpoint,
+        model_fingerprint: Option<ModelFingerprint>,
     ) -> Result<Self, RestoreError> {
         let mut executor = Self::new(driver, map, components)?;
+        executor.model_fingerprint = model_fingerprint;
         executor.check_checkpoint(checkpoint)?;
 
         // Driver state before component state: a driver that does not
@@ -973,6 +1067,7 @@ impl<'d> Executor<'d> {
                 .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
+        executor.forces = checkpoint.forces.clone();
         Ok(executor)
     }
 
@@ -982,6 +1077,8 @@ impl<'d> Executor<'d> {
     /// Where [`restore`](Executor::restore) builds a fresh equivalent
     /// executor, `apply` realigns one that is already assembled and may
     /// be mid-run: the same compatibility checks hold — the checkpoint's
+    /// format version must be supported and its model fingerprint must
+    /// equal this run's, its
     /// component set must equal the registered set, its outputs must be
     /// points the map serves as `Out` with the declared kinds, and its
     /// internal section must name image-carried `In` points — then the
@@ -1058,15 +1155,37 @@ impl<'d> Executor<'d> {
                 .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
+        drop(image);
+        // The checkpoint's force set is authoritative: the standby
+        // forces exactly what the active forced — no more, no less.
+        self.forces.clone_from(&checkpoint.forces);
         Ok(())
     }
 
     /// The compatibility half of checkpoint restore and apply: the
-    /// checkpoint's component set must equal the registered set exactly,
+    /// checkpoint's format version must be one this build accepts and its
+    /// model fingerprint must equal this run's — the explicit negotiation
+    /// that runs before any state is examined — then the checkpoint's
+    /// component set must equal the registered set exactly,
     /// every captured output must name a point the map serves as `Out`
     /// with the declared value kind, and every captured internal sample
     /// must name an image-carried `In` point with the declared kind.
     fn check_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
+        // Negotiation first: a checkpoint this build cannot read, or one
+        // captured under a different model, is refused before any state
+        // applies.
+        if !SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
+            return Err(RestoreError::UnsupportedVersion {
+                found: checkpoint.format_version,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            });
+        }
+        if checkpoint.model_fingerprint != self.model_fingerprint {
+            return Err(RestoreError::FingerprintMismatch {
+                found: checkpoint.model_fingerprint,
+                expected: self.model_fingerprint,
+            });
+        }
         // Component names are the run's component ids: the checkpoint's
         // set must equal the registered set exactly.
         for component in checkpoint.components.keys() {
@@ -1115,6 +1234,20 @@ impl<'d> Executor<'d> {
                 _ => return Err(RestoreError::UnknownInternal { point }),
             }
         }
+        for (&point, &value) in &checkpoint.forces {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::In && spec.writable => {
+                    if spec.kind != value.kind() {
+                        return Err(RestoreError::IncompatibleForce {
+                            point,
+                            expected: spec.kind,
+                            found: value,
+                        });
+                    }
+                }
+                _ => return Err(RestoreError::UnknownForce { point }),
+            }
+        }
         Ok(())
     }
 
@@ -1131,6 +1264,11 @@ impl<'d> Executor<'d> {
     /// ([`CommandError::NotWritable`] otherwise — every `Out` point
     /// refuses writes), then the declared kind must match the map's and
     /// the supplied value's variant ([`CommandError::TypeMismatch`]).
+    /// `ForcePoint`/`UnforcePoint` share that surface: a force pins a
+    /// point only the operator could write, so the same
+    /// `UnknownPoint`/`NotWritable`/`TypeMismatch` rejections bound it —
+    /// and a force never touches the driver, so no boundary refusal
+    /// exists for the pair.
     ///
     /// A `SetParameter` resolves its component by
     /// [`name`](Component::name) — the identity the descriptor and the
@@ -1143,17 +1281,9 @@ impl<'d> Executor<'d> {
     /// [`CommandError::OutOfRange`].
     fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
         match command {
-            Command::WriteValue { point, kind, value } => {
-                let spec = self
-                    .map
-                    .get(*point)
-                    .ok_or(CommandError::UnknownPoint { point: *point })?;
-                // The command surface is the map's writable `In` points:
-                // an unmarked point, and every `Out` point, refuses the
-                // write before its payload is examined.
-                if spec.direction != Direction::In || !spec.writable {
-                    return Err(CommandError::NotWritable { point: *point });
-                }
+            Command::WriteValue { point, kind, value }
+            | Command::ForcePoint { point, kind, value } => {
+                let spec = self.check_command_point(*point)?;
                 if *kind != spec.kind {
                     return Err(CommandError::TypeMismatch {
                         point: *point,
@@ -1168,10 +1298,20 @@ impl<'d> Executor<'d> {
                         found: *value,
                     });
                 }
-                Ok(Resolved::Write {
-                    point: *point,
-                    value: *value,
+                Ok(match command {
+                    Command::ForcePoint { .. } => Resolved::Force {
+                        point: *point,
+                        value: *value,
+                    },
+                    _ => Resolved::Write {
+                        point: *point,
+                        value: *value,
+                    },
                 })
+            }
+            Command::UnforcePoint { point } => {
+                self.check_command_point(*point)?;
+                Ok(Resolved::Unforce { point: *point })
             }
             Command::SetParameter {
                 component,
@@ -1228,6 +1368,22 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// The surface check every point command shares: the point must be
+    /// served ([`CommandError::UnknownPoint`]) and must be a writable
+    /// `In` point — the command surface is the map's writable `In`
+    /// points, so an unmarked point, and every `Out` point, refuses
+    /// before its payload is examined with [`CommandError::NotWritable`].
+    fn check_command_point(&self, point: PointId) -> Result<PointSpec, CommandError> {
+        let spec = self
+            .map
+            .get(point)
+            .ok_or(CommandError::UnknownPoint { point })?;
+        if spec.direction != Direction::In || !spec.writable {
+            return Err(CommandError::NotWritable { point });
+        }
+        Ok(spec)
+    }
+
     /// Applies every queued command in submission order, updating each
     /// one's receipt to its final outcome. Runs at the head of the scan —
     /// before the input read — so a write to a writable `In` point is
@@ -1242,6 +1398,12 @@ impl<'d> Executor<'d> {
     /// [`apply_parameter`](Component::apply_parameter) hook at this same
     /// boundary; a hook refusal settles the receipt `Rejected` and
     /// changes nothing.
+    ///
+    /// A `ForcePoint` records the force — this scan's input phase already
+    /// substitutes the value at `Substituted` quality — and an
+    /// `UnforcePoint` lifts it, so the same scan reads the driver again
+    /// for a field point. The pair never touches the driver, so both
+    /// settle `Applied` here.
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             let command = self.receipts[index].command.clone();
@@ -1282,6 +1444,14 @@ impl<'d> Executor<'d> {
                     Ok(()) => CommandOutcome::Applied { tick },
                     Err(reason) => CommandOutcome::Rejected { reason },
                 },
+                Ok(Resolved::Force { point, value }) => {
+                    self.forces.insert(point, value);
+                    CommandOutcome::Applied { tick }
+                }
+                Ok(Resolved::Unforce { point }) => {
+                    self.forces.remove(&point);
+                    CommandOutcome::Applied { tick }
+                }
             };
         }
     }
@@ -1294,10 +1464,26 @@ impl<'d> Executor<'d> {
     /// image sample onto its `In` point, delivering the value one scan
     /// after it was written. Held internal `In` points — unlinked —
     /// keep their image value untouched.
+    ///
+    /// A forced `In` point skips both channels: the driver is not read
+    /// — so a field fault on a forced point counts no failed read —
+    /// and no link routes onto it. The image instead holds the forced
+    /// value stamped `Uncertain(Substituted)` at this scan's tick, every
+    /// scan until release.
     fn read_inputs(&mut self, tick: Tick) {
         let mut image = self.image.borrow_mut();
         for (point, spec) in self.map.iter() {
-            if spec.direction != Direction::In || spec.internal.is_some() {
+            if spec.direction != Direction::In {
+                continue;
+            }
+            if let Some(&value) = self.forces.get(&point) {
+                image.insert(
+                    point,
+                    Sample::new(value, Quality::Uncertain(QualityReason::Substituted), tick),
+                );
+                continue;
+            }
+            if spec.internal.is_some() {
                 continue;
             }
             let sample = match self.driver.read(point) {
@@ -1326,6 +1512,9 @@ impl<'d> Executor<'d> {
             image.insert(point, sample);
         }
         for (output, input) in self.map.links() {
+            if self.forces.contains_key(&input) {
+                continue;
+            }
             if let Some(sample) = image.get(&output).copied() {
                 image.insert(input, Sample { tick, ..sample });
             }
@@ -2574,6 +2763,606 @@ mod tests {
         );
     }
 
+    fn force_point(point: u64, kind: ValueKind, value: Value) -> Command {
+        Command::ForcePoint {
+            point: PointId(point),
+            kind,
+            value,
+        }
+    }
+
+    fn unforce_point(point: u64) -> Command {
+        Command::UnforcePoint {
+            point: PointId(point),
+        }
+    }
+
+    /// The sample the scan image reports for a forced point.
+    fn forced(value: Value, tick: u64) -> Sample {
+        Sample::new(
+            value,
+            Quality::Uncertain(QualityReason::Substituted),
+            Tick(tick),
+        )
+    }
+
+    #[test]
+    fn force_holds_across_scans_with_substituted_quality() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+
+        // Baseline: the live field value reads through with Good quality.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(1)))
+        );
+
+        let receipt = executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+
+        // The applying scan substitutes the forced value at Substituted
+        // quality and the component's step observes it the same scan.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(5.0), 2))
+        );
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+        // The field itself is untouched: a force writes nothing to the
+        // driver and bypasses its reads.
+        assert_eq!(driver_value(&driver, 10), Value::Float(0.0));
+
+        // The field reasserting a different value changes nothing the
+        // image reports: the force holds across scans, each stamping the
+        // current tick at Substituted quality.
+        driver.write(PointId(10), Value::Float(3.0)).unwrap();
+        for n in 3..=5u64 {
+            executor.scan().unwrap();
+            assert_eq!(
+                executor.sample(PointId(10)),
+                Some(forced(Value::Float(5.0), n)),
+                "scan {n}"
+            );
+            assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+        }
+        // And the substitution reports into the snapshot the same way.
+        assert_eq!(
+            executor.snapshot().points[0].sample,
+            Some(forced(Value::Float(5.0), 5))
+        );
+    }
+
+    #[test]
+    fn unforce_resumes_driver_reads_at_the_scan_boundary() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.scan().unwrap();
+        // The field moves while the force stands; the image still holds
+        // the forced value.
+        driver.write(PointId(10), Value::Float(2.0)).unwrap();
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(5.0), 2))
+        );
+
+        let receipt = executor.submit_command(unforce_point(10));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(3)
+            }
+        );
+
+        // The release applies at the head of the scan, so that scan's
+        // input phase already reads the field again — the documented
+        // boundary — and the component sees the live value the same scan.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.0), Tick(3)))
+        );
+        assert_eq!(driver_value(&driver, 20), Value::Float(4.0));
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn force_commands_reject_outside_the_writable_surface() {
+        let driver = StubDriver::new(&[float(10), float(11), float(20), float(30)], &[]);
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(11), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            // A map may carry the mark on an `Out` point — a model
+            // declaring one fails validation — and the command path
+            // refuses it regardless.
+            .with_writable_point(PointId(30), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(&driver, map, vec![]).unwrap();
+
+        // Unknown point.
+        let receipt = executor.submit_command(force_point(99, ValueKind::Float, Value::Float(1.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownPoint { point: PointId(99) }
+            }
+        );
+
+        // Unmarked `In` point and every `Out` point, marked or not.
+        for point in [11, 20, 30] {
+            let receipt =
+                executor.submit_command(force_point(point, ValueKind::Float, Value::Float(1.0)));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::NotWritable {
+                        point: PointId(point)
+                    }
+                },
+                "point {point}"
+            );
+        }
+
+        // Declared kind disagrees with the map's, then the value's
+        // variant with the declared kind.
+        let receipt = executor.submit_command(force_point(10, ValueKind::Int, Value::Int(1)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::TypeMismatch {
+                    point: PointId(10),
+                    expected: ValueKind::Float,
+                    found: Value::Int(1),
+                }
+            }
+        );
+        let receipt = executor.submit_command(force_point(10, ValueKind::Float, Value::Bool(true)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::TypeMismatch {
+                    point: PointId(10),
+                    expected: ValueKind::Float,
+                    found: Value::Bool(true),
+                }
+            }
+        );
+
+        // Unforce shares the surface: unknown and unwritable points
+        // refuse with the same named reasons.
+        let receipt = executor.submit_command(unforce_point(99));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownPoint { point: PointId(99) }
+            }
+        );
+        for point in [11, 20, 30] {
+            let receipt = executor.submit_command(unforce_point(point));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::NotWritable {
+                        point: PointId(point)
+                    }
+                },
+                "point {point}"
+            );
+        }
+
+        // Every rejection was at submission: a scan queues nothing.
+        executor.scan().unwrap();
+        assert_eq!(executor.receipts().len(), 10);
+        assert_eq!(driver_value(&driver, 10), Value::Float(0.0));
+    }
+
+    #[test]
+    fn unforce_without_a_force_applies_as_a_noop() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+
+        // Releasing an unforced point still applies — the release is
+        // idempotent — and the scan reads the field as usual.
+        let receipt = executor.submit_command(unforce_point(10));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(1)))
+        );
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn reforce_repins_the_value_and_write_still_reaches_the_field() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.scan().unwrap();
+
+        // A second force replaces the first at its boundary.
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(9.0)));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(9.0), 2))
+        );
+
+        // A write to a forced field point still reaches the driver — the
+        // force overrides the image, not the field — so the release
+        // observes the field's current value.
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 10), Value::Float(4.0));
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(9.0), 3))
+        );
+
+        executor.submit_command(unforce_point(10));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(4.0), Tick(4)))
+        );
+    }
+
+    #[test]
+    fn forced_internal_point_reports_the_substituted_value() {
+        // A writable internal `In` point is on the same surface: its
+        // held value is already operator-owned, so the force's visible
+        // effect is the Substituted stamp each scan.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+        executor.submit_command(Command::ForcePoint {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(8.0),
+        });
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 2))
+        );
+
+        executor.submit_command(Command::UnforcePoint { point: PointId(10) });
+        executor.scan().unwrap();
+        // Release resumes the held-value rule: the image keeps the last
+        // sample — the forced value as last stamped while forced.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 2))
+        );
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn force_overrides_an_internal_link_route() {
+        // A link-driven internal `In` point marked writable can be
+        // forced: the force wins over the route — it is the operator's
+        // override of every channel feeding the image.
+        let driver = StubDriver::new(&[float(40)], &[]);
+        let map = PointMap::new()
+            .with_internal(
+                PointId(20),
+                Direction::Out,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+            .with_writable_internal(
+                PointId(30),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(-1.0),
+            )
+            .with_internal_link(PointId(20), PointId(30))
+            .with_point(PointId(40), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Constant {
+                name: "producer",
+                output: PointId(20),
+                value: 9.0,
+            })],
+        )
+        .unwrap();
+        executor.scan().unwrap();
+
+        executor.submit_command(force_point(30, ValueKind::Float, Value::Float(7.0)));
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(30)),
+            Some(forced(Value::Float(7.0), 3))
+        );
+
+        executor.submit_command(unforce_point(30));
+        executor.scan().unwrap();
+        // The route resumes at the release boundary.
+        assert_eq!(
+            executor.sample(PointId(30)),
+            Some(Sample::good(Value::Float(9.0), Tick(4)))
+        );
+    }
+
+    #[test]
+    fn forced_field_input_reports_no_failed_read_while_forced() {
+        // The driver read is bypassed: a field fault on a forced point
+        // produces no failed-read count and the forced sample stands.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.scan().unwrap();
+
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(5.0), 2))
+        );
+        assert_eq!(executor.snapshot().io_health.failed_reads, 0);
+
+        // Release resumes reads — and the fault now reports.
+        executor.submit_command(unforce_point(10));
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+    }
+
+    #[test]
+    fn snapshot_lists_the_force_set() {
+        let driver = StubDriver::new(&[float(10), float(11), float(20)], &[]);
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_writable_point(PointId(11), Direction::In, ValueKind::Bool)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(&driver, map, vec![]).unwrap();
+        assert!(executor.snapshot().forces.is_empty());
+
+        // Submit out of id order: the snapshot lists the set in
+        // ascending point order regardless.
+        executor.submit_command(Command::ForcePoint {
+            point: PointId(11),
+            kind: ValueKind::Bool,
+            value: Value::Bool(true),
+        });
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().forces,
+            vec![
+                dcs_core::ForcedPoint {
+                    point: PointId(10),
+                    value: Value::Float(5.0),
+                },
+                dcs_core::ForcedPoint {
+                    point: PointId(11),
+                    value: Value::Bool(true),
+                },
+            ]
+        );
+
+        executor.submit_command(unforce_point(10));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().forces,
+            vec![dcs_core::ForcedPoint {
+                point: PointId(11),
+                value: Value::Bool(true),
+            }]
+        );
+    }
+
+    /// Rig for forcing checkpoint tests: `Scale` reads writable `In`
+    /// point 10 onto `Out` 20 at gain 2.
+    fn forcing_checkpoint_components() -> Vec<Box<dyn Component>> {
+        vec![Box::new(Scale {
+            name: "a",
+            input: PointId(10),
+            output: PointId(20),
+            gain: 2.0,
+        })]
+    }
+
+    fn forcing_checkpoint_map() -> PointMap {
+        PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_the_force_set() {
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.run(2).unwrap();
+
+        let checkpoint = executor.checkpoint();
+        assert_eq!(
+            checkpoint.forces,
+            BTreeMap::from([(PointId(10), Value::Float(5.0))])
+        );
+        // The force set rides the serialized form.
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let checkpoint: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(checkpoint.forces[&PointId(10)], Value::Float(5.0));
+
+        // A fresh executor — its own driver reporting the field's real
+        // value — restores the force and keeps substituting.
+        let standby = StubDriver::new(&[float(10), float(20)], &[]);
+        standby.write(PointId(10), Value::Float(3.0)).unwrap();
+        let mut restored = Executor::restore(
+            &standby,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+            &checkpoint,
+            None,
+        )
+        .unwrap();
+        restored.scan().unwrap();
+        assert_eq!(
+            restored.sample(PointId(10)),
+            Some(forced(Value::Float(5.0), 3))
+        );
+        assert_eq!(driver_value(&standby, 20), Value::Float(10.0));
+        assert_eq!(
+            restored.snapshot().forces,
+            vec![dcs_core::ForcedPoint {
+                point: PointId(10),
+                value: Value::Float(5.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_aligns_the_force_set() {
+        // The running-standby half: `apply` converges a live executor's
+        // force set to the checkpoint's — forcing what the active forces
+        // and releasing what it released.
+        let active_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut active = Executor::new(
+            &active_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan().unwrap();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        standby_driver
+            .write(PointId(10), Value::Float(1.0))
+            .unwrap();
+        let mut standby = Executor::new(
+            &standby_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(forced(Value::Float(5.0), 2))
+        );
+
+        // A later checkpoint whose force set is empty releases the
+        // standby's force: the checkpoint's set is authoritative.
+        active.submit_command(unforce_point(10));
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(1.0), Tick(3)))
+        );
+        assert!(standby.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_rejects_a_force_on_an_unforceable_point() {
+        // A checkpoint naming a forced point this map does not serve as
+        // a writable `In` — or whose kind disagrees — is a different
+        // mapping's artifact and fails by name.
+        let driver = StubDriver::new(&[float(10), float(11), float(20)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+
+        let unforceable_map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let error = Executor::restore(
+            &driver,
+            unforceable_map,
+            forcing_checkpoint_components(),
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, RestoreError::UnknownForce { point: PointId(10) });
+
+        let mut wrong_kind = checkpoint.clone();
+        wrong_kind.forces.insert(PointId(10), Value::Int(5));
+        let error = Executor::restore(
+            &driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+            &wrong_kind,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::IncompatibleForce {
+                point: PointId(10),
+                expected: ValueKind::Float,
+                found: Value::Int(5),
+            }
+        );
+    }
+
+    #[test]
+    fn identical_forced_runs_are_deterministic() {
+        let run = || {
+            let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+            let mut executor = setpoint_rig(&driver);
+            executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+            executor.run(3).unwrap();
+            driver.write(PointId(10), Value::Float(3.0)).unwrap();
+            executor.run(2).unwrap();
+            executor.submit_command(unforce_point(10));
+            executor.scan().unwrap();
+            (
+                executor.receipts().to_vec(),
+                serde_json::to_string(&executor.snapshot()).unwrap(),
+                serde_json::to_string(&executor.checkpoint()).unwrap(),
+            )
+        };
+        assert_eq!(run(), run());
+    }
+
     /// A component whose `gain` and `limit` are operator-tunable
     /// parameters: `out` is `in * gain` clamped to `±limit`. The hook
     /// owns the cross-parameter invariant `gain <= limit` — declared
@@ -2625,6 +3414,7 @@ mod tests {
                         direction: requirement.direction,
                         kind: requirement.kind,
                         role: None,
+                        point: None,
                     })
                     .collect(),
                 parameters: ["gain", "limit"]
@@ -2954,6 +3744,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap();
         restored.scan().unwrap();
@@ -3091,6 +3882,7 @@ mod tests {
                         }),
                     ],
                     checkpoint,
+                    None,
                 )
                 .unwrap(),
                 None => checkpoint_rig(&driver),
@@ -3146,6 +3938,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -3191,6 +3984,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3252,6 +4046,7 @@ mod tests {
                 count: 0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3330,12 +4125,14 @@ mod tests {
                         direction: Direction::In,
                         kind: ValueKind::Float,
                         role: None,
+                        point: Some(PointId(10)),
                     },
                     PortDescriptor {
                         name: "out".to_string(),
                         direction: Direction::Out,
                         kind: ValueKind::Float,
                         role: None,
+                        point: Some(PointId(20)),
                     },
                 ],
                 parameters: Vec::new(),
@@ -3375,12 +4172,14 @@ mod tests {
                             direction: Direction::In,
                             kind: ValueKind::Float,
                             role: Some(PortRole::ProcessValue),
+                            point: None,
                         },
                         PortDescriptor {
                             name: "out".to_string(),
                             direction: Direction::Out,
                             kind: ValueKind::Float,
                             role: Some(PortRole::Output),
+                            point: None,
                         },
                     ],
                     parameters: vec![ParameterDescriptor {
@@ -3420,6 +4219,10 @@ mod tests {
         assert_eq!(descriptor.label, "Fancy loop");
         assert_eq!(descriptor.ports[0].role, Some(PortRole::ProcessValue));
         assert_eq!(descriptor.ports[1].role, Some(PortRole::Output));
+        // The serving layer annotated each port with its bound point —
+        // `Fancy`'s own `describe` reported none.
+        assert_eq!(descriptor.ports[0].point, Some(PointId(10)));
+        assert_eq!(descriptor.ports[1].point, Some(PointId(20)));
         assert_eq!(
             descriptor.parameters[0].range,
             Some(ParameterRange {
@@ -3763,6 +4566,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3823,5 +4627,250 @@ mod tests {
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
         );
+    }
+
+    #[test]
+    fn checkpoint_carries_version_and_fingerprint_through_serde() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor =
+            checkpoint_rig(&driver).with_model_fingerprint(ModelFingerprint::of(b"model-a"));
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+
+        // This build stamps the version it writes and the fingerprint
+        // the assembling layer supplied.
+        assert_eq!(checkpoint.format_version, CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            checkpoint.model_fingerprint,
+            Some(ModelFingerprint::of(b"model-a"))
+        );
+
+        // Both negotiate on the wire: the serialized form carries the
+        // fields and they survive a round-trip.
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["format_version"], CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            document["model_fingerprint"],
+            ModelFingerprint::of(b"model-a").0
+        );
+        assert_eq!(
+            serde_json::from_str::<Checkpoint>(&json).unwrap(),
+            checkpoint
+        );
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_version_restores() {
+        // The documented compatible-version case: a checkpoint a
+        // pre-versioning build wrote carries no `format_version` —
+        // serde reads it as version 0, which
+        // `SUPPORTED_FORMAT_VERSIONS` accepts — and no fingerprint, so
+        // it restores onto an executor assembled without one.
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.model_fingerprint, None);
+
+        let mut document = serde_json::to_value(&checkpoint).unwrap();
+        document.as_object_mut().unwrap().remove("format_version");
+        assert!(
+            !document
+                .as_object()
+                .unwrap()
+                .contains_key("model_fingerprint")
+        );
+        let legacy: Checkpoint = serde_json::from_value(document).unwrap();
+        assert_eq!(legacy.format_version, 0);
+        assert_eq!(legacy.model_fingerprint, None);
+
+        let standby = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &standby,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ],
+            &legacy,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+
+        // And a running unfingerprinted standby applies it in place.
+        let tracking_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut tracking = checkpoint_rig(&tracking_driver);
+        tracking.apply(&legacy).unwrap();
+        assert_eq!(tracking.tick(), Tick(3));
+    }
+
+    #[test]
+    fn restore_rejects_an_unsupported_format_version() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.scan().unwrap();
+        let mut checkpoint = executor.checkpoint();
+        checkpoint.format_version = CHECKPOINT_FORMAT_VERSION + 1;
+
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![Box::new(Counter {
+                name: "count",
+                output: PointId(30),
+                count: 0,
+            })],
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::UnsupportedVersion {
+                found: CHECKPOINT_FORMAT_VERSION + 1,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            }
+        );
+
+        // The same rejection precedes any state on a running standby:
+        // the version is negotiated before the component-set check, so
+        // this checkpoint's components would have failed it anyway.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver);
+        standby.run(2).unwrap();
+        assert_eq!(standby.apply(&checkpoint), Err(error));
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_a_mismatched_model_fingerprint() {
+        let fingerprint = ModelFingerprint::of(b"model-a");
+        let other = ModelFingerprint::of(b"model-b");
+
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        let mut executor = checkpoint_rig(&driver).with_model_fingerprint(fingerprint);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+
+        let components = || {
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }) as Box<dyn Component>,
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ]
+        };
+        let map = || {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect::<PointMap>()
+        };
+
+        // A checkpoint from a different model — same component set,
+        // different fingerprint — is rejected by fingerprint before any
+        // state applies.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            Some(other),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            }
+        );
+        // So is a fingerprinted checkpoint landing on a run assembled
+        // without one — the model identity cannot be verified.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: None,
+            }
+        );
+
+        // A running standby fingerprinted for a different model rejects
+        // the same checkpoint and keeps its last-good alignment: nothing
+        // of the foreign run applied.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver).with_model_fingerprint(other);
+        standby.run(2).unwrap();
+        assert_eq!(
+            standby.apply(&checkpoint),
+            Err(RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            })
+        );
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+
+        // The matching pair restores and keeps emitting the fingerprint.
+        let restored_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &restored_driver,
+            map(),
+            components(),
+            &checkpoint,
+            Some(fingerprint),
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+        assert_eq!(restored.checkpoint().model_fingerprint, Some(fingerprint));
     }
 }

@@ -37,6 +37,12 @@
 //! writable `In` points: writes to unmarked points and to every `Out`
 //! point are refused at submission with
 //! [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable).
+//! `force_point`/`unforce_point` share that surface: a force pins a
+//! point's image to an operator value stamped
+//! [`Quality::Uncertain`](dcs_core::Quality::Uncertain)`(Substituted)`
+//! every scan — the driver read bypassed — until the release resumes
+//! live reads at its own boundary, and the force set rides the snapshot
+//! and the checkpoint so a standby preserves it.
 //!
 //! [`Executor::checkpoint`] and [`Executor::restore`] are the redundancy
 //! groundwork: a serde-serializable [`Checkpoint`] carries the tick, each
@@ -58,9 +64,10 @@ mod divergence;
 mod executor;
 mod gate;
 mod peer;
-mod standby;
 
-pub use checkpoint::{Checkpoint, RestoreError};
+pub use checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
 pub use executor::{
@@ -68,4 +75,3 @@ pub use executor::{
 };
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange};
-pub use standby::{Standby, StandbyState};

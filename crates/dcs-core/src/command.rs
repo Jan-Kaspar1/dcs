@@ -11,6 +11,14 @@
 //! expected [`ValueKind`], and optional [`ParameterRange`] are declared
 //! by the component's [`ParameterDescriptor`](crate::ParameterDescriptor)s.
 //!
+//! [`Command::ForcePoint`] and [`Command::UnforcePoint`] are the forcing
+//! pair: a force pins a model-declared writable `In` point to an
+//! operator value across scans — the scan image reports it stamped
+//! [`Quality::Uncertain`](crate::Quality::Uncertain) with
+//! [`QualityReason::Substituted`](crate::QualityReason::Substituted)
+//! instead of the driver's read — and the release resumes live reads at
+//! the same scan boundary.
+//!
 //! Every submitted command produces a [`CommandReceipt`]: an accepted
 //! command reports the scan tick it is scheduled to apply at and later an
 //! [`CommandOutcome::Applied`] receipt at that tick; a refused command is
@@ -72,13 +80,52 @@ pub enum Command {
         /// The value to tune to; its variant must equal the declared kind.
         value: Value,
     },
+    /// Pins `point` — a model-declared writable `In` point — to `value`
+    /// across scans.
+    ///
+    /// The target surface is exactly [`WriteValue`](Self::WriteValue)'s:
+    /// the point must be served, must be an `In` point the plant model
+    /// marks `writable`, and `kind`/`value` must match the declared kind
+    /// — so a force on an unknown, unwritable, or `Out` point refuses at
+    /// submission with the same named reason a write would, and a forced
+    /// point stays forced until [`UnforcePoint`](Self::UnforcePoint)
+    /// releases it. While the force stands the scan's input image holds
+    /// `value` stamped
+    /// [`Quality::Uncertain`](crate::Quality::Uncertain)`(`[`QualityReason::Substituted`](crate::QualityReason::Substituted)`)`
+    /// — substitution, never false `Good` data — and the driver's read
+    /// is bypassed; a force writes nothing to the field.
+    ForcePoint {
+        /// The logical point to force.
+        point: PointId,
+        /// The value kind the operator declares for the point.
+        kind: ValueKind,
+        /// The forced value; its variant must equal `kind`.
+        value: Value,
+    },
+    /// Releases the force on `point`.
+    ///
+    /// `point` names the same writable `In` surface
+    /// [`ForcePoint`](Self::ForcePoint) does — an unknown, unwritable, or
+    /// `Out` point refuses at submission with the named reason — and the
+    /// release lands at the same scan boundary every command uses: the
+    /// applying scan's input phase already reads the driver again for a
+    /// field point, or resumes the held-value rule for an internal one.
+    /// Releasing a point that is not forced applies as a no-op — the
+    /// release is idempotent so an operator never needs the current force
+    /// set to issue one.
+    UnforcePoint {
+        /// The logical point to release.
+        point: PointId,
+    },
 }
 
 impl Command {
     /// The point the command acts on, when it is a point command.
     pub fn point(&self) -> Option<PointId> {
         match self {
-            Command::WriteValue { point, .. } => Some(*point),
+            Command::WriteValue { point, .. }
+            | Command::ForcePoint { point, .. }
+            | Command::UnforcePoint { point } => Some(*point),
             Command::SetParameter { .. } => None,
         }
     }
@@ -366,11 +413,21 @@ mod tests {
         }
     }
 
+    fn force_point() -> Command {
+        Command::ForcePoint {
+            point: PointId(7),
+            kind: ValueKind::Float,
+            value: Value::Float(42.0),
+        }
+    }
+
     #[test]
     fn command_serde_roundtrip() {
         for command in [
             write_value(),
             set_parameter(),
+            force_point(),
+            Command::UnforcePoint { point: PointId(7) },
             Command::WriteValue {
                 point: PointId(1),
                 kind: ValueKind::Bool,
@@ -399,6 +456,17 @@ mod tests {
             json,
             r#"{"set_parameter":{"component":"level-pid","name":"kp","value":{"Float":3.5}}}"#
         );
+    }
+
+    #[test]
+    fn force_commands_use_the_documented_wire_shape() {
+        let json = serde_json::to_string(&force_point()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"force_point":{"point":7,"kind":"Float","value":{"Float":42.0}}}"#
+        );
+        let json = serde_json::to_string(&Command::UnforcePoint { point: PointId(7) }).unwrap();
+        assert_eq!(json, r#"{"unforce_point":{"point":7}}"#);
     }
 
     #[test]
@@ -529,6 +597,11 @@ mod tests {
     #[test]
     fn command_names_its_point() {
         assert_eq!(write_value().point(), Some(PointId(7)));
+        assert_eq!(force_point().point(), Some(PointId(7)));
+        assert_eq!(
+            Command::UnforcePoint { point: PointId(7) }.point(),
+            Some(PointId(7))
+        );
         assert_eq!(set_parameter().point(), None);
     }
 

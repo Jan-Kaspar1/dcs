@@ -2,8 +2,9 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
-    JournalEvent, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, DriverDiagnostics,
+    ForcedPoint, IoDriver, IoError, IoFault, JournalEvent, LinkState, PointId, Quality,
+    QualityReason, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
@@ -21,6 +22,7 @@ use std::thread;
 struct StubDriver {
     points: Mutex<HashMap<PointId, Sample>>,
     faults: Mutex<HashSet<PointId>>,
+    report: Mutex<Option<DriverDiagnostics>>,
     tick: AtomicU64,
 }
 
@@ -34,6 +36,7 @@ impl StubDriver {
                     .collect(),
             ),
             faults: Mutex::new(HashSet::new()),
+            report: Mutex::new(None),
             tick: AtomicU64::new(0),
         }
     }
@@ -67,6 +70,13 @@ impl IoDriver for StubDriver {
         }
         *sample = Sample::good(value, Tick(self.tick.load(Ordering::Relaxed)));
         Ok(())
+    }
+
+    /// The optional transport-diagnostics hook: injectable, so a test
+    /// can report link degradation the way a dead plant server's driver
+    /// does — named link health, distinct from per-point faults.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        self.report.lock().unwrap().clone()
     }
 }
 
@@ -125,12 +135,16 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
     let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
     let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
-    thread::scope(|scope| {
+    let result = thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
-        let result = body(&driver, &client);
+        // A failing assertion must not deadlock the scope join: catch the
+        // panic so the server is always shut down before it propagates.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&driver, &client)));
         monitor.shutdown();
         result
-    })
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 fn point_value(snapshot: &dcs_core::TelemetrySnapshot, point: u64) -> Option<Value> {
@@ -422,9 +436,18 @@ fn page_serves_trend_and_journal_markup() {
         for needle in ["id=\"journal\"", "<th>Tick</th>", "/journal?since="] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
-        // The I/O-health line: the snapshot's io_health section rendered
-        // as its own surface beside the per-point quality column.
-        for needle in ["id=\"io-health\"", "snapshot.io_health"] {
+        // The I/O-health pane: the snapshot's io_health section rendered
+        // as its own surface beside the pair reporting — and the
+        // link-degradation display rule that shows a dead transport as
+        // link health, distinct from the per-point quality column.
+        for needle in [
+            "id=\"health\"",
+            "id=\"io-health\"",
+            "id=\"io-health-rows\"",
+            "snapshot.io_health",
+            "health.driver.link !== \"connected\"",
+            "scan overruns",
+        ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
         // The page stays a single dependency-free asset.
@@ -562,6 +585,163 @@ fn trend_and_journal_feeds_track_the_run() {
                 },
             }
         );
+    });
+}
+
+#[test]
+fn the_health_panes_fields_ride_the_served_snapshot() {
+    with_monitor(|driver, client| {
+        // Injected driver faults at both boundaries, plus a link-level
+        // report through the driver's optional diagnostics hook — the
+        // dead plant server's signature: named link degradation beside
+        // the per-point faults the executor counts.
+        *driver.report.lock().unwrap() = Some(DriverDiagnostics {
+            link: LinkState::Disconnected,
+            last_error: Some("no live connection to the plant server".to_string()),
+        });
+        driver.faults.lock().unwrap().insert(PointId(10));
+        driver.faults.lock().unwrap().insert(PointId(20));
+        // The failed output write fails the scan — the health section
+        // still counted and attributed it.
+        assert!(client.advance(1).is_err());
+
+        // Every field the pane reads is present in the served snapshot.
+        let health = &client.snapshot().unwrap().io_health;
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.consecutive_failures, 2);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(1),
+                point: PointId(20),
+                direction: Direction::Out,
+                error: IoError::Disconnected(PointId(20)),
+            })
+        );
+        assert_eq!(
+            health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })
+        );
+        assert_eq!(health.scan_overruns, 0);
+
+        // The payloads serde-roundtrip per the #83 contract.
+        let json = serde_json::to_string(health).unwrap();
+        assert_eq!(
+            serde_json::from_str::<dcs_core::IoHealth>(&json).unwrap(),
+            health.clone()
+        );
+    });
+}
+
+#[test]
+fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
+    with_monitor(|driver, client| {
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        client.advance(1).unwrap();
+
+        // The force submits over the same `/command` surface as a write.
+        let force = Command::ForcePoint {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(9.0),
+        };
+        let receipt = client.command(&force).unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+
+        // At the applying scan the snapshot badges the point: its force
+        // entry and the Substituted-stamped sample it reports.
+        client.advance(1).unwrap();
+        let snapshot = client.snapshot().unwrap();
+        assert_eq!(
+            snapshot.forces,
+            vec![ForcedPoint {
+                point: PointId(10),
+                value: Value::Float(9.0),
+            }]
+        );
+        let sample = snapshot
+            .points
+            .iter()
+            .find(|telemetry| telemetry.point == PointId(10))
+            .and_then(|telemetry| telemetry.sample)
+            .unwrap();
+        assert_eq!(
+            sample,
+            Sample::new(
+                Value::Float(9.0),
+                Quality::Uncertain(QualityReason::Substituted),
+                Tick(2),
+            )
+        );
+
+        // The field moving under the force changes nothing the monitor
+        // reports; the release resumes the live read at its boundary.
+        driver.write(PointId(10), Value::Float(4.0)).unwrap();
+        client.advance(1).unwrap();
+        assert_eq!(
+            point_value(&client.snapshot().unwrap(), 10),
+            Some(Value::Float(9.0))
+        );
+
+        let unforce = Command::UnforcePoint { point: PointId(10) };
+        let receipt = client.command(&unforce).unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(4)
+            }
+        );
+        client.advance(1).unwrap();
+        assert_eq!(
+            point_value(&client.snapshot().unwrap(), 10),
+            Some(Value::Float(4.0))
+        );
+        assert!(client.snapshot().unwrap().forces.is_empty());
+
+        // Both halves are journaled as settled commands at their ticks —
+        // the force's application carrying the quality transition to
+        // Substituted beside it.
+        let journal = client.journal(0).unwrap();
+        let json = serde_json::to_string(&journal).unwrap();
+        let journal: Vec<dcs_core::JournalEntry> = serde_json::from_str(&json).unwrap();
+
+        let settled: Vec<CommandReceipt> = journal
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            settled,
+            vec![
+                CommandReceipt {
+                    command: force,
+                    outcome: CommandOutcome::Applied { tick: Tick(2) },
+                },
+                CommandReceipt {
+                    command: unforce,
+                    outcome: CommandOutcome::Applied { tick: Tick(4) },
+                },
+            ]
+        );
+        assert!(journal.iter().any(|entry| {
+            entry.event
+                == JournalEvent::QualityChanged {
+                    point: PointId(10),
+                    from: Some(Quality::Good),
+                    to: Quality::Uncertain(QualityReason::Substituted),
+                }
+        }));
     });
 }
 

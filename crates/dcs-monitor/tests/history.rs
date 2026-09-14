@@ -156,12 +156,16 @@ fn with_monitor_config<T>(
     let executor = Executor::new(&driver, map, components).unwrap();
     let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
-    thread::scope(|scope| {
+    let result = thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
-        let result = body(&driver, &client);
+        // A failing assertion must not deadlock the scope join: catch the
+        // panic so the server is always shut down before it propagates.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&driver, &client)));
         monitor.shutdown();
         result
-    })
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 #[test]
