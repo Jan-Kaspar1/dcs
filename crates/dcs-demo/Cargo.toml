@@ -1,0 +1,14 @@
+[package]
+name = "dcs-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-blocks = { path = "../dcs-blocks" }
+dcs-core = { path = "../dcs-core" }
+dcs-model = { path = "../dcs-model" }
+dcs-runtime = { path = "../dcs-runtime" }
+dcs-sim = { path = "../dcs-sim" }
+serde_json = "1.0.151"
