@@ -1,6 +1,8 @@
-//! `dcs-controller`: loads a plant model, assembles it against its I/O
-//! backend, and runs the deterministic scan — as the active instance, or
-//! as a standby tracking an active peer's checkpoints.
+//! `dcs-controller`: loads a plant model, resolves its devices through the
+//! driver registry — local `sim*` devices plus remote `sim-tcp` ones —
+//! assembles the executor against the resulting fan-out driver, and runs
+//! the deterministic scan — as the active instance, or as a standby
+//! tracking an active peer's checkpoints.
 //!
 //! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
 //!         [--listen ADDR] [--standby ADDR] [--remote ADDR]`
@@ -22,9 +24,9 @@
 //! deterministic and monitor-free.
 //!
 //! `--remote ADDR` attaches to a shared simulated plant served by
-//! `dcs-sim-net`'s `PlantServer` instead of building a local `SimDriver`
-//! — the field-observing driver mode of the standby-field-observation
-//! decision.
+//! `dcs-sim-net`'s `PlantServer` instead of resolving the model's devices
+//! through the registry — the field-observing driver mode of the
+//! standby-field-observation decision.
 //!
 //! Redundancy, per the peer-transport decision: an active instance
 //! started with `--listen ADDR` also serves `GET /checkpoint`, and its
@@ -46,25 +48,26 @@
 //! Load, validation, and assembly failures exit nonzero naming the
 //! offending model element.
 
-use dcs_assembly::{assemble, sim_driver};
+use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{ScanError, Standby, WriteGate};
-use dcs_sim::SimDriver;
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-/// The field driver this instance runs: a local [`SimDriver`] built
-/// from the model, or a [`RemoteDriver`] attached to a shared simulated
-/// plant — the two field-observation modes of the redundancy decisions.
+/// The field driver this instance runs: the [`FanoutDriver`] the driver
+/// registry builds from the model — local `sim*` backends plus any
+/// model-declared `sim-tcp` devices — or a [`RemoteDriver`] attached to a
+/// shared simulated plant — the two field-observation modes of the
+/// redundancy decisions.
 enum Driver {
-    /// A private simulated plant held in this process.
-    Local(SimDriver),
+    /// The registry-resolved backends held in this process.
+    Local(FanoutDriver),
     /// A client of a shared plant server.
     Remote(RemoteDriver),
 }
@@ -73,21 +76,20 @@ impl Driver {
     /// The driver as the executor-facing trait object.
     fn io(&self) -> &(dyn IoDriver + Sync) {
         match self {
-            Self::Local(sim) => sim,
+            Self::Local(fanout) => fanout,
             Self::Remote(remote) => remote,
         }
     }
 
     /// Advances the simulated plant by one scan's `dt`. The local driver
-    /// steps in place; the remote one steps the shared plant — callers
-    /// skip this on a remote standby, where the plant's clock belongs to
-    /// the active.
+    /// steps its backends in place; the remote one steps the shared plant
+    /// — callers skip this on a remote standby, where the plant's clock
+    /// belongs to the active.
     fn step(&self, dt: f64) -> Result<(), String> {
         match self {
-            Self::Local(sim) => {
-                sim.step(dt);
-                Ok(())
-            }
+            Self::Local(fanout) => fanout
+                .step(dt)
+                .map_err(|error| format!("plant step failed: {error}")),
             Self::Remote(remote) => remote
                 .step(dt)
                 .map(|_| ())
@@ -120,8 +122,9 @@ const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
                       [--listen ADDR] [--standby ADDR] [--remote ADDR]
 
-Loads and validates the plant model, assembles it against the field
-driver, and runs the controller scan.
+Loads and validates the plant model, resolves its devices through the
+driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
+controller scan.
 
   --ticks N       run N deterministic ticks, then print the telemetry snapshot
   --scan-ms MS    pace scans to a wall-clock period of MS milliseconds;
@@ -262,9 +265,9 @@ fn main() -> ExitCode {
         Ok(model) => model,
         Err(error) => return fail(error),
     };
-
-    // The field driver: a local simulation, or the shared simulated
-    // plant a redundant pair observes together.
+    // The field driver: the registry-resolved fan-out — local simulated
+    // backends plus any `sim-tcp` devices the model declares — or the
+    // shared simulated plant a redundant pair observes together.
     let driver = match &options.remote {
         Some(addr) => {
             let addr = match resolve(addr) {
@@ -278,16 +281,19 @@ fn main() -> ExitCode {
                 }
             }
         }
-        None => match sim_driver(&model) {
-            Ok(sim) => Driver::Local(sim),
-            Err(error) => return fail(error),
-        },
+        None => {
+            match resolve_drivers(&model, &DriverRegistry::standard()).and_then(|plan| plan.build())
+            {
+                Ok(fanout) => Driver::Local(fanout),
+                Err(error) => return fail(error),
+            }
+        }
     };
 
     // A standby sharing the field through a remote driver is
     // output-quiescent: its writes are gated at the driver boundary so
     // exactly the active writes the shared plant. A standby-local
-    // SimDriver needs no gate — its plant is a private tracking copy
+    // FanoutDriver needs no gate — its plant is a private tracking copy
     // every checkpoint's driver section resynchronizes.
     let gate = match &driver {
         Driver::Remote(remote) if options.standby.is_some() => Some(WriteGate::closed(remote)),
