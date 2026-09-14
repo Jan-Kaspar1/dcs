@@ -43,7 +43,11 @@
 //! - [`ManualStation`] — a manual/auto station slewing bumplessly to the
 //!   newly selected source by a configured per-tick delta;
 //! - [`SignalFilter`] — a first-order per-tick smoothing of an analog
-//!   signal.
+//!   signal;
+//! - [`MedianVoter`] — 2oo3 median voting over three redundant analog
+//!   inputs with a spread discrepancy diagnostic;
+//! - [`Totalizer`] — a rate input accumulated into a running total with
+//!   reset and rollover.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -66,6 +70,7 @@ mod digital_output;
 mod interlock;
 mod latching_alarm;
 mod manual_station;
+mod median_voter;
 mod motor;
 mod override_select;
 mod params;
@@ -73,6 +78,7 @@ mod pid;
 mod rate_limiter;
 mod signal_filter;
 mod timer;
+mod totalizer;
 mod valve;
 
 pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
@@ -84,6 +90,7 @@ pub use digital_output::DigitalOutput;
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
+pub use median_voter::MedianVoter;
 pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
@@ -91,6 +98,7 @@ pub use pid::{Pid, PidConfig};
 pub use rate_limiter::RateLimiter;
 pub use signal_filter::SignalFilter;
 pub use timer::Timer;
+pub use totalizer::Totalizer;
 pub use valve::Valve;
 
 #[cfg(test)]

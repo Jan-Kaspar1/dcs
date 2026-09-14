@@ -8,8 +8,8 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{
-    AnalogInput, AnalogOutput, Counter, DigitalOutput, LatchingAlarm, ManualStation, Pid,
-    RateLimiter, SignalFilter, Timer,
+    AnalogInput, AnalogOutput, Counter, DigitalOutput, LatchingAlarm, ManualStation, MedianVoter,
+    Pid, RateLimiter, SignalFilter, Timer, Totalizer,
 };
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
@@ -31,6 +31,8 @@ const LATCHING_ALARM: &str = include_str!("../fixtures/latching_alarm.json");
 /// The operator-vocabulary fixture: a manual/auto station and a signal
 /// filter.
 const OPERATOR: &str = include_str!("../fixtures/operator.json");
+/// The voting/accumulation fixture: a 2oo3 median voter and a totalizer.
+const VOTING_TOTALIZER: &str = include_str!("../fixtures/voting_totalizer.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
@@ -70,6 +72,17 @@ const RAW: PointId = PointId(13);
 const DRIVE: PointId = PointId(20);
 const ACTIVE: PointId = PointId(21);
 const FILTERED: PointId = PointId(22);
+
+// `voting_totalizer.json`: the redundant voter inputs, the flow rate and
+// reset feeding the totalizer, and the field-side outputs.
+const VOTE_A: PointId = PointId(10);
+const VOTE_B: PointId = PointId(11);
+const VOTE_C: PointId = PointId(12);
+const FLOW: PointId = PointId(13);
+const TRESET: PointId = PointId(14);
+const VOTED: PointId = PointId(20);
+const SPREAD: PointId = PointId(21);
+const ACCUM: PointId = PointId(22);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -192,6 +205,26 @@ fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(MedianVoter::KIND, |spec| {
+            boxed(MedianVoter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in_1")?,
+                spec.require("in_2")?,
+                spec.require("in_3")?,
+                spec.require("out")?,
+                spec.require("discrepancy")?,
+                spec.parameters,
+            ))
+        })
+        .with(Totalizer::KIND, |spec| {
+            boxed(Totalizer::from_parameters(
+                spec.name.as_str(),
+                spec.require("rate")?,
+                spec.require("reset")?,
+                spec.require("total")?,
                 spec.parameters,
             ))
         })
@@ -488,6 +521,79 @@ fn operator_fixture_runs_station_and_filter() {
     assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(8.0));
     executor.scan().unwrap();
     assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(10.0));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn voting_totalizer_fixture_votes_accumulates_and_restores() {
+    let model = model(VOTING_TOTALIZER);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The registry built both declared kinds, in scan order.
+    let snapshot = executor.snapshot();
+    let kinds: Vec<&str> = snapshot
+        .descriptors
+        .iter()
+        .map(|descriptor| descriptor.kind.as_str())
+        .collect();
+    assert_eq!(kinds, [MedianVoter::KIND, Totalizer::KIND]);
+
+    // Three inputs within tolerance=2.0: the median passes through,
+    // no discrepancy; the totalizer banks rate * rate_unit = 5/scan.
+    driver.write(VOTE_A, Value::Float(10.0)).unwrap();
+    driver.write(VOTE_B, Value::Float(11.0)).unwrap();
+    driver.write(VOTE_C, Value::Float(11.5)).unwrap();
+    driver.write(FLOW, Value::Float(10.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(VOTED).unwrap().value, Value::Float(11.0));
+    assert_eq!(driver.read(SPREAD).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(5.0));
+
+    // in_3 deviating past the tolerance asserts the flag; the median
+    // is unaffected, and accumulation continues per scan.
+    driver.write(VOTE_C, Value::Float(20.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(VOTED).unwrap().value, Value::Float(11.0));
+    assert_eq!(driver.read(SPREAD).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(10.0));
+
+    // A standby assembled from the same model applies the mid-run
+    // checkpoint and continues identically — field state and the
+    // banked total both transfer.
+    let checkpoint = executor.checkpoint();
+    let standby_driver = sim_driver(&model).unwrap();
+    let mut standby = assemble(&model, &registry(), &standby_driver).unwrap();
+    standby.apply(&checkpoint).unwrap();
+    assert_eq!(standby.tick(), Tick(2));
+    for _ in 0..3 {
+        executor.scan().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby_driver.read(VOTED).unwrap(),
+            driver.read(VOTED).unwrap()
+        );
+        assert_eq!(
+            standby_driver.read(ACCUM).unwrap(),
+            driver.read(ACCUM).unwrap()
+        );
+    }
+    assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(25.0));
+
+    // Reset clears the total on both runs; release resumes banking.
+    driver.write(TRESET, Value::Bool(true)).unwrap();
+    standby_driver.write(TRESET, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    standby.scan().unwrap();
+    assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(0.0));
+    assert_eq!(standby_driver.read(ACCUM).unwrap().value, Value::Float(0.0));
 
     assert!(
         executor
