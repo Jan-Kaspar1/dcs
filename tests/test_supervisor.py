@@ -80,6 +80,13 @@ class SupervisorTests(unittest.TestCase):
         self.supervisor.state.close()
         self.tmp.cleanup()
 
+    def test_research_issue_worker_prompt_defines_research_role(self):
+        research_issue = issue(group='docs/research')
+        text = self.supervisor.worker_prompt(research_issue, 'codex/issue-1-1')
+        self.assertIn('act as the product research worker', text)
+        self.assertIn('separate source facts from proposed DCS behavior', text)
+        self.assertIn('does not implement vendor-derived product behavior', text)
+
     def test_full_issue_pr_merge_closed_flow(self):
         s=self.supervisor
         s.dispatch(self.github.items)
