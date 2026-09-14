@@ -191,7 +191,7 @@ fn decode_reason(code: i64) -> Option<QualityReason> {
 
 /// `Quality` as a stable `i64` code: `0` for `Good`, `10 + reason` for
 /// `Uncertain`, `20 + reason` for `Bad`.
-fn encode_quality(quality: Quality) -> i64 {
+pub(crate) fn encode_quality(quality: Quality) -> i64 {
     match quality {
         Quality::Good => 0,
         Quality::Uncertain(reason) => 10 + encode_reason(reason),
@@ -199,7 +199,7 @@ fn encode_quality(quality: Quality) -> i64 {
     }
 }
 
-fn decode_quality(code: i64) -> Option<Quality> {
+pub(crate) fn decode_quality(code: i64) -> Option<Quality> {
     Some(match code {
         0 => Quality::Good,
         10..=16 => Quality::Uncertain(decode_reason(code - 10)?),

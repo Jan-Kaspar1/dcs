@@ -99,6 +99,29 @@ pub enum ValidationError {
         /// The channel's declared direction.
         channel_direction: Direction,
     },
+    /// A channel-bound point declares an `initial` value; the field owns a
+    /// bound point's value, so the declaration has nothing to attach to.
+    FieldInitial {
+        /// The offending point.
+        point: PointId,
+    },
+    /// An internal point — declared without a channel — carries no
+    /// `initial` value; the scan image would hold nothing until a first
+    /// write.
+    MissingInitial {
+        /// The offending point.
+        point: PointId,
+    },
+    /// An internal point's `initial` value is a different kind than its
+    /// declared `value_type`.
+    InitialKindMismatch {
+        /// The offending point.
+        point: PointId,
+        /// The point's declared value type.
+        declared: ValueKind,
+        /// The kind `initial` actually carries.
+        initial: ValueKind,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -202,6 +225,23 @@ impl fmt::Display for ValidationError {
                 f,
                 "io point {} has direction {point_direction} but channel {channel:?} on device {} has direction {channel_direction}",
                 point.0, device.0
+            ),
+            Self::FieldInitial { point } => write!(
+                f,
+                "io point {} declares an initial value but is bound to a channel",
+                point.0
+            ),
+            Self::MissingInitial { point } => {
+                write!(f, "internal io point {} declares no initial value", point.0)
+            }
+            Self::InitialKindMismatch {
+                point,
+                declared,
+                initial,
+            } => write!(
+                f,
+                "internal io point {} declares type {declared:?} but its initial value is {initial:?}",
+                point.0
             ),
             Self::ChannelTypeMismatch {
                 point,
@@ -360,13 +400,17 @@ impl PlantModel {
     /// Runs the structural checks the schema cannot express in types:
     ///
     /// - every device, point, signal, and component id is unique;
-    /// - every reference resolves: a point's channel binding names a real
+    /// - every reference resolves: a bound point's channel names a real
     ///   device and channel, a signal's source names a real point, and each
     ///   connection endpoint names a real point, component, and port;
-    /// - a point's direction and value type agree with its bound channel;
+    /// - a bound point's direction and value type agree with its channel,
+    ///   while an internal point — one declared without a channel — must
+    ///   carry an `initial` value of its declared `value_type`, and a
+    ///   channel-bound point must not declare one;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
-    ///   port), with matching value types on both ends.
+    ///   port), with matching value types on both ends — internal points
+    ///   follow the same direction and type rules as bound points.
     ///
     /// Returns every error found; an empty vector means the model is valid.
     pub fn validate(&self) -> Vec<ValidationError> {
@@ -398,26 +442,45 @@ impl PlantModel {
         );
 
         for point in &self.io_points {
-            let Some(device) = devices.get(&point.channel.device.0) else {
+            let Some(reference) = &point.channel else {
+                // An internal point's initial value is its whole declared
+                // state: it must exist and match the declared value type.
+                match point.initial {
+                    None => errors.push(ValidationError::MissingInitial { point: point.id }),
+                    Some(initial) if initial.kind() != point.value_type => {
+                        errors.push(ValidationError::InitialKindMismatch {
+                            point: point.id,
+                            declared: point.value_type,
+                            initial: initial.kind(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            };
+            if point.initial.is_some() {
+                errors.push(ValidationError::FieldInitial { point: point.id });
+            }
+            let Some(device) = devices.get(&reference.device.0) else {
                 errors.push(ValidationError::UnknownDevice {
                     point: point.id,
-                    device: point.channel.device,
+                    device: reference.device,
                 });
                 continue;
             };
-            let Some(channel) = device.channels.get(&point.channel.name) else {
+            let Some(channel) = device.channels.get(&reference.name) else {
                 errors.push(ValidationError::UnknownChannel {
                     point: point.id,
-                    device: point.channel.device,
-                    channel: point.channel.name.clone(),
+                    device: reference.device,
+                    channel: reference.name.clone(),
                 });
                 continue;
             };
             if point.direction != channel.direction {
                 errors.push(ValidationError::ChannelDirectionMismatch {
                     point: point.id,
-                    device: point.channel.device,
-                    channel: point.channel.name.clone(),
+                    device: reference.device,
+                    channel: reference.name.clone(),
                     point_direction: point.direction,
                     channel_direction: channel.direction,
                 });
@@ -425,8 +488,8 @@ impl PlantModel {
             if point.value_type != channel.value_type {
                 errors.push(ValidationError::ChannelTypeMismatch {
                     point: point.id,
-                    device: point.channel.device,
-                    channel: point.channel.name.clone(),
+                    device: reference.device,
+                    channel: reference.name.clone(),
                     point_type: point.value_type,
                     channel_type: channel.value_type,
                 });
@@ -499,6 +562,7 @@ impl PlantModel {
 mod tests {
     use super::*;
     use crate::model::{LoadError, PortRef};
+    use dcs_core::Value;
 
     const MINIMAL: &str = include_str!("../fixtures/minimal.json");
 
@@ -594,7 +658,7 @@ mod tests {
     #[test]
     fn point_binding_to_unknown_device_is_rejected() {
         let mut model = minimal();
-        model.io_points[0].channel.device = DeviceId(99);
+        model.io_points[0].channel.as_mut().unwrap().device = DeviceId(99);
         assert!(model.validate().contains(&ValidationError::UnknownDevice {
             point: PointId(10),
             device: DeviceId(99),
@@ -708,5 +772,62 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// Turns point `index` of the minimal fixture into an internal point.
+    fn make_internal(model: &mut PlantModel, index: usize, initial: Option<Value>) {
+        model.io_points[index].channel = None;
+        model.io_points[index].initial = initial;
+    }
+
+    #[test]
+    fn internal_point_with_initial_is_valid() {
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Float(2.0)));
+        assert!(model.io_points[0].is_internal());
+        assert!(model.validate().is_empty());
+        // The internal point keeps producing values as a connection's
+        // `from` end — internal points follow the field-point rules.
+        let json = serde_json::to_string(&model).unwrap();
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(reloaded.io_points[0].is_internal());
+        assert_eq!(reloaded, model);
+    }
+
+    #[test]
+    fn internal_point_without_initial_is_rejected() {
+        let mut model = minimal();
+        make_internal(&mut model, 0, None);
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::MissingInitial { point: PointId(10) })
+        );
+    }
+
+    #[test]
+    fn internal_point_initial_must_match_value_type() {
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Int(2)));
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::InitialKindMismatch {
+                    point: PointId(10),
+                    declared: ValueKind::Float,
+                    initial: ValueKind::Int,
+                })
+        );
+    }
+
+    #[test]
+    fn bound_point_with_initial_is_rejected() {
+        let mut model = minimal();
+        model.io_points[0].initial = Some(Value::Float(0.0));
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::FieldInitial { point: PointId(10) })
+        );
     }
 }

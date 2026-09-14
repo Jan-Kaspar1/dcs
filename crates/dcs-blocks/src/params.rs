@@ -126,6 +126,19 @@ pub(crate) fn optional_f64(
     }
 }
 
+/// Reads a required `u64` parameter — [`optional_u64`] plus the
+/// [`ParameterError::Missing`] case.
+pub(crate) fn required_u64(
+    component: &str,
+    parameters: &Parameters,
+    name: &str,
+) -> Result<u64, ParameterError> {
+    optional_u64(component, parameters, name)?.ok_or_else(|| ParameterError::Missing {
+        component: component.to_string(),
+        parameter: name.to_string(),
+    })
+}
+
 /// Reads an optional `u64` parameter; `None` when absent. Non-negative
 /// `Int` values and finite, integral, non-negative `Float` values are
 /// accepted; anything else is `Invalid`.

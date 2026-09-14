@@ -16,6 +16,13 @@
 //! produces — nothing here or in component code reads a wall clock, so a
 //! run of `N` scans is exactly reproducible.
 //!
+//! A [`PointMap`] entry may be internal — carried by the scan image
+//! rather than a driver channel. An internal `In` point holds a declared
+//! initial until a command writes it; an internal `Out` point records
+//! component writes for monitoring; an internal link routes an `Out`
+//! sample onto an `In` point at each scan's input phase, carrying
+//! component-to-component wiring one scan later.
+//!
 //! [`Executor::snapshot`] is the monitoring read-side: it returns the
 //! `dcs-core` [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot) contract —
 //! the latest sample of every known point, per-component diagnostics, and
@@ -51,7 +58,9 @@ mod standby;
 
 pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
-pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};
+pub use executor::{
+    ComponentStatus, Executor, LinkError, PointMap, PointSpec, ScanError, WiringError,
+};
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange};
 pub use standby::{Standby, StandbyState};

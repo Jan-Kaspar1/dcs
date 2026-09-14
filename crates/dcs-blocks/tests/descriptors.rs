@@ -4,8 +4,8 @@
 //! `TelemetrySnapshot` serde-roundtrips.
 
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, DigitalInput, DigitalOutput, Interlock,
-    Motor, OverrideSelect, Pid, PidConfig, Scaling, Valve,
+    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
+    Interlock, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Timer, Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -141,12 +141,41 @@ fn rig() -> Rig {
             point(&mut specs, 40, Direction::In, ValueKind::Bool),
             point(&mut specs, 41, Direction::Out, ValueKind::Bool),
         )),
+        Box::new(
+            Timer::new(
+                "tmr",
+                point(&mut specs, 110, Direction::In, ValueKind::Bool),
+                point(&mut specs, 111, Direction::Out, ValueKind::Bool),
+                3,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            Counter::new(
+                "ctr",
+                point(&mut specs, 120, Direction::In, ValueKind::Bool),
+                point(&mut specs, 121, Direction::In, ValueKind::Bool),
+                point(&mut specs, 122, Direction::Out, ValueKind::Int),
+                point(&mut specs, 123, Direction::Out, ValueKind::Bool),
+                4,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            RateLimiter::new(
+                "rl",
+                point(&mut specs, 130, Direction::In, ValueKind::Float),
+                point(&mut specs, 131, Direction::Out, ValueKind::Float),
+                2.5,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 10] = [
+const EXPECTED_KINDS: [&str; 13] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -157,6 +186,9 @@ const EXPECTED_KINDS: [&str; 10] = [
     OverrideSelect::KIND,
     AlarmMonitor::KIND,
     DigitalOutput::KIND,
+    Timer::KIND,
+    Counter::KIND,
+    RateLimiter::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {
