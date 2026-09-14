@@ -1,0 +1,483 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-bus",
+      "parameters": {
+        "address": "__BUS_ADDR__",
+        "registers": {
+          "level_raw": 0,
+          "pump_run": 1,
+          "valve_fb": 2,
+          "valve_cmd": 3,
+          "pump_cmd": 4
+        }
+      },
+      "channels": {
+        "level_raw": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "pump_run": {
+          "direction": "in",
+          "value_type": "Bool"
+        },
+        "valve_fb": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "valve_cmd": {
+          "direction": "out",
+          "value_type": "Float"
+        },
+        "pump_cmd": {
+          "direction": "out",
+          "value_type": "Bool"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": {
+        "device": 1,
+        "name": "level_raw"
+      },
+      "writable": true
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": {
+        "device": 1,
+        "name": "pump_run"
+      }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": {
+        "device": 1,
+        "name": "valve_fb"
+      }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": {
+        "device": 1,
+        "name": "valve_cmd"
+      }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": {
+        "device": 1,
+        "name": "pump_cmd"
+      }
+    },
+    {
+      "id": 50,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": {
+        "Float": 50.0
+      },
+      "writable": true
+    },
+    {
+      "id": 51,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": {
+        "Bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 70,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": {
+        "Bool": false
+      }
+    },
+    {
+      "id": 71,
+      "direction": "out",
+      "value_type": "Bool",
+      "initial": {
+        "Bool": false
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "wet-well-level-raw",
+      "source": 10,
+      "unit": "mA",
+      "description": "LT-201 wet-well level transmitter raw output",
+      "group": "wet-well"
+    },
+    {
+      "id": 101,
+      "name": "pump-run-feedback",
+      "source": 11,
+      "description": "P-201 run feedback contact",
+      "group": "pumps"
+    },
+    {
+      "id": 102,
+      "name": "valve-position-feedback",
+      "source": 12,
+      "unit": "mA",
+      "description": "LV-201 discharge valve position feedback",
+      "group": "discharge"
+    },
+    {
+      "id": 103,
+      "name": "valve-command",
+      "source": 20,
+      "unit": "mA",
+      "description": "LV-201 discharge valve command",
+      "group": "discharge"
+    },
+    {
+      "id": 104,
+      "name": "pump-command",
+      "source": 21,
+      "description": "P-201 starter command",
+      "group": "pumps"
+    },
+    {
+      "id": 105,
+      "name": "level-setpoint",
+      "source": 50,
+      "unit": "%",
+      "description": "LIC-201 wet-well level setpoint",
+      "group": "wet-well"
+    },
+    {
+      "id": 106,
+      "name": "pump-start-request",
+      "source": 51,
+      "description": "P-201 operator start request",
+      "group": "pumps"
+    },
+    {
+      "id": 107,
+      "name": "pump-fault",
+      "source": 70,
+      "description": "P-201 run-feedback fault",
+      "group": "pumps"
+    },
+    {
+      "id": 108,
+      "name": "valve-discrepancy",
+      "source": 71,
+      "description": "LV-201 position feedback discrepancy",
+      "group": "discharge"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": {
+          "Float": 4.0
+        },
+        "raw_max": {
+          "Float": 20.0
+        },
+        "eng_min": {
+          "Float": 0.0
+        },
+        "eng_max": {
+          "Float": 100.0
+        }
+      },
+      "ports": {
+        "raw": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "Float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "pid",
+      "parameters": {
+        "kp": {
+          "Float": 0.5
+        },
+        "ki": {
+          "Float": 0.2
+        },
+        "kd": {
+          "Float": 0.0
+        },
+        "dt": {
+          "Float": 0.1
+        },
+        "out_min": {
+          "Float": 4.0
+        },
+        "out_max": {
+          "Float": 20.0
+        }
+      },
+      "ports": {
+        "sp": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "pv": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "Float"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "valve",
+      "parameters": {
+        "tolerance": {
+          "Float": 1.0
+        },
+        "discrepancy_ticks": {
+          "Int": 3
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "Float"
+        },
+        "fb": {
+          "direction": "in",
+          "value_type": "Float"
+        },
+        "discrepancy": {
+          "direction": "out",
+          "value_type": "Bool"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "digital-input",
+      "parameters": {},
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "Bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "Bool"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "Int": 5
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "Bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "Bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "Bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "Bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "raw"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "pv"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 50
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "sp"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 20
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "fb"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 11
+      },
+      "to": {
+        "port": {
+          "component": 4,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 51
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 21
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 70
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "discrepancy"
+        }
+      },
+      "to": {
+        "point": 71
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "point": 20
+      }
+    }
+  ]
+}

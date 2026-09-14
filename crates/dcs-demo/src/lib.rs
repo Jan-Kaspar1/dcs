@@ -33,10 +33,18 @@
 //! plus `dcs-controller`'s deployed [`registry`](dcs_controller::registry) —
 //! and run through a documented command-and-fault scenario. This module's
 //! hand-rolled [`assemble`] predates that path and stays as the M1 example.
+//!
+//! The [`two_kinds`] module carries the interim WW-FND-002 evidence: one
+//! logical plant bound once to `sim-scripted` and once to `sim-bus` — two
+//! registered driver kinds with different transport semantics — run through
+//! the same driven scan cycle with the field side fed in lockstep, so the
+//! tests can assert both transports produce identical executor snapshots
+//! and journals.
 
 #![warn(missing_docs)]
 
 pub mod showcase;
+pub mod two_kinds;
 
 use dcs_blocks::{AnalogInput, DigitalOutput, ParameterError, Pid, Scaling};
 use dcs_core::{IoDriver, IoError, PointId, TelemetrySnapshot, Value, ValueKind};
