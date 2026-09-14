@@ -52,6 +52,9 @@
 //!   `run` input holds, each driving `out` for its tick duration;
 //! - [`BoolGate`] — an N-input `and`/`or`/`xor` truth fold over its
 //!   `in_N` inputs;
+//! - [`PumpGroup`] — an N-pump duty/standby group with a declared
+//!   rotation policy, lag staging on unmet demand, availability
+//!   exclusion, and automatic duty handover on failed feedback;
 //! - [`SrLatch`] — a set/reset latch, reset-dominant on simultaneous
 //!   assertion;
 //! - [`EdgeTrigger`] — a one-scan pulse on the rising, falling, or both
@@ -85,6 +88,7 @@ mod motor;
 mod override_select;
 mod params;
 mod pid;
+mod pump_group;
 mod rate_limiter;
 mod sequencer;
 mod signal_filter;
@@ -109,6 +113,7 @@ pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
+pub use pump_group::{GroupOutputs, PumpGroup, PumpGroupConfig, PumpIo, RotationPolicy};
 pub use rate_limiter::RateLimiter;
 pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
@@ -148,6 +153,7 @@ pub const KINDS: &[&str] = &[
     Totalizer::KIND,
     Sequencer::KIND,
     BoolGate::KIND,
+    PumpGroup::KIND,
     SrLatch::KIND,
     EdgeTrigger::KIND,
 ];

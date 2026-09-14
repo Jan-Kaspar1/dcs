@@ -18,7 +18,7 @@
 use crate::endpoint::{Sink, Source};
 use crate::spec::{
     CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64,
-    ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
+    POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
 use dcs_core::{Direction, PointType, ValueKind};
 use dcs_model::ComponentId;
@@ -1557,6 +1557,165 @@ impl Spec for BoolGateSpec {
         BoolGateInstance {
             id,
             out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `pump-group` kind: an N-pump duty/standby group with a
+/// declared rotation policy, lag staging on unmet demand, availability
+/// exclusion, and automatic duty handover on failed feedback.
+///
+/// The port set is not static: an instance declares
+/// [`pumps`](Self::pumps) managed pumps, and [`ports`](Spec::ports)
+/// emits `demand` (`In`, `Int`), then `cmd_i` (`Out`, `Bool`),
+/// `run_i` (`In`, `Bool`), `fault_i` (`In`, `Bool`), `avail_i` (`In`,
+/// `Bool`) per pump — each connected through the instance's
+/// [`cmd`](PumpGroupInstance::cmd), [`run`](PumpGroupInstance::run),
+/// [`fault`](PumpGroupInstance::fault), and
+/// [`avail`](PumpGroupInstance::avail) handles — followed by `duty`
+/// (`Out`, `Int`), `staged` (`Out`, `Int`), `none_available` (`Out`,
+/// `Bool`), and `all_faulted` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// Parameters: `rotation` (required `Int` in `0..=2` — the
+/// `RotationPolicy` code: `0` alternate each pump-down cycle, `1`
+/// timed interval, `2` least-run-hours first); `rotation_ticks`
+/// (optional positive `Int`, required by the kind when `rotation` is
+/// `1` — the conditional requirement is the constructor's, the spec
+/// declares it optional); `start_delay_ticks`, `restage_delay_ticks`,
+/// `min_off_ticks` (optional non-negative `Int`s).
+pub struct PumpGroupSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many pumps the instance manages — the `cmd_i`/`run_i`/
+    /// `fault_i`/`avail_i` port families' index bound.
+    pub pumps: usize,
+}
+
+/// Typed port handles for a `pump-group` instance.
+pub struct PumpGroupInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `demand` port (`In`, `Int`): the requested stage count — `0`
+    /// all stopped, `1` duty only, `2` duty plus lag.
+    pub demand: Sink<i64>,
+    /// `duty` port (`Out`, `Int`): the 1-based index of the pump
+    /// holding duty, `0` while none holds it.
+    pub duty: Source<i64>,
+    /// `staged` port (`Out`, `Int`): how many pumps the group currently
+    /// commands.
+    pub staged: Source<i64>,
+    /// `none_available` port (`Out`, `Bool`): no pump is available.
+    pub none_available: Source<bool>,
+    /// `all_faulted` port (`Out`, `Bool`): every pump's `fault_i`
+    /// reads failed.
+    pub all_faulted: Source<bool>,
+}
+
+impl PumpGroupInstance {
+    /// Pump `index`'s run request (`cmd_1`…`cmd_N`, where `N` is the
+    /// spec's [`pumps`](PumpGroupSpec::pumps)): an `Out`, `Bool` port.
+    /// The pump count lives on the spec, not on this handle — an
+    /// `index` outside `1..=N` names a port the instance does not
+    /// declare, and [`build`](crate::PlantBuilder::build) reports the
+    /// connection.
+    pub fn cmd(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("cmd_{index}"))
+    }
+
+    /// Pump `index`'s run feedback (`run_1`…`run_N`): an `In`, `Bool`
+    /// port.
+    pub fn run(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("run_{index}"))
+    }
+
+    /// Pump `index`'s proven-failure flag (`fault_1`…`fault_N`): an
+    /// `In`, `Bool` port.
+    pub fn fault(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("fault_{index}"))
+    }
+
+    /// Pump `index`'s aggregated availability (`avail_1`…`avail_N`): an
+    /// `In`, `Bool` port.
+    pub fn avail(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("avail_{index}"))
+    }
+}
+
+impl PumpGroupSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "pump-group";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("rotation", ValueKind::Int, Some(CODE_RANGE)),
+        optional("rotation_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        optional("start_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("restage_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("min_off_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
+
+    /// A spec for an instance managing `pumps` pumps and carrying
+    /// `parameters` as its parameter map.
+    pub fn new(parameters: Parameters, pumps: usize) -> Self {
+        Self { parameters, pumps }
+    }
+}
+
+impl Spec for PumpGroupSpec {
+    type Instance = PumpGroupInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![port("demand", Direction::In, ValueKind::Int)];
+        for index in 1..=self.pumps {
+            ports.push(port(
+                &format!("cmd_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("run_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("fault_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("avail_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+        }
+        ports.push(port("duty", Direction::Out, ValueKind::Int));
+        ports.push(port("staged", Direction::Out, ValueKind::Int));
+        ports.push(port("none_available", Direction::Out, ValueKind::Bool));
+        ports.push(port("all_faulted", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        PumpGroupInstance {
+            id,
+            demand: Sink::port(id, "demand"),
+            duty: Source::port(id, "duty"),
+            staged: Source::port(id, "staged"),
+            none_available: Source::port(id, "none_available"),
+            all_faulted: Source::port(id, "all_faulted"),
         }
     }
 }

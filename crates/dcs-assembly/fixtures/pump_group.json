@@ -1,0 +1,653 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "demand": [
+            { "tick": 0, "value": 1 },
+            { "tick": 8, "value": 0 },
+            { "tick": 10, "value": 1 },
+            { "tick": 11, "value": 2 },
+            { "tick": 19, "value": 1 },
+            { "tick": 22, "value": 0 },
+            { "tick": 28, "value": 1 },
+            { "tick": 34, "value": 0 }
+          ],
+          "run-1": [
+            { "tick": 1, "value": true },
+            { "tick": 7, "value": false },
+            { "tick": 12, "value": true },
+            { "tick": 22, "value": false }
+          ],
+          "run-2": [
+            { "tick": 5, "value": true },
+            { "tick": 9, "value": false },
+            { "tick": 13, "value": true },
+            { "tick": 25, "value": false }
+          ],
+          "fault-1": [
+            { "tick": 0, "value": false },
+            { "tick": 4, "value": true },
+            { "tick": 7, "value": false },
+            { "tick": 28, "value": true },
+            { "tick": 33, "value": false }
+          ],
+          "fault-2": [
+            { "tick": 0, "value": false },
+            { "tick": 28, "value": true },
+            { "tick": 33, "value": false }
+          ],
+          "avail-1": [
+            { "tick": 0, "value": true },
+            { "tick": 15, "value": false },
+            { "tick": 20, "value": true },
+            { "tick": 28, "value": false },
+            { "tick": 33, "value": true }
+          ],
+          "avail-2": [
+            { "tick": 0, "value": true },
+            { "tick": 28, "value": false },
+            { "tick": 33, "value": true }
+          ]
+        }
+      },
+      "channels": {
+        "demand": { "direction": "in", "value_type": "Int" },
+        "run-1": { "direction": "in", "value_type": "Bool" },
+        "run-2": { "direction": "in", "value_type": "Bool" },
+        "fault-1": { "direction": "in", "value_type": "Bool" },
+        "fault-2": { "direction": "in", "value_type": "Bool" },
+        "avail-1": { "direction": "in", "value_type": "Bool" },
+        "avail-2": { "direction": "in", "value_type": "Bool" },
+        "cmd-a1": { "direction": "out", "value_type": "Bool" },
+        "cmd-a2": { "direction": "out", "value_type": "Bool" },
+        "duty-a": { "direction": "out", "value_type": "Int" },
+        "staged-a": { "direction": "out", "value_type": "Int" },
+        "none-a": { "direction": "out", "value_type": "Bool" },
+        "faulted-a": { "direction": "out", "value_type": "Bool" },
+        "cmd-t1": { "direction": "out", "value_type": "Bool" },
+        "cmd-t2": { "direction": "out", "value_type": "Bool" },
+        "duty-t": { "direction": "out", "value_type": "Int" },
+        "staged-t": { "direction": "out", "value_type": "Int" },
+        "none-t": { "direction": "out", "value_type": "Bool" },
+        "faulted-t": { "direction": "out", "value_type": "Bool" },
+        "cmd-l1": { "direction": "out", "value_type": "Bool" },
+        "cmd-l2": { "direction": "out", "value_type": "Bool" },
+        "duty-l": { "direction": "out", "value_type": "Int" },
+        "staged-l": { "direction": "out", "value_type": "Int" },
+        "none-l": { "direction": "out", "value_type": "Bool" },
+        "faulted-l": { "direction": "out", "value_type": "Bool" },
+        "latch-none": { "direction": "out", "value_type": "Bool" },
+        "latch-faulted": { "direction": "out", "value_type": "Bool" },
+        "none-echo": { "direction": "in", "value_type": "Bool" },
+        "faulted-echo": { "direction": "in", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "demand" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "run-1" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "run-2" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "fault-1" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "fault-2" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "avail-1" }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "avail-2" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-a1" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-a2" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "duty-a" }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "staged-a" }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "none-a" }
+    },
+    {
+      "id": 25,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "faulted-a" }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "Bool",
+      "initial": { "Bool": false },
+      "writable": true
+    },
+    {
+      "id": 31,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "latch-none" }
+    },
+    {
+      "id": 32,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "latch-faulted" }
+    },
+    {
+      "id": 33,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "none-echo" }
+    },
+    {
+      "id": 34,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "faulted-echo" }
+    },
+    {
+      "id": 40,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-t1" }
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-t2" }
+    },
+    {
+      "id": 42,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "duty-t" }
+    },
+    {
+      "id": 43,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "staged-t" }
+    },
+    {
+      "id": 44,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "none-t" }
+    },
+    {
+      "id": 45,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "faulted-t" }
+    },
+    {
+      "id": 50,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-l1" }
+    },
+    {
+      "id": 51,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "cmd-l2" }
+    },
+    {
+      "id": 52,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "duty-l" }
+    },
+    {
+      "id": 53,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "staged-l" }
+    },
+    {
+      "id": 54,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "none-l" }
+    },
+    {
+      "id": 55,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "faulted-l" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "group-demand",
+      "source": 10,
+      "description": "Requested pump stage count"
+    },
+    {
+      "id": 101,
+      "name": "pump-1-run",
+      "source": 11,
+      "description": "Pump 1 run feedback"
+    },
+    {
+      "id": 102,
+      "name": "pump-2-run",
+      "source": 12,
+      "description": "Pump 2 run feedback"
+    },
+    {
+      "id": 103,
+      "name": "pump-1-fault",
+      "source": 13,
+      "description": "Pump 1 proven failure flag"
+    },
+    {
+      "id": 104,
+      "name": "pump-2-fault",
+      "source": 14,
+      "description": "Pump 2 proven failure flag"
+    },
+    {
+      "id": 105,
+      "name": "pump-1-avail",
+      "source": 15,
+      "description": "Pump 1 aggregated availability"
+    },
+    {
+      "id": 106,
+      "name": "pump-2-avail",
+      "source": 16,
+      "description": "Pump 2 aggregated availability"
+    },
+    {
+      "id": 107,
+      "name": "duty-alternating",
+      "source": 22,
+      "description": "Duty index under per-cycle alternation"
+    },
+    {
+      "id": 108,
+      "name": "duty-timed",
+      "source": 42,
+      "description": "Duty index under timed rotation"
+    },
+    {
+      "id": 109,
+      "name": "duty-least-run",
+      "source": 52,
+      "description": "Duty index under least-run-hours rotation"
+    },
+    {
+      "id": 110,
+      "name": "none-available",
+      "source": 24,
+      "description": "No pump available group condition"
+    },
+    {
+      "id": 111,
+      "name": "all-faulted",
+      "source": 25,
+      "description": "All pumps faulted group condition"
+    },
+    {
+      "id": 112,
+      "name": "alarm-ack",
+      "source": 30,
+      "description": "Operator acknowledgment for the group-condition latches"
+    },
+    {
+      "id": 113,
+      "name": "none-available-latch",
+      "source": 31,
+      "description": "Latched no-pump-available alarm flag"
+    },
+    {
+      "id": 114,
+      "name": "all-faulted-latch",
+      "source": 32,
+      "description": "Latched all-pumps-faulted alarm flag"
+    }
+  ],
+  "components": [
+    {
+      "id": 10,
+      "kind": "pump-group",
+      "parameters": {
+        "rotation": { "Int": 0 },
+        "start_delay_ticks": { "Int": 2 },
+        "restage_delay_ticks": { "Int": 2 },
+        "min_off_ticks": { "Int": 2 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "Int" },
+        "cmd_1": { "direction": "out", "value_type": "Bool" },
+        "run_1": { "direction": "in", "value_type": "Bool" },
+        "fault_1": { "direction": "in", "value_type": "Bool" },
+        "avail_1": { "direction": "in", "value_type": "Bool" },
+        "cmd_2": { "direction": "out", "value_type": "Bool" },
+        "run_2": { "direction": "in", "value_type": "Bool" },
+        "fault_2": { "direction": "in", "value_type": "Bool" },
+        "avail_2": { "direction": "in", "value_type": "Bool" },
+        "duty": { "direction": "out", "value_type": "Int" },
+        "staged": { "direction": "out", "value_type": "Int" },
+        "none_available": { "direction": "out", "value_type": "Bool" },
+        "all_faulted": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "pump-group",
+      "parameters": {
+        "rotation": { "Int": 1 },
+        "rotation_ticks": { "Int": 6 },
+        "start_delay_ticks": { "Int": 2 },
+        "restage_delay_ticks": { "Int": 2 },
+        "min_off_ticks": { "Int": 2 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "Int" },
+        "cmd_1": { "direction": "out", "value_type": "Bool" },
+        "run_1": { "direction": "in", "value_type": "Bool" },
+        "fault_1": { "direction": "in", "value_type": "Bool" },
+        "avail_1": { "direction": "in", "value_type": "Bool" },
+        "cmd_2": { "direction": "out", "value_type": "Bool" },
+        "run_2": { "direction": "in", "value_type": "Bool" },
+        "fault_2": { "direction": "in", "value_type": "Bool" },
+        "avail_2": { "direction": "in", "value_type": "Bool" },
+        "duty": { "direction": "out", "value_type": "Int" },
+        "staged": { "direction": "out", "value_type": "Int" },
+        "none_available": { "direction": "out", "value_type": "Bool" },
+        "all_faulted": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "pump-group",
+      "parameters": {
+        "rotation": { "Int": 2 },
+        "start_delay_ticks": { "Int": 2 },
+        "restage_delay_ticks": { "Int": 2 },
+        "min_off_ticks": { "Int": 2 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "Int" },
+        "cmd_1": { "direction": "out", "value_type": "Bool" },
+        "run_1": { "direction": "in", "value_type": "Bool" },
+        "fault_1": { "direction": "in", "value_type": "Bool" },
+        "avail_1": { "direction": "in", "value_type": "Bool" },
+        "cmd_2": { "direction": "out", "value_type": "Bool" },
+        "run_2": { "direction": "in", "value_type": "Bool" },
+        "fault_2": { "direction": "in", "value_type": "Bool" },
+        "avail_2": { "direction": "in", "value_type": "Bool" },
+        "duty": { "direction": "out", "value_type": "Int" },
+        "staged": { "direction": "out", "value_type": "Int" },
+        "none_available": { "direction": "out", "value_type": "Bool" },
+        "all_faulted": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 30,
+      "kind": "sr-latch",
+      "parameters": {},
+      "ports": {
+        "set": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 31,
+      "kind": "sr-latch",
+      "parameters": {},
+      "ports": {
+        "set": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 10, "name": "demand" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 11, "name": "demand" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 12, "name": "demand" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 10, "name": "run_1" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 11, "name": "run_1" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 12, "name": "run_1" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 10, "name": "run_2" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 11, "name": "run_2" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 12, "name": "run_2" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 10, "name": "fault_1" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 11, "name": "fault_1" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 12, "name": "fault_1" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 10, "name": "fault_2" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 11, "name": "fault_2" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 12, "name": "fault_2" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 10, "name": "avail_1" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 11, "name": "avail_1" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 12, "name": "avail_1" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 10, "name": "avail_2" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 11, "name": "avail_2" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 12, "name": "avail_2" } }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "cmd_1" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "cmd_2" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "duty" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "staged" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "none_available" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "all_faulted" } },
+      "to": { "point": 25 }
+    },
+    {
+      "from": { "point": 33 },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "point": 34 },
+      "to": { "point": 25 }
+    },
+    {
+      "from": { "point": 33 },
+      "to": { "port": { "component": 30, "name": "set" } }
+    },
+    {
+      "from": { "point": 34 },
+      "to": { "port": { "component": 31, "name": "set" } }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 30, "name": "reset" } }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 31, "name": "reset" } }
+    },
+    {
+      "from": { "port": { "component": 30, "name": "out" } },
+      "to": { "point": 31 }
+    },
+    {
+      "from": { "port": { "component": 31, "name": "out" } },
+      "to": { "point": 32 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "cmd_1" } },
+      "to": { "point": 40 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "cmd_2" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "duty" } },
+      "to": { "point": 42 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "staged" } },
+      "to": { "point": 43 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "none_available" } },
+      "to": { "point": 44 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "all_faulted" } },
+      "to": { "point": 45 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "cmd_1" } },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "cmd_2" } },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "duty" } },
+      "to": { "point": 52 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "staged" } },
+      "to": { "point": 53 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "none_available" } },
+      "to": { "point": 54 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "all_faulted" } },
+      "to": { "point": 55 }
+    }
+  ]
+}
