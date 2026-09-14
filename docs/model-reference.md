@@ -186,7 +186,7 @@ command affordances only where commands can succeed.
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
 stay: the number of executor scan ticks a driver-stamped sample tick may
-lag before the point's data is stale (decision 41). The budget lives in
+lag before the point's data is stale (decision 45). The budget lives in
 the point map assembly produces, and the *executor's input phase*
 applies the rule — each scan, for a budgeted field `in` point, it
 compares the tick the driver returned on the sample against the scan
