@@ -26,8 +26,23 @@
 //!   controller pulls from (the peer-transport decision): like every
 //!   request it is served at a scan boundary under the executor lock, so
 //!   the checkpoint is always a consistent between-scans capture
+//! - `GET /role` → `200` [`RoleReport`] — the instance's reported role
+//!   in a redundant pair (`active`, `standby`, or a transition state)
+//!   plus the standby's convergence — the pair-as-one-controller
+//!   contract of the monitoring-under-redundancy decision
+//! - `POST /promote`, `POST /demote` → `200` [`RoleReport`] — the
+//!   switchover actions of the switchover-semantics decision: promotion
+//!   lifts the standby's write gate at the request's scan boundary,
+//!   demotion re-closes the active's; a refusal — a standby that has not
+//!   converged, or a repeated promotion — answers `409` with the named
+//!   [`SwitchError`]
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
-//!   (`accepted` / `rejected` outcome); an unparseable body → `400`
+//!   (`accepted` / `rejected` outcome); an unparseable body → `400`.
+//!   Only a peer reporting settled `active` accepts commands — on a
+//!   standby or mid-transition instance the command is refused with a
+//!   [`CommandError::NotActive`] rejection receipt, so an operator write
+//!   is never reported applied while the write gate keeps it from the
+//!   field
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
 //!   refused with `409` on a paced monitor (see below)
@@ -84,10 +99,11 @@ mod recorder;
 pub use recorder::MonitorConfig;
 
 use dcs_core::{
-    Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot, Tick,
+    Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
+    RoleReport, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{Checkpoint, Executor, ScanError};
+use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -122,10 +138,10 @@ pub struct Monitor<'d> {
     paced: bool,
 }
 
-/// The executor plus the history recorder, behind one lock so a request
-/// never observes a half-recorded scan.
+/// The peer — executor plus redundancy role — and the history recorder,
+/// behind one lock so a request never observes a half-recorded scan.
 struct Shared<'d> {
-    executor: Executor<'d>,
+    peer: Peer<'d>,
     recorder: recorder::Recorder,
 }
 
@@ -153,15 +169,7 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
-        Ok(Self {
-            shared: Mutex::new(Shared {
-                executor,
-                recorder: recorder::Recorder::new(config),
-            }),
-            signals,
-            server: Server::http(addr).map_err(io::Error::other)?,
-            paced: false,
-        })
+        Self::bind_peer_with(addr, Peer::active(executor, None), signals, config)
     }
 
     /// As [`bind`](Self::bind) for a process pacing its own scan loop:
@@ -173,9 +181,51 @@ impl<'d> Monitor<'d> {
         executor: Executor<'d>,
         signals: SignalIndex,
     ) -> io::Result<Self> {
-        let mut monitor = Self::bind_with(addr, executor, signals, MonitorConfig::default())?;
+        Self::bind_paced_peer(addr, Peer::active(executor, None), signals)
+    }
+
+    /// As [`bind`](Self::bind) for an instance carrying an explicit
+    /// redundancy role: `peer` bundles the executor with the write gate
+    /// and starting [`Role`](dcs_core::Role) — `active` or tracking
+    /// `standby` — that `GET /role`, `POST /promote`, and `POST /demote`
+    /// then serve and drive.
+    pub fn bind_peer<A: ToSocketAddrs>(
+        addr: A,
+        peer: Peer<'d>,
+        signals: SignalIndex,
+    ) -> io::Result<Self> {
+        Self::bind_peer_with(addr, peer, signals, MonitorConfig::default())
+    }
+
+    /// As [`bind_paced`](Self::bind_paced) for an instance carrying an
+    /// explicit redundancy role — see [`bind_peer`](Self::bind_peer).
+    pub fn bind_paced_peer<A: ToSocketAddrs>(
+        addr: A,
+        peer: Peer<'d>,
+        signals: SignalIndex,
+    ) -> io::Result<Self> {
+        let mut monitor = Self::bind_peer_with(addr, peer, signals, MonitorConfig::default())?;
         monitor.paced = true;
         Ok(monitor)
+    }
+
+    /// The shared constructor: `peer` in the lock, `config` retention
+    /// bounds, unpaced.
+    fn bind_peer_with<A: ToSocketAddrs>(
+        addr: A,
+        peer: Peer<'d>,
+        signals: SignalIndex,
+        config: MonitorConfig,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            shared: Mutex::new(Shared {
+                peer,
+                recorder: recorder::Recorder::new(config),
+            }),
+            signals,
+            server: Server::http(addr).map_err(io::Error::other)?,
+            paced: false,
+        })
     }
 
     /// The address the listener is bound to.
@@ -210,23 +260,55 @@ impl<'d> Monitor<'d> {
     /// interleaving: a request never observes a half-run scan, and a
     /// command submitted between scans still applies at the next scan's
     /// boundary. The scan is recorded exactly like an endpoint-driven
-    /// one, so `/history` and `/journal` advance under pacing.
+    /// one, so `/history` and `/journal` advance under pacing. A pending
+    /// role transition settles on the completed scan and its journal
+    /// entry follows the scan's own events.
     pub fn paced_scan(&self) -> Result<Tick, ScanError> {
         let mut shared = self.shared.lock().unwrap();
-        let Shared { executor, recorder } = &mut *shared;
-        let tick = executor.scan()?;
-        recorder.record_scan(executor, tick);
-        Ok(tick)
+        scan_and_record(&mut shared)
     }
 
     /// The executor's current telemetry snapshot, taken under the lock.
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        self.shared.lock().unwrap().executor.snapshot()
+        self.shared.lock().unwrap().peer.snapshot()
     }
 
     /// The executor's current virtual tick.
     pub fn tick(&self) -> Tick {
-        self.shared.lock().unwrap().executor.tick()
+        self.shared.lock().unwrap().peer.tick()
+    }
+
+    /// The instance's reported redundancy role — what `GET /role`
+    /// serves — taken under the lock.
+    pub fn role_report(&self) -> RoleReport {
+        self.shared.lock().unwrap().peer.report()
+    }
+
+    /// Whether the instance currently owns field writes — `active`, or
+    /// `promoting` with the gate already lifted. A paced loop uses this
+    /// to decide whether its scan may step a shared plant.
+    pub fn owns_field(&self) -> bool {
+        self.shared.lock().unwrap().peer.owns_field()
+    }
+
+    /// Applies a checkpoint pulled from the active peer — the standby's
+    /// tracking half of the redundancy contract, taken under the same
+    /// lock that serializes scans, so the apply lands at a scan
+    /// boundary. A field-owning instance refuses with
+    /// [`ApplyError::OwnsField`]; a rejected checkpoint rolls back and
+    /// the peer reports itself degraded.
+    pub fn apply_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
+        self.shared.lock().unwrap().peer.apply(checkpoint)
+    }
+
+    /// Marks a tracking peer degraded after a checkpoint fetch produced
+    /// nothing — an unreachable active or a refused request.
+    pub fn note_transfer_failed(&self, detail: impl std::fmt::Display) {
+        self.shared
+            .lock()
+            .unwrap()
+            .peer
+            .note_transfer_failed(detail);
     }
 
     fn handle(&self, mut request: Request) {
@@ -236,20 +318,17 @@ impl<'d> Monitor<'d> {
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
-            (Method::Get, "/snapshot") => {
-                json(200, &self.shared.lock().unwrap().executor.snapshot())
-            }
-            (Method::Get, "/receipts") => {
-                json(200, self.shared.lock().unwrap().executor.receipts())
-            }
+            (Method::Get, "/snapshot") => json(200, &self.shared.lock().unwrap().peer.snapshot()),
+            (Method::Get, "/receipts") => json(200, self.shared.lock().unwrap().peer.receipts()),
             (Method::Get, "/checkpoint") => {
-                json(200, &self.shared.lock().unwrap().executor.checkpoint())
+                json(200, &self.shared.lock().unwrap().peer.checkpoint())
             }
+            (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
             (Method::Get, "/history") => match history_query(query) {
                 Ok((points, since)) => {
                     let shared = self.shared.lock().unwrap();
-                    let Shared { executor, recorder } = &*shared;
-                    json(200, &recorder.history(executor, &points, since))
+                    let Shared { peer, recorder } = &*shared;
+                    json(200, &recorder.history(peer.executor(), &points, since))
                 }
                 Err(message) => json(400, &message),
             },
@@ -257,14 +336,35 @@ impl<'d> Monitor<'d> {
                 Ok(since) => json(200, &self.shared.lock().unwrap().recorder.journal(since)),
                 Err(message) => json(400, &message),
             },
+            (Method::Post, "/promote") => self.switchover(true),
+            (Method::Post, "/demote") => self.switchover(false),
             (Method::Post, "/command") => match read_json::<Command>(&mut request) {
                 Ok(command) => {
                     let mut shared = self.shared.lock().unwrap();
-                    let Shared { executor, recorder } = &mut *shared;
-                    let receipt = executor.submit_command(command);
-                    let index = executor.receipts().len() - 1;
-                    let tick = executor.tick();
-                    recorder.note_command(index, receipt, tick);
+                    let Shared { peer, recorder } = &mut *shared;
+                    // Only the settled-active peer accepts commands: on a
+                    // standby or mid-transition instance the write gate
+                    // would keep the write from the field, so refuse with
+                    // a receipt rather than report a phantom application.
+                    let receipt = if peer.accepts_commands() {
+                        let receipt = peer.submit_command(command);
+                        let index = peer.receipts().len() - 1;
+                        let tick = peer.tick();
+                        recorder.note_command(index, receipt, tick);
+                        receipt
+                    } else {
+                        let receipt = CommandReceipt {
+                            command,
+                            outcome: CommandOutcome::Rejected {
+                                reason: CommandError::NotActive {
+                                    point: command.point(),
+                                    role: peer.role(),
+                                },
+                            },
+                        };
+                        recorder.note_settled(receipt, peer.tick());
+                        receipt
+                    };
                     json(200, &receipt)
                 }
                 Err(response) => response,
@@ -273,11 +373,10 @@ impl<'d> Monitor<'d> {
                 Ok(_) if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
                 Ok(body) => {
                     let mut shared = self.shared.lock().unwrap();
-                    let Shared { executor, recorder } = &mut *shared;
                     let mut failure = None;
                     for _ in 0..body.scans {
-                        match executor.scan() {
-                            Ok(tick) => recorder.record_scan(executor, tick),
+                        match scan_and_record(&mut shared) {
+                            Ok(_) => {}
                             Err(error) => {
                                 failure = Some(error);
                                 break;
@@ -286,7 +385,7 @@ impl<'d> Monitor<'d> {
                     }
                     match failure {
                         Some(error) => json(500, &error.to_string()),
-                        None => json(200, &executor.snapshot()),
+                        None => json(200, &shared.peer.snapshot()),
                     }
                 }
                 Err(response) => response,
@@ -297,6 +396,45 @@ impl<'d> Monitor<'d> {
         // already handled, so the error is ignored.
         let _ = request.respond(response);
     }
+
+    /// `POST /promote` (`promote` true) or `POST /demote` (`false`):
+    /// applies the role change at the request's scan boundary and
+    /// answers the post-change [`RoleReport`], or `409` with the named
+    /// [`SwitchError`](dcs_core::SwitchError) on refusal. The reported
+    /// transition — the request is itself a boundary event — is
+    /// journaled at the tick the peer attributes it to.
+    fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        let result = if promote {
+            peer.promote()
+        } else {
+            peer.demote()
+        };
+        match result {
+            Ok(()) => {
+                for change in peer.take_role_changes() {
+                    recorder.note_role_change(change.tick, change.from, change.to);
+                }
+                json(200, &peer.report())
+            }
+            Err(error) => json(409, &error),
+        }
+    }
+}
+
+/// One executor scan plus its recording — the body `paced_scan` and
+/// `POST /scan` share: the scan runs under the lock, its history and
+/// journal entries are attributed to the scan's tick, and a role
+/// transition the scan settled is journaled after the scan's own events.
+fn scan_and_record(shared: &mut Shared<'_>) -> Result<Tick, ScanError> {
+    let Shared { peer, recorder } = shared;
+    let tick = peer.scan()?;
+    recorder.record_scan(peer.executor(), tick);
+    for change in peer.take_role_changes() {
+        recorder.note_role_change(change.tick, change.from, change.to);
+    }
+    Ok(tick)
 }
 
 /// Splits a URL query into `key=value` pairs. The monitoring endpoints
@@ -421,6 +559,31 @@ impl MonitorClient {
     /// peer-transport decision.
     pub fn checkpoint(&self) -> io::Result<Checkpoint> {
         self.get_json("/checkpoint")
+    }
+
+    /// `GET /role`: the instance's reported redundancy role and standby
+    /// convergence — the pair-as-one-controller contract.
+    pub fn role(&self) -> io::Result<RoleReport> {
+        self.get_json("/role")
+    }
+
+    /// `POST /promote`: lifts the standby's write gate at the request's
+    /// scan boundary, returning the post-change [`RoleReport`]. A
+    /// refusal — `not_converged`, `already_active` — surfaces as an
+    /// error whose message carries the `409` body: the named
+    /// `SwitchError` JSON.
+    pub fn promote(&self) -> io::Result<RoleReport> {
+        let (status, body) = self.request("POST", "/promote", None)?;
+        decode(status, &body)
+    }
+
+    /// `POST /demote`: re-closes the field owner's write gate at the
+    /// request's scan boundary, returning the post-change
+    /// [`RoleReport`]. A refusal on a non-owner surfaces like
+    /// [`promote`](Self::promote)'s.
+    pub fn demote(&self) -> io::Result<RoleReport> {
+        let (status, body) = self.request("POST", "/demote", None)?;
+        decode(status, &body)
     }
 
     /// `GET /history`: the retained samples of `points` — or of every

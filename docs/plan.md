@@ -54,7 +54,7 @@ Ticket breakdown:
 - #81 — `dcs-plant-server` binary running the shared simulated plant as a standalone process, merging a declared dynamics document via `--dynamics` (decision 24). **Done.**
 - #32 — standby synchronization: checkpoint transfer over the monitoring transport (decision 12) into a tracking standby covering both driver-observation modes (decision 13). **Done** — `GET /checkpoint` plus `MonitorClient::checkpoint`, `Executor::apply`, `Standby`/`StandbyState`, `WriteGate`, and `dcs-controller --standby`/`--listen`/`--remote`.
 - #47 — device-kind driver factory registry in `dcs-assembly`, including the remote-sim kind. **Done** — `DriverRegistry::standard` resolves `sim*` and `sim-tcp`, and `FanoutDriver` presents one `IoDriver` over the backends.
-- #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19). **Open.**
+- #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19). **Done** — `Role`/`StandbySync`/`RoleReport`/`SwitchError` in `dcs-core`, the `Peer` role machine in `dcs-runtime`, `GET /role` plus `POST /promote`/`/demote` and role-gated commands on the monitor, `JournalEvent::RoleChanged`, and `dcs-controller --standby` + `--listen` as the promotable standby over `--remote`.
 - #64 — end-to-end two-controller hot swap over the shared simulated plant. **Open.**
 
 Done when: two simulated peers run one model; the active checkpoints state to the standby over the monitoring transport; the standby scans output-quiesced until promotion; after promotion the new active's scans continue the run bumplessly against the shared simulated plant; and the monitoring path reports the pair's roles so the UI sees one logical controller.
@@ -72,7 +72,7 @@ Ticket breakdown:
 - #51 — the page's trend slice: live telemetry plus signal metadata, per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`. **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18). **Open** — M2 layer gating #62's affordances and #84's forcing.
 - #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Open.**
-- #63 — the pair-as-one-controller view (decision 19; needs #46's role reporting). **Open.**
+- #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Open.**
 - #69 — showcase plant model exercising the full component library. **Open.**
 
 Done when:
