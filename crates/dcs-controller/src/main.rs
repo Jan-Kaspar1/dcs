@@ -1,7 +1,8 @@
 //! `dcs-controller`: loads a plant model, assembles it against the
 //! simulated I/O backend, and runs the deterministic scan.
 //!
-//! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]`
+//! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
+//!         [--listen ADDR]`
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -9,6 +10,15 @@
 //! never to components — running until stopped, or for N scans when both
 //! options are given. `--dt T` sets the simulated process time advanced per
 //! scan; it defaults to the scan period in seconds, or 1.0 unpaced.
+//!
+//! `--listen ADDR` serves the `dcs-monitor` endpoints alongside the paced
+//! scan, sharing the executor behind the monitor's mutex so a request
+//! never observes a half-run scan. Under pacing the wall clock owns the
+//! scan schedule, so `POST /scan` is refused (`409`): externally
+//! requested scans would inject ticks no schedule accounts for. Commands
+//! still queue through `POST /command` and apply at the next scan
+//! boundary. Monitoring requires pacing — a pure `--ticks` run stays
+//! deterministic and monitor-free.
 //!
 //! The binary holds no control logic: the `dcs-blocks` component kinds are
 //! registered with [`ComponentRegistry`], and everything inside the
@@ -20,9 +30,11 @@ use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, DigitalInput, DigitalOutput, Interlock, Motor,
     OverrideSelect, Pid, Valve,
 };
-use dcs_core::ValueKind;
+use dcs_core::{TelemetrySnapshot, Tick, ValueKind};
 use dcs_model::PlantModel;
-use dcs_runtime::Component;
+use dcs_monitor::Monitor;
+use dcs_runtime::{Component, ScanError};
+use dcs_sim::SimDriver;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -184,20 +196,26 @@ struct Options {
     scan_ms: Option<u64>,
     /// Simulated process time advanced per scan.
     dt: Option<f64>,
+    /// Address the monitoring endpoints are served on; requires pacing.
+    listen: Option<String>,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
+           [--listen ADDR]
 
 Loads and validates the plant model, assembles it against simulated I/O,
 and runs the controller scan.
 
-  --ticks N     run N deterministic ticks, then print the telemetry snapshot
-  --scan-ms MS  pace scans to a wall-clock period of MS milliseconds;
-                runs until stopped, or for N scans when --ticks is given too
-  --dt T        simulated process time per scan (default: scan period in
-                seconds, or 1.0 when unpaced)
-  -h, --help    show this text
+  --ticks N      run N deterministic ticks, then print the telemetry snapshot
+  --scan-ms MS   pace scans to a wall-clock period of MS milliseconds;
+                 runs until stopped, or for N scans when --ticks is given too
+  --dt T         simulated process time per scan (default: scan period in
+                 seconds, or 1.0 when unpaced)
+  --listen ADDR  serve the monitoring endpoints on ADDR while the paced
+                 scan runs; requires --scan-ms. While pacing, POST /scan is
+                 refused: the wall clock owns the scan schedule
+  -h, --help     show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.";
 
@@ -207,6 +225,7 @@ impl Options {
         let mut ticks = None;
         let mut scan_ms = None;
         let mut dt = None;
+        let mut listen = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -235,6 +254,9 @@ impl Options {
                             .map_err(|error| format!("invalid --dt value: {error}"))?,
                     );
                 }
+                "--listen" => {
+                    listen = Some(value("--listen")?);
+                }
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -260,11 +282,17 @@ impl Options {
         {
             return Err("--dt must be finite and non-negative".to_string());
         }
+        if listen.is_some() && scan_ms.is_none() {
+            return Err(
+                "--listen requires --scan-ms: monitoring runs alongside the paced scan".to_string(),
+            );
+        }
         Ok(Self {
             model,
             ticks,
             scan_ms,
             dt,
+            listen,
         })
     }
 }
@@ -300,7 +328,7 @@ fn main() -> ExitCode {
         Ok(driver) => driver,
         Err(error) => return fail(error),
     };
-    let mut executor = match assemble(&model, &registry(), &driver) {
+    let executor = match assemble(&model, &registry(), &driver) {
         Ok(executor) => executor,
         Err(error) => return fail(error),
     };
@@ -313,26 +341,99 @@ fn main() -> ExitCode {
         .unwrap_or(1.0);
     let period = options.scan_ms.map(Duration::from_millis);
 
+    match &options.listen {
+        Some(addr) => {
+            let monitor = match Monitor::bind_paced(addr.as_str(), executor, model.signal_index()) {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    return fail(format!("cannot bind monitor on {addr}: {error}"));
+                }
+            };
+            // Announce the bound address — with a port of 0 this is the
+            // only way to learn where the monitor listens. Stderr keeps
+            // stdout a pure snapshot stream.
+            eprintln!("listening on {}", monitor.local_addr());
+            run_monitored(&monitor, &driver, &options, period.unwrap(), dt)
+        }
+        None => {
+            // The RefCell lets the two loop closures share the executor;
+            // the loop is single-threaded, so the borrows never overlap.
+            let executor = std::cell::RefCell::new(executor);
+            scan_loop(
+                || executor.borrow_mut().scan(),
+                || executor.borrow().snapshot(),
+                &driver,
+                &options,
+                period,
+                dt,
+            )
+        }
+    }
+}
+
+/// Serves `monitor` on a scoped thread while the main thread paces scans
+/// through [`Monitor::paced_scan`]: the executor stays behind the
+/// monitor's one mutex, so a request never observes a half-run scan and a
+/// queued command applies at the next scan boundary. [`Monitor::shutdown`]
+/// stops the serve loop when the run ends and the scope join completes
+/// the graceful close.
+fn run_monitored(
+    monitor: &Monitor<'_>,
+    driver: &SimDriver,
+    options: &Options,
+    period: Duration,
+    dt: f64,
+) -> ExitCode {
+    std::thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = scan_loop(
+            || monitor.paced_scan(),
+            || monitor.snapshot(),
+            driver,
+            options,
+            Some(period),
+            dt,
+        );
+        monitor.shutdown();
+        result
+    })
+}
+
+/// The scan loop both run modes share: `scan` performs one executor scan
+/// — directly, or through the monitor's lock when serving — and
+/// `snapshot` reads the resulting telemetry. The `--ticks` bound, the
+/// snapshot reporting, and the wall-clock pacing are identical either
+/// way.
+fn scan_loop(
+    mut scan: impl FnMut() -> Result<Tick, ScanError>,
+    snapshot: impl Fn() -> TelemetrySnapshot,
+    driver: &SimDriver,
+    options: &Options,
+    period: Option<Duration>,
+    dt: f64,
+) -> ExitCode {
     let mut scanned = 0_u64;
     loop {
         let started = Instant::now();
-        if let Err(error) = executor.scan() {
-            return fail(format!("scan {} failed: {error}", executor.tick().0));
+        if let Err(error) = scan() {
+            return fail(format!("scan {} failed: {error}", snapshot().tick.0));
         }
         driver.step(dt);
         scanned += 1;
 
         if let Some(ticks) = options.ticks {
             if scanned >= ticks {
-                match serde_json::to_string_pretty(&executor.snapshot()) {
-                    Ok(snapshot) => println!("{snapshot}"),
-                    Err(error) => return fail(format!("cannot serialize snapshot: {error}")),
-                }
-                return ExitCode::SUCCESS;
+                return match serde_json::to_string_pretty(&snapshot()) {
+                    Ok(snapshot) => {
+                        println!("{snapshot}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => fail(format!("cannot serialize snapshot: {error}")),
+                };
             }
         } else {
             // Continuous operation: report the run's state as JSON lines.
-            match serde_json::to_string(&executor.snapshot()) {
+            match serde_json::to_string(&snapshot()) {
                 Ok(snapshot) => println!("{snapshot}"),
                 Err(error) => return fail(format!("cannot serialize snapshot: {error}")),
             }
