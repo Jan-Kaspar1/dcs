@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "pulse": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "target": { "direction": "in", "value_type": "Float" },
+        "timed": { "direction": "out", "value_type": "Bool" },
+        "count": { "direction": "out", "value_type": "Int" },
+        "done": { "direction": "out", "value_type": "Bool" },
+        "limited": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "pulse" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "reset" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "target" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "timed" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "count" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "done" }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "limited" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "pulse-train",
+      "source": 10,
+      "description": "Field pulse the timer and counter observe"
+    },
+    {
+      "id": 101,
+      "name": "counter-reset",
+      "source": 11,
+      "description": "Operator reset for the batch counter"
+    },
+    {
+      "id": 102,
+      "name": "ramp-target",
+      "source": 12,
+      "unit": "%",
+      "description": "Analog target the rate limiter slews toward"
+    },
+    {
+      "id": 103,
+      "name": "timed-output",
+      "source": 20,
+      "description": "Timer output asserted after three consecutive scans"
+    },
+    {
+      "id": 104,
+      "name": "batch-count",
+      "source": 21,
+      "description": "Rising edges counted toward the preset"
+    },
+    {
+      "id": 105,
+      "name": "batch-done",
+      "source": 22,
+      "description": "Counter preset-reached flag"
+    },
+    {
+      "id": 106,
+      "name": "ramped-output",
+      "source": 23,
+      "unit": "%",
+      "description": "Slew-bounded analog output"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "timer",
+      "parameters": {
+        "delay_ticks": { "Int": 3 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "counter",
+      "parameters": {
+        "preset": { "Int": 3 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "count": { "direction": "out", "value_type": "Int" },
+        "done": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "rate-limiter",
+      "parameters": {
+        "max_delta": { "Float": 2.5 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 2, "name": "reset" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "count" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "done" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 23 }
+    }
+  ]
+}

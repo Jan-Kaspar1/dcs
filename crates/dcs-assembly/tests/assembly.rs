@@ -6,20 +6,30 @@
 use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, assemble, sim_channel_map, sim_driver,
 };
-use dcs_blocks::{AnalogInput, DigitalOutput, Pid};
+use dcs_blocks::{AnalogInput, Counter, DigitalOutput, Pid, RateLimiter, Timer};
 use dcs_core::{Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef};
-use dcs_runtime::{Component, ComponentIo, IoRequirement, StepError};
+use dcs_runtime::{Component, ComponentIo, Executor, IoRequirement, StepError};
 use dcs_sim::{ChannelId, ConfigError, FirstOrderLag, ProcessElement, SimDriver};
 
 const TANK_LOOP: &str = include_str!("../fixtures/tank_loop.json");
 /// The M1 milestone fixture, checked in with `dcs-demo` — reused here
 /// exactly as the issue asks, through the general registry.
 const M1_TANK_LEVEL: &str = include_str!("../../dcs-demo/fixtures/tank_level.json");
+/// The cyclic-vocabulary fixture: a timer, a counter, and a rate limiter.
+const CYCLIC: &str = include_str!("../fixtures/cyclic.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
 const VALVE: PointId = PointId(12);
+
+const PULSE: PointId = PointId(10);
+const RESET: PointId = PointId(11);
+const TARGET: PointId = PointId(12);
+const TIMED: PointId = PointId(20);
+const COUNT: PointId = PointId(21);
+const DONE: PointId = PointId(22);
+const LIMITED: PointId = PointId(23);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -65,6 +75,32 @@ fn registry() -> ComponentRegistry {
         })
         .with(DigitalOutput::KIND, |spec| {
             boxed(DigitalOutput::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(Timer::KIND, |spec| {
+            boxed(Timer::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(Counter::KIND, |spec| {
+            boxed(Counter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("reset")?,
+                spec.require("count")?,
+                spec.require("done")?,
+                spec.parameters,
+            ))
+        })
+        .with(RateLimiter::KIND, |spec| {
+            boxed(RateLimiter::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
@@ -173,6 +209,85 @@ fn identical_runs_snapshot_identically() {
         serde_json::to_string(&executor.snapshot()).unwrap()
     };
     assert_eq!(run(), run());
+}
+
+/// Steps the executor once and returns the value the driver holds on
+/// `point` — what the field side of the cyclic fixture observes.
+fn field_value(executor: &mut Executor<'_>, driver: &SimDriver, point: PointId) -> Value {
+    executor.scan().unwrap();
+    driver.read(point).unwrap().value
+}
+
+#[test]
+fn cyclic_fixture_runs_timer_counter_and_limiter() {
+    let model = model(CYCLIC);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The timer holds `pulse` for delay_ticks=3 scans; the counter's
+    // preset=3 counts its rising edges; the limiter follows `target`
+    // at max_delta=2.5 per scan.
+    driver.write(PULSE, Value::Bool(true)).unwrap();
+    driver.write(TARGET, Value::Float(10.0)).unwrap();
+
+    // Tick 1: the timer has banked one scan, the counter has seen one
+    // rising edge, and the limiter adopted its first finite input.
+    assert_eq!(
+        field_value(&mut executor, &driver, TIMED),
+        Value::Bool(false)
+    );
+    assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(1));
+    assert_eq!(driver.read(LIMITED).unwrap().value, Value::Float(10.0));
+
+    // Tick 2: still below the delay.
+    assert_eq!(
+        field_value(&mut executor, &driver, TIMED),
+        Value::Bool(false)
+    );
+    // Tick 3: the timer asserts exactly at the configured tick.
+    assert_eq!(
+        field_value(&mut executor, &driver, TIMED),
+        Value::Bool(true)
+    );
+
+    // A further target step slews by exactly max_delta per scan.
+    driver.write(TARGET, Value::Float(20.0)).unwrap();
+    assert_eq!(
+        field_value(&mut executor, &driver, LIMITED),
+        Value::Float(12.5)
+    );
+
+    // Dropping `pulse` deasserts the on-delay timer the same scan.
+    driver.write(PULSE, Value::Bool(false)).unwrap();
+    assert_eq!(
+        field_value(&mut executor, &driver, TIMED),
+        Value::Bool(false)
+    );
+
+    // Two more rising edges bring the counter to its preset.
+    driver.write(PULSE, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(2));
+    driver.write(PULSE, Value::Bool(false)).unwrap();
+    executor.scan().unwrap();
+    driver.write(PULSE, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(3));
+    assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(true));
+
+    // Reset clears the count and the flag.
+    driver.write(RESET, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(0));
+    assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(false));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
 }
 
 #[test]

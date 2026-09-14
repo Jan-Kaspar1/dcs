@@ -27,8 +27,8 @@
 
 use dcs_assembly::{BuildError, ComponentRegistry, assemble, sim_driver};
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, DigitalInput, DigitalOutput, Interlock, Motor,
-    OverrideSelect, Pid, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
+    Motor, OverrideSelect, Pid, RateLimiter, Timer, Valve,
 };
 use dcs_core::{TelemetrySnapshot, Tick, ValueKind};
 use dcs_model::PlantModel;
@@ -181,6 +181,32 @@ fn registry() -> ComponentRegistry {
                 spec.require("out")?,
                 spec.require("run")?,
                 spec.require("fault")?,
+                spec.parameters,
+            ))
+        })
+        .with(Timer::KIND, |spec| {
+            boxed(Timer::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(Counter::KIND, |spec| {
+            boxed(Counter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("reset")?,
+                spec.require("count")?,
+                spec.require("done")?,
+                spec.parameters,
+            ))
+        })
+        .with(RateLimiter::KIND, |spec| {
+            boxed(RateLimiter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
                 spec.parameters,
             ))
         })
