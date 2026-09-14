@@ -170,6 +170,13 @@ pub enum SwitchError {
     /// A checkpoint was offered to a field-owning instance — `active` or
     /// `promoting`; only a tracking peer applies checkpoints.
     OwnsField,
+    /// The promotion could not take the field's write-ownership claim —
+    /// the fencing arbitration a takeover relies on refused or failed, so
+    /// the write gate stayed closed and the role unchanged.
+    FieldClaimFailed {
+        /// What the field-side claim reported.
+        detail: String,
+    },
 }
 
 impl fmt::Display for SwitchError {
@@ -186,6 +193,9 @@ impl fmt::Display for SwitchError {
             }
             Self::OwnsField => {
                 f.write_str("instance owns field writes; checkpoints apply to a tracking peer")
+            }
+            Self::FieldClaimFailed { detail } => {
+                write!(f, "field write-ownership claim failed: {detail}")
             }
         }
     }
@@ -282,6 +292,9 @@ mod tests {
             },
             SwitchError::NotActive,
             SwitchError::OwnsField,
+            SwitchError::FieldClaimFailed {
+                detail: "plant server unreachable".to_string(),
+            },
         ] {
             let json = serde_json::to_string(&error).unwrap();
             assert_eq!(serde_json::from_str::<SwitchError>(&json).unwrap(), error);

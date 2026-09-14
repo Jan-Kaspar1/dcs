@@ -224,6 +224,14 @@ impl std::error::Error for StepError {}
 /// fieldbus advances itself) leave it `None`.
 pub type StepHook = Arc<dyn Fn(f64) -> Result<Tick, StepError> + Send + Sync>;
 
+/// Takes the backend's field write-ownership for `owner` — the
+/// per-backend half of [`FanoutDriver::claim_field_writer`]: the
+/// single-writer claim the failover fencing has a promoted standby take
+/// out on the old field owner. `owner` is an opaque token one field
+/// owner's several backends share, so all of them keep writing after
+/// the claim.
+pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -233,6 +241,11 @@ pub struct DeviceBackend {
     /// Steps the backend's simulated plant one `dt`; `None` for
     /// field-observing backends.
     pub step: Option<StepHook>,
+    /// Claims the backend's field write-ownership — meaningful only on a
+    /// `field_facing` backend; `None` when the field kind cannot
+    /// arbitrate a single writer (`sim-bus` today), which keeps
+    /// automatic failover off for models built on it.
+    pub claim: Option<ClaimHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -457,6 +470,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
+    let claiming = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -466,6 +480,16 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 backend: format!("device {device}"),
                 detail: error.to_string(),
             })
+        })),
+        // The plant server's single-writer claim — the fencing a
+        // promoted peer takes out on the old field owner.
+        claim: Some(Arc::new(move |owner| {
+            claiming
+                .claim_writer(owner)
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
         })),
         inspect: Some(inspect),
         field_facing: true,
@@ -545,6 +569,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
+        // The bus server has no write-ownership arbitration — an
+        // unfenceable field kind, so models built on it keep manual
+        // promotion only.
+        claim: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -740,6 +768,8 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: driver,
         step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
+        // Not field-facing — there is no shared field to claim.
+        claim: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -752,6 +782,9 @@ struct Backend {
     device: Option<DeviceId>,
     io: Arc<dyn IoDriver + Send + Sync>,
     step: Option<StepHook>,
+    /// [`DeviceBackend::claim`] carried into the built driver — the
+    /// field-ownership claim a promotion takes out.
+    claim: Option<ClaimHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -818,6 +851,7 @@ impl DriverPlan {
                 device: None,
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
+                claim: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -832,6 +866,7 @@ impl DriverPlan {
                 device: Some(planned.device),
                 io: planned.backend.io,
                 step: planned.backend.step,
+                claim: planned.backend.claim,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1054,6 +1089,39 @@ impl FanoutDriver {
     /// private simulated one and a redundant pair needs no write gate.
     pub fn has_field_backend(&self) -> bool {
         self.backends.iter().any(|backend| backend.field_facing)
+    }
+
+    /// Claims the field's write-ownership under `owner` on every
+    /// field-facing backend that can arbitrate it — the fencing action a
+    /// promotion runs before lifting the write gate, so the shared field
+    /// itself refuses a fenced-out old owner's writes. `owner` is the
+    /// same token on every backend, so all of this field owner's
+    /// attachments keep writing. Field-facing backends without a claim
+    /// hook are skipped — [`unfenced_field_devices`](Self::unfenced_field_devices)
+    /// reports them; a deployment arming automatic failover must have
+    /// none.
+    pub fn claim_field_writer(&self, owner: u64) -> Result<(), StepError> {
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(claim) = &backend.claim
+            {
+                claim(owner)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The field-facing devices whose backends cannot arbitrate a single
+    /// writer — the ids a promotion cannot take a claim out on. The
+    /// failover decision makes automatic promotion honest only when this
+    /// is empty; a model built on unfenceable field kinds keeps manual
+    /// promotion.
+    pub fn unfenced_field_devices(&self) -> Vec<DeviceId> {
+        self.backends
+            .iter()
+            .filter(|backend| backend.field_facing && backend.claim.is_none())
+            .filter_map(|backend| backend.device)
+            .collect()
     }
 
     /// Advances the assembled plant one step of `dt`: applies every

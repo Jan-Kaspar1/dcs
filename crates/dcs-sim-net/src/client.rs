@@ -37,6 +37,11 @@ pub enum RemoteError {
     /// express (e.g. a non-finite `Value::Float`, which has no JSON
     /// representation). `detail` is the server's diagnostic text.
     InvalidRequest(String),
+    /// The request mutates the shared field but another attachment holds
+    /// the field's write-ownership claim — the fencing verdict of the
+    /// failover decision. Reads still succeed; writing again requires
+    /// taking the claim back with [`claim_writer`](Self::claim_writer).
+    Fenced,
 }
 
 impl RemoteError {
@@ -52,6 +57,7 @@ impl RemoteError {
             Self::Disconnected | Self::InvalidRequest(_) => IoError::Disconnected(point),
             Self::Timeout => IoError::Timeout(point),
             Self::Io(error) => error,
+            Self::Fenced => IoError::Fenced(point),
         }
     }
 }
@@ -63,6 +69,12 @@ impl fmt::Display for RemoteError {
             Self::Timeout => write!(f, "plant server did not answer in time"),
             Self::Io(error) => write!(f, "{error}"),
             Self::InvalidRequest(detail) => write!(f, "server refused the request: {detail}"),
+            Self::Fenced => {
+                write!(
+                    f,
+                    "field mutation refused: another attachment owns field writes"
+                )
+            }
         }
     }
 }
@@ -81,6 +93,7 @@ impl From<PlantError> for RemoteError {
         match error {
             PlantError::Io { error } => Self::Io(error),
             PlantError::InvalidRequest { detail } => Self::InvalidRequest(detail),
+            PlantError::Fenced { .. } => Self::Fenced,
         }
     }
 }
@@ -226,6 +239,29 @@ impl RemoteDriver {
     /// observes the fault.
     pub fn inject_fault(&self, point: PointId, fault: Fault) -> Result<(), RemoteError> {
         match self.request(&PlantRequest::InjectFault { point, fault })? {
+            PlantResponse::Done => Ok(()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Takes the shared plant's field-write ownership for `owner` — the
+    /// single-writer claim the failover decision fences a superseded
+    /// active out with.
+    ///
+    /// `owner` is an opaque token the caller picks, unique per field
+    /// owner: one controller's several attachments claim the same token
+    /// so all of them write, while a takeover claims a fresh one. The
+    /// grant is unconditional — it preempts whichever owner held the
+    /// field — and it stands until preempted, never released on
+    /// disconnect: a dead owner's silence is exactly what the claim
+    /// exists to fence. Once an owner is claimed, a `write` from a
+    /// connection not holding it answers the point's
+    /// [`IoError::Fenced`] and a `step` answers [`RemoteError::Fenced`];
+    /// reads and the plant-tooling requests stay open to every
+    /// attachment.
+    pub fn claim_writer(&self, owner: u64) -> Result<(), RemoteError> {
+        match self.request(&PlantRequest::ClaimWriter { owner })? {
             PlantResponse::Done => Ok(()),
             PlantResponse::Error { error } => Err(self.fail(error.into())),
             _ => Err(self.protocol_violation()),
