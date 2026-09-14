@@ -28,7 +28,7 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 |---|---|---|
 | `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Not started — #19 open (currently blocked) |
 | `dcs-controller` | Paced controller binary | Not started — #19 open; monitoring integration tracked by #48 |
-| `dcs-monitor` | HTTP+JSON monitoring transport | Implemented (#20): `/snapshot`, `/receipts`, `/command`, `/scan`; signal-metadata endpoint and minimal page proposed under #34 (blocked), bounded history and transition journal under #35 (decision 17) |
+| `dcs-monitor` | HTTP+JSON monitoring transport | Implemented (#20): `/snapshot`, `/receipts`, `/command`, `/scan`; bounded history and the transition journal implemented (#35): `/history`, `/journal` with since-cursors (decision 17); signal-metadata endpoint and minimal page proposed under #34 (blocked) |
 | `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18) |
 | `dcs-model` internal points | Channel-less operator and port-to-port points | Proposed — #30 open; the demo's synthesized internal-device pairs are the implemented precursor (#12) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); `KIND` constants and `from_parameters` are in place; per-kind `ComponentDescriptor`s proposed under #50 (decision 16) |
@@ -64,7 +64,7 @@ Ticket breakdown:
 
 - #53 — this decision record and plan refresh. **Done with this change.**
 - #34 — signal-metadata endpoint and minimal live page on the monitor (currently blocked with M2's controller path).
-- #35 — bounded per-point history and the transition journal served with since-cursors (decision 17).
+- #35 — bounded per-point history and the transition journal served with since-cursors (decision 17). **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18).
 - #50 — `ComponentDescriptor` contract and per-kind descriptors, served to the UI (decision 16).
 - #51 — the page itself: live telemetry plus signal metadata, descriptor-driven faceplates, trend and journal panes on incremental polling, command affordances on writable points, and the pair-as-one-controller view once #46 lands.
