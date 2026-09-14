@@ -26,11 +26,19 @@
 //! head of the next scan — before the input read — each producing a
 //! [`CommandReceipt`](dcs_core::CommandReceipt) in the
 //! [`receipts`](Executor::receipts) log.
+//!
+//! [`Executor::checkpoint`] and [`Executor::restore`] are the redundancy
+//! groundwork: a serde-serializable [`Checkpoint`] carries the tick, each
+//! component's [`capture_state`](Component::capture_state), the driver's
+//! state when it implements the contract, and the last written outputs,
+//! letting a standby rebuild an equivalent executor mid-run.
 
 #![warn(missing_docs)]
 
+mod checkpoint;
 mod component;
 mod executor;
 
+pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};

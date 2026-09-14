@@ -23,6 +23,14 @@
 //! Stepping is fully deterministic: nothing in the driver reads a clock or
 //! a random source, so identical write and step sequences always produce
 //! identical [`Sample`](dcs_core::Sample)s.
+//!
+//! `SimDriver` also implements the driver half of the state-capture
+//! contract — [`IoDriver::capture_state`](dcs_core::IoDriver::capture_state)
+//! and [`IoDriver::restore_state`](dcs_core::IoDriver::restore_state) — so
+//! an executor checkpoint carries the simulated field state (point
+//! samples, injected faults, element accumulators) across to a standby.
+//! Real drivers leave the contract unimplemented and observe the actual
+//! process instead.
 
 #![warn(missing_docs)]
 

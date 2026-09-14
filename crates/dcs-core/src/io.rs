@@ -13,6 +13,7 @@
 //! simulated I/O, EtherCAT, or local hardware unchanged.
 
 use crate::signal::{PointId, Quality, Sample, Tick, Value, ValueKind};
+use crate::state::{StateError, StateMap};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -122,6 +123,34 @@ pub trait IoDriver {
     /// Returns [`IoError::TypeMismatch`] when `value`'s kind differs from the
     /// kind the plant model declared for the point.
     fn write(&self, point: PointId, value: Value) -> Result<(), IoError>;
+
+    /// Captures the driver's internal state for checkpointing, or `None`
+    /// when the driver holds no transferable state.
+    ///
+    /// This is the driver half of the state-capture contract: a driver
+    /// that implements it returns its state as a [`StateMap`] and accepts
+    /// such a map back through [`restore_state`](IoDriver::restore_state),
+    /// letting a redundant standby reconstruct the driver's view of the
+    /// field. The default returns `None` — a stateless driver — and a
+    /// checkpoint then carries no driver section. On live hardware the
+    /// standby's driver observes the actual process through its real
+    /// channels instead of reconstructing state, so `None` is also the
+    /// honest answer for drivers whose state is the plant itself.
+    fn capture_state(&self) -> Option<StateMap> {
+        None
+    }
+
+    /// Restores state previously produced by
+    /// [`capture_state`](IoDriver::capture_state).
+    ///
+    /// Restoring a map the driver did not produce fails with a
+    /// [`StateError`] naming the driver and the offending field; drivers
+    /// should validate the whole map before applying it so a rejected
+    /// restore changes nothing. The default accepts only an empty map —
+    /// the stateless case.
+    fn restore_state(&self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_empty("driver")
+    }
 }
 
 mod sealed {

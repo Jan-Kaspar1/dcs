@@ -12,3 +12,4 @@ dcs-runtime = { path = "../dcs-runtime" }
 [dev-dependencies]
 dcs-model = { path = "../dcs-model" }
 dcs-sim = { path = "../dcs-sim" }
+serde_json = "1.0.151"

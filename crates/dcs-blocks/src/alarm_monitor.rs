@@ -2,7 +2,7 @@
 //! signal.
 
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// Limit and deadband parameters for [`AlarmMonitor`].
@@ -167,6 +167,39 @@ impl Component for AlarmMonitor {
             self.alarm,
             Sample::new(Value::Bool(self.state != Alarm::Clear), quality, tick),
         )?;
+        Ok(())
+    }
+
+    /// Captures which limit, if any, holds the alarm — the state the
+    /// hysteresis bands act on.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert(
+            "state",
+            Value::Int(match self.state {
+                Alarm::Clear => 0,
+                Alarm::High => 1,
+                Alarm::Low => 2,
+            }),
+        );
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["state"])?;
+        let code = state.require_i64(&self.name, "state")?;
+        self.state = match code {
+            0 => Alarm::Clear,
+            1 => Alarm::High,
+            2 => Alarm::Low,
+            _ => {
+                return Err(StateError::InvalidValue {
+                    element: self.name.clone(),
+                    field: "state".to_string(),
+                    value: Value::Int(code),
+                });
+            }
+        };
         Ok(())
     }
 }

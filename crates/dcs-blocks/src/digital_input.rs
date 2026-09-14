@@ -2,7 +2,7 @@
 //! tick-based debounce.
 
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Sample, Tick, Value};
+use dcs_core::{PointId, Sample, StateError, StateMap, Tick, Value};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A digital input channel: conditions a boolean field `In` point onto a
@@ -121,6 +121,53 @@ impl Component for DigitalInput {
             self.output,
             Sample::new(Value::Bool(self.driven), sample.quality, tick),
         )?;
+        Ok(())
+    }
+
+    /// Captures the driven output value and the debounce's in-progress
+    /// observation (`stable_value`/`stable_count`, absent before the
+    /// first step).
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("driven", Value::Bool(self.driven));
+        if let Some((value, held)) = self.stable {
+            state.insert("stable_value", Value::Bool(value));
+            state.insert("stable_count", Value::Int(held as i64));
+        }
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["driven", "stable_value", "stable_count"])?;
+        let driven = state.require_bool(&self.name, "driven")?;
+        let stable = match (
+            state.optional_bool(&self.name, "stable_value")?,
+            state.optional_i64(&self.name, "stable_count")?,
+        ) {
+            (Some(value), Some(count)) if count >= 0 => Some((value, count as u64)),
+            (Some(_), Some(count)) => {
+                return Err(StateError::InvalidValue {
+                    element: self.name.clone(),
+                    field: "stable_count".to_string(),
+                    value: Value::Int(count),
+                });
+            }
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(StateError::MissingField {
+                    element: self.name.clone(),
+                    field: "stable_count".to_string(),
+                });
+            }
+            (None, Some(_)) => {
+                return Err(StateError::MissingField {
+                    element: self.name.clone(),
+                    field: "stable_value".to_string(),
+                });
+            }
+        };
+        self.driven = driven;
+        self.stable = stable;
         Ok(())
     }
 }

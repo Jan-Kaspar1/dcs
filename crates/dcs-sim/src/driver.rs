@@ -2,7 +2,10 @@
 //! element stepping, and fault injection behind the [`IoDriver`] boundary.
 
 use crate::map::{ChannelMap, ConfigError, Loopback, ProcessElement};
-use dcs_core::{IoDriver, IoError, PointId, Quality, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
+    ValueKind,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -77,6 +80,75 @@ struct State {
     loopbacks: Vec<Loopback>,
     elements: Vec<ElementState>,
     tick: Tick,
+}
+
+/// The element name [`StateError`]s from the driver's state-capture
+/// contract report.
+const STATE_ELEMENT: &str = "sim-driver";
+
+/// `QualityReason` as a stable `i64` code — the reason arm of the
+/// `point.{id}.quality` and `point.{id}.fault` fields.
+fn encode_reason(reason: QualityReason) -> i64 {
+    match reason {
+        QualityReason::Unspecified => 0,
+        QualityReason::Substituted => 1,
+        QualityReason::Stale => 2,
+        QualityReason::OutOfRange => 3,
+        QualityReason::CommunicationFault => 4,
+        QualityReason::DeviceFault => 5,
+        QualityReason::ConfigurationFault => 6,
+    }
+}
+
+fn decode_reason(code: i64) -> Option<QualityReason> {
+    Some(match code {
+        0 => QualityReason::Unspecified,
+        1 => QualityReason::Substituted,
+        2 => QualityReason::Stale,
+        3 => QualityReason::OutOfRange,
+        4 => QualityReason::CommunicationFault,
+        5 => QualityReason::DeviceFault,
+        6 => QualityReason::ConfigurationFault,
+        _ => return None,
+    })
+}
+
+/// `Quality` as a stable `i64` code: `0` for `Good`, `10 + reason` for
+/// `Uncertain`, `20 + reason` for `Bad`.
+fn encode_quality(quality: Quality) -> i64 {
+    match quality {
+        Quality::Good => 0,
+        Quality::Uncertain(reason) => 10 + encode_reason(reason),
+        Quality::Bad(reason) => 20 + encode_reason(reason),
+    }
+}
+
+fn decode_quality(code: i64) -> Option<Quality> {
+    Some(match code {
+        0 => Quality::Good,
+        10..=16 => Quality::Uncertain(decode_reason(code - 10)?),
+        20..=26 => Quality::Bad(decode_reason(code - 20)?),
+        _ => return None,
+    })
+}
+
+/// A [`Fault`] as a stable `i64` code: `0` disconnected, `1` timeout,
+/// `2 + quality code` for a substituted quality.
+fn encode_fault(fault: Fault) -> i64 {
+    match fault {
+        Fault::Disconnected => 0,
+        Fault::Timeout => 1,
+        Fault::Quality(quality) => 2 + encode_quality(quality),
+    }
+}
+
+fn decode_fault(code: i64) -> Option<Fault> {
+    Some(match code {
+        0 => Fault::Disconnected,
+        1 => Fault::Timeout,
+        2.. => Fault::Quality(decode_quality(code - 2)?),
+        _ => return None,
+    })
 }
 
 /// A deterministic simulated I/O backend implementing [`IoDriver`].
@@ -252,6 +324,134 @@ impl IoDriver for SimDriver {
             });
         }
         point_state.sample = Sample::good(value, state.tick);
+        Ok(())
+    }
+
+    /// Captures the simulated field state: the driver tick, every bound
+    /// point's stored sample (value, quality, tick) and injected fault,
+    /// and every process element's accumulator.
+    ///
+    /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
+    /// / `.fault` (the last only while a fault is active), and
+    /// `element.{output}.y` keyed by the element's driven point.
+    /// Loopbacks and element definitions are map configuration, not
+    /// state, so they are not captured. This is what transfers the
+    /// simulated process to a standby; a real driver leaves the contract
+    /// unimplemented and observes the actual field instead.
+    fn capture_state(&self) -> Option<StateMap> {
+        let state = self.state.lock().unwrap();
+        let mut captured = StateMap::new();
+        captured.insert("tick", Value::Int(state.tick.0 as i64));
+        let mut points: Vec<(&PointId, &PointState)> = state.points.iter().collect();
+        points.sort_by_key(|(point, _)| **point);
+        for (point, point_state) in points {
+            let prefix = format!("point.{}", point.0);
+            captured.insert(format!("{prefix}.value"), point_state.sample.value);
+            captured.insert(
+                format!("{prefix}.quality"),
+                Value::Int(encode_quality(point_state.sample.quality)),
+            );
+            captured.insert(
+                format!("{prefix}.tick"),
+                Value::Int(point_state.sample.tick.0 as i64),
+            );
+            if let Some(fault) = point_state.fault {
+                captured.insert(format!("{prefix}.fault"), Value::Int(encode_fault(fault)));
+            }
+        }
+        for element in &state.elements {
+            captured.insert(
+                format!("element.{}", element.element.output().0),
+                Value::Float(element.y),
+            );
+        }
+        Some(captured)
+    }
+
+    /// Restores state produced by an equivalent driver's
+    /// [`capture_state`](IoDriver::capture_state).
+    ///
+    /// The whole map is validated first — required fields present with
+    /// the declared kinds, codes decodable, every field one this driver
+    /// captured — so a rejected restore changes nothing. Field `point.{id}`
+    /// entries must cover exactly the bound points and `element.{id}`
+    /// entries exactly the map's elements, so a map from a different
+    /// [`ChannelMap`] fails naming `sim-driver`.
+    fn restore_state(&self, state: &StateMap) -> Result<(), StateError> {
+        let invalid = |field: String, value: Value| StateError::InvalidValue {
+            element: STATE_ELEMENT.to_string(),
+            field,
+            value,
+        };
+        let current = &mut *self.state.lock().unwrap();
+
+        let tick = state.require_i64(STATE_ELEMENT, "tick")?;
+        if tick < 0 {
+            return Err(invalid("tick".to_string(), Value::Int(tick)));
+        }
+
+        // Collect every expected field name while validating, so the
+        // final check rejects fields this driver never captured.
+        let mut known = vec!["tick".to_string()];
+        let mut points = HashMap::with_capacity(current.points.len());
+        for (&point, point_state) in &current.points {
+            let prefix = format!("point.{}", point.0);
+            let value =
+                state.require_kind(STATE_ELEMENT, &format!("{prefix}.value"), point_state.kind)?;
+            let quality_code = state.require_i64(STATE_ELEMENT, &format!("{prefix}.quality"))?;
+            let quality = decode_quality(quality_code)
+                .ok_or_else(|| invalid(format!("{prefix}.quality"), Value::Int(quality_code)))?;
+            let sample_tick = state.require_i64(STATE_ELEMENT, &format!("{prefix}.tick"))?;
+            if sample_tick < 0 {
+                return Err(invalid(format!("{prefix}.tick"), Value::Int(sample_tick)));
+            }
+            let fault = match state.get(&format!("{prefix}.fault")) {
+                None => None,
+                Some(Value::Int(code)) => Some(
+                    decode_fault(code)
+                        .ok_or_else(|| invalid(format!("{prefix}.fault"), Value::Int(code)))?,
+                ),
+                Some(found) => {
+                    return Err(StateError::IncompatibleField {
+                        element: STATE_ELEMENT.to_string(),
+                        field: format!("{prefix}.fault"),
+                        expected: ValueKind::Int,
+                        found: found.kind(),
+                    });
+                }
+            };
+            known.extend([
+                format!("{prefix}.value"),
+                format!("{prefix}.quality"),
+                format!("{prefix}.tick"),
+                format!("{prefix}.fault"),
+            ]);
+            points.insert(point, (value, quality, sample_tick, fault));
+        }
+
+        let mut ys = Vec::with_capacity(current.elements.len());
+        for element in &current.elements {
+            let field = format!("element.{}", element.element.output().0);
+            let y = state.require_f64(STATE_ELEMENT, &field)?;
+            if !y.is_finite() {
+                return Err(invalid(field, Value::Float(y)));
+            }
+            ys.push(y);
+            known.push(field);
+        }
+
+        let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
+        state.ensure_known_fields(STATE_ELEMENT, &known_refs)?;
+
+        current.tick = Tick(tick as u64);
+        for (point, (value, quality, sample_tick, fault)) in points {
+            let point_state = current.points.get_mut(&point).unwrap();
+            point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
+            point_state.fault = fault;
+        }
+        for (element, y) in current.elements.iter_mut().zip(ys) {
+            element.y = y;
+        }
         Ok(())
     }
 }
@@ -499,6 +699,121 @@ mod tests {
         assert_eq!(
             sim.clear_fault(unknown),
             Err(IoError::UnknownPoint(unknown))
+        );
+    }
+
+    #[test]
+    fn captured_state_restores_into_a_fresh_driver() {
+        // A lag element, a loopback pair, and an injected fault exercise
+        // every captured section.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_point(float_point(3, Direction::In))
+            .with_point(float_point(4, Direction::Out))
+            .with_loopback(Loopback {
+                output: PointId(4),
+                input: PointId(3),
+            })
+            .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
+                input: PointId(1),
+                output: PointId(2),
+                time_constant: 1.0,
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(4.0)).unwrap();
+        sim.write(PointId(4), Value::Float(2.5)).unwrap();
+        sim.step(0.1);
+        sim.inject_fault(
+            PointId(3),
+            Fault::Quality(Quality::Uncertain(QualityReason::Stale)),
+        )
+        .unwrap();
+        sim.step(0.1);
+        let state = sim.capture_state().unwrap();
+        assert!(!state.is_empty());
+
+        // The map serde-roundtrips like the rest of the contract.
+        let json = serde_json::to_string(&state).unwrap();
+        let state = serde_json::from_str::<StateMap>(&json).unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        assert_eq!(fresh.tick(), sim.tick());
+        for point in [PointId(1), PointId(2), PointId(3), PointId(4)] {
+            assert_eq!(
+                fresh.read(point).unwrap(),
+                sim.read(point).unwrap(),
+                "point {point:?}"
+            );
+        }
+
+        // Continued stepping stays identical: element accumulators and
+        // faults carried over.
+        sim.step(0.1);
+        fresh.step(0.1);
+        for point in [PointId(1), PointId(2), PointId(3), PointId(4)] {
+            assert_eq!(fresh.read(point).unwrap(), sim.read(point).unwrap());
+        }
+    }
+
+    #[test]
+    fn restore_rejects_state_the_driver_did_not_produce() {
+        let sim =
+            SimDriver::new(ChannelMap::new().with_point(float_point(1, Direction::In))).unwrap();
+
+        // A field for a point the map does not bind.
+        let mut foreign = StateMap::new();
+        foreign.insert("tick", Value::Int(0));
+        foreign.insert("point.1.value", Value::Float(0.0));
+        foreign.insert("point.1.quality", Value::Int(0));
+        foreign.insert("point.1.tick", Value::Int(0));
+        foreign.insert("point.9.value", Value::Float(0.0));
+        assert_eq!(
+            sim.restore_state(&foreign).unwrap_err(),
+            StateError::UnknownField {
+                element: "sim-driver".to_string(),
+                field: "point.9.value".to_string(),
+            }
+        );
+
+        // A required field missing.
+        let mut incomplete = StateMap::new();
+        incomplete.insert("tick", Value::Int(3));
+        incomplete.insert("point.1.value", Value::Float(1.0));
+        assert_eq!(
+            sim.restore_state(&incomplete).unwrap_err(),
+            StateError::MissingField {
+                element: "sim-driver".to_string(),
+                field: "point.1.quality".to_string(),
+            }
+        );
+        // Nothing was applied.
+        assert_eq!(sim.tick(), Tick::ZERO);
+
+        // A value kind the point does not declare.
+        let mut wrong_kind = StateMap::new();
+        wrong_kind.insert("tick", Value::Int(0));
+        wrong_kind.insert("point.1.value", Value::Bool(true));
+        assert!(matches!(
+            sim.restore_state(&wrong_kind).unwrap_err(),
+            StateError::IncompatibleField { .. }
+        ));
+
+        // An undecodable quality code.
+        let mut bad_code = StateMap::new();
+        bad_code.insert("tick", Value::Int(0));
+        bad_code.insert("point.1.value", Value::Float(0.0));
+        bad_code.insert("point.1.quality", Value::Int(99));
+        bad_code.insert("point.1.tick", Value::Int(0));
+        assert_eq!(
+            sim.restore_state(&bad_code).unwrap_err(),
+            StateError::InvalidValue {
+                element: "sim-driver".to_string(),
+                field: "point.1.quality".to_string(),
+                value: Value::Int(99),
+            }
         );
     }
 
