@@ -5,9 +5,10 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput,
-    DigitalOutput, Edge, EdgeTrigger, GateOperation, Interlock, LatchingAlarm, ManualStation,
-    MedianVoter, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Sequencer,
-    SequencerStep, SignalFilter, SrLatch, Timer, Totalizer, Valve,
+    DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig,
+    PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
+    Timer, Totalizer, Valve,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -262,6 +263,40 @@ fn rig() -> Rig {
             point(&mut specs, 202, Direction::Out, ValueKind::Bool),
             GateOperation::And,
         )),
+        Box::new(
+            PumpGroup::new(
+                "pg",
+                point(&mut specs, 230, Direction::In, ValueKind::Int),
+                vec![
+                    PumpIo {
+                        cmd: point(&mut specs, 231, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 232, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 233, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 234, Direction::In, ValueKind::Bool),
+                    },
+                    PumpIo {
+                        cmd: point(&mut specs, 235, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 236, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 237, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 238, Direction::In, ValueKind::Bool),
+                    },
+                ],
+                GroupOutputs {
+                    duty: point(&mut specs, 239, Direction::Out, ValueKind::Int),
+                    staged: point(&mut specs, 240, Direction::Out, ValueKind::Int),
+                    none_available: point(&mut specs, 241, Direction::Out, ValueKind::Bool),
+                    all_faulted: point(&mut specs, 242, Direction::Out, ValueKind::Bool),
+                },
+                PumpGroupConfig {
+                    rotation: RotationPolicy::AlternateEachCycle,
+                    rotation_ticks: 0,
+                    start_delay_ticks: 1,
+                    restage_delay_ticks: 2,
+                    min_off_ticks: 3,
+                },
+            )
+            .unwrap(),
+        ),
         Box::new(SrLatch::new(
             "srl",
             point(&mut specs, 210, Direction::In, ValueKind::Bool),
@@ -279,7 +314,7 @@ fn rig() -> Rig {
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 22] = [
+const EXPECTED_KINDS: [&str; 23] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -300,6 +335,7 @@ const EXPECTED_KINDS: [&str; 22] = [
     Totalizer::KIND,
     Sequencer::KIND,
     BoolGate::KIND,
+    PumpGroup::KIND,
     SrLatch::KIND,
     EdgeTrigger::KIND,
 ];
@@ -411,7 +447,7 @@ fn reported_parameters_match_each_kinds_declared_set() {
     let ovr = &snapshot.parameters[7];
     assert_eq!(ovr.name, "ovr");
     assert!(ovr.values.is_empty());
-    let srl = &snapshot.parameters[20];
+    let srl = &snapshot.parameters[21];
     assert_eq!(srl.name, "srl");
     assert!(srl.values.is_empty());
 }

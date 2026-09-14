@@ -18,8 +18,9 @@ use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
     DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec,
-    SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -270,6 +271,53 @@ fn bool_gate_rejects_an_undeclared_operation_code() {
 }
 
 #[test]
+fn pump_group_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+
+    let demand = plant.internal_input::<i64>(PointId(10), 0, true);
+    let run_1 = plant.internal_input::<bool>(PointId(11), false, true);
+    let run_2 = plant.internal_input::<bool>(PointId(12), false, true);
+    let fault_1 = plant.internal_input::<bool>(PointId(13), false, true);
+    let fault_2 = plant.internal_input::<bool>(PointId(14), false, true);
+    let avail_1 = plant.internal_input::<bool>(PointId(15), true, true);
+    let avail_2 = plant.internal_input::<bool>(PointId(16), true, true);
+    let cmd_1 = plant.internal_output::<bool>(PointId(17), false);
+    let cmd_2 = plant.internal_output::<bool>(PointId(18), false);
+    let duty = plant.internal_output::<i64>(PointId(19), 0);
+    let staged = plant.internal_output::<i64>(PointId(20), 0);
+    let none_available = plant.internal_output::<bool>(PointId(21), false);
+    let all_faulted = plant.internal_output::<bool>(PointId(22), false);
+
+    // A two-pump group on the recorded default policy — per-cycle
+    // alternation — with a two-tick inter-pump start delay.
+    let group = plant.add(PumpGroupSpec::new(
+        parameters([
+            ("rotation", Value::Int(0)),
+            ("start_delay_ticks", Value::Int(2)),
+        ]),
+        2,
+    ));
+    // The indexed pump handles resolve through the instance first;
+    // the `demand` field moves into `connect`, so it is wired last.
+    plant.connect(run_1, group.run(1));
+    plant.connect(run_2, group.run(2));
+    plant.connect(fault_1, group.fault(1));
+    plant.connect(fault_2, group.fault(2));
+    plant.connect(avail_1, group.avail(1));
+    plant.connect(avail_2, group.avail(2));
+    plant.connect(group.cmd(1), cmd_1);
+    plant.connect(group.cmd(2), cmd_2);
+    plant.connect(demand, group.demand);
+    plant.connect(&group.duty, duty);
+    plant.connect(&group.staged, staged);
+    plant.connect(&group.none_available, none_available);
+    plant.connect(&group.all_faulted, all_faulted);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, PumpGroupSpec::KIND);
+}
+
+#[test]
 fn sr_latch_spec_emits_an_assembling_document() {
     let mut plant = PlantBuilder::new();
     let sim = plant.device("sim").id;
@@ -373,6 +421,7 @@ fn every_registered_kind_has_a_spec() {
         TotalizerSpec::KIND,
         SequencerSpec::KIND,
         BoolGateSpec::KIND,
+        PumpGroupSpec::KIND,
         SrLatchSpec::KIND,
         EdgeTriggerSpec::KIND,
     ]
