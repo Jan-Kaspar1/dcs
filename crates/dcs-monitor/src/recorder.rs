@@ -19,8 +19,8 @@
 
 use crate::journal_file::JournalFile;
 use dcs_core::{
-    CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry, JournalEvent,
-    PointHistory, PointId, Quality, Role, Sample, Tick,
+    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry,
+    JournalEvent, PointHistory, PointId, Quality, Role, Sample, Tick,
 };
 use dcs_runtime::Executor;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -175,6 +175,14 @@ impl Recorder {
     /// `Out` points and both sides' values.
     pub(super) fn note_divergence(&mut self, tick: Tick, mismatches: Vec<Divergence>) {
         self.push(tick, JournalEvent::DivergenceDetected { mismatches });
+    }
+
+    /// Journals a model-boundary crossing — a revision-armed peer's
+    /// transition into `reinitialized` — carrying its
+    /// [`CarryoverReport`]; the entry is attributed to the tick the run
+    /// resumed at.
+    pub(super) fn note_reinitialized(&mut self, report: CarryoverReport) {
+        self.push(report.resumed_at, JournalEvent::Reinitialized { report });
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the

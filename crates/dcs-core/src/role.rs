@@ -16,6 +16,7 @@
 //! or `demoting` until the first scan under the new mode completes, when
 //! the reported role settles to `active` or `standby`.
 
+use crate::carryover::CarryoverReport;
 use crate::signal::{PointId, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -110,6 +111,23 @@ pub enum StandbySync {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
+    /// The peer runs a revised model — its fingerprint differs from the
+    /// active's by design, so ordinary checkpoint convergence cannot
+    /// apply — and has consumed the active's checkpoint under the
+    /// documented model-boundary carryover rule: operator-writable
+    /// internal points matched by declared identity carried their last
+    /// values, component state reinitialized, and every element without
+    /// a continuation is named in `report`. A promotable state: the run
+    /// is defined, and the documented switchover order — demote the old
+    /// peer, then promote — moves the field writer to the revised model
+    /// at a scan boundary.
+    Reinitialized {
+        /// The carryover audit record: the fingerprints on each side of
+        /// the boundary, the resumed tick, and every element classified.
+        /// Boxed so a `SwitchError` carrying this state stays small —
+        /// the wire shape is unchanged, `Box` serializes transparently.
+        report: Box<CarryoverReport>,
+    },
 }
 
 impl fmt::Display for StandbySync {
@@ -127,6 +145,7 @@ impl fmt::Display for StandbySync {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::Reinitialized { report } => write!(f, "{report}"),
         }
     }
 }
@@ -248,6 +267,23 @@ mod tests {
                             field: Value::Bool(false),
                         },
                     ],
+                }),
+            },
+            RoleReport {
+                role: Role::Standby,
+                tick: Tick(42),
+                sync: Some(StandbySync::Reinitialized {
+                    report: Box::new(CarryoverReport {
+                        from: Some(crate::ModelFingerprint(7)),
+                        to: Some(crate::ModelFingerprint(9)),
+                        resumed_at: Tick(41),
+                        carried: vec![],
+                        carried_outputs: vec![],
+                        carried_forces: vec![],
+                        dropped: vec![],
+                        reinitialized: vec![],
+                        initialized: vec![],
+                    }),
                 }),
             },
         ];

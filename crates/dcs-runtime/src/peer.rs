@@ -21,9 +21,11 @@
 //! [`RoleChange`]. The documented switchover order is demote first, then
 //! promote, so no scan ever has two writers.
 //!
-//! Promotion is accepted only from a converged peer —
-//! [`StandbySync::Tracking`], i.e. a checkpoint has applied cleanly —
-//! and refused otherwise with a named
+//! Promotion is accepted only from a peer whose run is defined by the
+//! active's state — [`StandbySync::Tracking`], i.e. a checkpoint has
+//! applied cleanly, or [`StandbySync::Reinitialized`], the revision-armed
+//! crossing of the rolling model-revision decision — and refused
+//! otherwise with a named
 //! [`SwitchError`](dcs_core::SwitchError): `NotConverged` before
 //! convergence, `AlreadyActive` on an instance already owning the field.
 //! Demotion is accepted only from a field-owning instance. A
@@ -67,9 +69,10 @@ use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::divergence::{DivergenceReport, compare_staged};
 use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
+use crate::revision::CarryoverError;
 use dcs_core::{
-    Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync, SwitchError,
-    TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync,
+    SwitchError, TelemetrySnapshot, Tick,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -125,6 +128,16 @@ pub struct Peer<'d> {
     /// the gate lifts — the fencing arbitration of the failover
     /// decision — when the driver surface can arbitrate single-writer.
     claim: Option<Claim<'d>>,
+    /// Whether this peer rolls a revised model into production — armed
+    /// by [`with_revision`](Peer::with_revision): a pulled checkpoint
+    /// whose fingerprint differs from this run's crosses the model
+    /// boundary through the documented carryover rule rather than
+    /// degrading the peer on a fingerprint mismatch.
+    revision: bool,
+    /// Reinitializations not yet consumed for journaling — one per
+    /// transition into [`StandbySync::Reinitialized`], each carrying the
+    /// crossing's [`CarryoverReport`].
+    pending_reinits: Vec<CarryoverReport>,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -153,7 +166,8 @@ pub struct RoleChange {
     pub to: Role,
 }
 
-/// Why [`Peer::apply`] did not apply a checkpoint.
+/// Why [`Peer::apply`] or [`Peer::transfer`] did not consume a
+/// checkpoint.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplyError {
     /// The instance owns field writes — `active` or `promoting` — and
@@ -162,6 +176,11 @@ pub enum ApplyError {
     /// The checkpoint was rejected as incompatible: the run rolled back
     /// and the peer reports [`StandbySync::Degraded`].
     Restore(RestoreError),
+    /// The checkpoint crossed a revision-armed peer's model boundary but
+    /// broke the documented carryover rule — a kind-retyped carried
+    /// point or an unservable force. Nothing applied and the peer
+    /// reports [`StandbySync::Degraded`] carrying the named error.
+    Carryover(CarryoverError),
 }
 
 impl fmt::Display for ApplyError {
@@ -171,6 +190,7 @@ impl fmt::Display for ApplyError {
                 f.write_str("instance owns field writes; checkpoints apply to a tracking peer")
             }
             Self::Restore(error) => write!(f, "checkpoint apply failed: {error}"),
+            Self::Carryover(error) => write!(f, "model-boundary carryover failed: {error}"),
         }
     }
 }
@@ -180,8 +200,25 @@ impl std::error::Error for ApplyError {
         match self {
             Self::OwnsField => None,
             Self::Restore(error) => Some(error),
+            Self::Carryover(error) => Some(error),
         }
     }
+}
+
+/// What one pulled checkpoint did on a tracking peer — the answer of
+/// [`Peer::transfer`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Transfer {
+    /// The checkpoint carried this run's model fingerprint and applied
+    /// as ordinary convergence — the peer reports
+    /// [`StandbySync::Tracking`], or [`StandbySync::Diverged`] when the
+    /// staged-output comparison found a mismatch.
+    Applied,
+    /// The checkpoint carried a different model fingerprint and the
+    /// revision-armed peer crossed the boundary under the documented
+    /// carryover rule — the peer reports [`StandbySync::Reinitialized`]
+    /// carrying this report.
+    Reinitialized(CarryoverReport),
 }
 
 impl<'d> Peer<'d> {
@@ -208,6 +245,8 @@ impl<'d> Peer<'d> {
             converged: false,
             failover: None,
             claim: None,
+            revision: false,
+            pending_reinits: Vec::new(),
         }
     }
 
@@ -240,6 +279,20 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the rolling model-revision path — meaningful on a standby
+    /// assembled under a revised plant model whose fingerprint differs
+    /// from the active's by design. A pulled checkpoint carrying a
+    /// foreign fingerprint then crosses the model boundary through
+    /// [`transfer`](Self::transfer)'s documented carryover rule —
+    /// reporting [`StandbySync::Reinitialized`] — instead of degrading
+    /// the peer on a fingerprint mismatch. Checkpoints matching this
+    /// run's fingerprint apply as ordinary convergence either way, so an
+    /// armed peer also converges after the revision has rolled.
+    pub fn with_revision(mut self) -> Self {
+        self.revision = true;
+        self
+    }
+
     /// An instance tracking an active peer: role `standby`, its gate
     /// closed — scans compute outputs but no write reaches the field.
     pub fn standby(executor: Executor<'d>, gate: Option<&'d WriteGate<'d>>) -> Self {
@@ -259,6 +312,8 @@ impl<'d> Peer<'d> {
             converged: false,
             failover: None,
             claim: None,
+            revision: false,
+            pending_reinits: Vec::new(),
         }
     }
 
@@ -314,7 +369,12 @@ impl<'d> Peer<'d> {
     /// means a checkpoint has applied cleanly and the staged-output
     /// divergence check has found the run matching the field, so the
     /// next scan writes what the run would have — bumpless by
-    /// determinism. A standby that has not converged — or that reports
+    /// determinism. [`StandbySync::Reinitialized`] is the revision
+    /// path's equivalent: the checkpoint crossed the model boundary
+    /// under the documented carryover rule and the carryover report
+    /// records exactly what continues — not bumpless by restored state,
+    /// but honest about what the revised run starts from. A standby
+    /// that has not converged — or that reports
     /// [`StandbySync::Diverged`] — is refused with
     /// [`SwitchError::NotConverged`] carrying the reported state; a
     /// field-owning instance — including a still-settling promotion —
@@ -325,7 +385,10 @@ impl<'d> Peer<'d> {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
         }
-        if !matches!(self.sync, StandbySync::Tracking { .. }) {
+        if !matches!(
+            self.sync,
+            StandbySync::Tracking { .. } | StandbySync::Reinitialized { .. }
+        ) {
             return Err(SwitchError::NotConverged {
                 sync: self.sync.clone(),
             });
@@ -339,7 +402,8 @@ impl<'d> Peer<'d> {
     /// the checkpoint-pull heartbeat's consecutive misses have reached
     /// the configured [`with_failover`](Self::with_failover) budget and
     /// the convergence proof still stands — the last applied verdict
-    /// was `Tracking` and the misses have not exceeded the budget —
+    /// was `Tracking` or `Reinitialized` and the misses have not
+    /// exceeded the budget —
     /// lifts the gate at this boundary exactly as a manual promotion
     /// would, reporting `promoting`.
     ///
@@ -476,6 +540,87 @@ impl<'d> Peer<'d> {
         }
     }
 
+    /// Consumes one pulled checkpoint — the standby's transfer entry
+    /// point, covering both convergence and the rolling model revision.
+    ///
+    /// A field-owning instance refuses with [`ApplyError::OwnsField`].
+    /// Otherwise the checkpoint's model fingerprint routes it: equal to
+    /// this run's means ordinary convergence — [`apply`](Self::apply)
+    /// and [`Transfer::Applied`] — while a different fingerprint on a
+    /// revision-armed peer ([`with_revision`](Self::with_revision)) is
+    /// the rolling deployment of the model-revision decision:
+    /// [`reinitialize`](Self::reinitialize) crosses the boundary and
+    /// [`Transfer::Reinitialized`] carries its report. A foreign
+    /// fingerprint on an unarmed peer is an ordinary
+    /// [`ApplyError::Restore`]-wrapped
+    /// [`RestoreError::FingerprintMismatch`] — the fingerprint gate is
+    /// not weakened for peers that did not opt in.
+    pub fn transfer(&mut self, checkpoint: &Checkpoint) -> Result<Transfer, ApplyError> {
+        if self.owns_field() {
+            return Err(ApplyError::OwnsField);
+        }
+        if self.revision && checkpoint.model_fingerprint != self.executor.model_fingerprint() {
+            return self.reinitialize(checkpoint).map(Transfer::Reinitialized);
+        }
+        self.apply(checkpoint).map(|()| Transfer::Applied)
+    }
+
+    /// Crosses the model boundary with a checkpoint captured under a
+    /// different model — the rolling-revision half of the transfer
+    /// contract, in place on the running executor assembled under the
+    /// revised model.
+    ///
+    /// The carryover rule is documented in [`crate::revision`]: operator
+    /// values and the output image carry by declared identity, forces
+    /// carry all-or-nothing, component and driver state reinitialize,
+    /// and the tick resumes at the checkpoint's. Success reports
+    /// [`StandbySync::Reinitialized`] carrying the
+    /// [`CarryoverReport`] — a promotable state: the documented
+    /// switchover order (demote the old peer, then promote) moves the
+    /// field writer to the revised model at a scan boundary with
+    /// exactly-one-writer preserved throughout.
+    ///
+    /// A checkpoint breaking the rule is refused with
+    /// [`ApplyError::Carryover`] naming the element and reason, nothing
+    /// applies, and the peer reports [`StandbySync::Degraded`] — the
+    /// failure lands before promotion, so the old active keeps the
+    /// field. A field-owning instance refuses with
+    /// [`ApplyError::OwnsField`]. Each successful pull refreshes the
+    /// crossing — the report always describes the latest checkpoint —
+    /// and the journal queue takes one entry per transition into
+    /// `Reinitialized`, not per pull.
+    pub fn reinitialize(&mut self, checkpoint: &Checkpoint) -> Result<CarryoverReport, ApplyError> {
+        if self.owns_field() {
+            return Err(ApplyError::OwnsField);
+        }
+        // A produced checkpoint means the active served — the heartbeat
+        // miss count resets as in `apply`, whether the crossing lands.
+        self.misses = 0;
+        match self.executor.reinitialize(checkpoint) {
+            Ok(report) => {
+                if !matches!(self.sync, StandbySync::Reinitialized { .. }) {
+                    self.pending_reinits.push(report.clone());
+                }
+                self.sync = StandbySync::Reinitialized {
+                    report: Box::new(report.clone()),
+                };
+                self.aligned = Some(checkpoint.tick);
+                // Staged evidence belongs to the old alignment — the
+                // divergence check does not pair against a crossing.
+                self.staged = None;
+                self.converged = true;
+                Ok(report)
+            }
+            Err(error) => {
+                self.sync = StandbySync::Degraded {
+                    detail: error.to_string(),
+                };
+                self.converged = false;
+                Err(ApplyError::Carryover(error))
+            }
+        }
+    }
+
     /// Marks the tracking peer [`Degraded`](StandbySync::Degraded)
     /// after a transfer failure that produced no checkpoint at all — an
     /// unreachable active or a refused request — and counts the
@@ -530,6 +675,14 @@ impl<'d> Peer<'d> {
     /// layer records them into.
     pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
         std::mem::take(&mut self.pending_divergences)
+    }
+
+    /// Drains reinitializations queued since the last call — one
+    /// [`CarryoverReport`] per transition into
+    /// [`StandbySync::Reinitialized`] — for the transition journal the
+    /// monitoring layer records them into.
+    pub fn take_reinitializations(&mut self) -> Vec<CarryoverReport> {
+        std::mem::take(&mut self.pending_reinits)
     }
 
     /// Queues `command` for application at the next scan boundary —
@@ -755,6 +908,161 @@ mod tests {
         peer.scan().unwrap();
         assert_eq!(peer.promote(), Err(SwitchError::AlreadyActive));
         assert_eq!(peer.apply(&checkpoint), Err(ApplyError::OwnsField));
+    }
+
+    /// The revision-side executor: a writable internal `In` point is the
+    /// carried operator value's landing.
+    fn revision_executor<'d>(driver: &'d (dyn IoDriver + Sync)) -> Executor<'d> {
+        Executor::new(
+            driver,
+            PointMap::new().with_writable_internal(
+                PointId(10),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            ),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_model_fingerprint(dcs_core::ModelFingerprint::of(b"model-b"))
+    }
+
+    /// A checkpoint captured under `model-a`: internal 10 carries the
+    /// old run's held operator value.
+    fn foreign_checkpoint(tick: u64) -> Checkpoint {
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Executor::new(
+            &source_driver,
+            PointMap::new().with_writable_internal(
+                PointId(10),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            ),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_model_fingerprint(dcs_core::ModelFingerprint::of(b"model-a"));
+        source.submit_command(Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        source.run(tick).unwrap();
+        source.checkpoint()
+    }
+
+    #[test]
+    fn revision_transfer_reinitializes_instead_of_converging() {
+        let driver = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(revision_executor(&gate), Some(&gate)).with_revision();
+
+        // An unarmed standby degrades on the foreign fingerprint — the
+        // gate is opt-in, not weakened.
+        let checkpoint = foreign_checkpoint(5);
+        let mut plain = Peer::standby(executor(&gate), Some(&gate));
+        assert!(matches!(
+            plain.transfer(&checkpoint),
+            Err(ApplyError::Restore(
+                RestoreError::FingerprintMismatch { .. }
+            ))
+        ));
+        assert!(matches!(plain.sync_state(), StandbySync::Degraded { .. }));
+
+        // The armed peer crosses the boundary: the operator value
+        // carried, the component set reinitialized, and the report rides
+        // the named sync state.
+        let transfer = peer.transfer(&checkpoint).unwrap();
+        let report = match &transfer {
+            Transfer::Reinitialized(report) => report.clone(),
+            Transfer::Applied => panic!("a foreign fingerprint reinitializes"),
+        };
+        assert_eq!(report.resumed_at, Tick(5));
+        assert_eq!(
+            report.carried,
+            vec![dcs_core::CarriedPoint {
+                point: PointId(10),
+                value: Value::Float(7.0),
+            }]
+        );
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Reinitialized {
+                report: Box::new(report.clone())
+            }
+        );
+        assert_eq!(peer.take_reinitializations(), vec![report]);
+
+        // Refresh pulls keep the crossing current without re-journaling
+        // the transition.
+        let _ = peer.transfer(&foreign_checkpoint(6)).unwrap();
+        assert!(matches!(
+            peer.sync_state(),
+            StandbySync::Reinitialized { .. }
+        ));
+        assert!(peer.take_reinitializations().is_empty());
+    }
+
+    #[test]
+    fn reinitialized_peer_promotes_at_the_boundary() {
+        let driver = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(revision_executor(&gate), Some(&gate)).with_revision();
+        peer.transfer(&foreign_checkpoint(5)).unwrap();
+
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        peer.scan().unwrap();
+        assert_eq!(peer.role(), Role::Active);
+        // The carried operator value survived the switch.
+        assert_eq!(
+            peer.snapshot()
+                .points
+                .iter()
+                .find(|telemetry| telemetry.point == PointId(10))
+                .and_then(|telemetry| telemetry.sample)
+                .map(|sample| sample.value),
+            Some(Value::Float(7.0))
+        );
+    }
+
+    #[test]
+    fn broken_carryover_fails_before_promotion() {
+        let driver = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(revision_executor(&gate), Some(&gate)).with_revision();
+
+        // A force on a point the revision does not serve breaks the
+        // all-or-nothing force rule.
+        let mut checkpoint = foreign_checkpoint(5);
+        checkpoint.forces.insert(PointId(9), Value::Float(1.0));
+        assert_eq!(
+            peer.transfer(&checkpoint),
+            Err(ApplyError::Carryover(CarryoverError::ForceNotServed {
+                point: PointId(9)
+            }))
+        );
+        assert!(matches!(peer.sync_state(), StandbySync::Degraded { .. }));
+
+        // The refused crossing leaves the peer unpromotable — the named
+        // sync state is the refusal's evidence.
+        assert!(matches!(
+            peer.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { .. }
+            })
+        ));
+        assert!(!gate.is_open());
+
+        // A clean later pull still crosses: the failure is per-transfer,
+        // not a latch.
+        assert!(peer.transfer(&foreign_checkpoint(6)).is_ok());
+        assert!(matches!(
+            peer.sync_state(),
+            StandbySync::Reinitialized { .. }
+        ));
     }
 
     #[test]
