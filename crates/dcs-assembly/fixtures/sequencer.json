@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "run": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "step": { "direction": "out", "value_type": "Int" },
+        "done": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "run" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "reset" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "out" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Int",
+      "channel": { "device": 1, "name": "step" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "done" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "sequence-run",
+      "source": 10,
+      "description": "Level command stepping the declared table"
+    },
+    {
+      "id": 101,
+      "name": "sequence-reset",
+      "source": 11,
+      "description": "Operator reset returning the sequencer to step 1"
+    },
+    {
+      "id": 102,
+      "name": "sequence-out",
+      "source": 20,
+      "unit": "%",
+      "description": "Value the active step drives"
+    },
+    {
+      "id": 103,
+      "name": "sequence-step",
+      "source": 21,
+      "description": "Active step index, 1-based"
+    },
+    {
+      "id": 104,
+      "name": "sequence-done",
+      "source": 22,
+      "description": "Hold-at-end completion flag"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "sequencer",
+      "parameters": {
+        "step_count": { "Int": 3 },
+        "step_1_ticks": { "Int": 2 },
+        "step_1_out": { "Float": 10.0 },
+        "step_2_ticks": { "Int": 2 },
+        "step_2_out": { "Float": 20.0 },
+        "step_3_ticks": { "Int": 1 },
+        "step_3_out": { "Float": 30.0 }
+      },
+      "ports": {
+        "run": { "direction": "in", "value_type": "Bool" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "step": { "direction": "out", "value_type": "Int" },
+        "done": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "run" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "reset" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "step" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "done" } },
+      "to": { "point": 22 }
+    }
+  ]
+}

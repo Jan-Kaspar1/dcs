@@ -9,7 +9,7 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AnalogInput, AnalogOutput, Counter, DigitalOutput, LatchingAlarm, ManualStation, MedianVoter,
-    Pid, RateLimiter, SignalFilter, Timer, Totalizer,
+    Pid, RateLimiter, Sequencer, SignalFilter, Timer, Totalizer,
 };
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
@@ -33,6 +33,9 @@ const LATCHING_ALARM: &str = include_str!("../fixtures/latching_alarm.json");
 const OPERATOR: &str = include_str!("../fixtures/operator.json");
 /// The voting/accumulation fixture: a 2oo3 median voter and a totalizer.
 const VOTING_TOTALIZER: &str = include_str!("../fixtures/voting_totalizer.json");
+/// The sequence-control fixture: a sequencer walking a declared
+/// three-step table while `run` holds.
+const SEQUENCER: &str = include_str!("../fixtures/sequencer.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
@@ -83,6 +86,14 @@ const TRESET: PointId = PointId(14);
 const VOTED: PointId = PointId(20);
 const SPREAD: PointId = PointId(21);
 const ACCUM: PointId = PointId(22);
+
+// `sequencer.json`: the run/reset commands and the field-side outputs
+// the sequencer drives.
+const SEQ_RUN: PointId = PointId(10);
+const SEQ_RESET: PointId = PointId(11);
+const SEQ_OUT: PointId = PointId(20);
+const SEQ_STEP: PointId = PointId(21);
+const SEQ_DONE: PointId = PointId(22);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -225,6 +236,17 @@ fn registry() -> ComponentRegistry {
                 spec.require("rate")?,
                 spec.require("reset")?,
                 spec.require("total")?,
+                spec.parameters,
+            ))
+        })
+        .with(Sequencer::KIND, |spec| {
+            boxed(Sequencer::from_parameters(
+                spec.name.as_str(),
+                spec.require("run")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.require("step")?,
+                spec.require("done")?,
                 spec.parameters,
             ))
         })
@@ -594,6 +616,81 @@ fn voting_totalizer_fixture_votes_accumulates_and_restores() {
     standby.scan().unwrap();
     assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(0.0));
     assert_eq!(standby_driver.read(ACCUM).unwrap().value, Value::Float(0.0));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn sequencer_fixture_advances_holds_at_end_and_restores() {
+    let model = model(SEQUENCER);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The registry built the declared kind.
+    assert!(
+        executor
+            .snapshot()
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.kind == Sequencer::KIND)
+    );
+
+    // Parked on step 1 before `run` asserts: the first step's value is
+    // already driven and `step` reports it.
+    executor.scan().unwrap();
+    assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(10.0));
+    assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(1));
+    assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
+
+    // The table declares step 1 for 2 ticks, step 2 for 2, step 3 for 1.
+    // A step still drives the scan it completes on, so the outputs walk
+    // 1,1,2,2,3 across the five running scans.
+    driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
+    for (out, step) in [(10.0, 1), (10.0, 1), (20.0, 2)] {
+        executor.scan().unwrap();
+        assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(out));
+        assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(step));
+        assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
+    }
+
+    // Mid-sequence checkpoint — one scan banked into step 2 — transfers
+    // to a standby assembled from the same model, which continues
+    // identically through the table's end.
+    let checkpoint = executor.checkpoint();
+    let standby_driver = sim_driver(&model).unwrap();
+    let mut standby = assemble(&model, &registry(), &standby_driver).unwrap();
+    standby.apply(&checkpoint).unwrap();
+    assert_eq!(standby.tick(), Tick(4));
+    standby_driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
+    for (out, step, done) in [(20.0, 2, false), (30.0, 3, true), (30.0, 3, true)] {
+        executor.scan().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby_driver.read(SEQ_OUT).unwrap(),
+            driver.read(SEQ_OUT).unwrap()
+        );
+        assert_eq!(
+            standby_driver.read(SEQ_STEP).unwrap(),
+            driver.read(SEQ_STEP).unwrap()
+        );
+        assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(out));
+        assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(step));
+        assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(done));
+    }
+
+    // Hold-at-end: the final step keeps driving while `run` holds; only
+    // `reset` parks the table back on step 1.
+    driver.write(SEQ_RESET, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(10.0));
+    assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(1));
+    assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
 
     assert!(
         executor
