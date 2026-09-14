@@ -4,9 +4,19 @@
 //! the deterministic scan — as the active instance, or as a standby
 //! tracking an active peer's checkpoints.
 //!
-//! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]
-//!         [--auto-promote N] [--state-file PATH] [--journal-file PATH]`
+//! Usage: `dcs-controller <model-file> [--check] [--ticks N]
+//!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
+//!         [--remote ADDR] [--driven] [--auto-promote N]
+//!         [--state-file PATH] [--journal-file PATH]`
+//!
+//! `--check` is the engineering compile-check: the model is loaded,
+//! validated, and assembled through the standard registries — device
+//! kinds resolved, channels mapped, ports bound, parameters
+//! constructed — and a summary of what assembled prints, answering
+//! "does this model assemble" without starting a run. No scan executes
+//! and no listener binds; a load, validation, or assembly failure exits
+//! nonzero naming the element exactly as a run would. Run-mode options
+//! do not apply and are rejected as usage errors.
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -226,6 +236,9 @@ fn owner_token() -> u64 {
 struct Options {
     /// The plant model document to load.
     model: PathBuf,
+    /// Assemble and report without running a scan — the engineering
+    /// compile-check mode.
+    check: bool,
     /// How many scans to run; `None` runs until stopped.
     ticks: Option<u64>,
     /// Wall-clock scan period in milliseconds; `None` runs unpaced.
@@ -261,15 +274,20 @@ struct Options {
 }
 
 const USAGE: &str = "\
-Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-                      [--listen ADDR] [--standby ADDR] [--remote ADDR]
-                      [--driven] [--auto-promote N] [--state-file PATH]
-                      [--journal-file PATH]
+Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
+                      [--dt T] [--listen ADDR] [--standby ADDR]
+                      [--remote ADDR] [--driven] [--auto-promote N]
+                      [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
 controller scan.
 
+  --check         assemble the model without running it: load, validate,
+                  resolve devices, and construct components through the
+                  standard registries, then print what assembled and
+                  exit; no scan runs and no listener binds. Run-mode
+                  options do not apply
   --ticks N       run N deterministic ticks, then print the telemetry snapshot
   --scan-ms MS    pace scans to a wall-clock period of MS milliseconds;
                   runs until stopped, or for N scans when --ticks is given too
@@ -321,6 +339,7 @@ way, so exactly one peer writes the shared plant.";
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut model = None;
+        let mut check = false;
         let mut ticks = None;
         let mut scan_ms = None;
         let mut dt = None;
@@ -338,6 +357,7 @@ impl Options {
                     .ok_or_else(|| format!("{flag} requires a value"))
             };
             match arg.as_str() {
+                "--check" => check = true,
                 "--ticks" => {
                     ticks = Some(
                         value("--ticks")?
@@ -386,7 +406,35 @@ impl Options {
             }
         }
         let model = model.ok_or_else(|| "missing <model-file>".to_string())?;
-        if !driven && ticks.is_none() && scan_ms.is_none() {
+        if check {
+            // Check mode assembles and reports; it runs no scan and
+            // binds no listener, so the run-mode options have no meaning
+            // and are rejected rather than silently ignored.
+            let mut rejected = Vec::new();
+            for (flag, present) in [
+                ("--ticks", ticks.is_some()),
+                ("--scan-ms", scan_ms.is_some()),
+                ("--dt", dt.is_some()),
+                ("--listen", listen.is_some()),
+                ("--standby", standby.is_some()),
+                ("--remote", remote.is_some()),
+                ("--driven", driven),
+                ("--auto-promote", auto_promote.is_some()),
+                ("--state-file", state_file.is_some()),
+                ("--journal-file", journal_file.is_some()),
+            ] {
+                if present {
+                    rejected.push(flag);
+                }
+            }
+            if !rejected.is_empty() {
+                return Err(format!(
+                    "--check assembles the model without scanning or serving; {} do not apply",
+                    rejected.join(", ")
+                ));
+            }
+        }
+        if !check && !driven && ticks.is_none() && scan_ms.is_none() {
             scan_ms = Some(100);
         }
         if let Some(period) = scan_ms
@@ -427,6 +475,7 @@ impl Options {
         }
         Ok(Self {
             model,
+            check,
             ticks,
             scan_ms,
             dt,
@@ -525,6 +574,22 @@ fn main() -> ExitCode {
         Ok(model) => model,
         Err(error) => return fail(error),
     };
+
+    // The compile-check mode: driver resolution and assembly run exactly
+    // as they do below — the same standard registries, the same named
+    // failures — then the run stops at the summary. No gate, no peer, no
+    // scan, no listener.
+    if options.check {
+        return match dcs_controller::check(&model) {
+            Ok(report) => {
+                println!("check ok: {}", options.model.display());
+                print!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(error),
+        };
+    }
+
     // The field driver: the registry-resolved fan-out — local simulated
     // backends plus any `sim-tcp` devices the model declares — or the
     // shared simulated plant a redundant pair observes together.
