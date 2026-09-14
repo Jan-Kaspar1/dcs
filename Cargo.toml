@@ -2,6 +2,7 @@
 members = [
     "crates/dcs-core",
     "crates/dcs-model",
+    "crates/dcs-monitor",
     "crates/dcs-runtime",
     "crates/dcs-sim",
 ]
