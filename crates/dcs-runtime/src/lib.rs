@@ -18,13 +18,28 @@
 //!
 //! [`Executor::snapshot`] is the monitoring read-side: it returns the
 //! `dcs-core` [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot) contract —
-//! the latest sample of every known point plus per-component diagnostics —
-//! serde-serializable so a monitoring UI needs only the shared contracts.
+//! the latest sample of every known point, per-component diagnostics, and
+//! each component's [`Component::describe`] self-description — serde-
+//! serializable so a monitoring UI needs only the shared contracts.
+//!
+//! [`Executor::submit_command`] is the monitoring write-side: operator
+//! [`Command`](dcs_core::Command)s queue between scans and apply at the
+//! head of the next scan — before the input read — each producing a
+//! [`CommandReceipt`](dcs_core::CommandReceipt) in the
+//! [`receipts`](Executor::receipts) log.
+//!
+//! [`Executor::checkpoint`] and [`Executor::restore`] are the redundancy
+//! groundwork: a serde-serializable [`Checkpoint`] carries the tick, each
+//! component's [`capture_state`](Component::capture_state), the driver's
+//! state when it implements the contract, and the last written outputs,
+//! letting a standby rebuild an equivalent executor mid-run.
 
 #![warn(missing_docs)]
 
+mod checkpoint;
 mod component;
 mod executor;
 
+pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};

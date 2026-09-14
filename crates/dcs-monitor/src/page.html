@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dcs-monitor</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 64rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 0.25rem 0.6rem; text-align: left; }
+  th { background: #f0f0f0; }
+  td.value { font-variant-numeric: tabular-nums; }
+  .good { color: #060; }
+  .uncertain { color: #a60; }
+  .bad { color: #b00; font-weight: bold; }
+  .nosample { color: #888; font-style: italic; }
+  #status { color: #666; }
+  #receipt { background: #f6f6f6; padding: 0.5rem; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Plant monitoring</h1>
+<p id="status">connecting&hellip;</p>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
+      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
+    </tr>
+  </thead>
+  <tbody id="points"></tbody>
+</table>
+
+<h2>Operator command</h2>
+<form id="command-form">
+  <label>Signal <select id="command-point" required></select></label>
+  <label>Value <input id="command-value" required></label>
+  <button type="submit">Write value</button>
+</form>
+<pre id="receipt"></pre>
+
+<script>
+"use strict";
+// The page speaks only the monitor's JSON contract: GET /signals for the
+// loaded model's point metadata, GET /snapshot for live samples, and
+// POST /command for operator writes. No dependencies, no build step.
+
+let index = { points: [] };
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+// Value serializes as {"Bool": b} | {"Int": i} | {"Float": f}.
+function formatValue(value) {
+  if (value == null) return "";
+  if ("Bool" in value) return value.Bool ? "true" : "false";
+  if ("Int" in value) return String(value.Int);
+  if ("Float" in value) return String(value.Float);
+  return JSON.stringify(value);
+}
+
+// Quality serializes as "Good" | {"Uncertain": reason} | {"Bad": reason}.
+function formatQuality(quality) {
+  if (typeof quality === "string") return quality;
+  const [severity, reason] = Object.entries(quality)[0];
+  return severity + " (" + reason + ")";
+}
+
+function qualityClass(quality) {
+  const severity = typeof quality === "string" ? quality : Object.keys(quality)[0];
+  return esc(severity.toLowerCase());
+}
+
+async function refresh() {
+  const snapshot = await (await fetch("/snapshot")).json();
+  document.getElementById("status").textContent =
+    "tick " + snapshot.tick + " — polled " + new Date().toLocaleTimeString();
+  const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+  document.getElementById("points").innerHTML = index.points.map(meta => {
+    const sample = (telemetry.get(meta.point) || {}).sample;
+    const quality = sample ? formatQuality(sample.quality) : "no sample";
+    const cls = sample ? qualityClass(sample.quality) : "nosample";
+    return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
+      meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
+      (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
+      esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
+      (sample ? sample.tick : "") + "</td></tr>";
+  }).join("");
+}
+
+function commandValue(kind, text) {
+  if (kind === "Bool") return { Bool: /^(true|1|on)$/i.test(text.trim()) };
+  if (kind === "Int") return { Int: parseInt(text, 10) };
+  return { Float: parseFloat(text) };
+}
+
+async function init() {
+  index = await (await fetch("/signals")).json();
+  const select = document.getElementById("command-point");
+  select.innerHTML = index.points.map(p =>
+    "<option value=\"" + p.point + "\">" + esc(p.name) +
+    " (point " + p.point + ")</option>").join("");
+  document.getElementById("command-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const point = Number(select.value);
+    const meta = index.points.find(p => p.point === point);
+    const command = { write_value: {
+      point: point,
+      kind: meta.value_type,
+      value: commandValue(meta.value_type, document.getElementById("command-value").value),
+    } };
+    const response = await fetch("/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(command),
+    });
+    document.getElementById("receipt").textContent =
+      JSON.stringify(await response.json(), null, 2);
+    refresh();
+  });
+  refresh();
+  setInterval(refresh, 1000);
+}
+
+init().catch(error => {
+  document.getElementById("status").textContent =
+    "failed to load signal metadata: " + error;
+});
+</script>
+</body>
+</html>

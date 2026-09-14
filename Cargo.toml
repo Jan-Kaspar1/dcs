@@ -4,9 +4,12 @@ members = [
     "crates/dcs-blocks",
     "crates/dcs-controller",
     "crates/dcs-core",
+    "crates/dcs-demo",
     "crates/dcs-model",
+    "crates/dcs-monitor",
     "crates/dcs-runtime",
     "crates/dcs-sim",
+    "crates/dcs-sim-net",
 ]
 resolver = "3"
 
