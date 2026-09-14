@@ -29,7 +29,7 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 | `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47); internal points and links resolved under #30 (decision 14) |
 | `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); `--standby`/`--remote` modes track an active's checkpoints (#32); Docker packaging done (#39) |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented: `/snapshot`, `/receipts`, `/command`, `/scan` (#20); `/signals` and the live page (#34); `/history` and `/journal` with since-cursors (#35, decision 17); trend and journal panes (#51) |
-| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18); component-targeted `set_parameter` proposed under #82 (decision 20) |
+| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); component-targeted `set_parameter` implemented under #82 (decision 20); model-declared writable targets proposed under #49 (decision 18) |
 | `dcs-model` internal points | Channel-less operator and port-to-port points | Implemented (#30): channel-less `io_point`s carry `initial` in the scan image — held `In` setpoints, monitored `Out` writes, and internal links serving port-to-port wiring (decision 14) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); every kind ships `KIND`, `from_parameters`, and a `ComponentDescriptor` (#50, #61, decision 16) |
 
@@ -112,7 +112,7 @@ The operator-facing surface and the reusable library grow together on the contra
 Ticket breakdown:
 
 - #89 — this decision record and plan refresh. **Done with this change.**
-- #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Open** — issue filed under M4.
+- #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Done.**
 - #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Open** — issue filed under M4.
 - #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; depends on #49). **Open** — issue filed under M4.
 - #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **Done** — issue filed under M4.
@@ -121,7 +121,7 @@ Ticket breakdown:
 
 Done when:
 
-- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **open**;
+- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **done**;
 - a writable field `In` point can be forced across scans at substituted quality, released at the scan boundary, badged in the snapshot, journaled, and preserved across a checkpoint (#84, with #49) — **open**;
 - the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83) — **open**;
 - the monitoring page organizes its signal list by the model's declared `group` field, with ungrouped signals under a documented default (#86) — **done**;

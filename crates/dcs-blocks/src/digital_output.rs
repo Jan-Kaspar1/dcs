@@ -2,7 +2,10 @@
 
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{ComponentDescriptor, PointId, PortRole, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
+    Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A digital output channel: copies a boolean command `In` point onto a
@@ -94,6 +97,29 @@ impl Component for DigitalOutput {
             &[("in", PortRole::Setpoint), ("out", PortRole::Output)],
             vec![describe::parameter("invert", ValueKind::Bool, None)],
         )
+    }
+
+    /// Tunes `invert` at the scan boundary; the next step's write uses
+    /// the new sense.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "invert" => self.invert = params::tune_bool(&self.name, parameter, value)?,
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the tuned `invert` — the block's only run state.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("invert", Value::Bool(self.invert));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["invert"])?;
+        self.invert = state.require_bool(&self.name, "invert")?;
+        Ok(())
     }
 }
 

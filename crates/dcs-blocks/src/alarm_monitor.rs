@@ -4,8 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, StateError, StateMap,
-    Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -195,8 +195,50 @@ impl Component for AlarmMonitor {
         )
     }
 
+    /// Tunes a declared parameter at the scan boundary.
+    ///
+    /// The executor pre-checks the descriptor — declared name, `Float`
+    /// kind, and the declared range — so this hook owns the
+    /// cross-parameter invariant `low_limit < high_limit`. A value
+    /// breaking it is [`CommandError::InvalidParameter`] and changes
+    /// nothing.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        let tuned = params::tune_f64(&self.name, parameter, value)?;
+        let mut limits = self.limits;
+        match parameter {
+            "low_limit" => limits.low = tuned,
+            "high_limit" => limits.high = tuned,
+            "hysteresis" => limits.hysteresis = tuned,
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        if !tuned.is_finite() {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "must be finite",
+            ));
+        }
+        if limits.low >= limits.high {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "limits require low_limit < high_limit",
+            ));
+        }
+        if limits.hysteresis < 0.0 {
+            return Err(params::invalid_parameter(
+                &self.name,
+                "hysteresis",
+                "must be non-negative",
+            ));
+        }
+        self.limits = limits;
+        Ok(())
+    }
+
     /// Captures which limit, if any, holds the alarm — the state the
-    /// hysteresis bands act on.
+    /// hysteresis bands act on — plus the tuned limits, so a tracking
+    /// standby inherits runtime tuning.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         state.insert(
@@ -207,13 +249,19 @@ impl Component for AlarmMonitor {
                 Alarm::Low => 2,
             }),
         );
+        state.insert("low_limit", Value::Float(self.limits.low));
+        state.insert("high_limit", Value::Float(self.limits.high));
+        state.insert("hysteresis", Value::Float(self.limits.hysteresis));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["state"])?;
+        state.ensure_known_fields(
+            &self.name,
+            &["state", "low_limit", "high_limit", "hysteresis"],
+        )?;
         let code = state.require_i64(&self.name, "state")?;
-        self.state = match code {
+        let restored = match code {
             0 => Alarm::Clear,
             1 => Alarm::High,
             2 => Alarm::Low,
@@ -225,6 +273,34 @@ impl Component for AlarmMonitor {
                 });
             }
         };
+        let limits = AlarmLimits {
+            low: state.require_f64(&self.name, "low_limit")?,
+            high: state.require_f64(&self.name, "high_limit")?,
+            hysteresis: state.require_f64(&self.name, "hysteresis")?,
+        };
+        // The same invariants `new` and `apply_parameter` enforce.
+        for (field, value) in [
+            ("low_limit", limits.low),
+            ("high_limit", limits.high),
+            ("hysteresis", limits.hysteresis),
+        ] {
+            if !value.is_finite() {
+                return Err(StateError::InvalidValue {
+                    element: self.name.clone(),
+                    field: field.to_string(),
+                    value: Value::Float(value),
+                });
+            }
+        }
+        if limits.low >= limits.high || limits.hysteresis < 0.0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "high_limit".to_string(),
+                value: Value::Float(limits.high),
+            });
+        }
+        self.limits = limits;
+        self.state = restored;
         Ok(())
     }
 }
@@ -461,6 +537,76 @@ mod tests {
             AlarmMonitor::new("alm", IN, ALARM, non_finite),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn apply_parameter_tunes_limits_and_hysteresis() {
+        let mut block = component();
+        block
+            .apply_parameter("high_limit", Value::Float(80.0))
+            .unwrap();
+        block
+            .apply_parameter("hysteresis", Value::Float(2.0))
+            .unwrap();
+        assert_eq!(block.limits.high, 80.0);
+        assert_eq!(block.limits.hysteresis, 2.0);
+
+        // The tuned limits take effect on the next step.
+        let io = io();
+        feed(&io, 85.0, 1);
+        block.step(&io, Tick(1)).unwrap();
+        assert!(alarmed(&io));
+
+        // An undeclared name is a named rejection naming the component.
+        assert_eq!(
+            block
+                .apply_parameter("debounce", Value::Float(1.0))
+                .unwrap_err(),
+            CommandError::UnknownParameter {
+                component: "alm".to_string(),
+                parameter: "debounce".to_string(),
+            }
+        );
+
+        // Crossing low over high refuses and changes nothing — the
+        // cross-parameter invariant no declared range can express.
+        assert!(matches!(
+            block
+                .apply_parameter("low_limit", Value::Float(95.0))
+                .unwrap_err(),
+            CommandError::InvalidParameter {
+                ref component,
+                ref parameter,
+                ..
+            } if component == "alm" && parameter == "low_limit"
+        ));
+        assert_eq!(block.limits.low, 10.0);
+    }
+
+    #[test]
+    fn tuned_limits_ride_the_checkpoint() {
+        let mut block = component();
+        let active_io = io();
+        feed(&active_io, 95.0, 1);
+        block.step(&active_io, Tick(1)).unwrap();
+        block
+            .apply_parameter("high_limit", Value::Float(100.0))
+            .unwrap();
+
+        let state = block.capture_state();
+        assert_eq!(state.get("high_limit"), Some(Value::Float(100.0)));
+        // The banked alarm state rides along with the tuning.
+        assert_eq!(state.get("state"), Some(Value::Int(1)));
+
+        let mut standby = component();
+        standby.restore_state(&state).unwrap();
+        assert_eq!(standby.limits.high, 100.0);
+        // Restore mid-trip: 95 is inside the new limit, but the captured
+        // high-alarm state survives into the next step's hysteresis.
+        let standby_io = io();
+        feed(&standby_io, 99.0, 2);
+        standby.step(&standby_io, Tick(2)).unwrap();
+        assert!(alarmed(&standby_io));
     }
 
     #[test]

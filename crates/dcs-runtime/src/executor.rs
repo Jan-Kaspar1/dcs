@@ -409,6 +409,19 @@ fn failure_quality(error: IoError) -> Quality {
     }
 }
 
+/// A command resolved past static validation: what
+/// [`Executor::apply_commands`] carries out at the scan boundary.
+enum Resolved {
+    /// `WriteValue` on a mapped point of the declared kind.
+    Write { point: PointId, value: Value },
+    /// `SetParameter` on the component at this scan-order index.
+    Parameter {
+        component: usize,
+        name: String,
+        value: Value,
+    },
+}
+
 /// A deterministic fixed-step executor over registered components.
 ///
 /// The scan order is the order `components` were registered in — explicit
@@ -450,6 +463,15 @@ fn failure_quality(error: IoError) -> Quality {
 /// control logic authoritative inside a scan — and a link routing from
 /// the commanded point carries the value to its `In` target that same
 /// scan.
+///
+/// A [`Command::SetParameter`] rides the same boundary: it addresses a
+/// component by the name its descriptor and diagnostics report, is
+/// validated at submission against the component's declared
+/// [`ParameterDescriptor`](dcs_core::ParameterDescriptor)s — existence,
+/// value kind, and declared range — and lands on the component's
+/// [`apply_parameter`](Component::apply_parameter) hook at the head of
+/// the next scan, where a component-side refusal turns the receipt
+/// `Rejected` without changing anything.
 ///
 /// Nothing reads a wall clock: identical driver behavior over identical
 /// scans produces identical samples on every host.
@@ -661,27 +683,32 @@ impl<'d> Executor<'d> {
     /// Queues `command` for application at the start of the next scan and
     /// returns its receipt.
     ///
-    /// Submission validates the command against the point map — the point
-    /// must be served, and the declared kind must match both the map's
-    /// kind and the supplied value's variant — so an invalid command is
-    /// [`CommandOutcome::Rejected`] immediately and never queued. An
-    /// [`CommandOutcome::Accepted`] receipt reports the tick the command
-    /// is scheduled to apply at; at the head of the next
+    /// Submission validates the command statically — a `WriteValue`
+    /// against the point map (the point must be served, and the declared
+    /// kind must match both the map's kind and the supplied value's
+    /// variant), a `SetParameter` against the addressed component's
+    /// descriptor (the component must be registered, the parameter
+    /// declared, the value's kind matching, and a declared
+    /// [`ParameterRange`](dcs_core::ParameterRange) satisfied) — so an
+    /// invalid command is [`CommandOutcome::Rejected`] immediately and
+    /// never queued. An [`CommandOutcome::Accepted`] receipt reports the
+    /// tick the command is scheduled to apply at; at the head of the next
     /// [`scan`](Executor::scan), before the input-read phase, that same
     /// log entry's outcome is updated to [`CommandOutcome::Applied`], or
-    /// `Rejected` with [`CommandError::DriverRejected`] when the field
-    /// driver refuses the write — exactly one receipt per command, kept
+    /// `Rejected` when the driver refuses the write or the component
+    /// refuses the tuned value — exactly one receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
-        let outcome = match self.check_command(command) {
+        let outcome = match self.check_command(&command) {
             Err(reason) => CommandOutcome::Rejected { reason },
             Ok(_) => CommandOutcome::Accepted {
                 apply_tick: Tick(self.tick.0 + 1),
             },
         };
+        let accepted = matches!(outcome, CommandOutcome::Accepted { .. });
         let receipt = CommandReceipt { command, outcome };
-        self.receipts.push(receipt);
-        if matches!(outcome, CommandOutcome::Accepted { .. }) {
+        self.receipts.push(receipt.clone());
+        if accepted {
             self.pending_commands.push_back(self.receipts.len() - 1);
         }
         receipt
@@ -961,33 +988,99 @@ impl<'d> Executor<'d> {
         Ok(())
     }
 
-    /// Validates `command` against the point map, returning the target
-    /// point and value to write. The checks are static — the map fixes
-    /// which points exist and their declared kinds — so the same check at
-    /// submission and at application can only differ when the driver
-    /// refuses the write itself.
-    fn check_command(&self, command: Command) -> Result<(PointId, Value), CommandError> {
+    /// Validates `command` statically and resolves what it will apply.
+    /// The checks are static — the map fixes which points exist and their
+    /// declared kinds, and a component's descriptor fixes which
+    /// parameters exist, their kinds, and their declared ranges — so the
+    /// same check at submission and at application can only differ when
+    /// the driver or the component itself refuses.
+    ///
+    /// A `SetParameter` resolves its component by
+    /// [`name`](Component::name) — the identity the descriptor and the
+    /// snapshot's diagnostics report — then validates against the
+    /// component's declared parameters: a component declaring none is
+    /// [`CommandError::UnsupportedParameter`], an undeclared name is
+    /// [`CommandError::UnknownParameter`], a mismatched value kind is
+    /// [`CommandError::ParameterTypeMismatch`], and a value outside a
+    /// declared [`ParameterRange`](dcs_core::ParameterRange) is
+    /// [`CommandError::OutOfRange`].
+    fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
         match command {
             Command::WriteValue { point, kind, value } => {
                 let spec = self
                     .map
-                    .get(point)
-                    .ok_or(CommandError::UnknownPoint { point })?;
-                if kind != spec.kind {
+                    .get(*point)
+                    .ok_or(CommandError::UnknownPoint { point: *point })?;
+                if *kind != spec.kind {
                     return Err(CommandError::TypeMismatch {
-                        point,
+                        point: *point,
                         expected: spec.kind,
-                        found: value,
+                        found: *value,
                     });
                 }
-                if value.kind() != kind {
+                if value.kind() != *kind {
                     return Err(CommandError::TypeMismatch {
-                        point,
-                        expected: kind,
-                        found: value,
+                        point: *point,
+                        expected: *kind,
+                        found: *value,
                     });
                 }
-                Ok((point, value))
+                Ok(Resolved::Write {
+                    point: *point,
+                    value: *value,
+                })
+            }
+            Command::SetParameter {
+                component,
+                name,
+                value,
+            } => {
+                let index = self
+                    .components
+                    .iter()
+                    .position(|entry| entry.component.name() == component)
+                    .ok_or_else(|| CommandError::UnknownComponent {
+                        component: component.clone(),
+                    })?;
+                let parameters = self.components[index].component.describe().parameters;
+                let declared = match parameters.iter().find(|p| p.name == *name) {
+                    Some(declared) => declared,
+                    None if parameters.is_empty() => {
+                        return Err(CommandError::UnsupportedParameter {
+                            component: component.clone(),
+                            parameter: name.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(CommandError::UnknownParameter {
+                            component: component.clone(),
+                            parameter: name.clone(),
+                        });
+                    }
+                };
+                if value.kind() != declared.kind {
+                    return Err(CommandError::ParameterTypeMismatch {
+                        component: component.clone(),
+                        parameter: name.clone(),
+                        expected: declared.kind,
+                        found: *value,
+                    });
+                }
+                if let Some(range) = declared.range
+                    && !range.contains(*value)
+                {
+                    return Err(CommandError::OutOfRange {
+                        component: component.clone(),
+                        parameter: name.clone(),
+                        value: *value,
+                        range,
+                    });
+                }
+                Ok(Resolved::Parameter {
+                    component: index,
+                    name: name.clone(),
+                    value: *value,
+                })
             }
         }
     }
@@ -1002,12 +1095,17 @@ impl<'d> Executor<'d> {
     /// driver does not serve it — so a held `In` value changes here and
     /// holds until the next command, and a write to an `Out` point routes
     /// through its internal links at this same scan's input phase.
+    ///
+    /// A `SetParameter` lands on the component's
+    /// [`apply_parameter`](Component::apply_parameter) hook at this same
+    /// boundary; a hook refusal settles the receipt `Rejected` and
+    /// changes nothing.
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
-            let command = self.receipts[index].command;
-            self.receipts[index].outcome = match self.check_command(command) {
+            let command = self.receipts[index].command.clone();
+            self.receipts[index].outcome = match self.check_command(&command) {
                 Err(reason) => CommandOutcome::Rejected { reason },
-                Ok((point, value)) => {
+                Ok(Resolved::Write { point, value }) => {
                     let internal = self
                         .map
                         .get(point)
@@ -1031,6 +1129,17 @@ impl<'d> Executor<'d> {
                         }
                     }
                 }
+                Ok(Resolved::Parameter {
+                    component,
+                    name,
+                    value,
+                }) => match self.components[component]
+                    .component
+                    .apply_parameter(&name, value)
+                {
+                    Ok(()) => CommandOutcome::Applied { tick },
+                    Err(reason) => CommandOutcome::Rejected { reason },
+                },
             };
         }
     }
@@ -1857,7 +1966,7 @@ mod tests {
         let mut executor = setpoint_rig(&driver);
         let command = write_value(10, ValueKind::Float, Value::Float(5.0));
 
-        let receipt = executor.submit_command(command);
+        let receipt = executor.submit_command(command.clone());
         assert_eq!(
             receipt,
             CommandReceipt {
@@ -2007,8 +2116,10 @@ mod tests {
         // command, in submission order — accepted commands read `Applied`
         // once their scan boundary has passed.
         let (receipts, _) = run();
-        let outcomes: Vec<CommandOutcome> =
-            receipts.iter().map(|receipt| receipt.outcome).collect();
+        let outcomes: Vec<CommandOutcome> = receipts
+            .iter()
+            .map(|receipt| receipt.outcome.clone())
+            .collect();
         assert_eq!(
             outcomes,
             vec![
@@ -2020,6 +2131,395 @@ mod tests {
                 CommandOutcome::Applied { tick: Tick(3) },
             ]
         );
+    }
+
+    /// A component whose `gain` and `limit` are operator-tunable
+    /// parameters: `out` is `in * gain` clamped to `±limit`. The hook
+    /// owns the cross-parameter invariant `gain <= limit` — declared
+    /// ranges alone cannot express it — and the tuned pair rides the
+    /// checkpoint.
+    struct Tunable {
+        name: &'static str,
+        input: PointId,
+        output: PointId,
+        gain: f64,
+        limit: f64,
+    }
+
+    impl Component for Tunable {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![
+                IoRequirement::input::<f64>("in", self.input),
+                IoRequirement::output::<f64>("out", self.output),
+            ]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            let sample = io.read_typed::<f64>(self.input)?;
+            io.write_typed(
+                self.output,
+                (sample.value * self.gain).clamp(-self.limit, self.limit),
+            )?;
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            let range = ParameterRange {
+                min: Value::Float(0.0),
+                max: Value::Float(10.0),
+            };
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "tunable".to_string(),
+                label: self.name.to_string(),
+                ports: self
+                    .io_requirements()
+                    .into_iter()
+                    .map(|requirement| PortDescriptor {
+                        name: requirement.name,
+                        direction: requirement.direction,
+                        kind: requirement.kind,
+                        role: None,
+                    })
+                    .collect(),
+                parameters: ["gain", "limit"]
+                    .into_iter()
+                    .map(|name| ParameterDescriptor {
+                        name: name.to_string(),
+                        kind: ValueKind::Float,
+                        range: Some(range),
+                    })
+                    .collect(),
+            }
+        }
+
+        fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+            let mismatch = || CommandError::ParameterTypeMismatch {
+                component: self.name.to_string(),
+                parameter: parameter.to_string(),
+                expected: ValueKind::Float,
+                found: value,
+            };
+            let mut gain = self.gain;
+            let mut limit = self.limit;
+            match parameter {
+                "gain" => gain = f64::try_from(value).map_err(|_| mismatch())?,
+                "limit" => limit = f64::try_from(value).map_err(|_| mismatch())?,
+                _ => {
+                    return Err(CommandError::UnknownParameter {
+                        component: self.name.to_string(),
+                        parameter: parameter.to_string(),
+                    });
+                }
+            }
+            if gain > limit {
+                return Err(CommandError::InvalidParameter {
+                    component: self.name.to_string(),
+                    parameter: parameter.to_string(),
+                    detail: "gain must not exceed limit".to_string(),
+                });
+            }
+            self.gain = gain;
+            self.limit = limit;
+            Ok(())
+        }
+
+        fn capture_state(&self) -> StateMap {
+            let mut state = StateMap::new();
+            state.insert("gain", Value::Float(self.gain));
+            state.insert("limit", Value::Float(self.limit));
+            state
+        }
+
+        fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+            state.ensure_known_fields(self.name, &["gain", "limit"])?;
+            self.gain = state.require_f64(self.name, "gain")?;
+            self.limit = state.require_f64(self.name, "limit")?;
+            Ok(())
+        }
+    }
+
+    fn set_parameter(component: &str, name: &str, value: Value) -> Command {
+        Command::SetParameter {
+            component: component.to_string(),
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    /// Rig for parameter commands: `Tunable` ("loop") reads `In` point
+    /// 10 and drives `Out` point 20 at gain 2, limit 10; `Scale` ("a")
+    /// rides along as the parameterless component.
+    fn tuning_rig(driver: &StubDriver) -> Executor<'_> {
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        Executor::new(
+            driver,
+            map,
+            vec![
+                Box::new(Tunable {
+                    name: "loop",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                    limit: 10.0,
+                }),
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(30),
+                    gain: 1.0,
+                }),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parameter_command_applies_at_the_scan_boundary() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
+
+        let command = set_parameter("loop", "gain", Value::Float(3.0));
+        let receipt = executor.submit_command(command.clone());
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command,
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(2)
+                },
+            }
+        );
+        // Queued, not yet applied: the component still runs the old gain.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        // The tuned gain changed the output deterministically: 1.0 * 3.
+        assert_eq!(driver_value(&driver, 20), Value::Float(3.0));
+    }
+
+    #[test]
+    fn parameter_command_rejections_name_the_offending_component() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = tuning_rig(&driver);
+
+        // The component name resolves nothing registered.
+        let receipt = executor.submit_command(set_parameter("nope", "gain", Value::Float(1.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownComponent {
+                    component: "nope".to_string(),
+                }
+            }
+        );
+        if let CommandOutcome::Rejected { reason } = &receipt.outcome {
+            assert_eq!(reason.component(), Some("nope"));
+        }
+
+        // A component whose kind declares no writable parameters.
+        let receipt = executor.submit_command(set_parameter("a", "gain", Value::Float(1.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnsupportedParameter {
+                    component: "a".to_string(),
+                    parameter: "gain".to_string(),
+                }
+            }
+        );
+
+        // A parameter the descriptor does not declare.
+        let receipt = executor.submit_command(set_parameter("loop", "bias", Value::Float(1.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownParameter {
+                    component: "loop".to_string(),
+                    parameter: "bias".to_string(),
+                }
+            }
+        );
+
+        // The value's kind differs from the declared kind.
+        let receipt = executor.submit_command(set_parameter("loop", "gain", Value::Bool(true)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::ParameterTypeMismatch {
+                    component: "loop".to_string(),
+                    parameter: "gain".to_string(),
+                    expected: ValueKind::Float,
+                    found: Value::Bool(true),
+                }
+            }
+        );
+
+        // Every rejection carried the offending component and none were
+        // queued: the next scan applies nothing.
+        for receipt in executor.receipts() {
+            if let CommandOutcome::Rejected { reason } = &receipt.outcome {
+                assert!(reason.component().is_some(), "receipt={receipt:?}");
+            }
+        }
+        executor.scan().unwrap();
+        assert_eq!(executor.receipts().len(), 4);
+    }
+
+    #[test]
+    fn out_of_range_parameter_rejects_without_applying() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+
+        // `gain` declares [0, 10]; 11 never queues.
+        let receipt = executor.submit_command(set_parameter("loop", "gain", Value::Float(11.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::OutOfRange {
+                    component: "loop".to_string(),
+                    parameter: "gain".to_string(),
+                    value: Value::Float(11.0),
+                    range: ParameterRange {
+                        min: Value::Float(0.0),
+                        max: Value::Float(10.0),
+                    },
+                }
+            }
+        );
+        executor.scan().unwrap();
+        // Untouched: the run still drives the constructor's gain.
+        assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
+    }
+
+    #[test]
+    fn component_refusal_at_the_boundary_leaves_state_untouched() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+
+        // limit=1.5 passes the declared range but the hook's
+        // `gain <= limit` invariant — gain is still 2 — refuses it.
+        let receipt = executor.submit_command(set_parameter("loop", "limit", Value::Float(1.5)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::InvalidParameter {
+                    component: "loop".to_string(),
+                    parameter: "limit".to_string(),
+                    detail: "gain must not exceed limit".to_string(),
+                }
+            }
+        );
+        // A refused parameter changes nothing.
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
+    }
+
+    #[test]
+    fn parameter_commands_apply_in_submission_order_with_writes() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+
+        // Three commands share one boundary: a parameter tune, a point
+        // write, and a second tune that relies on the first having
+        // landed — raising gain past the old limit is only legal
+        // because limit was raised first.
+        executor.submit_command(set_parameter("loop", "limit", Value::Float(8.0)));
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(2.0)));
+        executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
+        executor.scan().unwrap();
+
+        assert_eq!(
+            executor
+                .receipts()
+                .iter()
+                .map(|receipt| receipt.outcome.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                CommandOutcome::Applied { tick: Tick(1) },
+                CommandOutcome::Applied { tick: Tick(1) },
+                CommandOutcome::Applied { tick: Tick(1) },
+            ]
+        );
+        // in=2 written at the boundary, gain=4 applied: out = 8 = limit.
+        assert_eq!(driver_value(&driver, 20), Value::Float(8.0));
+    }
+
+    #[test]
+    fn checkpoint_restores_tuned_parameters() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+        executor.scan().unwrap();
+        executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(4.0));
+
+        let checkpoint = executor.checkpoint();
+        // The tuned gain is inside the component's captured state.
+        assert_eq!(
+            checkpoint.components["loop"].get("gain"),
+            Some(Value::Float(4.0))
+        );
+
+        // A fresh executor — constructor tuning, not the command's —
+        // restores to the tuned run state.
+        let standby = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        standby.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut restored = Executor::restore(
+            &standby,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                Box::new(Tunable {
+                    name: "loop",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                    limit: 10.0,
+                }),
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(30),
+                    gain: 1.0,
+                }),
+            ],
+            &checkpoint,
+        )
+        .unwrap();
+        restored.scan().unwrap();
+        assert_eq!(driver_value(&standby, 20), Value::Float(4.0));
     }
 
     /// A stateful component: counts its scans into an `Int` output and

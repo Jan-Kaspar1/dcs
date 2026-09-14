@@ -3,7 +3,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PointType, PortRole, Quality, QualityReason, Sample, Tick, Value,
+    CommandError, ComponentDescriptor, PointId, PointType, PortRole, Quality, QualityReason,
+    Sample, StateError, StateMap, Tick, Value,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 use std::marker::PhantomData;
@@ -218,6 +219,85 @@ impl<R: RawInput> Component for AnalogInput<R> {
             &[("raw", PortRole::ProcessValue), ("out", PortRole::Output)],
             describe::scaling_parameters(),
         )
+    }
+
+    /// Tunes one scaling bound at the scan boundary.
+    ///
+    /// The executor pre-checks the descriptor — declared name, `Float`
+    /// kind, and the `FINITE_F64` bound — so this hook owns the
+    /// cross-parameter invariant `raw_min != raw_max`: a bound that
+    /// would flatten the raw range is [`CommandError::InvalidParameter`]
+    /// and changes nothing.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        let tuned = params::tune_f64(&self.name, parameter, value)?;
+        let mut scaling = self.scaling;
+        match parameter {
+            "raw_min" => scaling.raw_min = tuned,
+            "raw_max" => scaling.raw_max = tuned,
+            "eng_min" => scaling.eng_min = tuned,
+            "eng_max" => scaling.eng_max = tuned,
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        if !tuned.is_finite() {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "must be finite",
+            ));
+        }
+        if scaling.raw_min == scaling.raw_max {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "raw range must have non-zero span",
+            ));
+        }
+        self.scaling = scaling;
+        Ok(())
+    }
+
+    /// Captures the tuned scaling bounds — runtime tuning is run state
+    /// a tracking standby must inherit.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("raw_min", Value::Float(self.scaling.raw_min));
+        state.insert("raw_max", Value::Float(self.scaling.raw_max));
+        state.insert("eng_min", Value::Float(self.scaling.eng_min));
+        state.insert("eng_max", Value::Float(self.scaling.eng_max));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["raw_min", "raw_max", "eng_min", "eng_max"])?;
+        let scaling = Scaling {
+            raw_min: state.require_f64(&self.name, "raw_min")?,
+            raw_max: state.require_f64(&self.name, "raw_max")?,
+            eng_min: state.require_f64(&self.name, "eng_min")?,
+            eng_max: state.require_f64(&self.name, "eng_max")?,
+        };
+        for (field, value) in [
+            ("raw_min", scaling.raw_min),
+            ("raw_max", scaling.raw_max),
+            ("eng_min", scaling.eng_min),
+            ("eng_max", scaling.eng_max),
+        ] {
+            if !value.is_finite() {
+                return Err(StateError::InvalidValue {
+                    element: self.name.clone(),
+                    field: field.to_string(),
+                    value: Value::Float(value),
+                });
+            }
+        }
+        if scaling.raw_min == scaling.raw_max {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "raw_max".to_string(),
+                value: Value::Float(scaling.raw_max),
+            });
+        }
+        self.scaling = scaling;
+        Ok(())
     }
 }
 

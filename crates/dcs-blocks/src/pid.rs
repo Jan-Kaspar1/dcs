@@ -4,8 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, StateError, StateMap,
-    Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -245,9 +245,57 @@ impl Component for Pid {
         )
     }
 
+    /// Tunes a declared parameter at the scan boundary.
+    ///
+    /// The executor pre-checks the descriptor — declared name, `Float`
+    /// kind, and the declared range — so this hook owns the invariants
+    /// no per-parameter range can express: `dt > 0` and
+    /// `out_min < out_max` across fields. A value breaking them is
+    /// [`CommandError::InvalidParameter`] and changes nothing; a
+    /// retuned limit re-clamps the held `last_output` so the hold path
+    /// stays inside the new bounds.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        let tuned = params::tune_f64(&self.name, parameter, value)?;
+        let mut config = self.config;
+        match parameter {
+            "kp" => config.kp = tuned,
+            "ki" => config.ki = tuned,
+            "kd" => config.kd = tuned,
+            "dt" => config.dt = tuned,
+            "out_min" => config.out_min = tuned,
+            "out_max" => config.out_max = tuned,
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        if !tuned.is_finite() {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "must be finite",
+            ));
+        }
+        if config.dt <= 0.0 {
+            return Err(params::invalid_parameter(
+                &self.name,
+                "dt",
+                "must be positive",
+            ));
+        }
+        if config.out_min >= config.out_max {
+            return Err(params::invalid_parameter(
+                &self.name,
+                parameter,
+                "output limits require out_min < out_max",
+            ));
+        }
+        self.config = config;
+        self.last_output = self.last_output.clamp(config.out_min, config.out_max);
+        Ok(())
+    }
+
     /// Captures the integrator, the previous `pv` (when any step has run),
     /// and the held last output — the state a standby needs to continue
-    /// the loop bumplessly.
+    /// the loop bumplessly — plus the tuning: a `set_parameter` command's
+    /// gains are run state a tracking standby must inherit.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         state.insert("integrator", Value::Float(self.integrator));
@@ -255,14 +303,75 @@ impl Component for Pid {
         if let Some(previous) = self.previous_pv {
             state.insert("previous_pv", Value::Float(previous));
         }
+        state.insert("kp", Value::Float(self.config.kp));
+        state.insert("ki", Value::Float(self.config.ki));
+        state.insert("kd", Value::Float(self.config.kd));
+        state.insert("dt", Value::Float(self.config.dt));
+        state.insert("out_min", Value::Float(self.config.out_min));
+        state.insert("out_max", Value::Float(self.config.out_max));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["integrator", "last_output", "previous_pv"])?;
+        state.ensure_known_fields(
+            &self.name,
+            &[
+                "integrator",
+                "last_output",
+                "previous_pv",
+                "kp",
+                "ki",
+                "kd",
+                "dt",
+                "out_min",
+                "out_max",
+            ],
+        )?;
         let integrator = state.require_f64(&self.name, "integrator")?;
         let last_output = state.require_f64(&self.name, "last_output")?;
         let previous_pv = state.optional_f64(&self.name, "previous_pv")?;
+        let config = PidConfig {
+            kp: state.require_f64(&self.name, "kp")?,
+            ki: state.require_f64(&self.name, "ki")?,
+            kd: state.require_f64(&self.name, "kd")?,
+            dt: state.require_f64(&self.name, "dt")?,
+            out_min: state.require_f64(&self.name, "out_min")?,
+            out_max: state.require_f64(&self.name, "out_max")?,
+        };
+        // The same invariants `new` and `apply_parameter` enforce, so a
+        // map captured out of contract cannot hand back a config the
+        // constructor would refuse.
+        for (field, value) in [
+            ("kp", config.kp),
+            ("ki", config.ki),
+            ("kd", config.kd),
+            ("dt", config.dt),
+            ("out_min", config.out_min),
+            ("out_max", config.out_max),
+        ] {
+            if !value.is_finite() {
+                return Err(StateError::InvalidValue {
+                    element: self.name.clone(),
+                    field: field.to_string(),
+                    value: Value::Float(value),
+                });
+            }
+        }
+        if config.dt <= 0.0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "dt".to_string(),
+                value: Value::Float(config.dt),
+            });
+        }
+        if config.out_min >= config.out_max {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "out_max".to_string(),
+                value: Value::Float(config.out_max),
+            });
+        }
+        self.config = config;
         self.integrator = integrator;
         self.last_output = last_output;
         self.previous_pv = previous_pv;
@@ -438,6 +547,130 @@ mod tests {
             Pid::new("pid", SP, PV, OUT, bad_dt),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn apply_parameter_tunes_gains_and_limits() {
+        let mut pid = Pid::new("pid", SP, PV, OUT, config()).unwrap();
+        pid.apply_parameter("kp", Value::Float(3.5)).unwrap();
+        pid.apply_parameter("out_max", Value::Float(8.0)).unwrap();
+        assert_eq!(pid.config.kp, 3.5);
+        assert_eq!(pid.config.out_max, 8.0);
+
+        // An undeclared name is a named rejection naming the component.
+        assert_eq!(
+            pid.apply_parameter("bias", Value::Float(1.0)).unwrap_err(),
+            CommandError::UnknownParameter {
+                component: "pid".to_string(),
+                parameter: "bias".to_string(),
+            }
+        );
+
+        // A wrong-kind value is a named rejection too — the executor's
+        // descriptor check normally pre-filters it, but the hook does
+        // not rely on that.
+        assert!(matches!(
+            pid.apply_parameter("kp", Value::Bool(true)).unwrap_err(),
+            CommandError::ParameterTypeMismatch {
+                ref component,
+                ref parameter,
+                ..
+            } if component == "pid" && parameter == "kp"
+        ));
+
+        // The invariants the descriptor cannot express stay the hook's:
+        // a limit inversion or a non-positive dt refuse and change
+        // nothing.
+        assert_eq!(
+            pid.apply_parameter("out_min", Value::Float(9.0))
+                .unwrap_err(),
+            CommandError::InvalidParameter {
+                component: "pid".to_string(),
+                parameter: "out_min".to_string(),
+                detail: "output limits require out_min < out_max".to_string(),
+            }
+        );
+        assert_eq!(pid.config.out_min, 0.0);
+        assert!(matches!(
+            pid.apply_parameter("dt", Value::Float(0.0)).unwrap_err(),
+            CommandError::InvalidParameter {
+                ref component,
+                ref parameter,
+                ..
+            } if component == "pid" && parameter == "dt"
+        ));
+        assert_eq!(pid.config.dt, 0.1);
+    }
+
+    #[test]
+    fn tuned_parameters_ride_the_checkpoint() {
+        let mut pid = Pid::new("pid", SP, PV, OUT, config()).unwrap();
+        let io = io(4.0, 1.0);
+        pid.step(&io, Tick(1)).unwrap();
+        pid.apply_parameter("ki", Value::Float(0.5)).unwrap();
+
+        // A fresh block with constructor tuning restores to the tuned
+        // configuration plus the banked run state.
+        let state = pid.capture_state();
+        assert_eq!(state.get("ki"), Some(Value::Float(0.5)));
+        let mut standby = Pid::new("pid", SP, PV, OUT, config()).unwrap();
+        standby.restore_state(&state).unwrap();
+        assert_eq!(standby.config.ki, 0.5);
+        assert_eq!(standby.integral(), pid.integral());
+        assert_eq!(standby.last_output(), pid.last_output());
+    }
+
+    #[test]
+    fn set_parameter_command_retunes_the_loop_at_the_boundary() {
+        // The acceptance path end to end: an operator command tunes the
+        // registered Pid at the next scan boundary and the output moves
+        // deterministically — e = 4 with ki = kd = 0 gives u = kp·4.
+        let channel_map = ChannelMap::new()
+            .with_point(sim_point(PV, dcs_sim::Direction::In))
+            .with_point(sim_point(SP, dcs_sim::Direction::In))
+            .with_point(sim_point(OUT, dcs_sim::Direction::Out));
+        let sim = SimDriver::new(channel_map).unwrap();
+        let point_map: dcs_runtime::PointMap = [
+            (PV, Direction::In, dcs_core::ValueKind::Float),
+            (SP, Direction::In, dcs_core::ValueKind::Float),
+            (OUT, Direction::Out, dcs_core::ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let pid = Pid::new(
+            "pid",
+            SP,
+            PV,
+            OUT,
+            PidConfig {
+                kp: 1.0,
+                ki: 0.0,
+                kd: 0.0,
+                out_min: -100.0,
+                out_max: 100.0,
+                ..config()
+            },
+        )
+        .unwrap();
+        let mut executor = Executor::new(&sim, point_map, vec![Box::new(pid)]).unwrap();
+        sim.write(SP, Value::Float(5.0)).unwrap();
+        sim.write(PV, Value::Float(1.0)).unwrap();
+        executor.scan().unwrap();
+        assert_eq!(sim.read(OUT).unwrap().value, Value::Float(4.0));
+
+        let receipt = executor.submit_command(dcs_core::Command::SetParameter {
+            component: "pid".to_string(),
+            name: "kp".to_string(),
+            value: Value::Float(2.0),
+        });
+        assert!(matches!(
+            receipt.outcome,
+            dcs_core::CommandOutcome::Accepted { .. }
+        ));
+        // Not yet applied: the boundary is the next scan.
+        assert_eq!(sim.read(OUT).unwrap().value, Value::Float(4.0));
+        executor.scan().unwrap();
+        assert_eq!(sim.read(OUT).unwrap().value, Value::Float(8.0));
     }
 
     #[test]

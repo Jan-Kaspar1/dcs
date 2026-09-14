@@ -4,7 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
+    Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -147,9 +148,30 @@ impl Component for DigitalInput {
         )
     }
 
-    /// Captures the driven output value and the debounce's in-progress
+    /// Tunes a declared parameter at the scan boundary.
+    ///
+    /// Flipping `invert` changes the *conditioned* value the debounce
+    /// watches, so the banked observation no longer applies: the
+    /// debounce restarts on the next scan's reading. `debounce_ticks`
+    /// retunes the hold count a pending change is measured against.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "invert" => {
+                self.invert = params::tune_bool(&self.name, parameter, value)?;
+                self.stable = None;
+            }
+            "debounce_ticks" => {
+                self.debounce_ticks = params::tune_u64(&self.name, parameter, value)?;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the driven output value, the debounce's in-progress
     /// observation (`stable_value`/`stable_count`, absent before the
-    /// first step).
+    /// first step), and the tuned `invert`/`debounce_ticks` so a
+    /// tracking standby inherits runtime tuning.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         state.insert("driven", Value::Bool(self.driven));
@@ -157,11 +179,22 @@ impl Component for DigitalInput {
             state.insert("stable_value", Value::Bool(value));
             state.insert("stable_count", Value::Int(held as i64));
         }
+        state.insert("invert", Value::Bool(self.invert));
+        state.insert("debounce_ticks", Value::Int(self.debounce_ticks as i64));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["driven", "stable_value", "stable_count"])?;
+        state.ensure_known_fields(
+            &self.name,
+            &[
+                "driven",
+                "stable_value",
+                "stable_count",
+                "invert",
+                "debounce_ticks",
+            ],
+        )?;
         let driven = state.require_bool(&self.name, "driven")?;
         let stable = match (
             state.optional_bool(&self.name, "stable_value")?,
@@ -189,8 +222,18 @@ impl Component for DigitalInput {
                 });
             }
         };
+        let debounce_ticks = state.require_i64(&self.name, "debounce_ticks")?;
+        if debounce_ticks < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "debounce_ticks".to_string(),
+                value: Value::Int(debounce_ticks),
+            });
+        }
         self.driven = driven;
         self.stable = stable;
+        self.invert = state.require_bool(&self.name, "invert")?;
+        self.debounce_ticks = debounce_ticks as u64;
         Ok(())
     }
 }

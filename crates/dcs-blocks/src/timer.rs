@@ -4,7 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
+    Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -163,19 +164,52 @@ impl Component for Timer {
         )
     }
 
-    /// Captures the in-progress count so a checkpointed timer continues
-    /// mid-count: a restored timer with `elapsed` scans banked needs
-    /// exactly `delay_ticks - elapsed` further scans of the timed state.
+    /// Tunes a declared parameter at the scan boundary.
+    ///
+    /// Shrinking `delay_ticks` below the banked `elapsed` clamps the
+    /// count at the new bound — an on-delay timer already satisfied
+    /// asserts on the next scan. Switching `off_delay` mid-run resets the
+    /// count: banked scans of one mode mean nothing in the other, so the
+    /// switch starts a clean count rather than reinterpreting them.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "delay_ticks" => {
+                self.delay_ticks = params::tune_u64(&self.name, parameter, value)?;
+                self.elapsed = self.elapsed.min(self.delay_ticks);
+            }
+            "off_delay" => {
+                self.off_delay = params::tune_bool(&self.name, parameter, value)?;
+                self.elapsed = 0;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the in-progress count and the tuned delay so a
+    /// checkpointed timer continues mid-count under the same tuning: a
+    /// restored timer with `elapsed` scans banked needs exactly
+    /// `delay_ticks - elapsed` further scans of the timed state.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         state.insert("elapsed", Value::Int(self.elapsed as i64));
+        state.insert("delay_ticks", Value::Int(self.delay_ticks as i64));
+        state.insert("off_delay", Value::Bool(self.off_delay));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["elapsed"])?;
+        state.ensure_known_fields(&self.name, &["elapsed", "delay_ticks", "off_delay"])?;
         let elapsed = state.require_i64(&self.name, "elapsed")?;
-        if elapsed < 0 || elapsed as u64 > self.delay_ticks {
+        let delay_ticks = state.require_i64(&self.name, "delay_ticks")?;
+        if delay_ticks < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "delay_ticks".to_string(),
+                value: Value::Int(delay_ticks),
+            });
+        }
+        if elapsed < 0 || elapsed > delay_ticks {
             return Err(StateError::InvalidValue {
                 element: self.name.clone(),
                 field: "elapsed".to_string(),
@@ -183,6 +217,8 @@ impl Component for Timer {
             });
         }
         self.elapsed = elapsed as u64;
+        self.delay_ticks = delay_ticks as u64;
+        self.off_delay = state.require_bool(&self.name, "off_delay")?;
         Ok(())
     }
 }
@@ -394,12 +430,16 @@ mod tests {
         let mut block = component();
         let mut state = StateMap::new();
         state.insert("elapsed", Value::Int(7)); // beyond delay_ticks
+        state.insert("delay_ticks", Value::Int(3));
+        state.insert("off_delay", Value::Bool(false));
         assert!(matches!(
             block.restore_state(&state),
             Err(StateError::InvalidValue { ref field, .. }) if field == "elapsed"
         ));
         let mut state = StateMap::new();
         state.insert("elapsed", Value::Bool(true));
+        state.insert("delay_ticks", Value::Int(3));
+        state.insert("off_delay", Value::Bool(false));
         assert!(matches!(
             block.restore_state(&state),
             Err(StateError::IncompatibleField { ref field, .. }) if field == "elapsed"

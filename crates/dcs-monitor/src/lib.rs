@@ -371,11 +371,11 @@ impl<'d> Monitor<'d> {
                         let receipt = peer.submit_command(command);
                         let index = peer.receipts().len() - 1;
                         let tick = peer.tick();
-                        recorder.note_command(index, receipt, tick);
+                        recorder.note_command(index, receipt.clone(), tick);
                         receipt
                     } else {
                         let receipt = CommandReceipt {
-                            command,
+                            command: command.clone(),
                             outcome: CommandOutcome::Rejected {
                                 reason: CommandError::NotActive {
                                     point: command.point(),
@@ -383,7 +383,7 @@ impl<'d> Monitor<'d> {
                                 },
                             },
                         };
-                        recorder.note_settled(receipt, peer.tick());
+                        recorder.note_settled(receipt.clone(), peer.tick());
                         receipt
                     };
                     json(200, &receipt)
