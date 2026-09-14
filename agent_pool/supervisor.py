@@ -174,6 +174,10 @@ Repair context: {repair}
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 self.log('Planner failed: ' + json.dumps(receipt))
                 return
+            if not Path(current['output']).is_file():
+                self.state.set('last_error', 'Planner produced no proposal; inspect its permission/output log')
+                self.log('Planner produced no proposal; inspect its permission/output log')
+                return
             proposal = planning.validate(json.loads(Path(current['output']).read_text()))
             self.state.set('pending_proposal', proposal)
         if self.state.paused():
@@ -203,7 +207,7 @@ Repair context: {repair}
         if now - last < 7200 and not (ready < 6 and now - last >= 900):
             return
         clone = self.runtime.prepare_clone('coordinator')
-        output = self.root / 'prompts' / f'proposal-{int(now)}.json'
+        output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
         output.parent.mkdir(parents=True, exist_ok=True)
         process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output))
         self.state.set('planner', {'process': process, 'output': str(output)})
