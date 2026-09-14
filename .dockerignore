@@ -5,3 +5,11 @@
 /.venv/
 **/__pycache__/
 *.py[cod]
+
+# Tooling the Rust build stage does not consume: the agent pool, its
+# Python test suite, helper scripts, and CI workflow definitions.
+# `docs/` stays — `dcs-assembly` doc-includes the integration guide.
+/agent_pool/
+/tests/
+/scripts/
+/.github/
