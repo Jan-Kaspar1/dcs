@@ -493,6 +493,73 @@ fn trend_and_journal_feeds_track_the_run() {
 }
 
 #[test]
+fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
+    // The paced binding a controller uses: the hosting loop drives
+    // paced_scan, so POST /scan is refused — the wall clock owns the
+    // schedule and an endpoint-driven tick would break it.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let map: PointMap = [
+        (PointId(10), Direction::In, ValueKind::Float),
+        (PointId(20), Direction::Out, ValueKind::Float),
+        (PointId(30), Direction::Out, ValueKind::Float),
+    ]
+    .into_iter()
+    .collect();
+    let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
+    let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+
+        // The paced loop's entry point: the scan runs through the shared
+        // lock and is recorded like an endpoint-driven one.
+        assert_eq!(monitor.paced_scan(), Ok(Tick(1)));
+        assert_eq!(monitor.tick(), Tick(1));
+        assert_eq!(client.snapshot().unwrap().tick, Tick(1));
+        assert_eq!(
+            point_value(&monitor.snapshot(), 20),
+            Some(Value::Float(6.0))
+        );
+        let history = client.history(&[PointId(10)], 0).unwrap();
+        assert_eq!(history[0].samples.len(), 1);
+
+        // Externally requested scans are refused under pacing.
+        let (status, body) = client
+            .request("POST", "/scan", Some(r#"{"scans":1}"#))
+            .unwrap();
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("paced"), "{body}");
+        assert_eq!(monitor.tick(), Tick(1));
+
+        // Commands still queue for the paced boundary and settle there.
+        let receipt = client
+            .command(&write_value(10, ValueKind::Float, Value::Float(7.0)))
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+        monitor.paced_scan().unwrap();
+        assert_eq!(
+            client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            point_value(&client.snapshot().unwrap(), 20),
+            Some(Value::Float(14.0))
+        );
+
+        monitor.shutdown();
+    });
+}
+
+#[test]
 fn malformed_bodies_and_unknown_paths_are_http_errors() {
     with_monitor(|_driver, client| {
         // Garbage JSON is a 400, not a panic or a silent rejection.

@@ -10,5 +10,7 @@ dcs-assembly = { path = "../dcs-assembly" }
 dcs-blocks = { path = "../dcs-blocks" }
 dcs-core = { path = "../dcs-core" }
 dcs-model = { path = "../dcs-model" }
+dcs-monitor = { path = "../dcs-monitor" }
 dcs-runtime = { path = "../dcs-runtime" }
+dcs-sim = { path = "../dcs-sim" }
 serde_json = "1.0.151"
