@@ -118,13 +118,10 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
         (PointId(20), Value::Float(0.0)),
         (PointId(30), Value::Float(0.0)),
     ]);
-    let map: PointMap = [
-        (PointId(10), Direction::In, ValueKind::Float),
-        (PointId(20), Direction::Out, ValueKind::Float),
-        (PointId(30), Direction::Out, ValueKind::Float),
-    ]
-    .into_iter()
-    .collect();
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
     let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
     let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
@@ -237,10 +234,21 @@ fn rejected_commands_return_named_reasons() {
             }
         );
 
-        // Driver rejection surfaces at the scan boundary.
-        driver.faults.lock().unwrap().insert(PointId(30));
+        // An unmarked or `Out` point is not a command target.
         let receipt = client
             .command(&write_value(30, ValueKind::Float, Value::Float(9.0)))
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(30) }
+            }
+        );
+
+        // Driver rejection surfaces at the scan boundary.
+        driver.faults.lock().unwrap().insert(PointId(10));
+        let receipt = client
+            .command(&write_value(10, ValueKind::Float, Value::Float(9.0)))
             .unwrap();
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
         client.advance(1).unwrap();
@@ -248,11 +256,12 @@ fn rejected_commands_return_named_reasons() {
             client.receipts().unwrap().last().unwrap().outcome,
             CommandOutcome::Rejected {
                 reason: CommandError::DriverRejected {
-                    point: PointId(30),
-                    error: IoError::Disconnected(PointId(30)),
+                    point: PointId(10),
+                    error: IoError::Disconnected(PointId(10)),
                 }
             }
         );
+        driver.faults.lock().unwrap().remove(&PointId(10));
         // A component-targeted command roundtrips through the same POST
         // contract and is answered by the same receipt shape.
         let command = Command::SetParameter {
@@ -553,13 +562,10 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
         (PointId(20), Value::Float(0.0)),
         (PointId(30), Value::Float(0.0)),
     ]);
-    let map: PointMap = [
-        (PointId(10), Direction::In, ValueKind::Float),
-        (PointId(20), Direction::Out, ValueKind::Float),
-        (PointId(30), Direction::Out, ValueKind::Float),
-    ]
-    .into_iter()
-    .collect();
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
     let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
     let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
     let client = MonitorClient::new(monitor.local_addr());

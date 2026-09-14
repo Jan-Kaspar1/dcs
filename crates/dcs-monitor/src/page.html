@@ -518,6 +518,7 @@ function describeOutcome(outcome) {
 }
 
 // A rejection reason serializes as {"unknown_point": {point}} |
+// {"not_writable": {point}} |
 // {"type_mismatch": {point, expected, found}} |
 // {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
 // the parameter-command reasons
@@ -527,6 +528,10 @@ function describeOutcome(outcome) {
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
+  }
+  if ("not_writable" in reason) {
+    return pointName(reason.not_writable.point) +
+      " is not declared writable — the model marks the command surface";
   }
   if ("type_mismatch" in reason) {
     const mismatch = reason.type_mismatch;
@@ -635,7 +640,10 @@ async function submitCommand(command) {
 async function init() {
   index = await (await fetch("/signals")).json();
   const select = document.getElementById("command-point");
-  select.innerHTML = index.points.map(p =>
+  // The command form offers only the model-declared writable points —
+  // the index carries each io_point's `writable` mark, and writes to
+  // anything else reject with not_writable.
+  select.innerHTML = index.points.filter(p => p.writable).map(p =>
     "<option value=\"" + p.point + "\">" + esc(p.name) +
     " (point " + p.point + ")</option>").join("");
   buildTrends();
@@ -643,6 +651,7 @@ async function init() {
     event.preventDefault();
     const point = Number(select.value);
     const meta = index.points.find(p => p.point === point);
+    if (!meta) return;
     const command = { write_value: {
       point: point,
       kind: meta.value_type,

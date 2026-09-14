@@ -31,6 +31,13 @@ pub struct PointSpec {
     /// path for `In`, by a component for `Out`. `None` marks a field
     /// point the driver serves.
     pub internal: Option<Value>,
+    /// Whether the point accepts operator `WriteValue` commands — the
+    /// `writable` flag a model `io_point` declaration carries through
+    /// assembly. Only `In` points honor the mark: the command path
+    /// refuses every `Out` point with
+    /// [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable)
+    /// regardless.
+    pub writable: bool,
 }
 
 /// The executor's point map: which logical points exist, whether the
@@ -66,6 +73,31 @@ impl PointMap {
                 direction,
                 kind,
                 internal: None,
+                writable: false,
+            },
+        );
+        self
+    }
+
+    /// Adds `point` as a driver-served field point marked writable — the
+    /// flag a model `io_point` declaration carries. A command write to a
+    /// writable `In` point is forwarded to the driver at the scan
+    /// boundary as documented operator substitution of the input image;
+    /// the mark is inert on an `Out` point, whose writes the command
+    /// path refuses outright. A repeated id replaces the earlier spec.
+    pub fn with_writable_point(
+        mut self,
+        point: PointId,
+        direction: Direction,
+        kind: ValueKind,
+    ) -> Self {
+        self.points.insert(
+            point,
+            PointSpec {
+                direction,
+                kind,
+                internal: None,
+                writable: true,
             },
         );
         self
@@ -87,6 +119,32 @@ impl PointMap {
                 direction,
                 kind,
                 internal: Some(initial),
+                writable: false,
+            },
+        );
+        self
+    }
+
+    /// Adds `point` as an image-carried internal point holding `initial`,
+    /// marked writable — the common operator-value target: a command
+    /// write lands in the image at the scan boundary and components
+    /// observe it in that scan. As for
+    /// [`with_writable_point`](Self::with_writable_point), the mark is
+    /// inert on an `Out` point. A repeated id replaces the earlier spec.
+    pub fn with_writable_internal(
+        mut self,
+        point: PointId,
+        direction: Direction,
+        kind: ValueKind,
+        initial: Value,
+    ) -> Self {
+        self.points.insert(
+            point,
+            PointSpec {
+                direction,
+                kind,
+                internal: Some(initial),
+                writable: true,
             },
         );
         self
@@ -454,15 +512,22 @@ enum Resolved {
 /// [`snapshot`](Executor::snapshot) and
 /// [`checkpoint`](Executor::checkpoint).
 ///
-/// Applying commands before the input read gives a command to an `In`
-/// point setpoint semantics: the same scan's input phase observes the
-/// written value, and it holds for later scans until the field-side value
-/// changes again — for an internal `In` point, until the next command.
-/// A command to an `Out` point lands in the image where a component write
-/// later in the same scan may still override it — components win, keeping
-/// control logic authoritative inside a scan — and a link routing from
-/// the commanded point carries the value to its `In` target that same
-/// scan.
+/// The point map marks which points accept operator writes — the
+/// `writable` flag of the model's `io_point` declarations — and the
+/// command surface is writable `In` points only: a `WriteValue` naming
+/// an unmarked point or any `Out` point is refused at submission with
+/// [`CommandError::NotWritable`]. The recorded rule for `Out` points is
+/// rejection: control logic stays authoritative over outputs inside a
+/// scan, so operator influence on an output is engineered through
+/// components and their writable `In` inputs, never a raw point write.
+///
+/// Applying commands before the input read gives a command to a writable
+/// `In` point setpoint semantics: a field point's write is forwarded to
+/// the driver — documented operator substitution of the input image —
+/// and the same scan's input phase reads it back, holding for later
+/// scans until the field side asserts a different value; an internal
+/// `In` point's write lands in the image directly and holds until the
+/// next command.
 ///
 /// A [`Command::SetParameter`] rides the same boundary: it addresses a
 /// component by the name its descriptor and diagnostics report, is
@@ -684,9 +749,10 @@ impl<'d> Executor<'d> {
     /// returns its receipt.
     ///
     /// Submission validates the command statically — a `WriteValue`
-    /// against the point map (the point must be served, and the declared
-    /// kind must match both the map's kind and the supplied value's
-    /// variant), a `SetParameter` against the addressed component's
+    /// against the point map (the point must be served, must be a
+    /// writable `In` point, and the declared kind must match both the
+    /// map's kind and the supplied value's variant), a `SetParameter`
+    /// against the addressed component's
     /// descriptor (the component must be registered, the parameter
     /// declared, the value's kind matching, and a declared
     /// [`ParameterRange`](dcs_core::ParameterRange) satisfied) — so an
@@ -989,11 +1055,18 @@ impl<'d> Executor<'d> {
     }
 
     /// Validates `command` statically and resolves what it will apply.
-    /// The checks are static — the map fixes which points exist and their
-    /// declared kinds, and a component's descriptor fixes which
-    /// parameters exist, their kinds, and their declared ranges — so the
-    /// same check at submission and at application can only differ when
-    /// the driver or the component itself refuses.
+    /// The checks are static — the map fixes which points exist, which of
+    /// them are writable `In` points, and their declared kinds, and a
+    /// component's descriptor fixes which parameters exist, their kinds,
+    /// and their declared ranges — so the same check at submission and at
+    /// application can only differ when the driver or the component
+    /// itself refuses.
+    ///
+    /// A `WriteValue` must name a served point ([`CommandError::UnknownPoint`])
+    /// the map marks writable and whose direction is `In`
+    /// ([`CommandError::NotWritable`] otherwise — every `Out` point
+    /// refuses writes), then the declared kind must match the map's and
+    /// the supplied value's variant ([`CommandError::TypeMismatch`]).
     ///
     /// A `SetParameter` resolves its component by
     /// [`name`](Component::name) — the identity the descriptor and the
@@ -1011,6 +1084,12 @@ impl<'d> Executor<'d> {
                     .map
                     .get(*point)
                     .ok_or(CommandError::UnknownPoint { point: *point })?;
+                // The command surface is the map's writable `In` points:
+                // an unmarked point, and every `Out` point, refuses the
+                // write before its payload is examined.
+                if spec.direction != Direction::In || !spec.writable {
+                    return Err(CommandError::NotWritable { point: *point });
+                }
                 if *kind != spec.kind {
                     return Err(CommandError::TypeMismatch {
                         point: *point,
@@ -1087,14 +1166,13 @@ impl<'d> Executor<'d> {
 
     /// Applies every queued command in submission order, updating each
     /// one's receipt to its final outcome. Runs at the head of the scan —
-    /// before the input read — so a write to an `In` point is observed by
-    /// this scan's input phase, while a write to an `Out` point enters the
-    /// image where the step phase may still override it.
+    /// before the input read — so a write to a writable `In` point is
+    /// observed by this scan's input phase. Only writable `In` writes
+    /// reach here: submission already refused every other point.
     ///
     /// A command to an internal point writes the image directly — the
     /// driver does not serve it — so a held `In` value changes here and
-    /// holds until the next command, and a write to an `Out` point routes
-    /// through its internal links at this same scan's input phase.
+    /// holds until the next command.
     ///
     /// A `SetParameter` lands on the component's
     /// [`apply_parameter`](Component::apply_parameter) hook at this same
@@ -1937,16 +2015,13 @@ mod tests {
         }
     }
 
-    /// Setpoint rig: `Scale` reads `In` point 10 and drives `Out` point 20
-    /// at gain 2, plus an unwritten `Out` point 30.
+    /// Setpoint rig: `Scale` reads writable `In` point 10 and drives `Out`
+    /// point 20 at gain 2, plus an unwritten `Out` point 30.
     fn setpoint_rig(driver: &StubDriver) -> Executor<'_> {
-        let map: PointMap = [
-            (PointId(10), Direction::In, ValueKind::Float),
-            (PointId(20), Direction::Out, ValueKind::Float),
-            (PointId(30), Direction::Out, ValueKind::Float),
-        ]
-        .into_iter()
-        .collect();
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(30), Direction::Out, ValueKind::Float);
         Executor::new(
             driver,
             map,
@@ -2044,12 +2119,79 @@ mod tests {
     }
 
     #[test]
+    fn unwritable_points_refuse_commands_at_submission() {
+        let driver = StubDriver::new(&[float(10), float(11), float(20), float(30)], &[]);
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(11), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            // The map tolerates a mark on an `Out` point — a model
+            // declaring one fails validation — and the command path
+            // refuses it regardless.
+            .with_writable_point(PointId(30), Direction::Out, ValueKind::Float)
+            .with_writable_internal(
+                PointId(40),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(1.0),
+            )
+            .with_internal(
+                PointId(41),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(2.0),
+            );
+        let mut executor = Executor::new(&driver, map, vec![]).unwrap();
+
+        // Unmarked `In` points — field or internal — and every `Out`
+        // point, marked or not, refuse at submission naming the point.
+        for point in [11, 20, 30, 41] {
+            let receipt =
+                executor.submit_command(write_value(point, ValueKind::Float, Value::Float(9.0)));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::NotWritable {
+                        point: PointId(point)
+                    }
+                },
+                "point {point}"
+            );
+            assert_eq!(receipt.command.point(), Some(PointId(point)));
+        }
+
+        // Writability is checked before the payload: a wrong-kind command
+        // to an unmarked point still reads `NotWritable`.
+        let receipt = executor.submit_command(write_value(11, ValueKind::Int, Value::Int(9)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(11) }
+            }
+        );
+
+        // Nothing was queued: a scan adds no application receipts and
+        // leaves driver and image untouched.
+        executor.scan().unwrap();
+        assert_eq!(executor.receipts().len(), 5);
+        assert_eq!(driver_value(&driver, 11), Value::Float(0.0));
+        let held = executor
+            .snapshot()
+            .points
+            .iter()
+            .find(|telemetry| telemetry.point == PointId(41))
+            .and_then(|telemetry| telemetry.sample)
+            .unwrap();
+        assert_eq!(held.value, Value::Float(2.0));
+    }
+
+    #[test]
     fn driver_rejection_is_recorded_at_the_scan_boundary() {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
-        driver.faults.lock().unwrap().insert(PointId(30));
+        driver.faults.lock().unwrap().insert(PointId(10));
 
-        let command = write_value(30, ValueKind::Float, Value::Float(9.0));
+        let command = write_value(10, ValueKind::Float, Value::Float(9.0));
         let receipt = executor.submit_command(command);
         // Static checks pass — the fault only surfaces at the driver.
         assert_eq!(
@@ -2064,34 +2206,36 @@ mod tests {
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
                 reason: CommandError::DriverRejected {
-                    point: PointId(30),
-                    error: IoError::Disconnected(PointId(30)),
+                    point: PointId(10),
+                    error: IoError::Disconnected(PointId(10)),
                 }
             }
         );
     }
 
     #[test]
-    fn output_command_without_a_component_writer_persists() {
+    fn output_point_commands_are_refused_not_writable() {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
 
-        executor.submit_command(write_value(30, ValueKind::Float, Value::Float(7.0)));
+        // The recorded rule for `Out` points is rejection: a command to
+        // one — component-written or not — is refused at submission and
+        // never reaches the driver or the image.
+        for point in [20, 30] {
+            let receipt =
+                executor.submit_command(write_value(point, ValueKind::Float, Value::Float(7.0)));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::NotWritable {
+                        point: PointId(point)
+                    }
+                }
+            );
+        }
         executor.scan().unwrap();
-
-        // No component writes point 30, so the command's value reaches the
-        // field and the snapshot.
-        assert_eq!(driver_value(&driver, 30), Value::Float(7.0));
-        assert_eq!(
-            executor.snapshot().points[2].sample.unwrap().value,
-            Value::Float(7.0)
-        );
-
-        // A component writing the same `Out` point wins inside the scan:
-        // it rewrites point 20 from the (still zero) input.
-        executor.submit_command(write_value(20, ValueKind::Float, Value::Float(-1.0)));
-        executor.scan().unwrap();
-        assert_eq!(driver_value(&driver, 20), Value::Float(0.0));
+        assert_eq!(executor.receipts().len(), 2);
+        assert_eq!(driver_value(&driver, 30), Value::Float(0.0));
     }
 
     #[test]
@@ -2127,7 +2271,9 @@ mod tests {
                 CommandOutcome::Rejected {
                     reason: CommandError::UnknownPoint { point: PointId(99) }
                 },
-                CommandOutcome::Applied { tick: Tick(1) },
+                CommandOutcome::Rejected {
+                    reason: CommandError::NotWritable { point: PointId(30) }
+                },
                 CommandOutcome::Applied { tick: Tick(3) },
             ]
         );
@@ -2251,17 +2397,14 @@ mod tests {
         }
     }
 
-    /// Rig for parameter commands: `Tunable` ("loop") reads `In` point
-    /// 10 and drives `Out` point 20 at gain 2, limit 10; `Scale` ("a")
-    /// rides along as the parameterless component.
+    /// Rig for parameter commands: `Tunable` ("loop") reads writable `In`
+    /// point 10 and drives `Out` point 20 at gain 2, limit 10; `Scale`
+    /// ("a") rides along as the parameterless component.
     fn tuning_rig(driver: &StubDriver) -> Executor<'_> {
-        let map: PointMap = [
-            (PointId(10), Direction::In, ValueKind::Float),
-            (PointId(20), Direction::Out, ValueKind::Float),
-            (PointId(30), Direction::Out, ValueKind::Float),
-        ]
-        .into_iter()
-        .collect();
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(30), Direction::Out, ValueKind::Float);
         Executor::new(
             driver,
             map,
@@ -3059,11 +3202,12 @@ mod tests {
         );
     }
 
-    /// A map with a held internal `In` point (an operator setpoint) and an
-    /// internal `Out` point (a monitored component write).
+    /// A map with a held internal `In` point (a writable operator
+    /// setpoint) and an internal `Out` point (a monitored component
+    /// write).
     fn internal_map() -> PointMap {
         PointMap::new()
-            .with_internal(
+            .with_writable_internal(
                 PointId(10),
                 Direction::In,
                 ValueKind::Float,

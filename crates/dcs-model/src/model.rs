@@ -92,6 +92,13 @@ pub struct ChannelRef {
     pub name: String,
 }
 
+/// `serde` helper for `IoPoint::writable`: the flag follows the
+/// optional-field convention — documents that predate it deserialize as
+/// `false`, and `false` serializes back without the key.
+fn is_false(writable: &bool) -> bool {
+    !*writable
+}
+
 /// A logical I/O point: the unit control logic binds to.
 ///
 /// [`PointId`], direction, and value type form the component-facing
@@ -103,6 +110,19 @@ pub struct ChannelRef {
 /// internal `Out` point records component writes for monitoring, and a
 /// declared internal `In`/`Out` pair can carry a port-to-port or
 /// point-to-point wire inside the image.
+///
+/// `writable` marks the point an operator may write through the receipt-
+/// answered command path — the model-declared command surface. Only `In`
+/// points can be writable: a writable field `In` point's command write is
+/// forwarded to the driver at the scan boundary and the same scan's input
+/// phase reads it back — documented operator substitution of the input
+/// image, holding until the field side asserts a different value — while a
+/// writable internal `In` point holds the written value until the next
+/// command and is the common target for operator values like setpoints.
+/// `Out` points are never command targets: the command path refuses them
+/// outright, so validation rejects `writable` on an `Out` point — operator
+/// influence on an output is engineered through components, not raw point
+/// writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -127,6 +147,15 @@ pub struct IoPoint {
     /// Optional like [`Signal::unit`]; see its note on schema versioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial: Option<Value>,
+    /// Whether the point accepts operator `WriteValue` commands; see the
+    /// type docs for the per-kind semantics. Valid only on `In` points —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports
+    /// `writable` on an `Out` point.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the flag load with `writable` unset.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub writable: bool,
 }
 
 impl IoPoint {
@@ -367,6 +396,48 @@ mod tests {
         assert_eq!(model.signals[0].group, None);
         let json = serde_json::to_string(&model).unwrap();
         assert!(!json.contains("\"group\""), "{json}");
+    }
+
+    #[test]
+    fn documents_predating_writable_default_to_unwritable() {
+        // Points without the optional field deserialize `writable` as
+        // `false`, and `false` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.io_points.iter().all(|point| !point.writable));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"writable\""), "{json}");
+    }
+
+    #[test]
+    fn writable_flag_parses_and_roundtrips() {
+        // A writable internal point: declare one by dropping the channel
+        // and carrying an initial value.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].channel = None;
+        model.io_points[0].initial = Some(Value::Float(25.0));
+        model.io_points[0].writable = true;
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"writable\": true"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(reloaded.io_points[0].writable);
+        assert!(!reloaded.io_points[1].writable);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn writable_out_point_is_rejected_by_load() {
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[1].writable = true;
+        let json = serde_json::to_string(&model).unwrap();
+        match PlantModel::load(&json) {
+            Err(LoadError::Invalid(errors)) => assert!(
+                errors.contains(&ValidationError::WritableOut { point: PointId(11) }),
+                "{errors:?}"
+            ),
+            other => panic!("expected invalid model, got {other:?}"),
+        }
     }
 
     #[test]
