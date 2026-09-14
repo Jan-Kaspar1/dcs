@@ -45,6 +45,7 @@ dependencies = [
  "dcs-assembly",
  "dcs-blocks",
  "dcs-core",
+ "dcs-demo",
  "dcs-model",
  "dcs-monitor",
  "dcs-runtime",
