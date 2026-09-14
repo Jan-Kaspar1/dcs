@@ -25,11 +25,187 @@ pub struct AlarmLimits {
 }
 
 /// Which limit, if any, currently holds the alarm.
+///
+/// Shared with [`LatchingAlarm`](crate::LatchingAlarm), whose `alarm`
+/// output follows the same hysteresis rule and whose checkpoint carries
+/// the same `state` encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Alarm {
+pub(crate) enum Alarm {
     Clear,
     High,
     Low,
+}
+
+impl Alarm {
+    /// Advances the limit state by the documented hysteresis rule: the
+    /// high alarm trips when `pv` reaches `high` and clears once it
+    /// falls strictly below `high - hysteresis`; the low alarm trips at
+    /// `low` and clears once `pv` rises strictly above
+    /// `low + hysteresis`. Inside a deadband the state holds, a `NaN`
+    /// satisfies no comparison and also holds, and a plunge past the
+    /// opposite limit transitions directly, e.g. high to low.
+    pub(crate) fn evaluate(self, pv: f64, limits: AlarmLimits) -> Alarm {
+        if pv.is_nan() {
+            self
+        } else {
+            match self {
+                // A tripped alarm holds until the input has receded past
+                // its limit by the hysteresis.
+                Alarm::High if pv >= limits.high - limits.hysteresis => Alarm::High,
+                Alarm::Low if pv <= limits.low + limits.hysteresis => Alarm::Low,
+                _ if pv >= limits.high => Alarm::High,
+                _ if pv <= limits.low => Alarm::Low,
+                _ => Alarm::Clear,
+            }
+        }
+    }
+
+    /// The `Int` code the checkpoint's `state` field carries.
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Alarm::Clear => 0,
+            Alarm::High => 1,
+            Alarm::Low => 2,
+        }
+    }
+
+    /// Decodes the checkpoint's `state` field; any other code is a
+    /// [`StateError::InvalidValue`] naming `component` and `state`.
+    pub(crate) fn from_code(component: &str, code: i64) -> Result<Alarm, StateError> {
+        match code {
+            0 => Ok(Alarm::Clear),
+            1 => Ok(Alarm::High),
+            2 => Ok(Alarm::Low),
+            _ => Err(StateError::InvalidValue {
+                element: component.to_string(),
+                field: "state".to_string(),
+                value: Value::Int(code),
+            }),
+        }
+    }
+}
+
+impl AlarmLimits {
+    /// Validates the invariants every construction path enforces —
+    /// all fields finite, `low < high`, `hysteresis >= 0` — reporting a
+    /// violation as a [`ParameterError`] naming `component` and the
+    /// offending parameter.
+    pub(crate) fn checked(component: &str, limits: Self) -> Result<Self, ParameterError> {
+        for (parameter, value) in [
+            ("low_limit", limits.low),
+            ("high_limit", limits.high),
+            ("hysteresis", limits.hysteresis),
+        ] {
+            if !value.is_finite() {
+                return Err(params::invalid(
+                    component,
+                    parameter,
+                    "must be finite".to_string(),
+                ));
+            }
+        }
+        if limits.low >= limits.high {
+            return Err(params::invalid(
+                component,
+                "high_limit",
+                "limits require low_limit < high_limit".to_string(),
+            ));
+        }
+        if limits.hysteresis < 0.0 {
+            return Err(params::invalid(
+                component,
+                "hysteresis",
+                "must be non-negative".to_string(),
+            ));
+        }
+        Ok(limits)
+    }
+
+    /// Reads the limits from a plant-model parameter map: `low_limit`
+    /// and `high_limit` required, `hysteresis` optional (default `0.0`).
+    pub(crate) fn from_parameters(
+        component: &str,
+        parameters: &Parameters,
+    ) -> Result<Self, ParameterError> {
+        Self::checked(
+            component,
+            Self {
+                low: params::required_f64(component, parameters, "low_limit")?,
+                high: params::required_f64(component, parameters, "high_limit")?,
+                hysteresis: params::optional_f64(component, parameters, "hysteresis")?
+                    .unwrap_or(0.0),
+            },
+        )
+    }
+
+    /// Retunes one declared limit parameter, returning the updated
+    /// limits or a [`CommandError`] naming `component`. The
+    /// cross-parameter invariant `low < high` is re-checked after the
+    /// change; a refused value changes nothing.
+    pub(crate) fn tune(
+        self,
+        component: &str,
+        parameter: &str,
+        value: Value,
+    ) -> Result<Self, CommandError> {
+        let tuned = params::tune_f64(component, parameter, value)?;
+        let mut limits = self;
+        match parameter {
+            "low_limit" => limits.low = tuned,
+            "high_limit" => limits.high = tuned,
+            "hysteresis" => limits.hysteresis = tuned,
+            _ => return Err(params::unknown_parameter(component, parameter)),
+        }
+        if !tuned.is_finite() {
+            return Err(params::invalid_parameter(
+                component,
+                parameter,
+                "must be finite",
+            ));
+        }
+        if limits.low >= limits.high {
+            return Err(params::invalid_parameter(
+                component,
+                parameter,
+                "limits require low_limit < high_limit",
+            ));
+        }
+        if limits.hysteresis < 0.0 {
+            return Err(params::invalid_parameter(
+                component,
+                "hysteresis",
+                "must be non-negative",
+            ));
+        }
+        Ok(limits)
+    }
+
+    /// The restore-path mirror of [`checked`](Self::checked), reporting
+    /// violations as [`StateError::InvalidValue`] so a rejected
+    /// checkpoint changes nothing.
+    pub(crate) fn check_restored(&self, component: &str) -> Result<(), StateError> {
+        for (field, value) in [
+            ("low_limit", self.low),
+            ("high_limit", self.high),
+            ("hysteresis", self.hysteresis),
+        ] {
+            if !value.is_finite() {
+                return Err(StateError::InvalidValue {
+                    element: component.to_string(),
+                    field: field.to_string(),
+                    value: Value::Float(value),
+                });
+            }
+        }
+        if self.low >= self.high || self.hysteresis < 0.0 {
+            return Err(StateError::InvalidValue {
+                element: component.to_string(),
+                field: "high_limit".to_string(),
+                value: Value::Float(self.high),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// An alarm monitor: reads an analog `In` point and drives a boolean
@@ -76,38 +252,11 @@ impl AlarmMonitor {
         limits: AlarmLimits,
     ) -> Result<Self, ParameterError> {
         let name = name.into();
-        for (parameter, value) in [
-            ("low_limit", limits.low),
-            ("high_limit", limits.high),
-            ("hysteresis", limits.hysteresis),
-        ] {
-            if !value.is_finite() {
-                return Err(params::invalid(
-                    &name,
-                    parameter,
-                    "must be finite".to_string(),
-                ));
-            }
-        }
-        if limits.low >= limits.high {
-            return Err(params::invalid(
-                &name,
-                "high_limit",
-                "limits require low_limit < high_limit".to_string(),
-            ));
-        }
-        if limits.hysteresis < 0.0 {
-            return Err(params::invalid(
-                &name,
-                "hysteresis",
-                "must be non-negative".to_string(),
-            ));
-        }
         Ok(Self {
+            limits: AlarmLimits::checked(&name, limits)?,
             name,
             input,
             alarm,
-            limits,
             state: Alarm::Clear,
         })
     }
@@ -121,11 +270,7 @@ impl AlarmMonitor {
         parameters: &Parameters,
     ) -> Result<Self, ParameterError> {
         let name = name.into();
-        let limits = AlarmLimits {
-            low: params::required_f64(&name, parameters, "low_limit")?,
-            high: params::required_f64(&name, parameters, "high_limit")?,
-            hysteresis: params::optional_f64(&name, parameters, "hysteresis")?.unwrap_or(0.0),
-        };
+        let limits = AlarmLimits::from_parameters(&name, parameters)?;
         Self::new(name, input, alarm, limits)
     }
 }
@@ -145,21 +290,7 @@ impl Component for AlarmMonitor {
     fn step(&mut self, io: &dyn ComponentIo, tick: Tick) -> Result<(), StepError> {
         let sample = io.read_typed::<f64>(self.input)?;
         let pv = sample.value;
-        let limits = self.limits;
-        self.state = if pv.is_nan() {
-            // A NaN input satisfies no comparison; hold the current state.
-            self.state
-        } else {
-            match self.state {
-                // A tripped alarm holds until the input has receded past
-                // its limit by the hysteresis.
-                Alarm::High if pv >= limits.high - limits.hysteresis => Alarm::High,
-                Alarm::Low if pv <= limits.low + limits.hysteresis => Alarm::Low,
-                _ if pv >= limits.high => Alarm::High,
-                _ if pv <= limits.low => Alarm::Low,
-                _ => Alarm::Clear,
-            }
-        };
+        self.state = self.state.evaluate(pv, self.limits);
         let quality = if pv.is_nan() {
             sample
                 .quality
@@ -203,36 +334,7 @@ impl Component for AlarmMonitor {
     /// breaking it is [`CommandError::InvalidParameter`] and changes
     /// nothing.
     fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
-        let tuned = params::tune_f64(&self.name, parameter, value)?;
-        let mut limits = self.limits;
-        match parameter {
-            "low_limit" => limits.low = tuned,
-            "high_limit" => limits.high = tuned,
-            "hysteresis" => limits.hysteresis = tuned,
-            _ => return Err(params::unknown_parameter(&self.name, parameter)),
-        }
-        if !tuned.is_finite() {
-            return Err(params::invalid_parameter(
-                &self.name,
-                parameter,
-                "must be finite",
-            ));
-        }
-        if limits.low >= limits.high {
-            return Err(params::invalid_parameter(
-                &self.name,
-                parameter,
-                "limits require low_limit < high_limit",
-            ));
-        }
-        if limits.hysteresis < 0.0 {
-            return Err(params::invalid_parameter(
-                &self.name,
-                "hysteresis",
-                "must be non-negative",
-            ));
-        }
-        self.limits = limits;
+        self.limits = self.limits.tune(&self.name, parameter, value)?;
         Ok(())
     }
 
@@ -241,14 +343,7 @@ impl Component for AlarmMonitor {
     /// standby inherits runtime tuning.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
-        state.insert(
-            "state",
-            Value::Int(match self.state {
-                Alarm::Clear => 0,
-                Alarm::High => 1,
-                Alarm::Low => 2,
-            }),
-        );
+        state.insert("state", Value::Int(self.state.code()));
         state.insert("low_limit", Value::Float(self.limits.low));
         state.insert("high_limit", Value::Float(self.limits.high));
         state.insert("hysteresis", Value::Float(self.limits.hysteresis));
@@ -260,45 +355,14 @@ impl Component for AlarmMonitor {
             &self.name,
             &["state", "low_limit", "high_limit", "hysteresis"],
         )?;
-        let code = state.require_i64(&self.name, "state")?;
-        let restored = match code {
-            0 => Alarm::Clear,
-            1 => Alarm::High,
-            2 => Alarm::Low,
-            _ => {
-                return Err(StateError::InvalidValue {
-                    element: self.name.clone(),
-                    field: "state".to_string(),
-                    value: Value::Int(code),
-                });
-            }
-        };
+        let restored = Alarm::from_code(&self.name, state.require_i64(&self.name, "state")?)?;
         let limits = AlarmLimits {
             low: state.require_f64(&self.name, "low_limit")?,
             high: state.require_f64(&self.name, "high_limit")?,
             hysteresis: state.require_f64(&self.name, "hysteresis")?,
         };
         // The same invariants `new` and `apply_parameter` enforce.
-        for (field, value) in [
-            ("low_limit", limits.low),
-            ("high_limit", limits.high),
-            ("hysteresis", limits.hysteresis),
-        ] {
-            if !value.is_finite() {
-                return Err(StateError::InvalidValue {
-                    element: self.name.clone(),
-                    field: field.to_string(),
-                    value: Value::Float(value),
-                });
-            }
-        }
-        if limits.low >= limits.high || limits.hysteresis < 0.0 {
-            return Err(StateError::InvalidValue {
-                element: self.name.clone(),
-                field: "high_limit".to_string(),
-                value: Value::Float(limits.high),
-            });
-        }
+        limits.check_restored(&self.name)?;
         self.limits = limits;
         self.state = restored;
         Ok(())
