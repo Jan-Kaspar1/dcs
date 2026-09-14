@@ -129,6 +129,17 @@ The checked-in example is `dcs_controller::registry()`
 (`crates/dcs-controller/src/lib.rs`), which registers every `dcs-blocks`
 kind the shipped controller deploys.
 
+A registered kind also carries a `dcs-build` spec
+(`crates/dcs-build/src/specs.rs`): a data mirror of the interface
+`describe()` reports — kind string, ports in `io_requirements` order,
+parameters in `describe` order — that the Rust composition seam checks
+at compile time. The kind's `KIND` joins `dcs_blocks::KINDS`, the
+checked-in list `crates/dcs-blocks/tests/spec_drift.rs` pins the spec
+table against, so a kind added without its spec fails the drift test.
+Where a parameter set is not statically enumerable — the sequencer's
+`step_<n>_*` keys — the spec records `declared_parameters() -> None`
+and documents the treatment.
+
 ### 7. Instantiate in a model
 
 A `components` entry declares `id`, `kind`, `parameters` (each a typed

@@ -130,6 +130,8 @@ dependencies = [
 name = "dcs-build"
 version = "0.1.0"
 dependencies = [
+ "dcs-assembly",
+ "dcs-controller",
  "dcs-core",
  "dcs-model",
  "serde_json",
