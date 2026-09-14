@@ -463,7 +463,7 @@ fn malformed_sim_bus_parameters_fail_assembly_with_named_errors() {
     // Two channels sharing one register.
     let detail = expect_bad_parameters(|device| {
         device["channels"]["extra"] =
-            serde_json::json!({ "direction": "in", "value_type": "Float" });
+            serde_json::json!({ "direction": "in", "value_type": "float" });
         device["parameters"]["registers"] = serde_json::json!({ "level-raw": 4, "extra": 4 });
     });
     assert!(detail.contains("share register 4"), "{detail}");
@@ -479,7 +479,7 @@ fn malformed_sim_bus_parameters_fail_assembly_with_named_errors() {
     // An initial whose kind disagrees with the channel.
     let detail = expect_bad_parameters(|device| {
         device["parameters"]["registers"] =
-            serde_json::json!({ "level-raw": { "register": 4, "initial": { "Bool": true } } });
+            serde_json::json!({ "level-raw": { "register": 4, "initial": { "bool": true } } });
     });
     assert!(detail.contains("Float"), "{detail}");
     // An unknown parameter key.

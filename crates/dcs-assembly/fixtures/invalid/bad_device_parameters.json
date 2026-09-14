@@ -6,7 +6,7 @@
       "kind": "sim-tcp",
       "parameters": { "timeout_ms": 250 },
       "channels": {
-        "ch0": { "direction": "in", "value_type": "Float" }
+        "ch0": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -14,7 +14,7 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ch0" }
     }
   ],

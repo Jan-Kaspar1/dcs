@@ -52,7 +52,12 @@
 //!   ticks;
 //! - the lexical integer/float distinction — JSON Schema compares numbers
 //!   mathematically, so `1.0` passes an integer field the serde loader
-//!   rejects.
+//!   rejects;
+//! - the legacy PascalCase spellings of [`Value`](dcs_core::Value) and
+//!   [`ValueKind`](dcs_core::ValueKind) variants — the serde loader still
+//!   accepts `"Bool"`/`"Int"`/`"Float"` through its read-compat aliases,
+//!   while the schema pins the canonical `snake_case` vocabulary the
+//!   contract emits.
 
 use crate::PlantModel;
 use crate::model::MODEL_VERSION;
@@ -96,26 +101,26 @@ const SCHEMA_SOURCE: &str = r##"{
   "$defs": {
     "id": { "type": "integer", "minimum": 0 },
     "direction": { "enum": ["in", "out"] },
-    "value-kind": { "enum": ["Bool", "Int", "Float"] },
+    "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },
     "register-index": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "bool-value": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["Bool"],
-      "properties": { "Bool": { "type": "boolean" } }
+      "required": ["bool"],
+      "properties": { "bool": { "type": "boolean" } }
     },
     "int-value": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["Int"],
-      "properties": { "Int": { "type": "integer" } }
+      "required": ["int"],
+      "properties": { "int": { "type": "integer" } }
     },
     "float-value": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["Float"],
-      "properties": { "Float": { "type": "number" } }
+      "required": ["float"],
+      "properties": { "float": { "type": "number" } }
     },
     "value": {
       "oneOf": [
@@ -365,7 +370,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "if": {
             "required": ["initial", "value_type"],
             "properties": {
-              "value_type": { "const": "Bool" },
+              "value_type": { "const": "bool" },
               "initial": { "type": "object" }
             }
           },
@@ -377,7 +382,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "if": {
             "required": ["initial", "value_type"],
             "properties": {
-              "value_type": { "const": "Int" },
+              "value_type": { "const": "int" },
               "initial": { "type": "object" }
             }
           },
@@ -389,7 +394,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "if": {
             "required": ["initial", "value_type"],
             "properties": {
-              "value_type": { "const": "Float" },
+              "value_type": { "const": "float" },
               "initial": { "type": "object" }
             }
           },

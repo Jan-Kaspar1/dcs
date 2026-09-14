@@ -5,13 +5,13 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "pv1": { "direction": "in", "value_type": "Float" },
-        "pv2": { "direction": "in", "value_type": "Float" },
-        "ack2": { "direction": "in", "value_type": "Bool" },
-        "alarm1": { "direction": "out", "value_type": "Bool" },
-        "unack1": { "direction": "out", "value_type": "Bool" },
-        "alarm2": { "direction": "out", "value_type": "Bool" },
-        "unack2": { "direction": "out", "value_type": "Bool" }
+        "pv1": { "direction": "in", "value_type": "float" },
+        "pv2": { "direction": "in", "value_type": "float" },
+        "ack2": { "direction": "in", "value_type": "bool" },
+        "alarm1": { "direction": "out", "value_type": "bool" },
+        "unack1": { "direction": "out", "value_type": "bool" },
+        "alarm2": { "direction": "out", "value_type": "bool" },
+        "unack2": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -19,50 +19,50 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "pv1" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "pv2" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "ack2" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "alarm1" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "unack1" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "alarm2" }
     },
     {
       "id": 23,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "unack2" }
     }
   ],

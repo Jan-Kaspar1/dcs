@@ -5,13 +5,13 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "cv": { "direction": "in", "value_type": "Float" },
-        "manual": { "direction": "in", "value_type": "Float" },
-        "mode": { "direction": "in", "value_type": "Bool" },
-        "raw": { "direction": "in", "value_type": "Float" },
-        "drive": { "direction": "out", "value_type": "Float" },
-        "active": { "direction": "out", "value_type": "Bool" },
-        "filtered": { "direction": "out", "value_type": "Float" }
+        "cv": { "direction": "in", "value_type": "float" },
+        "manual": { "direction": "in", "value_type": "float" },
+        "mode": { "direction": "in", "value_type": "bool" },
+        "raw": { "direction": "in", "value_type": "float" },
+        "drive": { "direction": "out", "value_type": "float" },
+        "active": { "direction": "out", "value_type": "bool" },
+        "filtered": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -19,43 +19,43 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "cv" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "manual" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "mode" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "raw" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "drive" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "active" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "filtered" }
     }
   ],
@@ -113,25 +113,25 @@
       "id": 1,
       "kind": "manual-station",
       "parameters": {
-        "transfer_delta": { "Float": 5.0 }
+        "transfer_delta": { "float": 5.0 }
       },
       "ports": {
-        "control": { "direction": "in", "value_type": "Float" },
-        "manual": { "direction": "in", "value_type": "Float" },
-        "mode": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "manual_active": { "direction": "out", "value_type": "Bool" }
+        "control": { "direction": "in", "value_type": "float" },
+        "manual": { "direction": "in", "value_type": "float" },
+        "mode": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "manual_active": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 2,
       "kind": "signal-filter",
       "parameters": {
-        "alpha": { "Float": 0.5 }
+        "alpha": { "float": 0.5 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],

@@ -354,39 +354,47 @@ function esc(text) {
   }[c]));
 }
 
-// Value serializes as {"Bool": b} | {"Int": i} | {"Float": f}.
+// The contract's snake_case wire names render in their long-standing
+// PascalCase display form: "uncertain" → "Uncertain",
+// "out_of_range" → "OutOfRange".
+function pascal(name) {
+  return String(name).split("_")
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+
+// Value serializes as {"bool": b} | {"int": i} | {"float": f}.
 function formatValue(value) {
   if (value == null) return "";
-  if ("Bool" in value) return value.Bool ? "true" : "false";
-  if ("Int" in value) return String(value.Int);
-  if ("Float" in value) return String(value.Float);
+  if ("bool" in value) return value.bool ? "true" : "false";
+  if ("int" in value) return String(value.int);
+  if ("float" in value) return String(value.float);
   return JSON.stringify(value);
 }
 
 // The numeric ordinate a trend plots for a value; Bool draws as 0/1.
 function numericValue(value) {
   if (value == null) return null;
-  if ("Bool" in value) return value.Bool ? 1 : 0;
-  if ("Int" in value) return value.Int;
-  if ("Float" in value) return value.Float;
+  if ("bool" in value) return value.bool ? 1 : 0;
+  if ("int" in value) return value.int;
+  if ("float" in value) return value.float;
   return null;
 }
 
-// Quality serializes as "Good" | {"Uncertain": reason} | {"Bad": reason}.
+// Quality serializes as "good" | {"uncertain": reason} | {"bad": reason}.
 function formatQuality(quality) {
-  if (typeof quality === "string") return quality;
+  if (typeof quality === "string") return pascal(quality);
   const [severity, reason] = Object.entries(quality)[0];
-  return severity + " (" + reason + ")";
+  return pascal(severity) + " (" + pascal(reason) + ")";
 }
 
 function isGood(quality) {
-  return quality === "Good";
+  return quality === "good";
 }
 
 function qualityClass(quality) {
-  // A force stamps Uncertain(Substituted); it draws distinctly from an
-  // ordinary uncertain value wherever a quality class colors a display.
-  if (typeof quality !== "string" && quality.Uncertain === "Substituted") {
+  // A force stamps {"uncertain":"substituted"}; it draws distinctly from
+  // an ordinary uncertain value wherever a quality class colors a display.
+  if (typeof quality !== "string" && quality.uncertain === "substituted") {
     return "substituted";
   }
   const severity = typeof quality === "string" ? quality : Object.keys(quality)[0];
@@ -775,7 +783,7 @@ async function refresh() {
         ackReleases.delete(point);
         try {
           await submitCommand({ write_value: {
-            point: point, kind: "Bool", value: { Bool: false } } });
+            point: point, kind: "bool", value: { bool: false } } });
         } catch (error) {
           document.getElementById("receipt").textContent =
             "command failed: " + error;
@@ -830,15 +838,16 @@ async function refresh() {
 // of their own: a dead transport names link degradation there, visibly
 // separate from the per-point quality column below. IoFault serializes
 // as {tick, point, direction, error}, an IoError as
-// {"Disconnected": id} | {"Timeout": id} | {"UnknownPoint": id} |
-// {"TypeMismatch": {point, expected, found}}, a LinkState as
-// "connected" | "disconnected", and a Direction as "in" | "out".
+// {"disconnected": id} | {"timeout": id} | {"unknown_point": id} |
+// {"type_mismatch": {point, expected, found}} | {"fenced": id}, a
+// LinkState as "connected" | "disconnected", and a Direction as
+// "in" | "out".
 function describeIoError(error) {
   const [variant, detail] = Object.entries(error)[0];
-  const name = variant.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
-  if (variant === "TypeMismatch") {
+  const name = variant.replace(/_/g, " ");
+  if (variant === "type_mismatch") {
     return name + " on point " + detail.point + " (expects " +
-      detail.expected + ", found " + formatValue(detail.found) + ")";
+      pascal(detail.expected) + ", found " + formatValue(detail.found) + ")";
   }
   return name + " on point " + detail;
 }
@@ -926,7 +935,7 @@ function pointRow(meta, telemetry, forced) {
   const cls = sample ? qualityClass(sample.quality) : "nosample";
   return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) +
     "</td><td>" +
-    meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
+    meta.direction + "</td><td>" + pascal(meta.value_type) + "</td><td class=\"value\">" +
     (sample ? formatValue(sample.value) : "") + forcedBadge(meta.point, forced) +
     "</td><td class=\"" + cls + "\">" +
     esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
@@ -1007,8 +1016,8 @@ function roleElement(port, telemetry, forced) {
   const value = sample ? esc(formatValue(sample.value)) : "—";
   if (port.role === "status") {
     // A bool draws as an on/off flag; any other kind shows its value.
-    const on = sample && sample.value && "Bool" in sample.value
-      ? sample.value.Bool : null;
+    const on = sample && sample.value && "bool" in sample.value
+      ? sample.value.bool : null;
     const text = on === null
       ? port.name + ": " + (sample ? formatValue(sample.value) : "—")
       : port.name;
@@ -1063,7 +1072,7 @@ function parameterTable(descriptor, values) {
     "</tr></thead><tbody>" +
     descriptor.parameters.map(param => {
       const status = paramStatus.get(paramKey(descriptor.name, param.name));
-      return "<tr><td>" + esc(param.name) + "</td><td>" + esc(param.kind) +
+      return "<tr><td>" + esc(param.name) + "</td><td>" + esc(pascal(param.kind)) +
         "</td><td>" +
         (param.range
           ? esc(formatValue(param.range.min)) + " … " +
@@ -1095,13 +1104,13 @@ function parameterControl(component, param) {
       ? " title=\"" + esc(formatValue(param.range.min)) + " … " +
         esc(formatValue(param.range.max)) + "\""
       : "");
-  if (param.kind === "Bool") {
+  if (param.kind === "bool") {
     return "<select class=\"param-value\"" + attrs + ">" +
       "<option value=\"true\">true</option>" +
       "<option value=\"false\">false</option></select>";
   }
   return "<input class=\"param-value\"" + attrs + " size=\"9\"" +
-    (param.kind === "Int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
+    (param.kind === "int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
     ">";
 }
 
@@ -1126,14 +1135,14 @@ function setParamStatus(component, name, status) {
 // so a value of a different kind — or a non-finite Float — is outside
 // every range.
 function inDeclaredRange(range, value) {
-  if ("Bool" in range.min && "Bool" in range.max && "Bool" in value) {
+  if ("bool" in range.min && "bool" in range.max && "bool" in value) {
     return true;
   }
-  if ("Int" in range.min && "Int" in range.max && "Int" in value) {
-    return range.min.Int <= value.Int && value.Int <= range.max.Int;
+  if ("int" in range.min && "int" in range.max && "int" in value) {
+    return range.min.int <= value.int && value.int <= range.max.int;
   }
-  if ("Float" in range.min && "Float" in range.max && "Float" in value) {
-    return range.min.Float <= value.Float && value.Float <= range.max.Float;
+  if ("float" in range.min && "float" in range.max && "float" in value) {
+    return range.min.float <= value.float && value.float <= range.max.float;
   }
   return false;
 }
@@ -1146,15 +1155,15 @@ function inDeclaredRange(range, value) {
 function parameterValue(param, text) {
   const warnings = [];
   let value;
-  if (param.kind === "Bool") {
-    value = { Bool: text === "true" };
-  } else if (param.kind === "Int") {
+  if (param.kind === "bool") {
+    value = { bool: text === "true" };
+  } else if (param.kind === "int") {
     if (!/^[-+]?\d+$/.test(text)) warnings.push("not an Int value");
-    value = { Int: parseInt(text, 10) };
+    value = { int: parseInt(text, 10) };
   } else {
     const parsed = Number(text);
     if (Number.isNaN(parsed)) warnings.push("not a Float value");
-    value = { Float: parsed };
+    value = { float: parsed };
   }
   if (warnings.length === 0 && param.range &&
       !inDeclaredRange(param.range, value)) {
@@ -1290,9 +1299,9 @@ function alarmJoin(snapshot) {
 function isAsserted(sample) {
   if (!sample || !sample.value) return false;
   const value = sample.value;
-  if ("Bool" in value) return value.Bool;
-  if ("Int" in value) return value.Int !== 0;
-  if ("Float" in value) return value.Float !== 0;
+  if ("bool" in value) return value.bool;
+  if ("int" in value) return value.int !== 0;
+  if ("float" in value) return value.float !== 0;
   return false;
 }
 
@@ -1326,7 +1335,7 @@ function lastChangedTick(point, sample) {
 // rather than silently commandable.
 function ackAffordance(descriptor) {
   const ack = descriptor.ports.find(p =>
-    p.name === "ack" && p.direction === "in" && p.kind === "Bool");
+    p.name === "ack" && p.direction === "in" && p.kind === "bool");
   if (!ack || ack.point == null) return "";
   const meta = metaByPoint.get(ack.point);
   if (!meta || !meta.writable) return "";
@@ -1431,7 +1440,7 @@ async function submitAck(button) {
   if (!meta || !meta.writable) return;
   try {
     const answer = await submitCommand({ write_value: {
-      point: point, kind: meta.value_type, value: { Bool: true } } });
+      point: point, kind: meta.value_type, value: { bool: true } } });
     if (answer && answer.outcome) {
       if ("accepted" in answer.outcome) {
         ackReleases.set(point, answer.outcome.accepted.apply_tick);
@@ -1678,7 +1687,7 @@ function describeReason(reason) {
   if ("type_mismatch" in reason) {
     const mismatch = reason.type_mismatch;
     return "type mismatch on " + pointName(mismatch.point) + ": expected " +
-      mismatch.expected + ", found " + formatValue(mismatch.found);
+      pascal(mismatch.expected) + ", found " + formatValue(mismatch.found);
   }
   if ("driver_rejected" in reason) {
     const rejection = reason.driver_rejected;
@@ -1704,7 +1713,7 @@ function describeReason(reason) {
   if ("parameter_type_mismatch" in reason) {
     const rejection = reason.parameter_type_mismatch;
     return "parameter " + rejection.component + "." + rejection.parameter +
-      " expects " + rejection.expected + ", found " + formatValue(rejection.found);
+      " expects " + pascal(rejection.expected) + ", found " + formatValue(rejection.found);
   }
   if ("out_of_range" in reason) {
     const rejection = reason.out_of_range;
@@ -1721,9 +1730,9 @@ function describeReason(reason) {
 }
 
 function commandValue(kind, text) {
-  if (kind === "Bool") return { Bool: /^(true|1|on)$/i.test(text.trim()) };
-  if (kind === "Int") return { Int: parseInt(text, 10) };
-  return { Float: parseFloat(text) };
+  if (kind === "bool") return { bool: /^(true|1|on)$/i.test(text.trim()) };
+  if (kind === "int") return { int: parseInt(text, 10) };
+  return { float: parseFloat(text) };
 }
 
 // POSTs the command to a peer: the attributed envelope
@@ -1799,7 +1808,7 @@ async function submitParameter(button) {
     descriptor.parameters.find(candidate => candidate.name === name);
   if (!control || !param) return;
   const text = control.value.trim();
-  if (param.kind !== "Bool" && text === "") {
+  if (param.kind !== "bool" && text === "") {
     setParamStatus(component, name,
       { text: "enter a value", warn: true, bad: false });
     return;

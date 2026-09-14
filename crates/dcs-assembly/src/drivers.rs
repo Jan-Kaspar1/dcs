@@ -585,18 +585,11 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }))
 }
 
-/// A `snake_case` [`QualityReason`] name, as a script entry's `"reason"`.
+/// A [`QualityReason`] wire name, as a script entry's `"reason"` — the
+/// serde vocabulary itself (`snake_case`, plus the legacy PascalCase
+/// spellings the enum's aliases accept on read), not a hand-kept table.
 fn script_reason(name: &str) -> Option<QualityReason> {
-    Some(match name {
-        "unspecified" => QualityReason::Unspecified,
-        "substituted" => QualityReason::Substituted,
-        "stale" => QualityReason::Stale,
-        "out_of_range" => QualityReason::OutOfRange,
-        "communication_fault" => QualityReason::CommunicationFault,
-        "device_fault" => QualityReason::DeviceFault,
-        "configuration_fault" => QualityReason::ConfigurationFault,
-        _ => return None,
-    })
+    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
 }
 
 /// One `"script"` entry: `{"tick", "value", "quality"?, "reason"?}` —
@@ -662,7 +655,7 @@ fn scripted_entry(
             Some(reason) => Some(reason),
             None => {
                 return Err(invalid(format!(
-                    "\"reason\" must name a QualityReason in snake_case, found {reason}"
+                    "\"reason\" must name a QualityReason, found {reason}"
                 )));
             }
         },

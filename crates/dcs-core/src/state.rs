@@ -31,9 +31,15 @@ pub struct StateMap {
 /// Every variant names the element that rejected the restore — a
 /// component's name or the driver's — and, where a single field is at
 /// fault, the field.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Variants serialize in `snake_case` (`{"unknown_field": {…}}`,
+/// `{"incompatible_field": {…}}`, …); the PascalCase spellings remain
+/// accepted on read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StateError {
     /// The element captured no such field.
+    #[serde(alias = "UnknownField")]
     UnknownField {
         /// The element rejecting the restore.
         element: String,
@@ -41,6 +47,7 @@ pub enum StateError {
         field: String,
     },
     /// A field the element requires is absent.
+    #[serde(alias = "MissingField")]
     MissingField {
         /// The element rejecting the restore.
         element: String,
@@ -48,6 +55,7 @@ pub enum StateError {
         field: String,
     },
     /// A field's value kind differs from what the element captured.
+    #[serde(alias = "IncompatibleField")]
     IncompatibleField {
         /// The element rejecting the restore.
         element: String,
@@ -60,6 +68,7 @@ pub enum StateError {
     },
     /// A field's value is of the right kind but outside the element's
     /// domain — e.g. an enum code that names no variant.
+    #[serde(alias = "InvalidValue")]
     InvalidValue {
         /// The element rejecting the restore.
         element: String,
@@ -300,6 +309,86 @@ mod tests {
             map.optional_bool("elem", "i").unwrap_err(),
             StateError::IncompatibleField { .. }
         ));
+    }
+
+    #[test]
+    fn state_error_emits_snake_case_and_reads_legacy_pascal_case() {
+        // The emitted wire spelling of every variant — nested ValueKind
+        // and Value spell snake_case too.
+        for (error, emitted) in [
+            (
+                StateError::UnknownField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                },
+                r#"{"unknown_field":{"element":"pid","field":"tau"}}"#,
+            ),
+            (
+                StateError::MissingField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                },
+                r#"{"missing_field":{"element":"pid","field":"tau"}}"#,
+            ),
+            (
+                StateError::IncompatibleField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                    expected: ValueKind::Float,
+                    found: ValueKind::Int,
+                },
+                r#"{"incompatible_field":{"element":"pid","field":"tau","expected":"float","found":"int"}}"#,
+            ),
+            (
+                StateError::InvalidValue {
+                    element: "pid".to_string(),
+                    field: "mode".to_string(),
+                    value: Value::Int(9),
+                },
+                r#"{"invalid_value":{"element":"pid","field":"mode","value":{"int":9}}}"#,
+            ),
+        ] {
+            let json = serde_json::to_string(&error).unwrap();
+            assert_eq!(json, emitted);
+            assert_eq!(serde_json::from_str::<StateError>(&json).unwrap(), error);
+        }
+
+        // PascalCase spellings stay accepted on read.
+        for (legacy, error) in [
+            (
+                r#"{"UnknownField":{"element":"pid","field":"tau"}}"#,
+                StateError::UnknownField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                },
+            ),
+            (
+                r#"{"MissingField":{"element":"pid","field":"tau"}}"#,
+                StateError::MissingField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                },
+            ),
+            (
+                r#"{"IncompatibleField":{"element":"pid","field":"tau","expected":"Float","found":"Int"}}"#,
+                StateError::IncompatibleField {
+                    element: "pid".to_string(),
+                    field: "tau".to_string(),
+                    expected: ValueKind::Float,
+                    found: ValueKind::Int,
+                },
+            ),
+            (
+                r#"{"InvalidValue":{"element":"pid","field":"mode","value":{"Int":9}}}"#,
+                StateError::InvalidValue {
+                    element: "pid".to_string(),
+                    field: "mode".to_string(),
+                    value: Value::Int(9),
+                },
+            ),
+        ] {
+            assert_eq!(serde_json::from_str::<StateError>(legacy).unwrap(), error);
+        }
     }
 
     #[test]

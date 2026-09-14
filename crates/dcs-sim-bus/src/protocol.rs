@@ -751,7 +751,7 @@ mod tests {
                 quality: Quality::Bad(QualityReason::DeviceFault),
             })
             .unwrap(),
-            r#"{"op":"inject_quality","register":4,"quality":{"Bad":"DeviceFault"}}"#
+            r#"{"op":"inject_quality","register":4,"quality":{"bad":"device_fault"}}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::ClearQuality { register: 4 }).unwrap(),
@@ -778,6 +778,40 @@ mod tests {
             encode_request(&BusRequest::ClearQuality { register: 4 }),
             vec![0, 3, 0x08, 0, 4]
         );
+    }
+
+    #[test]
+    fn requests_read_legacy_pascal_case_payloads() {
+        // A peer running an earlier build spells Quality and its reason
+        // PascalCase; the variant aliases keep those payloads readable.
+        let request: BusRequest = serde_json::from_str(
+            r#"{"op":"inject_quality","register":4,"quality":{"Bad":"DeviceFault"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            BusRequest::InjectQuality {
+                register: 4,
+                quality: Quality::Bad(QualityReason::DeviceFault),
+            }
+        );
+        let response: BusResponse = serde_json::from_str(
+            r#"{"result":"sample","sample":{"value":{"Int":-3},"quality":{"Uncertain":"Substituted"},"tick":9}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response,
+            BusResponse::Sample {
+                sample: Sample::new(
+                    Value::Int(-3),
+                    Quality::Uncertain(QualityReason::Substituted),
+                    Tick(9),
+                ),
+            }
+        );
+        // The binary frame carries the same quality by severity and
+        // reason tags — unchanged by the spelling normalization.
+        assert_eq!(encode_request(&request), vec![0, 5, 0x07, 0, 4, 0x03, 0x06]);
     }
 
     #[test]

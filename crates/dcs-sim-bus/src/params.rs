@@ -226,7 +226,7 @@ mod tests {
             (
                 "registers".to_string(),
                 json!({
-                    "pv": {"register": 4, "initial": {"Float": 1.5}},
+                    "pv": {"register": 4, "initial": {"float": 1.5}},
                     "run": 9
                 }),
             ),
@@ -264,7 +264,7 @@ mod tests {
             // A non-integer register.
             json!({"address": "a:1", "registers": {"pv": "zero", "run": 1}}),
             // An initial whose kind disagrees with the channel.
-            json!({"address": "a:1", "registers": {"pv": {"register": 0, "initial": {"Bool": true}}, "run": 1}}),
+            json!({"address": "a:1", "registers": {"pv": {"register": 0, "initial": {"bool": true}}, "run": 1}}),
             // An unknown top-level parameter.
             json!({"address": "a:1", "registers": {"pv": 0, "run": 1}, "bogus": 1}),
         ];

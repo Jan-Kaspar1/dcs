@@ -182,51 +182,51 @@ fn schema_rejects_documents_with_structural_violations() {
             "signals": [], "components": [], "connections": [], "extra": 1}),
         // Unknown element key — serde would silently ignore it.
         serde_json::json!({"version": 1, "devices": [], "io_points": [
-            {"id": 1, "direction": "in", "value_type": "Float",
-             "initial": {"Float": 0.0}, "initials": {"Float": 1.0}}
+            {"id": 1, "direction": "in", "value_type": "float",
+             "initial": {"float": 0.0}, "initials": {"float": 1.0}}
         ], "signals": [], "components": [], "connections": []}),
         // A writable out point.
         serde_json::json!({"version": 1, "devices": [], "io_points": [
-            {"id": 1, "direction": "out", "value_type": "Float",
-             "initial": {"Float": 0.0}, "writable": true}
+            {"id": 1, "direction": "out", "value_type": "float",
+             "initial": {"float": 0.0}, "writable": true}
         ], "signals": [], "components": [], "connections": []}),
         // An internal point whose initial kind mismatches value_type.
         serde_json::json!({"version": 1, "devices": [], "io_points": [
-            {"id": 1, "direction": "in", "value_type": "Float",
-             "initial": {"Bool": true}}
+            {"id": 1, "direction": "in", "value_type": "float",
+             "initial": {"bool": true}}
         ], "signals": [], "components": [], "connections": []}),
         // A bound point declaring an initial value.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim", "channels":
-                {"ch0": {"direction": "in", "value_type": "Float"}}}
+                {"ch0": {"direction": "in", "value_type": "float"}}}
         ], "io_points": [
-            {"id": 1, "direction": "in", "value_type": "Float",
-             "channel": {"device": 1, "name": "ch0"}, "initial": {"Float": 0.0}}
+            {"id": 1, "direction": "in", "value_type": "float",
+             "channel": {"device": 1, "name": "ch0"}, "initial": {"float": 0.0}}
         ], "signals": [], "components": [], "connections": []}),
         // A sim-tcp device without the required address parameter.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim-tcp", "parameters": {"timeout_ms": 250},
-             "channels": {"ch0": {"direction": "in", "value_type": "Float"}}}
+             "channels": {"ch0": {"direction": "in", "value_type": "float"}}}
         ], "io_points": [], "signals": [], "components": [], "connections": []}),
         // A freshness budget on an out point.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim", "channels":
-                {"ch0": {"direction": "out", "value_type": "Float"}}}
+                {"ch0": {"direction": "out", "value_type": "float"}}}
         ], "io_points": [
-            {"id": 1, "direction": "out", "value_type": "Float",
+            {"id": 1, "direction": "out", "value_type": "float",
              "channel": {"device": 1, "name": "ch0"}, "stale_after_ticks": 2}
         ], "signals": [], "components": [], "connections": []}),
         // A freshness budget on a channel-less internal point.
         serde_json::json!({"version": 1, "devices": [], "io_points": [
-            {"id": 1, "direction": "in", "value_type": "Float",
-             "initial": {"Float": 0.0}, "stale_after_ticks": 2}
+            {"id": 1, "direction": "in", "value_type": "float",
+             "initial": {"float": 0.0}, "stale_after_ticks": 2}
         ], "signals": [], "components": [], "connections": []}),
         // A negative freshness budget.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim", "channels":
-                {"ch0": {"direction": "in", "value_type": "Float"}}}
+                {"ch0": {"direction": "in", "value_type": "float"}}}
         ], "io_points": [
-            {"id": 1, "direction": "in", "value_type": "Float",
+            {"id": 1, "direction": "in", "value_type": "float",
              "channel": {"device": 1, "name": "ch0"}, "stale_after_ticks": -1}
         ], "signals": [], "components": [], "connections": []}),
     ];

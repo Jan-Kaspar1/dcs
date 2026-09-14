@@ -1117,10 +1117,10 @@ const BIN_MODEL: &str = r#"{
       "kind": "sim-bus",
       "parameters": {
         "address": "127.0.0.1:0",
-        "registers": { "level-raw": { "register": 4, "initial": { "Float": 1.5 } } }
+        "registers": { "level-raw": { "register": 4, "initial": { "float": 1.5 } } }
       },
       "channels": {
-        "level-raw": { "direction": "in", "value_type": "Float" }
+        "level-raw": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -1199,13 +1199,13 @@ const STATION_MODEL: &str = r#"{
         }
       },
       "channels": {
-        "level": { "direction": "in", "value_type": "Float" },
-        "inflow": { "direction": "in", "value_type": "Float" },
-        "pump-a-flow": { "direction": "in", "value_type": "Float" },
-        "pump-b-flow": { "direction": "in", "value_type": "Float" },
-        "net-flow": { "direction": "in", "value_type": "Float" },
-        "pump-a-run": { "direction": "out", "value_type": "Bool" },
-        "pump-b-run": { "direction": "out", "value_type": "Bool" }
+        "level": { "direction": "in", "value_type": "float" },
+        "inflow": { "direction": "in", "value_type": "float" },
+        "pump-a-flow": { "direction": "in", "value_type": "float" },
+        "pump-b-flow": { "direction": "in", "value_type": "float" },
+        "net-flow": { "direction": "in", "value_type": "float" },
+        "pump-a-run": { "direction": "out", "value_type": "bool" },
+        "pump-b-run": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

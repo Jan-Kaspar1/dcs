@@ -160,7 +160,7 @@ fn a_forced_point_lands_in_the_snapshot_force_list_the_page_consumes() {
             .request(
                 "POST",
                 "/command",
-                Some(r#"{"force_point":{"point":10,"kind":"Float","value":{"Float":9.0}}}"#),
+                Some(r#"{"force_point":{"point":10,"kind":"float","value":{"float":9.0}}}"#),
             )
             .unwrap();
         assert_eq!(status, 200, "{body}");
@@ -250,7 +250,7 @@ fn page_serves_the_badge_and_writable_only_force_affordances() {
         // Forced values draw their Substituted quality distinctly from
         // ordinary Uncertain.
         for needle in [
-            "quality.Uncertain === \"Substituted\"",
+            "quality.uncertain === \"substituted\"",
             "\"substituted\"",
             ".substituted",
         ] {

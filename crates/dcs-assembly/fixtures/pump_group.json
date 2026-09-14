@@ -55,35 +55,35 @@
         }
       },
       "channels": {
-        "demand": { "direction": "in", "value_type": "Int" },
-        "run-1": { "direction": "in", "value_type": "Bool" },
-        "run-2": { "direction": "in", "value_type": "Bool" },
-        "fault-1": { "direction": "in", "value_type": "Bool" },
-        "fault-2": { "direction": "in", "value_type": "Bool" },
-        "avail-1": { "direction": "in", "value_type": "Bool" },
-        "avail-2": { "direction": "in", "value_type": "Bool" },
-        "cmd-a1": { "direction": "out", "value_type": "Bool" },
-        "cmd-a2": { "direction": "out", "value_type": "Bool" },
-        "duty-a": { "direction": "out", "value_type": "Int" },
-        "staged-a": { "direction": "out", "value_type": "Int" },
-        "none-a": { "direction": "out", "value_type": "Bool" },
-        "faulted-a": { "direction": "out", "value_type": "Bool" },
-        "cmd-t1": { "direction": "out", "value_type": "Bool" },
-        "cmd-t2": { "direction": "out", "value_type": "Bool" },
-        "duty-t": { "direction": "out", "value_type": "Int" },
-        "staged-t": { "direction": "out", "value_type": "Int" },
-        "none-t": { "direction": "out", "value_type": "Bool" },
-        "faulted-t": { "direction": "out", "value_type": "Bool" },
-        "cmd-l1": { "direction": "out", "value_type": "Bool" },
-        "cmd-l2": { "direction": "out", "value_type": "Bool" },
-        "duty-l": { "direction": "out", "value_type": "Int" },
-        "staged-l": { "direction": "out", "value_type": "Int" },
-        "none-l": { "direction": "out", "value_type": "Bool" },
-        "faulted-l": { "direction": "out", "value_type": "Bool" },
-        "latch-none": { "direction": "out", "value_type": "Bool" },
-        "latch-faulted": { "direction": "out", "value_type": "Bool" },
-        "none-echo": { "direction": "in", "value_type": "Bool" },
-        "faulted-echo": { "direction": "in", "value_type": "Bool" }
+        "demand": { "direction": "in", "value_type": "int" },
+        "run-1": { "direction": "in", "value_type": "bool" },
+        "run-2": { "direction": "in", "value_type": "bool" },
+        "fault-1": { "direction": "in", "value_type": "bool" },
+        "fault-2": { "direction": "in", "value_type": "bool" },
+        "avail-1": { "direction": "in", "value_type": "bool" },
+        "avail-2": { "direction": "in", "value_type": "bool" },
+        "cmd-a1": { "direction": "out", "value_type": "bool" },
+        "cmd-a2": { "direction": "out", "value_type": "bool" },
+        "duty-a": { "direction": "out", "value_type": "int" },
+        "staged-a": { "direction": "out", "value_type": "int" },
+        "none-a": { "direction": "out", "value_type": "bool" },
+        "faulted-a": { "direction": "out", "value_type": "bool" },
+        "cmd-t1": { "direction": "out", "value_type": "bool" },
+        "cmd-t2": { "direction": "out", "value_type": "bool" },
+        "duty-t": { "direction": "out", "value_type": "int" },
+        "staged-t": { "direction": "out", "value_type": "int" },
+        "none-t": { "direction": "out", "value_type": "bool" },
+        "faulted-t": { "direction": "out", "value_type": "bool" },
+        "cmd-l1": { "direction": "out", "value_type": "bool" },
+        "cmd-l2": { "direction": "out", "value_type": "bool" },
+        "duty-l": { "direction": "out", "value_type": "int" },
+        "staged-l": { "direction": "out", "value_type": "int" },
+        "none-l": { "direction": "out", "value_type": "bool" },
+        "faulted-l": { "direction": "out", "value_type": "bool" },
+        "latch-none": { "direction": "out", "value_type": "bool" },
+        "latch-faulted": { "direction": "out", "value_type": "bool" },
+        "none-echo": { "direction": "in", "value_type": "bool" },
+        "faulted-echo": { "direction": "in", "value_type": "bool" }
       }
     }
   ],
@@ -91,182 +91,182 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "demand" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "run-1" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "run-2" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "fault-1" }
     },
     {
       "id": 14,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "fault-2" }
     },
     {
       "id": 15,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "avail-1" }
     },
     {
       "id": 16,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "avail-2" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-a1" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-a2" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "duty-a" }
     },
     {
       "id": 23,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "staged-a" }
     },
     {
       "id": 24,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "none-a" }
     },
     {
       "id": 25,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "faulted-a" }
     },
     {
       "id": 30,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 31,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "latch-none" }
     },
     {
       "id": 32,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "latch-faulted" }
     },
     {
       "id": 33,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "none-echo" }
     },
     {
       "id": 34,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "faulted-echo" }
     },
     {
       "id": 40,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-t1" }
     },
     {
       "id": 41,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-t2" }
     },
     {
       "id": 42,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "duty-t" }
     },
     {
       "id": 43,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "staged-t" }
     },
     {
       "id": 44,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "none-t" }
     },
     {
       "id": 45,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "faulted-t" }
     },
     {
       "id": 50,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-l1" }
     },
     {
       "id": 51,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-l2" }
     },
     {
       "id": 52,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "duty-l" }
     },
     {
       "id": 53,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "staged-l" }
     },
     {
       "id": 54,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "none-l" }
     },
     {
       "id": 55,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "faulted-l" }
     }
   ],
@@ -367,76 +367,76 @@
       "id": 10,
       "kind": "pump-group",
       "parameters": {
-        "rotation": { "Int": 0 },
-        "start_delay_ticks": { "Int": 2 },
-        "restage_delay_ticks": { "Int": 2 },
-        "min_off_ticks": { "Int": 2 }
+        "rotation": { "int": 0 },
+        "start_delay_ticks": { "int": 2 },
+        "restage_delay_ticks": { "int": 2 },
+        "min_off_ticks": { "int": 2 }
       },
       "ports": {
-        "demand": { "direction": "in", "value_type": "Int" },
-        "cmd_1": { "direction": "out", "value_type": "Bool" },
-        "run_1": { "direction": "in", "value_type": "Bool" },
-        "fault_1": { "direction": "in", "value_type": "Bool" },
-        "avail_1": { "direction": "in", "value_type": "Bool" },
-        "cmd_2": { "direction": "out", "value_type": "Bool" },
-        "run_2": { "direction": "in", "value_type": "Bool" },
-        "fault_2": { "direction": "in", "value_type": "Bool" },
-        "avail_2": { "direction": "in", "value_type": "Bool" },
-        "duty": { "direction": "out", "value_type": "Int" },
-        "staged": { "direction": "out", "value_type": "Int" },
-        "none_available": { "direction": "out", "value_type": "Bool" },
-        "all_faulted": { "direction": "out", "value_type": "Bool" }
+        "demand": { "direction": "in", "value_type": "int" },
+        "cmd_1": { "direction": "out", "value_type": "bool" },
+        "run_1": { "direction": "in", "value_type": "bool" },
+        "fault_1": { "direction": "in", "value_type": "bool" },
+        "avail_1": { "direction": "in", "value_type": "bool" },
+        "cmd_2": { "direction": "out", "value_type": "bool" },
+        "run_2": { "direction": "in", "value_type": "bool" },
+        "fault_2": { "direction": "in", "value_type": "bool" },
+        "avail_2": { "direction": "in", "value_type": "bool" },
+        "duty": { "direction": "out", "value_type": "int" },
+        "staged": { "direction": "out", "value_type": "int" },
+        "none_available": { "direction": "out", "value_type": "bool" },
+        "all_faulted": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 11,
       "kind": "pump-group",
       "parameters": {
-        "rotation": { "Int": 1 },
-        "rotation_ticks": { "Int": 6 },
-        "start_delay_ticks": { "Int": 2 },
-        "restage_delay_ticks": { "Int": 2 },
-        "min_off_ticks": { "Int": 2 }
+        "rotation": { "int": 1 },
+        "rotation_ticks": { "int": 6 },
+        "start_delay_ticks": { "int": 2 },
+        "restage_delay_ticks": { "int": 2 },
+        "min_off_ticks": { "int": 2 }
       },
       "ports": {
-        "demand": { "direction": "in", "value_type": "Int" },
-        "cmd_1": { "direction": "out", "value_type": "Bool" },
-        "run_1": { "direction": "in", "value_type": "Bool" },
-        "fault_1": { "direction": "in", "value_type": "Bool" },
-        "avail_1": { "direction": "in", "value_type": "Bool" },
-        "cmd_2": { "direction": "out", "value_type": "Bool" },
-        "run_2": { "direction": "in", "value_type": "Bool" },
-        "fault_2": { "direction": "in", "value_type": "Bool" },
-        "avail_2": { "direction": "in", "value_type": "Bool" },
-        "duty": { "direction": "out", "value_type": "Int" },
-        "staged": { "direction": "out", "value_type": "Int" },
-        "none_available": { "direction": "out", "value_type": "Bool" },
-        "all_faulted": { "direction": "out", "value_type": "Bool" }
+        "demand": { "direction": "in", "value_type": "int" },
+        "cmd_1": { "direction": "out", "value_type": "bool" },
+        "run_1": { "direction": "in", "value_type": "bool" },
+        "fault_1": { "direction": "in", "value_type": "bool" },
+        "avail_1": { "direction": "in", "value_type": "bool" },
+        "cmd_2": { "direction": "out", "value_type": "bool" },
+        "run_2": { "direction": "in", "value_type": "bool" },
+        "fault_2": { "direction": "in", "value_type": "bool" },
+        "avail_2": { "direction": "in", "value_type": "bool" },
+        "duty": { "direction": "out", "value_type": "int" },
+        "staged": { "direction": "out", "value_type": "int" },
+        "none_available": { "direction": "out", "value_type": "bool" },
+        "all_faulted": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 12,
       "kind": "pump-group",
       "parameters": {
-        "rotation": { "Int": 2 },
-        "start_delay_ticks": { "Int": 2 },
-        "restage_delay_ticks": { "Int": 2 },
-        "min_off_ticks": { "Int": 2 }
+        "rotation": { "int": 2 },
+        "start_delay_ticks": { "int": 2 },
+        "restage_delay_ticks": { "int": 2 },
+        "min_off_ticks": { "int": 2 }
       },
       "ports": {
-        "demand": { "direction": "in", "value_type": "Int" },
-        "cmd_1": { "direction": "out", "value_type": "Bool" },
-        "run_1": { "direction": "in", "value_type": "Bool" },
-        "fault_1": { "direction": "in", "value_type": "Bool" },
-        "avail_1": { "direction": "in", "value_type": "Bool" },
-        "cmd_2": { "direction": "out", "value_type": "Bool" },
-        "run_2": { "direction": "in", "value_type": "Bool" },
-        "fault_2": { "direction": "in", "value_type": "Bool" },
-        "avail_2": { "direction": "in", "value_type": "Bool" },
-        "duty": { "direction": "out", "value_type": "Int" },
-        "staged": { "direction": "out", "value_type": "Int" },
-        "none_available": { "direction": "out", "value_type": "Bool" },
-        "all_faulted": { "direction": "out", "value_type": "Bool" }
+        "demand": { "direction": "in", "value_type": "int" },
+        "cmd_1": { "direction": "out", "value_type": "bool" },
+        "run_1": { "direction": "in", "value_type": "bool" },
+        "fault_1": { "direction": "in", "value_type": "bool" },
+        "avail_1": { "direction": "in", "value_type": "bool" },
+        "cmd_2": { "direction": "out", "value_type": "bool" },
+        "run_2": { "direction": "in", "value_type": "bool" },
+        "fault_2": { "direction": "in", "value_type": "bool" },
+        "avail_2": { "direction": "in", "value_type": "bool" },
+        "duty": { "direction": "out", "value_type": "int" },
+        "staged": { "direction": "out", "value_type": "int" },
+        "none_available": { "direction": "out", "value_type": "bool" },
+        "all_faulted": { "direction": "out", "value_type": "bool" }
       }
     },
     {
@@ -444,9 +444,9 @@
       "kind": "sr-latch",
       "parameters": {},
       "ports": {
-        "set": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "set": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
@@ -454,9 +454,9 @@
       "kind": "sr-latch",
       "parameters": {},
       "ports": {
-        "set": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "set": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

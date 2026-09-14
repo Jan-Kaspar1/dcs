@@ -5,35 +5,35 @@
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "lt101a_raw": { "direction": "in", "value_type": "Float" },
-        "lt101b_raw": { "direction": "in", "value_type": "Float" },
-        "lt101c_raw": { "direction": "in", "value_type": "Float" },
-        "ft101_raw": { "direction": "in", "value_type": "Float" },
-        "ly101_raw": { "direction": "in", "value_type": "Float" }
+        "lt101a_raw": { "direction": "in", "value_type": "float" },
+        "lt101b_raw": { "direction": "in", "value_type": "float" },
+        "lt101c_raw": { "direction": "in", "value_type": "float" },
+        "ft101_raw": { "direction": "in", "value_type": "float" },
+        "ly101_raw": { "direction": "in", "value_type": "float" }
       }
     },
 {
       "id": 2,
       "kind": "sim-ao",
       "channels": {
-        "lv101_raw": { "direction": "out", "value_type": "Float" }
+        "lv101_raw": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 3,
       "kind": "sim-di",
       "channels": {
-        "p101_run": { "direction": "in", "value_type": "Bool" },
-        "lsh101": { "direction": "in", "value_type": "Bool" }
+        "p101_run": { "direction": "in", "value_type": "bool" },
+        "lsh101": { "direction": "in", "value_type": "bool" }
       }
     },
 {
       "id": 4,
       "kind": "sim-do",
       "channels": {
-        "p101_cmd": { "direction": "out", "value_type": "Bool" },
-        "la101_horn": { "direction": "out", "value_type": "Bool" },
-        "la102_lamp": { "direction": "out", "value_type": "Bool" }
+        "p101_cmd": { "direction": "out", "value_type": "bool" },
+        "la101_horn": { "direction": "out", "value_type": "bool" },
+        "la102_lamp": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -41,312 +41,312 @@
 {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "lt101a_raw" }
     },
 {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ly101_raw" }
     },
 {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "lt101b_raw" }
     },
 {
       "id": 13,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "lt101c_raw" }
     },
 {
       "id": 14,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ft101_raw" }
     },
 {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "lv101_raw" }
     },
 {
       "id": 30,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 3, "name": "p101_run" }
     },
 {
       "id": 31,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 3, "name": "lsh101" }
     },
 {
       "id": 40,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 4, "name": "p101_cmd" }
     },
 {
       "id": 41,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 4, "name": "la101_horn" }
     },
 {
       "id": 42,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 4, "name": "la102_lamp" }
     },
 {
       "id": 50,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 },
+      "value_type": "float",
+      "initial": { "float": 60.0 },
       "writable": true
     },
 {
       "id": 51,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": true },
+      "value_type": "bool",
+      "initial": { "bool": true },
       "writable": true
     },
 {
       "id": 52,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 },
+      "value_type": "float",
+      "initial": { "float": 0.0 },
       "writable": true
     },
 {
       "id": 53,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 54,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 55,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 56,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 57,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 58,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 59,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
 {
       "id": 60,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 61,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 62,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 63,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 64,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 65,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 66,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 67,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 68,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 69,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 70,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 71,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 72,
       "direction": "out",
-      "value_type": "Int",
-      "initial": { "Int": 0 }
+      "value_type": "int",
+      "initial": { "int": 0 }
     },
 {
       "id": 73,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 74,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 75,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 76,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 77,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 60.0 }
+      "value_type": "float",
+      "initial": { "float": 60.0 }
     },
 {
       "id": 78,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 79,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 80,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 81,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
 {
       "id": 82,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
 {
       "id": 83,
       "direction": "out",
-      "value_type": "Int",
-      "initial": { "Int": 0 }
+      "value_type": "int",
+      "initial": { "int": 0 }
     },
 {
       "id": 84,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 85,
       "direction": "out",
-      "value_type": "Bool",
-      "initial": { "Bool": false }
+      "value_type": "bool",
+      "initial": { "bool": false }
     },
 {
       "id": 86,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
 {
       "id": 87,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
 {
       "id": 88,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     }
   ],
   "signals": [
@@ -395,102 +395,102 @@
       "id": 1,
       "kind": "digital-input",
       "parameters": {
-        "debounce_ticks": { "Int": 1 }
+        "debounce_ticks": { "int": 1 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 2,
       "kind": "digital-input",
       "parameters": {
-        "debounce_ticks": { "Int": 2 }
+        "debounce_ticks": { "int": 2 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 3,
       "kind": "timer",
       "parameters": {
-        "delay_ticks": { "Int": 2 }
+        "delay_ticks": { "int": 2 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 4,
       "kind": "motor",
       "parameters": {
-        "fault_ticks": { "Int": 3 }
+        "fault_ticks": { "int": 3 }
       },
       "ports": {
-        "cmd": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" },
-        "run": { "direction": "in", "value_type": "Bool" },
-        "fault": { "direction": "out", "value_type": "Bool" }
+        "cmd": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" },
+        "run": { "direction": "in", "value_type": "bool" },
+        "fault": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 5,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 6,
       "kind": "rate-limiter",
       "parameters": {
-        "max_delta": { "Float": 5.0 }
+        "max_delta": { "float": 5.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 7,
       "kind": "pid",
       "parameters": {
-        "kp": { "Float": 1.0 },
-        "ki": { "Float": 0.35 },
-        "kd": { "Float": 1.5 },
-        "dt": { "Float": 0.1 },
-        "out_min": { "Float": 0.0 },
-        "out_max": { "Float": 100.0 }
+        "kp": { "float": 1.0 },
+        "ki": { "float": 0.35 },
+        "kd": { "float": 1.5 },
+        "dt": { "float": 0.1 },
+        "out_min": { "float": 0.0 },
+        "out_max": { "float": 100.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "Float" },
-        "pv": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 8,
       "kind": "interlock",
       "parameters": {
-        "safe_value": { "Float": 0.0 }
+        "safe_value": { "float": 0.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "permissive": { "direction": "in", "value_type": "Bool" },
-        "trip_1": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "tripped": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "float" },
+        "permissive": { "direction": "in", "value_type": "bool" },
+        "trip_1": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "tripped": { "direction": "out", "value_type": "bool" }
       }
     },
 {
@@ -498,78 +498,78 @@
       "kind": "override-select",
       "parameters": {},
       "ports": {
-        "control": { "direction": "in", "value_type": "Float" },
-        "operator": { "direction": "in", "value_type": "Float" },
-        "select": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "control": { "direction": "in", "value_type": "float" },
+        "operator": { "direction": "in", "value_type": "float" },
+        "select": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 10,
       "kind": "valve",
       "parameters": {
-        "tolerance": { "Float": 1.0 },
-        "discrepancy_ticks": { "Int": 3 }
+        "tolerance": { "float": 1.0 },
+        "discrepancy_ticks": { "int": 3 }
       },
       "ports": {
-        "cmd": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "fb": { "direction": "in", "value_type": "Float" },
-        "discrepancy": { "direction": "out", "value_type": "Bool" }
+        "cmd": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "fb": { "direction": "in", "value_type": "float" },
+        "discrepancy": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 11,
       "kind": "analog-output",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "eng": { "direction": "in", "value_type": "Float" },
-        "raw": { "direction": "out", "value_type": "Float" }
+        "eng": { "direction": "in", "value_type": "float" },
+        "raw": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 12,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 13,
       "kind": "alarm-monitor",
       "parameters": {
-        "low_limit": { "Float": 10.0 },
-        "high_limit": { "Float": 90.0 },
-        "hysteresis": { "Float": 2.0 }
+        "low_limit": { "float": 10.0 },
+        "high_limit": { "float": 90.0 },
+        "hysteresis": { "float": 2.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "alarm": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "float" },
+        "alarm": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 14,
       "kind": "counter",
       "parameters": {
-        "preset": { "Int": 2 }
+        "preset": { "int": 2 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "count": { "direction": "out", "value_type": "Int" },
-        "done": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "count": { "direction": "out", "value_type": "int" },
+        "done": { "direction": "out", "value_type": "bool" }
       }
     },
 {
@@ -577,140 +577,140 @@
       "kind": "digital-output",
       "parameters": {},
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 16,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 17,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 18,
       "kind": "median-voter",
       "parameters": {
-        "tolerance": { "Float": 8.0 }
+        "tolerance": { "float": 8.0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Float" },
-        "in_2": { "direction": "in", "value_type": "Float" },
-        "in_3": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "discrepancy": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "float" },
+        "in_2": { "direction": "in", "value_type": "float" },
+        "in_3": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "discrepancy": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 19,
       "kind": "signal-filter",
       "parameters": {
-        "alpha": { "Float": 0.5 }
+        "alpha": { "float": 0.5 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 20,
       "kind": "sequencer",
       "parameters": {
-        "step_count": { "Int": 5 },
-        "step_1_ticks": { "Int": 40 },
-        "step_1_out": { "Float": 40.0 },
-        "step_2_ticks": { "Int": 80 },
-        "step_2_out": { "Float": 70.0 },
-        "step_3_ticks": { "Int": 120 },
-        "step_3_out": { "Float": 40.0 },
-        "step_4_ticks": { "Int": 80 },
-        "step_4_out": { "Float": 70.0 },
-        "step_5_ticks": { "Int": 80 },
-        "step_5_out": { "Float": 40.0 }
+        "step_count": { "int": 5 },
+        "step_1_ticks": { "int": 40 },
+        "step_1_out": { "float": 40.0 },
+        "step_2_ticks": { "int": 80 },
+        "step_2_out": { "float": 70.0 },
+        "step_3_ticks": { "int": 120 },
+        "step_3_out": { "float": 40.0 },
+        "step_4_ticks": { "int": 80 },
+        "step_4_out": { "float": 70.0 },
+        "step_5_ticks": { "int": 80 },
+        "step_5_out": { "float": 40.0 }
       },
       "ports": {
-        "run": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "step": { "direction": "out", "value_type": "Int" },
-        "done": { "direction": "out", "value_type": "Bool" }
+        "run": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "step": { "direction": "out", "value_type": "int" },
+        "done": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 21,
       "kind": "manual-station",
       "parameters": {
-        "transfer_delta": { "Float": 5.0 }
+        "transfer_delta": { "float": 5.0 }
       },
       "ports": {
-        "control": { "direction": "in", "value_type": "Float" },
-        "manual": { "direction": "in", "value_type": "Float" },
-        "mode": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "manual_active": { "direction": "out", "value_type": "Bool" }
+        "control": { "direction": "in", "value_type": "float" },
+        "manual": { "direction": "in", "value_type": "float" },
+        "mode": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "manual_active": { "direction": "out", "value_type": "bool" }
       }
     },
 {
       "id": 22,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 23,
       "kind": "totalizer",
       "parameters": {
-        "rate_unit": { "Float": 0.1 }
+        "rate_unit": { "float": 0.1 }
       },
       "ports": {
-        "rate": { "direction": "in", "value_type": "Float" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "total": { "direction": "out", "value_type": "Float" }
+        "rate": { "direction": "in", "value_type": "float" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "total": { "direction": "out", "value_type": "float" }
       }
     },
 {
       "id": 24,
       "kind": "latching-alarm",
       "parameters": {
-        "low_limit": { "Float": 10.0 },
-        "high_limit": { "Float": 95.0 },
-        "hysteresis": { "Float": 2.0 }
+        "low_limit": { "float": 10.0 },
+        "high_limit": { "float": 95.0 },
+        "hysteresis": { "float": 2.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "ack": { "direction": "in", "value_type": "Bool" },
-        "alarm": { "direction": "out", "value_type": "Bool" },
-        "unacknowledged": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "float" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" }
       }
     },
 {
@@ -718,8 +718,8 @@
       "kind": "digital-output",
       "parameters": {},
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
