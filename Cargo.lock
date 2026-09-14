@@ -20,6 +20,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dcs-runtime"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
+]
+
+[[package]]
 name = "dcs-sim"
 version = "0.1.0"
 dependencies = [
