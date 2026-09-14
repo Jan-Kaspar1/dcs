@@ -6,7 +6,8 @@ use crate::protocol::{
     read_frame,
 };
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value, ValueKind,
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, Sample, Tick, Value,
+    ValueKind,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -186,6 +187,9 @@ fn exchange(
 /// the claim under this attachment and [`release_writer`](Self::release_writer)
 /// drops it; while any attachment holds it, a non-holder's `write`
 /// answers [`IoError::Fenced`] and its `step` [`LinkError::Fenced`].
+/// Quality injection — [`inject_quality`](Self::inject_quality) /
+/// [`clear_quality`](Self::clear_quality) — is development tooling
+/// beside the claim: open to every attachment, never fenced.
 ///
 /// Failure handling: a point the driver's map does not serve is
 /// [`IoError::UnknownPoint`] without a request; a write carrying the
@@ -297,10 +301,42 @@ impl BusDriver {
     /// rather than fencing the device forever. While the claim is
     /// held, a `write` from an attachment not holding it answers the
     /// point's [`IoError::Fenced`] and a `step` answers
-    /// [`LinkError::Fenced`]; reads and the register census stay open
-    /// to every attachment.
+    /// [`LinkError::Fenced`]; reads, the register census, and quality
+    /// injection stay open to every attachment.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
         match self.request(&BusRequest::ClaimWriter { owner })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Stamps `register`'s stored sample with `quality` —
+    /// [`BusRequest::InjectQuality`], the register protocol's analogue
+    /// of `dcs-sim-net`'s `RemoteDriver::inject_fault` carrying a
+    /// quality fault. The stored value and tick are untouched; the
+    /// declared quality stands on the sample every read and the
+    /// register census report until [`clear_quality`](Self::clear_quality)
+    /// or a real write — which stores a `Good` sample — overwrites it.
+    ///
+    /// Injection is development tooling, not field ownership: it is
+    /// never fenced by the write-ownership claim, so an attachment not
+    /// holding the claim can fault a register while a controller pair
+    /// owns the field.
+    pub fn inject_quality(&self, register: u16, quality: Quality) -> Result<(), LinkError> {
+        match self.request(&BusRequest::InjectQuality { register, quality })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Restores `register`'s stored sample to `Quality::Good` —
+    /// [`BusRequest::ClearQuality`], the clear half of the injection
+    /// pair. Like the inject it is open to every attachment; clearing
+    /// a register carrying no injection is a no-op.
+    pub fn clear_quality(&self, register: u16) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ClearQuality { register })? {
             BusResponse::Done => Ok(()),
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),

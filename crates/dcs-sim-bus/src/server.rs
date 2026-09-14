@@ -140,7 +140,10 @@ fn fenced_out() -> BusResponse {
 /// `WriteRegister` and `Step` are the field-mutating operations: while
 /// a claim is held, a connection not holding it sees both refused with
 /// [`BusError::Fenced`] — the old owner's writes stop at the field,
-/// not merely at its own gate.
+/// not merely at its own gate. `InjectQuality` and `ClearQuality`
+/// mutate the bank too but are deliberately unfenced: fault injection
+/// is development tooling, so a test or operator tool not holding the
+/// claim can fault a point while a controller pair owns the field.
 fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusResponse {
     match request {
         BusRequest::ReadRegister { register } => match shared.bank.read(register) {
@@ -202,6 +205,20 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
             release_claim(&shared.writer, connection);
             BusResponse::Done
         }
+        // Quality injection is development tooling, not field
+        // ownership: like reads and the census it is never fenced, so
+        // a scripted rig can fault a register while a controller pair
+        // owns the field.
+        BusRequest::InjectQuality { register, quality } => {
+            match shared.bank.inject_quality(register, quality) {
+                Ok(()) => BusResponse::Done,
+                Err(error) => BusResponse::Error { error },
+            }
+        }
+        BusRequest::ClearQuality { register } => match shared.bank.clear_quality(register) {
+            Ok(()) => BusResponse::Done,
+            Err(error) => BusResponse::Error { error },
+        },
     }
 }
 

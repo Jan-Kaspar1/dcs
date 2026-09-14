@@ -7,8 +7,10 @@
 //! over the [`BusDriver`] client — one subcommand per request — to
 //! inspect and perturb a scripted rig's `sim-bus` devices without a
 //! controller in the loop: list the served registers, read and write
-//! them by address, and step the bank's logical tick explicitly. It is
-//! development tooling, not part of the operator contract.
+//! them by address, inject and clear a register's reported quality —
+//! the bus analogue of `dcs-plant-ctl`'s `fault`/`clear-fault` — and
+//! step the bank's logical tick explicitly. It is development tooling,
+//! not part of the operator contract.
 //!
 //! Each invocation connects, sends its request, and prints the server's
 //! answer as JSON. `write` first reads the register to learn its
@@ -18,7 +20,7 @@
 //! error answer exits nonzero naming the reported error; malformed
 //! arguments print usage and exit nonzero — never a panic.
 
-use dcs_core::{Tick, Value, ValueKind};
+use dcs_core::{Quality, QualityReason, Tick, Value, ValueKind};
 use dcs_sim_bus::{BusDriver, BusError, BusRequest, BusResponse, LinkError};
 use std::fmt;
 use std::process::ExitCode;
@@ -38,6 +40,18 @@ commands:
                             server names the kind mismatch
   step [n]                  advance the device's logical tick n times
                             (default: 1)
+  inject-quality <register> <quality>
+                            stamp a register's stored sample with a
+                            declared quality — good,
+                            uncertain[:<reason>], or bad[:<reason>] —
+                            until cleared or a real write overwrites
+                            it; injection is open to every attachment,
+                            the writer claim does not fence it
+  clear-quality <register>  restore a register's stored sample to good
+                            quality
+
+quality reasons: unspecified, substituted, stale, out_of_range,
+communication_fault, device_fault, configuration_fault
 
 example: dcs-sim-bus-ctl 127.0.0.1:5502 write 4 2.5";
 
@@ -77,6 +91,8 @@ enum Action {
     /// the register's kind, which only the server knows.
     Write(u16, String, Value),
     Step(u64),
+    InjectQuality(u16, Quality),
+    ClearQuality(u16),
 }
 
 /// One command's failure.
@@ -121,7 +137,14 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ),
         ("step", []) => Action::Step(1),
         ("step", [count]) => Action::Step(parse_count(count).map_err(usage)?),
-        ("list" | "read" | "write" | "step", _) => {
+        ("inject-quality", [register, quality]) => Action::InjectQuality(
+            parse_register(register).map_err(usage)?,
+            parse_quality(quality).map_err(usage)?,
+        ),
+        ("clear-quality", [register]) => {
+            Action::ClearQuality(parse_register(register).map_err(usage)?)
+        }
+        ("list" | "read" | "write" | "step" | "inject-quality" | "clear-quality", _) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -202,12 +225,62 @@ fn execute(driver: &BusDriver, action: &Action) -> Result<BusResponse, Failure> 
             }
             Ok(answer)
         }
+        Action::InjectQuality(register, quality) => expect(
+            driver,
+            &BusRequest::InjectQuality {
+                register: *register,
+                quality: *quality,
+            },
+            |response| matches!(response, BusResponse::Done),
+        ),
+        Action::ClearQuality(register) => expect(
+            driver,
+            &BusRequest::ClearQuality {
+                register: *register,
+            },
+            |response| matches!(response, BusResponse::Done),
+        ),
     }
 }
 
 fn parse_register(arg: &str) -> Result<u16, String> {
     arg.parse::<u16>()
         .map_err(|_| format!("invalid register {arg:?}: expected an address 0..=65535"))
+}
+
+/// Parses an `inject-quality` `<quality>` argument: `good`, or
+/// `uncertain[:<reason>]` and `bad[:<reason>]` defaulting to
+/// `unspecified` when the reason is omitted — the same quality
+/// vocabulary `dcs-plant-ctl`'s `fault` command accepts, minus the
+/// error faults a register bank does not model.
+fn parse_quality(arg: &str) -> Result<Quality, String> {
+    let (severity, reason) = match arg.split_once(':') {
+        Some((severity, reason)) => (severity, Some(reason)),
+        None => (arg, None),
+    };
+    match (severity, reason) {
+        ("good", None) => Ok(Quality::Good),
+        ("uncertain", reason) => Ok(Quality::Uncertain(parse_reason(reason)?)),
+        ("bad", reason) => Ok(Quality::Bad(parse_reason(reason)?)),
+        _ => Err(format!(
+            "invalid quality {arg:?}: expected good, uncertain[:<reason>], or bad[:<reason>]"
+        )),
+    }
+}
+
+/// Parses a `:<reason>` qualifier — the named `QualityReason`s, with
+/// `unspecified` and an absent reason interchangeable.
+fn parse_reason(arg: Option<&str>) -> Result<QualityReason, String> {
+    match arg {
+        None | Some("unspecified") => Ok(QualityReason::Unspecified),
+        Some("substituted") => Ok(QualityReason::Substituted),
+        Some("stale") => Ok(QualityReason::Stale),
+        Some("out_of_range") => Ok(QualityReason::OutOfRange),
+        Some("communication_fault") => Ok(QualityReason::CommunicationFault),
+        Some("device_fault") => Ok(QualityReason::DeviceFault),
+        Some("configuration_fault") => Ok(QualityReason::ConfigurationFault),
+        Some(other) => Err(format!("invalid quality reason {other:?}")),
+    }
 }
 
 /// Parses `step`'s `[n]`: a positive count of ticks to advance.
