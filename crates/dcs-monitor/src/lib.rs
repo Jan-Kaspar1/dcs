@@ -21,6 +21,11 @@
 //!   the caller's last seen sequence
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise
+//! - `GET /checkpoint` → `200` [`Checkpoint`] — the executor's current
+//!   transferable state. This is the peer-sync endpoint a standby
+//!   controller pulls from (the peer-transport decision): like every
+//!   request it is served at a scan boundary under the executor lock, so
+//!   the checkpoint is always a consistent between-scans capture
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
@@ -64,7 +69,7 @@ pub use recorder::MonitorConfig;
 
 use dcs_core::{Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot};
 use dcs_model::SignalIndex;
-use dcs_runtime::Executor;
+use dcs_runtime::{Checkpoint, Executor, ScanError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -156,6 +161,22 @@ impl<'d> Monitor<'d> {
         self.server.unblock();
     }
 
+    /// Runs `scans` executor scans under the monitor's lock — the
+    /// driving half of `POST /scan`, exposed so the hosting process can
+    /// pace scans itself while the server runs. Each completed scan is
+    /// recorded into history and the journal exactly as an
+    /// endpoint-driven scan is; a [`ScanError`] stops the run partway.
+    /// Returns the snapshot taken after the last completed scan.
+    pub fn run_scans(&self, scans: u64) -> Result<TelemetrySnapshot, ScanError> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { executor, recorder } = &mut *shared;
+        for _ in 0..scans {
+            let tick = executor.scan()?;
+            recorder.record_scan(executor, tick);
+        }
+        Ok(executor.snapshot())
+    }
+
     fn handle(&self, mut request: Request) {
         let method = request.method().clone();
         let url = request.url().to_string();
@@ -168,6 +189,9 @@ impl<'d> Monitor<'d> {
             }
             (Method::Get, "/receipts") => {
                 json(200, self.shared.lock().unwrap().executor.receipts())
+            }
+            (Method::Get, "/checkpoint") => {
+                json(200, &self.shared.lock().unwrap().executor.checkpoint())
             }
             (Method::Get, "/history") => match history_query(query) {
                 Ok((points, since)) => {
@@ -194,24 +218,10 @@ impl<'d> Monitor<'d> {
                 Err(response) => response,
             },
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
-                Ok(body) => {
-                    let mut shared = self.shared.lock().unwrap();
-                    let Shared { executor, recorder } = &mut *shared;
-                    let mut failure = None;
-                    for _ in 0..body.scans {
-                        match executor.scan() {
-                            Ok(tick) => recorder.record_scan(executor, tick),
-                            Err(error) => {
-                                failure = Some(error);
-                                break;
-                            }
-                        }
-                    }
-                    match failure {
-                        Some(error) => json(500, &error.to_string()),
-                        None => json(200, &executor.snapshot()),
-                    }
-                }
+                Ok(body) => match self.run_scans(body.scans) {
+                    Ok(snapshot) => json(200, &snapshot),
+                    Err(error) => json(500, &error.to_string()),
+                },
                 Err(response) => response,
             },
             _ => json(404, "not found"),
@@ -337,6 +347,13 @@ impl MonitorClient {
     /// `GET /receipts`: the executor's full receipt log.
     pub fn receipts(&self) -> io::Result<Vec<CommandReceipt>> {
         self.get_json("/receipts")
+    }
+
+    /// `GET /checkpoint`: the executor's current transferable state —
+    /// the endpoint a standby pulls checkpoints from, per the
+    /// peer-transport decision.
+    pub fn checkpoint(&self) -> io::Result<Checkpoint> {
+        self.get_json("/checkpoint")
     }
 
     /// `GET /history`: the retained samples of `points` — or of every
