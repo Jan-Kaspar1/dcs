@@ -10,8 +10,9 @@
 //! server read one declaration: each channel's register index and
 //! optional power-on `initial` value come from the model, and `--listen`
 //! defaults to the declared `"address"`. Register state changes only on
-//! writes and the explicit `step` request, so identical request
-//! sequences produce identical responses on every run.
+//! writes, quality injection, and the explicit `step` request, so
+//! identical request sequences produce identical responses on every
+//! run.
 //!
 //! Load, validation, device-selection, and bind failures exit nonzero
 //! naming the offending element or address; argument errors print usage

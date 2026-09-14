@@ -6,10 +6,13 @@
 //! `u16` register index rather than by point.
 //! Writes stamp the stored sample with the bank's current tick; the tick
 //! advances only on [`step`](RegisterBank::step), so identical write and
-//! step sequences produce identical samples on every run.
+//! step sequences produce identical samples on every run. A stored
+//! sample's quality is `Good` unless a development-tooling injection
+//! stamps it otherwise — see
+//! [`inject_quality`](RegisterBank::inject_quality).
 
 use crate::protocol::{BusError, RegisterInfo};
-use dcs_core::{Sample, Tick, Value};
+use dcs_core::{Quality, Sample, Tick, Value};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
@@ -132,6 +135,41 @@ impl RegisterBank {
         Ok(state.tick)
     }
 
+    /// Stamps `register`'s stored sample with `quality` — the fault
+    /// injection behind
+    /// [`BusRequest::InjectQuality`](crate::BusRequest::InjectQuality).
+    /// The stored value and tick are untouched: the injection declares
+    /// how much the stored value can be trusted, it does not re-observe
+    /// it. The declared quality stands on the sample — and so on every
+    /// read and census — until [`clear_quality`](Self::clear_quality) or
+    /// a real [`write`](Self::write), which stores a `Good` sample,
+    /// overwrites it.
+    ///
+    /// Fails with [`BusError::UnknownRegister`] when the device serves
+    /// no such register.
+    pub fn inject_quality(&self, register: u16, quality: Quality) -> Result<(), BusError> {
+        let state = &mut *self.state.lock().unwrap();
+        let stored = state
+            .registers
+            .get_mut(&register)
+            .ok_or(BusError::UnknownRegister { register })?;
+        stored.quality = quality;
+        Ok(())
+    }
+
+    /// Restores `register`'s stored sample to
+    /// [`Quality::Good`](dcs_core::Quality::Good) — the clear half of
+    /// the injection pair, behind
+    /// [`BusRequest::ClearQuality`](crate::BusRequest::ClearQuality).
+    /// Clearing a register carrying no injection leaves the `Good` it
+    /// already reports.
+    ///
+    /// Fails with [`BusError::UnknownRegister`] when the device serves
+    /// no such register.
+    pub fn clear_quality(&self, register: u16) -> Result<(), BusError> {
+        self.inject_quality(register, Quality::Good)
+    }
+
     /// Advances the bank's tick by one and returns it — the explicit
     /// step behind [`BusRequest::Step`](crate::BusRequest::Step). The
     /// bank holds values only: stepping moves the stamping clock, no
@@ -168,7 +206,7 @@ impl fmt::Debug for RegisterBank {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dcs_core::ValueKind;
+    use dcs_core::{QualityReason, ValueKind};
 
     fn bank() -> RegisterBank {
         RegisterBank::new([
@@ -226,6 +264,62 @@ mod tests {
         );
         // The failed write leaves the stored value untouched.
         assert_eq!(bank.read(0).unwrap().value, Value::Float(1.5));
+    }
+
+    #[test]
+    fn injected_quality_stands_until_cleared_or_overwritten() {
+        let bank = bank();
+        bank.write(0, Value::Float(2.5)).unwrap();
+
+        // The injection stamps the stored sample's quality, leaving
+        // its value and tick untouched.
+        bank.inject_quality(0, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::new(
+                Value::Float(2.5),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(0),
+            )
+        );
+        // The census reports the stamped sample too.
+        assert_eq!(
+            bank.registers()[0].sample.quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+
+        // The clear restores Good on the same stored value and tick.
+        bank.clear_quality(0).unwrap();
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(2.5), Tick(0))
+        );
+
+        // A real write overwrites an injection: the new sample is Good.
+        bank.inject_quality(0, Quality::Uncertain(QualityReason::Stale))
+            .unwrap();
+        bank.write(0, Value::Float(3.5)).unwrap();
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(3.5), Tick(0))
+        );
+
+        // Clearing a register carrying no injection is a no-op, and
+        // both operations name an unserved register.
+        bank.clear_quality(4).unwrap();
+        assert_eq!(
+            bank.read(4).unwrap(),
+            Sample::good(Value::Bool(false), Tick(0))
+        );
+        assert_eq!(
+            bank.inject_quality(9, Quality::Good),
+            Err(BusError::UnknownRegister { register: 9 })
+        );
+        assert_eq!(
+            bank.clear_quality(9),
+            Err(BusError::UnknownRegister { register: 9 })
+        );
     }
 
     #[test]
