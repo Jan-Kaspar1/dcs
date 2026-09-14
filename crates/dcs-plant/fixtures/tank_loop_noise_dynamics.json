@@ -1,0 +1,19 @@
+[
+  {
+    "first_order_lag": {
+      "input": 20,
+      "output": 10,
+      "time_constant": 2.0,
+      "initial": 4.0
+    }
+  },
+  {
+    "noise": {
+      "input": 10,
+      "output": 11,
+      "amplitude": 0.5,
+      "seed": 42,
+      "initial": 4.0
+    }
+  }
+]
