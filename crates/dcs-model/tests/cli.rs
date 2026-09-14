@@ -20,6 +20,12 @@ fn run(command: &str, file: &Path) -> Output {
         .expect("failed to run dcs-model")
 }
 
+fn run_diff(old: &Path, new: &Path, extra: &[&str]) -> Output {
+    let mut command = Command::new(BIN);
+    command.arg("diff").arg(old).arg(new).args(extra);
+    command.output().expect("failed to run dcs-model")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
@@ -149,6 +155,194 @@ fn no_arguments_prints_usage() {
 fn an_unknown_command_prints_usage() {
     let output = Command::new(BIN)
         .arg("frobnicate")
+        .arg(fixture("minimal.json"))
+        .output()
+        .expect("failed to run dcs-model");
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("usage: dcs-model"));
+}
+
+#[test]
+fn diff_lists_added_removed_and_changed_elements_in_every_class() {
+    let output = run_diff(
+        &fixture("diff/base.json"),
+        &fixture("diff/revised.json"),
+        &[],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for line in [
+        // devices: kind, channel, and membership changes
+        "devices:",
+        "  changed device 1",
+        "    kind: \"sim-8ai\" -> \"sim-16ai\"",
+        "    channels.ch1.value_type: \"Float\" -> \"Int\"",
+        "    channels.ch2: added {\"direction\":\"in\",\"value_type\":\"Float\"}",
+        "  changed device 2",
+        "    channels.ch1: added {\"direction\":\"out\",\"value_type\":\"Float\"}",
+        "  added device 3",
+        "  removed device 9",
+        // io_points: channel, direction, value-type, and initial changes
+        "io_points:",
+        "  changed io_point 10",
+        "    direction: \"in\" -> \"out\"",
+        "    channel.device: 1 -> 2",
+        "    channel.name: \"ch0\" -> \"ch1\"",
+        "  changed io_point 11",
+        "    channel: removed {\"device\":2,\"name\":\"ch0\"}",
+        "    initial: added {\"Float\":0.0}",
+        "  changed io_point 12",
+        "    initial: {\"Float\":0.0} -> {\"Float\":3.5}",
+        "  added io_point 13",
+        "  changed io_point 14",
+        "    value_type: \"Int\" -> \"Float\"",
+        "    initial: {\"Int\":0} -> {\"Float\":1.0}",
+        "  removed io_point 19",
+        // signals
+        "signals:",
+        "  changed signal 100 \"reactor-inlet-temperature\"",
+        "    name: \"reactor-temperature\" -> \"reactor-inlet-temperature\"",
+        "    unit: \"degC\" -> \"degF\"",
+        "    group: removed \"reactor\"",
+        "    description: added \"first-pass outlet temperature\"",
+        "  added signal 102 \"valve-command\"",
+        "  removed signal 109 \"spare-output\"",
+        // components: kind, parameter, and port-wiring changes
+        "components:",
+        "  changed component 1 \"pid\"",
+        "    kind: \"gain\" -> \"pid\"",
+        "    parameters.k: removed {\"Float\":2.0}",
+        "    parameters.kp: added {\"Float\":1.5}",
+        "    parameters.ti: added {\"Float\":10.0}",
+        "  changed component 2 \"first-order-lag\"",
+        "    parameters.tau: {\"Float\":5.0} -> {\"Float\":8.0}",
+        "    ports.enable: added {\"direction\":\"in\",\"value_type\":\"Bool\"}",
+        "    ports.out.value_type: \"Float\" -> \"Bool\"",
+        "  added component 3 \"alarm\"",
+        "  removed component 9 \"spare-gain\"",
+        // connections
+        "connections:",
+        "  removed point 10 -> port \"in\" on component 1",
+        "  removed port \"out\" on component 2 -> point 19",
+        "  added port \"out\" on component 1 -> point 10",
+        "  added point 12 -> port \"in\" on component 3",
+        "  added port \"out\" on component 2 -> point 13",
+    ] {
+        assert!(stdout.contains(line), "{line} missing from:\n{stdout}");
+    }
+}
+
+#[test]
+fn diff_of_identical_documents_is_empty_and_exits_zero() {
+    let output = run_diff(&fixture("diff/base.json"), &fixture("diff/base.json"), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "no changes");
+}
+
+#[test]
+fn diff_reports_an_invalid_document_with_its_validation_errors() {
+    // The invalid document may sit on either side; each run names the
+    // failing file and its validation errors instead of diffing.
+    let invalid = fixture("invalid").join("unknown_channel.json");
+    for (old, new, expected_path) in [
+        (invalid.clone(), fixture("diff/base.json"), &invalid),
+        (fixture("diff/base.json"), invalid.clone(), &invalid),
+    ] {
+        let output = run_diff(&old, &new, &[]);
+        assert!(!output.status.success(), "diff unexpectedly succeeded");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains(&expected_path.display().to_string()),
+            "stderr does not name the invalid document:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("io point 10 binds unknown channel \"ch9\" on device 1"),
+            "stderr lacks the validation errors:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn diff_json_mode_parses_and_names_the_elements() {
+    let output = run_diff(
+        &fixture("diff/base.json"),
+        &fixture("diff/revised.json"),
+        &["--json"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let diff: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let elements = |class: &str| -> Vec<&str> {
+        diff[class]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["element"].as_str().unwrap())
+            .collect()
+    };
+    assert!(elements("devices").contains(&"device 3"));
+    assert!(elements("io_points").contains(&"io_point 10"));
+    assert!(elements("signals").contains(&"signal 102 \"valve-command\""));
+    assert!(elements("components").contains(&"component 9 \"spare-gain\""));
+    assert!(elements("connections").contains(&"port \"out\" on component 1 -> point 10"));
+    // The change kind and field detail are machine-readable too.
+    let device1 = diff["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["element"] == "device 1")
+        .unwrap();
+    assert_eq!(device1["change"], "changed");
+    assert_eq!(device1["id"], 1);
+    assert!(
+        device1["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["field"] == "kind"
+                && field["old"] == "sim-8ai"
+                && field["new"] == "sim-16ai"),
+        "{device1}"
+    );
+    // The empty diff serializes with every class present and empty.
+    let output = run_diff(
+        &fixture("diff/base.json"),
+        &fixture("diff/base.json"),
+        &["--json"],
+    );
+    assert!(output.status.success());
+    let diff: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    for class in [
+        "devices",
+        "io_points",
+        "signals",
+        "components",
+        "connections",
+    ] {
+        assert_eq!(diff[class], serde_json::json!([]), "{class}");
+    }
+}
+
+#[test]
+fn diff_output_is_deterministic_across_runs() {
+    for extra in [Vec::new(), vec!["--json"]] {
+        let first = run_diff(
+            &fixture("diff/base.json"),
+            &fixture("diff/revised.json"),
+            &extra,
+        );
+        let second = run_diff(
+            &fixture("diff/base.json"),
+            &fixture("diff/revised.json"),
+            &extra,
+        );
+        assert_eq!(stdout(&first), stdout(&second));
+    }
+}
+
+#[test]
+fn diff_without_two_files_prints_usage() {
+    let output = Command::new(BIN)
+        .arg("diff")
         .arg(fixture("minimal.json"))
         .output()
         .expect("failed to run dcs-model");
