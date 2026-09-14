@@ -8,9 +8,9 @@
 
 use dcs_blocks::{Pid, PidConfig};
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver, IoError, PointId,
-    Quality, QualityReason, Role, RoleReport, Sample, SignalId, StandbySync, Tick, Value,
-    ValueKind,
+    Command, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver, IoError,
+    JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId, StandbySync,
+    Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient};
@@ -254,19 +254,35 @@ impl Drop for PeerRig {
     }
 }
 
-/// Runs the tool against the monitor at `addr`.
+/// Runs the tool against the monitor at `addr`. `DCS_ACTOR` — the
+/// configured actor default — is removed so an ambient value can never
+/// attribute a run meant to submit unattributed; `ctl_env` is the
+/// variant for cases setting it.
 fn ctl(addr: SocketAddr, args: &[&str]) -> Output {
-    Process::new(CTL)
+    ctl_env(addr, args, &[])
+}
+
+/// Runs the tool against the monitor at `addr` with extra environment.
+fn ctl_env(addr: SocketAddr, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Process::new(CTL);
+    command
         .arg(addr.to_string())
         .args(args)
-        .output()
-        .expect("dcs-ctl runs")
+        .env_remove("DCS_ACTOR");
+    for &(key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("dcs-ctl runs")
 }
 
 /// Runs the tool with `args` verbatim — for malformed-command-line
 /// cases where the address itself is absent.
 fn ctl_args(args: &[&str]) -> Output {
-    Process::new(CTL).args(args).output().expect("dcs-ctl runs")
+    Process::new(CTL)
+        .args(args)
+        .env_remove("DCS_ACTOR")
+        .output()
+        .expect("dcs-ctl runs")
 }
 
 /// Runs the tool expecting success and returns the server's answer as
@@ -601,6 +617,123 @@ fn force_and_unforce_roundtrip_through_the_receipted_path() {
     });
 }
 
+/// The `CommandSettled` receipts of the served journal, in order.
+fn settled_receipts(client: &MonitorClient) -> Vec<CommandReceipt> {
+    client
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            JournalEvent::CommandSettled { receipt } => Some(receipt),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn command_submissions_carry_the_declared_actor() {
+    with_monitor(|_driver, addr, client| {
+        client.advance(1).unwrap();
+
+        // `--actor <name>` on a write declares the identity: the
+        // printed receipt carries it, and the journaled CommandSettled
+        // entry — the settled receipt's echo — shows the attribution.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["write", "11", "60", "--actor", "console-7"]))
+                .unwrap();
+        assert_eq!(receipt.actor.as_deref(), Some("console-7"));
+        ctl_ok(addr, &["scan", "1"]);
+        let settled = settled_receipts(client);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].actor.as_deref(), Some("console-7"));
+        assert_eq!(
+            settled[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+
+        // Every receipted subcommand takes the flag — the flag may sit
+        // anywhere in the argument list.
+        for args in [
+            [
+                "set-parameter",
+                "level-pid",
+                "kp",
+                "0.5",
+                "--actor",
+                "console-7",
+            ]
+            .as_slice(),
+            ["force", "--actor", "console-7", "10", "9"].as_slice(),
+            ["unforce", "10", "--actor", "console-7"].as_slice(),
+        ] {
+            let receipt: CommandReceipt = serde_json::from_value(ctl_ok(addr, args)).unwrap();
+            assert_eq!(receipt.actor.as_deref(), Some("console-7"), "{args:?}");
+        }
+
+        // A rejected command still prints its receipt — attribution
+        // included — and exits nonzero naming the CommandError.
+        let output = ctl(addr, &["write", "20", "5", "--actor", "console-7"]);
+        assert!(!output.status.success());
+        let receipt: CommandReceipt = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(receipt.actor.as_deref(), Some("console-7"));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: dcs_core::CommandError::NotWritable { point: OUT }
+            }
+        );
+        assert!(stderr(&output).contains("not_writable"), "{output:?}");
+    });
+}
+
+#[test]
+fn dcs_actor_is_the_configured_default_the_flag_overrides() {
+    with_monitor(|_driver, addr, _client| {
+        // The environment variable attributes invocations that carry no
+        // flag — a shell or service configures the identity once.
+        let output = ctl_env(addr, &["write", "11", "60"], &[("DCS_ACTOR", "ops-cli")]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let receipt: CommandReceipt = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(receipt.actor.as_deref(), Some("ops-cli"));
+
+        // The flag wins over the environment.
+        let output = ctl_env(
+            addr,
+            &["write", "11", "61", "--actor", "console-7"],
+            &[("DCS_ACTOR", "ops-cli")],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let receipt: CommandReceipt = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(receipt.actor.as_deref(), Some("console-7"));
+
+        // An empty configured default is no declaration.
+        let output = ctl_env(addr, &["write", "11", "62"], &[("DCS_ACTOR", "")]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let receipt: CommandReceipt = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(receipt.actor, None);
+    });
+}
+
+#[test]
+fn an_unattributed_submission_journals_unattributed() {
+    with_monitor(|_driver, addr, client| {
+        client.advance(1).unwrap();
+        // No flag and no configured default: the bare-Command body
+        // submits as before — the receipt and its journaled echo carry
+        // no actor, never a rejection.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["write", "11", "60"])).unwrap();
+        assert_eq!(receipt.actor, None);
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        ctl_ok(addr, &["scan", "1"]);
+        let settled = settled_receipts(client);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].actor, None);
+        let journal_json = serde_json::to_string(&client.journal(0).unwrap()).unwrap();
+        assert!(!journal_json.contains("\"actor\""), "{journal_json}");
+    });
+}
+
 #[test]
 fn promote_and_demote_print_role_reports_and_named_refusals() {
     let active = PeerRig::start(Role::Active);
@@ -725,14 +858,27 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "write", "10"],
         vec![dead, "write", "abc", "1"],
         vec![dead, "write", "10", "1", "extra"],
+        // The actor flag's malformed shapes: a missing name, a repeated
+        // flag, an unknown flag — all usage, never a submission.
+        vec![dead, "write", "10", "1", "--actor"],
+        vec![dead, "write", "10", "1", "--actor", "a", "--actor", "b"],
+        vec![dead, "write", "10", "1", "--bogus", "x"],
         vec![dead, "set-parameter", "comp"],
         vec![dead, "set-parameter", "comp", "name"],
         vec![dead, "set-parameter", "comp", "name", "1", "extra"],
+        vec![dead, "set-parameter", "comp", "name", "1", "--actor"],
         vec![dead, "force", "abc", "1"],
+        vec![dead, "force", "10", "1", "--actor"],
         vec![dead, "unforce"],
         vec![dead, "unforce", "abc"],
+        vec![dead, "unforce", "10", "--actor"],
+        // promote/demote take no actor: the switch-request contract has
+        // no field for one, so the flag is malformed usage there.
         vec![dead, "promote", "extra"],
+        vec![dead, "promote", "--actor", "op"],
         vec![dead, "demote", "extra"],
+        vec![dead, "demote", "--actor", "op"],
+        vec![dead, "snapshot", "--actor", "op"],
         vec![dead, "scan"],
         vec![dead, "scan", "abc"],
         vec![dead, "scan", "-1"],
