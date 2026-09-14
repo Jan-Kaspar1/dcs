@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-The Rust workspace holds seven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-blocks`, `dcs-monitor`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor, the simulated I/O backend, the reusable component library, HTTP+JSON monitoring access, and the end-to-end simulated tank loop. The operator command path (#20) and deterministic checkpoint/restore (#21) are implemented; the `dcs-assembly` wiring crate and `dcs-controller` binary do not exist yet. Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53).
+The Rust workspace holds eight implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor, the simulated I/O backend, the TCP-served shared simulated plant and remote driver, the reusable component library, HTTP+JSON monitoring access, and the end-to-end simulated tank loop. The operator command path (#20) and deterministic checkpoint/restore (#21) are implemented; the `dcs-assembly` wiring crate and `dcs-controller` binary do not exist yet. Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53).
 
 ## Milestones
 
@@ -48,7 +48,7 @@ Ticket breakdown:
 
 - #21 — checkpoint/restore contract: `StateMap`/`StateError`, driver hooks, `Executor::checkpoint`/`restore`. **Done.**
 - #33 — M3 decision record and plan refresh: decisions 10–15. **Done.**
-- #31 — remote simulated I/O driver over TCP: one shared simulated plant two controller processes attach to (blocked).
+- #31 — remote simulated I/O driver over TCP: `dcs-sim-net`'s `PlantServer`/`RemoteDriver`, one shared simulated plant two controller processes attach to. **Done.**
 - #32 — standby synchronization: checkpoint transfer over the monitoring transport (decision 12) into a tracking standby covering both driver-observation modes (decision 13).
 - #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19).
 - #47 — device-kind driver factory registry in `dcs-assembly`, including the remote-sim kind.
