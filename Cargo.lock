@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "dcs-blocks"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
+ "dcs-sim",
+]
+
+[[package]]
 name = "dcs-core"
 version = "0.1.0"
 dependencies = [
