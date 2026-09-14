@@ -37,15 +37,21 @@
 //! ends:
 //!
 //! - `point → port` and `port → point` connections bind a component port to
-//!   an `io_point`;
+//!   an `io_point` — field or internal alike;
 //! - `port → port` connections synthesize a pair of internal points — an
 //!   `Out` point bound to the producing port and an `In` point bound to the
-//!   consuming one — joined by a [`Loopback`] in the local simulated map,
-//!   so a component-to-component wire delivers the value one scan later;
-//! - `point → point` connections describe a field-side wire: the `to`
-//!   (`Out`) channel drives the `from` (`In`) channel observing it — a
-//!   [`Loopback`] inside the local simulated map when both ends are
-//!   sim-served, a [`FanoutDriver`] route across backends otherwise.
+//!   consuming one — joined by an internal link in the executor's scan
+//!   image, so a component-to-component wire delivers the value one scan
+//!   later. A declared channel-less `Out`/`In` `io_point` pair wired the
+//!   same way serves as the carrier instead;
+//! - `point → point` connections describe a wire between two `io_point`s:
+//!   field endpoints a field-side [`Loopback`] — inside the local
+//!   simulated map when both ends are sim-served, a [`FanoutDriver`]
+//!   route across backends otherwise — internal endpoints an internal
+//!   link through the scan image: the `to` (`Out`) point drives the
+//!   `from` (`In`) point at the same one-scan-later boundary. A mixed
+//!   field/internal pair cannot be carried and is
+//!   [`AssemblyError::MixedPointLink`].
 //!
 //! Every failure is a structured [`AssemblyError`] naming the offending
 //! model element.
@@ -62,5 +68,5 @@ pub use drivers::{
     DeviceBackend, DeviceDriver, DeviceError, DevicePoint, DeviceSpec, DriverPlan, DriverRegistry,
     FanoutDriver, SIM_SCRIPTED_KIND, SIM_TCP_KIND, StepError, StepHook, resolve_drivers,
 };
-pub use error::{AssemblyError, BuildError};
+pub use error::{AssemblyError, BuildError, InternalPointError};
 pub use registry::{ComponentRegistry, ComponentSpec};

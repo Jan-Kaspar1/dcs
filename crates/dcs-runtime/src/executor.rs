@@ -17,26 +17,38 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 
-/// How the controller may use one point the driver serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the controller may use one mapped point.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointSpec {
     /// `In` points are read into the scan image; `Out` points are written
     /// from the image to the driver.
     pub direction: Direction,
     /// The point's declared value kind.
     pub kind: ValueKind,
+    /// `Some(initial)` marks an internal point: image-carried rather than
+    /// driver-served. The image is seeded with `initial` at wiring and the
+    /// point holds it until written — by a command through the command
+    /// path for `In`, by a component for `Out`. `None` marks a field
+    /// point the driver serves.
+    pub internal: Option<Value>,
 }
 
-/// The driver's point map: which logical points the driver serves and how
-/// the controller may use them.
+/// The executor's point map: which logical points exist, whether the
+/// driver or the scan image serves each, and the internal links routing
+/// values between image-carried points.
 ///
-/// The map is the resolved, driver-side form of the plant model's I/O
-/// mapping — the caller that built the driver supplies it, and the executor
-/// treats it as the authority every component's declared I/O is checked
-/// against at wiring time.
+/// The map is the resolved form of the plant model's I/O mapping — the
+/// caller that assembled the run supplies it, and the executor treats it
+/// as the authority every component's declared I/O is checked against at
+/// wiring time.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PointMap {
     points: BTreeMap<PointId, PointSpec>,
+    /// Internal `Out` → `In` routes through the scan image: at each
+    /// scan's input phase the `Out` point's sample is copied onto the
+    /// `In` point — the image-carried carrier for port-to-port and
+    /// internal point-to-point wiring.
+    links: Vec<(PointId, PointId)>,
 }
 
 impl PointMap {
@@ -45,10 +57,48 @@ impl PointMap {
         Self::default()
     }
 
-    /// Adds `point` with the given direction and value kind; a repeated id
-    /// replaces the earlier spec.
+    /// Adds `point` as a driver-served field point with the given
+    /// direction and value kind; a repeated id replaces the earlier spec.
     pub fn with_point(mut self, point: PointId, direction: Direction, kind: ValueKind) -> Self {
-        self.points.insert(point, PointSpec { direction, kind });
+        self.points.insert(
+            point,
+            PointSpec {
+                direction,
+                kind,
+                internal: None,
+            },
+        );
+        self
+    }
+
+    /// Adds `point` as an image-carried internal point holding `initial`
+    /// until it is written; a repeated id replaces the earlier spec. The
+    /// driver is never touched for an internal point.
+    pub fn with_internal(
+        mut self,
+        point: PointId,
+        direction: Direction,
+        kind: ValueKind,
+        initial: Value,
+    ) -> Self {
+        self.points.insert(
+            point,
+            PointSpec {
+                direction,
+                kind,
+                internal: Some(initial),
+            },
+        );
+        self
+    }
+
+    /// Routes internal `Out` point `output`'s image sample onto internal
+    /// `In` point `input` at each scan's input phase — the image-carried
+    /// equivalent of a field-side loopback, delivering the value one scan
+    /// after it was written. [`Executor::new`] rejects a link whose ends
+    /// are not mapped internal `Out`/`In` points of one kind.
+    pub fn with_internal_link(mut self, output: PointId, input: PointId) -> Self {
+        self.links.push((output, input));
         self
     }
 
@@ -60,6 +110,12 @@ impl PointMap {
     /// Iterates the mapped points in ascending id order.
     pub fn iter(&self) -> impl Iterator<Item = (PointId, PointSpec)> + '_ {
         self.points.iter().map(|(&point, &spec)| (point, spec))
+    }
+
+    /// The declared internal links — `(output, input)` pairs — in
+    /// declaration order.
+    pub fn links(&self) -> impl Iterator<Item = (PointId, PointId)> + '_ {
+        self.links.iter().copied()
     }
 }
 
@@ -73,9 +129,37 @@ impl FromIterator<(PointId, Direction, ValueKind)> for PointMap {
     }
 }
 
+/// Why a [`PointMap`] internal link is rejected at wiring: a link must
+/// route a mapped internal `Out` point onto a mapped internal `In` point
+/// of the same value kind, driving each `In` point at most once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LinkError {
+    /// The `output` end is not a mapped internal `Out` point — it is
+    /// unmapped, field-backed, or an `In` point.
+    Output,
+    /// The `input` end is not a mapped internal `In` point — it is
+    /// unmapped, field-backed, or an `Out` point.
+    Input,
+    /// The link's ends carry different value kinds.
+    KindMismatch,
+    /// The `input` point is already driven by another link.
+    Conflict,
+}
+
+impl fmt::Display for LinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LinkError::Output => "the output end is not an internal out point",
+            LinkError::Input => "the input end is not an internal in point",
+            LinkError::KindMismatch => "the ends carry different value kinds",
+            LinkError::Conflict => "the input point is already driven by another link",
+        })
+    }
+}
+
 /// Why an executor refuses to run: a component's declared I/O does not
-/// match the driver's point map. Every variant names the component and the
-/// point.
+/// match the driver's point map, or an internal link is malformed. Every
+/// variant names the offending element.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WiringError {
     /// Two components declare the same name. Names are each component's
@@ -122,6 +206,15 @@ pub enum WiringError {
         /// The value kind the map declares.
         mapped: ValueKind,
     },
+    /// An internal link in the point map is malformed.
+    InvalidLink {
+        /// The link's producing point.
+        output: PointId,
+        /// The link's consuming point.
+        input: PointId,
+        /// What the link violates.
+        detail: LinkError,
+    },
 }
 
 impl fmt::Display for WiringError {
@@ -162,6 +255,15 @@ impl fmt::Display for WiringError {
                 f,
                 "component {component:?} declares io point {} as {declared:?} but the driver map has {mapped:?}",
                 point.0
+            ),
+            Self::InvalidLink {
+                output,
+                input,
+                detail,
+            } => write!(
+                f,
+                "internal link {} -> {} is invalid: {detail}",
+                output.0, input.0
             ),
         }
     }
@@ -317,21 +419,37 @@ fn failure_quality(error: IoError) -> Quality {
 /// 2. applies every queued operator [`Command`] in submission order —
 ///    this is the documented point where commands submitted between scans
 ///    take effect, each updating its receipt to the final outcome;
-/// 3. reads every `In` point in the map into the scan image, stamping the
-///    new tick — a failed read keeps the last known value marked
-///    [`Quality::Bad`] rather than aborting the scan;
+/// 3. refreshes the image's `In` points: every field `In` point is read
+///    from the driver, stamping the new tick — a failed read keeps the
+///    last known value marked [`Quality::Bad`] rather than aborting the
+///    scan — and every internal link routes its `Out` point's image
+///    sample onto its `In` point, so a port-to-port carrier delivers the
+///    value one scan after it was written;
 /// 4. steps the components in scan order, each seeing a [`ComponentIo`]
 ///    scoped to its declared points — a failing step is recorded and the
 ///    scan continues;
-/// 5. writes the image's `Out` points to the driver — points a component
-///    never wrote keep their last output, so a failed step holds outputs.
+/// 5. writes the image's field `Out` points to the driver — points a
+///    component never wrote keep their last output, so a failed step
+///    holds outputs.
+///
+/// Internal points — declared in the map via
+/// [`PointMap::with_internal`] — are served by the image alone: the
+/// driver is never read or written for them. An internal `In` point
+/// holds its declared initial value until a command writes it through
+/// the command path; an internal `Out` point records component writes
+/// for monitoring, keeping the last written sample visible in
+/// [`snapshot`](Executor::snapshot) and
+/// [`checkpoint`](Executor::checkpoint).
 ///
 /// Applying commands before the input read gives a command to an `In`
 /// point setpoint semantics: the same scan's input phase observes the
 /// written value, and it holds for later scans until the field-side value
-/// changes again. A command to an `Out` point lands in the image where a
-/// component write later in the same scan may still override it —
-/// components win, keeping control logic authoritative inside a scan.
+/// changes again — for an internal `In` point, until the next command.
+/// A command to an `Out` point lands in the image where a component write
+/// later in the same scan may still override it — components win, keeping
+/// control logic authoritative inside a scan — and a link routing from
+/// the commanded point carries the value to its `In` target that same
+/// scan.
 ///
 /// Nothing reads a wall clock: identical driver behavior over identical
 /// scans produces identical samples on every host.
@@ -412,11 +530,53 @@ impl<'d> Executor<'d> {
                 last_error: None,
             });
         }
+
+        // Internal links are wiring too: each must route a mapped internal
+        // `Out` point onto a mapped internal `In` point of the same kind,
+        // driving it at most once.
+        let mut driven = HashSet::with_capacity(map.links.len());
+        for (output, input) in map.links() {
+            let internal = |point: PointId, direction: Direction| {
+                map.get(point)
+                    .is_some_and(|spec| spec.direction == direction && spec.internal.is_some())
+            };
+            let detail = if !internal(output, Direction::Out) {
+                Some(LinkError::Output)
+            } else if !internal(input, Direction::In) {
+                Some(LinkError::Input)
+            } else if map.get(output).unwrap().kind != map.get(input).unwrap().kind {
+                Some(LinkError::KindMismatch)
+            } else if !driven.insert(input) {
+                Some(LinkError::Conflict)
+            } else {
+                None
+            };
+            if let Some(detail) = detail {
+                return Err(WiringError::InvalidLink {
+                    output,
+                    input,
+                    detail,
+                });
+            }
+        }
+
+        // Internal points are seeded into the image at their declared
+        // initial values — a held operator value or a carrier's start —
+        // so every internal point has a defined sample before the first
+        // scan.
+        let image = RefCell::new(HashMap::new());
+        for (point, spec) in map.iter() {
+            if let Some(initial) = spec.internal {
+                image
+                    .borrow_mut()
+                    .insert(point, Sample::good(initial, Tick::ZERO));
+            }
+        }
         Ok(Self {
             driver,
             map,
             components: entries,
-            image: RefCell::new(HashMap::new()),
+            image,
             pending_commands: VecDeque::new(),
             receipts: Vec::new(),
             tick: Tick::ZERO,
@@ -568,8 +728,10 @@ impl<'d> Executor<'d> {
     /// The checkpoint bundles the current tick, every component's
     /// [`capture_state`](Component::capture_state) keyed by name (empty
     /// for stateless components), the driver's captured state when it
-    /// implements the contract, and the scan image's `Out` samples — the
-    /// last written output values. It is serde-serializable, so an active
+    /// implements the contract, and the image-carried point samples: the
+    /// `Out` samples — the last written output values — plus the internal
+    /// `In` samples, so held operator values and link carriers transfer.
+    /// It is serde-serializable, so an active
     /// controller can ship it to a standby over the same JSON channel the
     /// monitoring contract uses. See the [`Checkpoint`] docs for how this
     /// maps to real redundancy.
@@ -592,6 +754,12 @@ impl<'d> Executor<'d> {
                 .map
                 .iter()
                 .filter(|(_, spec)| spec.direction == Direction::Out)
+                .filter_map(|(point, _)| image.get(&point).map(|sample| (point, *sample)))
+                .collect(),
+            internal: self
+                .map
+                .iter()
+                .filter(|(_, spec)| spec.direction == Direction::In && spec.internal.is_some())
                 .filter_map(|(point, _)| image.get(&point).map(|sample| (point, *sample)))
                 .collect(),
         }
@@ -645,6 +813,7 @@ impl<'d> Executor<'d> {
             checkpoint
                 .outputs
                 .iter()
+                .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
         Ok(executor)
@@ -657,10 +826,12 @@ impl<'d> Executor<'d> {
     /// executor, `apply` realigns one that is already assembled and may
     /// be mid-run: the same compatibility checks hold — the checkpoint's
     /// component set must equal the registered set, its outputs must be
-    /// points the map serves as `Out` with the declared kinds — then the
+    /// points the map serves as `Out` with the declared kinds, and its
+    /// internal section must name image-carried `In` points — then the
     /// driver and each component restore their captured state, the tick
     /// resumes from `checkpoint.tick`, and the output image becomes
-    /// exactly the checkpoint's. The next [`scan`](Executor::scan) then
+    /// exactly the checkpoint's while its internal `In` samples overlay
+    /// the image's held values. The next [`scan`](Executor::scan) then
     /// continues the run the checkpoint captured.
     ///
     /// Like `restore`, a rejected apply changes nothing the run
@@ -712,7 +883,12 @@ impl<'d> Executor<'d> {
         let mut image = self.image.borrow_mut();
         // The output image becomes exactly the checkpoint's: drop stale
         // `Out` samples so a value from the standby's own earlier scans
-        // cannot linger where the captured run never wrote.
+        // cannot linger where the captured run never wrote. Internal `In`
+        // samples overlay rather than replace: a checkpoint carrying an
+        // `internal` section converges the standby's held values to the
+        // active's — a commanded setpoint included — while one without it
+        // (written before internal points existed) leaves the standby's
+        // last-known values standing.
         image.retain(|point, _| {
             self.map
                 .get(*point)
@@ -722,6 +898,7 @@ impl<'d> Executor<'d> {
             checkpoint
                 .outputs
                 .iter()
+                .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
         Ok(())
@@ -729,8 +906,9 @@ impl<'d> Executor<'d> {
 
     /// The compatibility half of checkpoint restore and apply: the
     /// checkpoint's component set must equal the registered set exactly,
-    /// and every captured output must name a point the map serves as
-    /// `Out` with the declared value kind.
+    /// every captured output must name a point the map serves as `Out`
+    /// with the declared value kind, and every captured internal sample
+    /// must name an image-carried `In` point with the declared kind.
     fn check_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
         // Component names are the run's component ids: the checkpoint's
         // set must equal the registered set exactly.
@@ -764,6 +942,20 @@ impl<'d> Executor<'d> {
                     }
                 }
                 _ => return Err(RestoreError::UnknownOutput { point }),
+            }
+        }
+        for (&point, &sample) in &checkpoint.internal {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::In && spec.internal.is_some() => {
+                    if spec.kind != sample.value.kind() {
+                        return Err(RestoreError::IncompatibleInternal {
+                            point,
+                            expected: spec.kind,
+                            found: sample.value,
+                        });
+                    }
+                }
+                _ => return Err(RestoreError::UnknownInternal { point }),
             }
         }
         Ok(())
@@ -805,34 +997,56 @@ impl<'d> Executor<'d> {
     /// before the input read — so a write to an `In` point is observed by
     /// this scan's input phase, while a write to an `Out` point enters the
     /// image where the step phase may still override it.
+    ///
+    /// A command to an internal point writes the image directly — the
+    /// driver does not serve it — so a held `In` value changes here and
+    /// holds until the next command, and a write to an `Out` point routes
+    /// through its internal links at this same scan's input phase.
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             let command = self.receipts[index].command;
             self.receipts[index].outcome = match self.check_command(command) {
                 Err(reason) => CommandOutcome::Rejected { reason },
-                Ok((point, value)) => match self.driver.write(point, value) {
-                    Err(error) => CommandOutcome::Rejected {
-                        reason: CommandError::DriverRejected { point, error },
-                    },
-                    Ok(()) => {
+                Ok((point, value)) => {
+                    let internal = self
+                        .map
+                        .get(point)
+                        .is_some_and(|spec| spec.internal.is_some());
+                    if internal {
                         self.image
                             .borrow_mut()
                             .insert(point, Sample::good(value, tick));
                         CommandOutcome::Applied { tick }
+                    } else {
+                        match self.driver.write(point, value) {
+                            Err(error) => CommandOutcome::Rejected {
+                                reason: CommandError::DriverRejected { point, error },
+                            },
+                            Ok(()) => {
+                                self.image
+                                    .borrow_mut()
+                                    .insert(point, Sample::good(value, tick));
+                                CommandOutcome::Applied { tick }
+                            }
+                        }
                     }
-                },
+                }
             };
         }
     }
 
-    /// Reads every `In` point in the map into the image, stamping `tick`.
-    /// A failed read keeps the last known value — a neutral one if none —
-    /// marked `Bad`, so a field fault degrades inputs instead of stopping
-    /// the controller.
+    /// Refreshes the image's `In` points for the scan: every field `In`
+    /// point is read from the driver, stamping `tick` — a failed read
+    /// keeps the last known value, a neutral one if none, marked `Bad`,
+    /// so a field fault degrades inputs instead of stopping the
+    /// controller — while every internal link routes its `Out` point's
+    /// image sample onto its `In` point, delivering the value one scan
+    /// after it was written. Held internal `In` points — unlinked —
+    /// keep their image value untouched.
     fn read_inputs(&mut self, tick: Tick) {
         let mut image = self.image.borrow_mut();
         for (point, spec) in self.map.iter() {
-            if spec.direction != Direction::In {
+            if spec.direction != Direction::In || spec.internal.is_some() {
                 continue;
             }
             let sample = match self.driver.read(point) {
@@ -846,6 +1060,11 @@ impl<'d> Executor<'d> {
                 ),
             };
             image.insert(point, sample);
+        }
+        for (output, input) in self.map.links() {
+            if let Some(sample) = image.get(&output).copied() {
+                image.insert(input, Sample { tick, ..sample });
+            }
         }
     }
 
@@ -869,12 +1088,14 @@ impl<'d> Executor<'d> {
         }
     }
 
-    /// Writes every `Out` point the image holds to the driver. Points a
-    /// component never wrote keep no image entry and are left untouched.
+    /// Writes every field `Out` point the image holds to the driver.
+    /// Points a component never wrote keep no image entry and are left
+    /// untouched; internal `Out` points are image-carried for monitoring
+    /// and never reach the driver.
     fn write_outputs(&mut self) -> Result<(), ScanError> {
         let image = self.image.borrow();
         for (point, spec) in self.map.iter() {
-            if spec.direction != Direction::Out {
+            if spec.direction != Direction::Out || spec.internal.is_some() {
                 continue;
             }
             let Some(sample) = image.get(&point) else {
@@ -2335,6 +2556,333 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&snapshot_a).unwrap(),
             serde_json::to_string(&snapshot_b).unwrap()
+        );
+    }
+
+    /// A map with a held internal `In` point (an operator setpoint) and an
+    /// internal `Out` point (a monitored component write).
+    fn internal_map() -> PointMap {
+        PointMap::new()
+            .with_internal(
+                PointId(10),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(2.5),
+            )
+            .with_internal(
+                PointId(20),
+                Direction::Out,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+    }
+
+    /// `Scale` reads the internal `In` point onto the internal `Out` one.
+    fn internal_rig(driver: &StubDriver) -> Executor<'_> {
+        Executor::new(
+            driver,
+            internal_map(),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn internal_points_are_served_from_the_image() {
+        // The driver serves no points at all: every value here is
+        // image-carried.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+
+        // The declared initial is seeded at wiring, before any scan.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick::ZERO))
+        );
+        executor.scan().unwrap();
+        // The component read the held initial and its write landed on the
+        // image-carried `Out` point — recorded for monitoring.
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(5.0), Tick(1)))
+        );
+
+        // A command writes the internal `In` point at the scan boundary.
+        let receipt = executor.submit_command(Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(2)))
+        );
+        // The component observed the commanded value the same scan.
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(14.0), Tick(2)))
+        );
+
+        // The held value survives later scans until the next command.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().value,
+            Value::Float(7.0)
+        );
+
+        // Internal points appear in the telemetry snapshot like field
+        // points.
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.points.len(), 2);
+        assert_eq!(
+            snapshot.points[0],
+            PointTelemetry {
+                point: PointId(10),
+                direction: Direction::In,
+                sample: Some(Sample::good(Value::Float(7.0), Tick(2))),
+            }
+        );
+    }
+
+    #[test]
+    fn internal_link_delivers_a_write_one_scan_later() {
+        // The producer writes internal `Out` 20 during the step phase;
+        // the link routes it onto internal `In` 30 at the next scan's
+        // input phase, where the consumer's step observes it — the same
+        // boundary a field loopback crosses.
+        let driver = StubDriver::new(&[float(40)], &[]);
+        let map = PointMap::new()
+            .with_internal(
+                PointId(20),
+                Direction::Out,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+            .with_internal(
+                PointId(30),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(-1.0),
+            )
+            .with_internal_link(PointId(20), PointId(30))
+            .with_point(PointId(40), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![
+                Box::new(Constant {
+                    name: "producer",
+                    output: PointId(20),
+                    value: 9.0,
+                }),
+                Box::new(Scale {
+                    name: "consumer",
+                    input: PointId(30),
+                    output: PointId(40),
+                    gain: 1.0,
+                }),
+            ],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        // Scan 1's input phase routed the `Out` point's seeded initial;
+        // the producer's write lands on the `In` point at scan 2.
+        assert_eq!(
+            executor.sample(PointId(30)),
+            Some(Sample::good(Value::Float(0.0), Tick(1)))
+        );
+        assert_eq!(driver_value(&driver, 40), Value::Float(0.0));
+
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(30)),
+            Some(Sample::good(Value::Float(9.0), Tick(2)))
+        );
+        assert_eq!(driver_value(&driver, 40), Value::Float(9.0));
+    }
+
+    #[test]
+    fn malformed_internal_links_fail_wiring() {
+        let driver = StubDriver::new(&[float(1)], &[]);
+        let internal = || {
+            PointMap::new()
+                .with_point(PointId(1), Direction::In, ValueKind::Float)
+                .with_internal(
+                    PointId(20),
+                    Direction::Out,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+                .with_internal(
+                    PointId(30),
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+        };
+        let wire = |map: PointMap| Executor::new(&driver, map, Vec::new());
+
+        // The `output` end must be a mapped internal `Out` point: field
+        // and unmapped ends are rejected alike.
+        for output in [PointId(1), PointId(99)] {
+            assert_eq!(
+                wire(internal().with_internal_link(output, PointId(30))).unwrap_err(),
+                WiringError::InvalidLink {
+                    output,
+                    input: PointId(30),
+                    detail: LinkError::Output,
+                }
+            );
+        }
+        // The `input` end must be a mapped internal `In` point.
+        assert_eq!(
+            wire(internal().with_internal_link(PointId(20), PointId(1))).unwrap_err(),
+            WiringError::InvalidLink {
+                output: PointId(20),
+                input: PointId(1),
+                detail: LinkError::Input,
+            }
+        );
+        // The ends must carry the same value kind.
+        assert_eq!(
+            wire(
+                internal()
+                    .with_internal(PointId(31), Direction::In, ValueKind::Int, Value::Int(0))
+                    .with_internal_link(PointId(20), PointId(31))
+            )
+            .unwrap_err(),
+            WiringError::InvalidLink {
+                output: PointId(20),
+                input: PointId(31),
+                detail: LinkError::KindMismatch,
+            }
+        );
+        // An `In` point may be driven by only one link.
+        assert_eq!(
+            wire(
+                internal()
+                    .with_internal_link(PointId(20), PointId(30))
+                    .with_internal_link(PointId(20), PointId(30))
+            )
+            .unwrap_err(),
+            WiringError::InvalidLink {
+                output: PointId(20),
+                input: PointId(30),
+                detail: LinkError::Conflict,
+            }
+        );
+    }
+
+    #[test]
+    fn checkpoint_carries_internal_in_samples() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+        executor.submit_command(Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        executor.scan().unwrap();
+
+        let checkpoint = executor.checkpoint();
+        assert_eq!(
+            checkpoint.internal[&PointId(10)],
+            Sample::good(Value::Float(7.0), Tick(1))
+        );
+        assert_eq!(
+            checkpoint.outputs[&PointId(20)],
+            Sample::good(Value::Float(14.0), Tick(1))
+        );
+
+        // A restored executor resumes with the commanded value rather
+        // than the declared initial — operator state transfers.
+        let driver = StubDriver::new(&[], &[]);
+        let restored = Executor::restore(
+            &driver,
+            internal_map(),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &checkpoint,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+    }
+
+    #[test]
+    fn apply_converges_internal_in_samples() {
+        // The standby half of the transfer: an already-running executor
+        // realigns its held operator values to the checkpoint's, the same
+        // convergence `restore` gives a fresh one.
+        let driver = StubDriver::new(&[], &[]);
+        let mut standby = internal_rig(&driver);
+
+        let driver = StubDriver::new(&[], &[]);
+        let mut active = internal_rig(&driver);
+        active.submit_command(Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        active.scan().unwrap();
+        let checkpoint = active.checkpoint();
+
+        standby.apply(&checkpoint).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+
+        // A checkpoint's internal entries must name image-carried `In`
+        // points of the declared kind — a mismatched mapping is a named
+        // rejection, not a silent write.
+        let mut foreign = checkpoint.clone();
+        foreign
+            .internal
+            .insert(PointId(20), Sample::good(Value::Float(1.0), Tick(1)));
+        assert_eq!(
+            standby.apply(&foreign).unwrap_err(),
+            RestoreError::UnknownInternal { point: PointId(20) }
+        );
+        let mut foreign = checkpoint;
+        foreign
+            .internal
+            .insert(PointId(10), Sample::good(Value::Int(7), Tick(1)));
+        assert_eq!(
+            standby.apply(&foreign).unwrap_err(),
+            RestoreError::IncompatibleInternal {
+                point: PointId(10),
+                expected: ValueKind::Float,
+                found: Value::Int(7),
+            }
+        );
+        // A rejected apply changes nothing the run observes.
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(1)))
         );
     }
 }
