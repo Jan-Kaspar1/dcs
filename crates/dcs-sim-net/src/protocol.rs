@@ -14,7 +14,7 @@
 //! the synchronous exchange and its failure semantics well-defined.
 
 use dcs_core::{IoError, PointId, Sample, Tick, Value};
-use dcs_sim::Fault;
+use dcs_sim::{Fault, PointInfo};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpStream;
@@ -72,13 +72,18 @@ pub enum PlantRequest {
         /// The point to clear.
         point: PointId,
     },
+    /// Lists every point the plant serves — `SimDriver::points`. This is
+    /// the census development tooling (`dcs-plant-ctl`) needs to show the
+    /// shared plant's surface without a copy of its channel map.
+    ListPoints,
 }
 
 /// The server's answer to one [`PlantRequest`].
 ///
 /// The `result` tag is the wire discriminator:
 /// `{"result":"sample","sample":{...}}`, `{"result":"stepped","tick":7}`,
-/// `{"result":"done"}`, or `{"result":"error","error":{...}}`.
+/// `{"result":"points","points":[...]}`, `{"result":"done"}`, or
+/// `{"result":"error","error":{...}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum PlantResponse {
@@ -92,6 +97,13 @@ pub enum PlantResponse {
     Stepped {
         /// The tick the step advanced to.
         tick: Tick,
+    },
+    /// Answer to [`PlantRequest::ListPoints`]: every bound point's
+    /// description — direction, the sample readers observe, and the
+    /// active fault — ordered by [`PointId`].
+    Points {
+        /// The plant's points.
+        points: Vec<PointInfo>,
     },
     /// Answer to [`PlantRequest::Write`], [`PlantRequest::InjectFault`],
     /// and [`PlantRequest::ClearFault`]: the request applied.
@@ -204,6 +216,7 @@ mod tests {
                 fault: Fault::Timeout,
             },
             PlantRequest::ClearFault { point: PointId(4) },
+            PlantRequest::ListPoints,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -228,6 +241,10 @@ mod tests {
             .unwrap(),
             r#"{"op":"inject_fault","point":4,"fault":"disconnected"}"#
         );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ListPoints).unwrap(),
+            r#"{"op":"list_points"}"#
+        );
     }
 
     #[test]
@@ -241,6 +258,14 @@ mod tests {
                 ),
             },
             PlantResponse::Stepped { tick: Tick(7) },
+            PlantResponse::Points {
+                points: vec![PointInfo {
+                    point: PointId(10),
+                    direction: dcs_sim::Direction::In,
+                    sample: Sample::good(Value::Float(1.5), Tick(3)),
+                    fault: Some(Fault::Timeout),
+                }],
+            },
             PlantResponse::Done,
             PlantResponse::Error {
                 error: PlantError::Io {

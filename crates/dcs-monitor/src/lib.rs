@@ -24,7 +24,8 @@
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
-//!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`
+//!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
+//!   refused with `409` on a paced monitor (see below)
 //! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
 //!   page described below
 //!
@@ -52,6 +53,19 @@
 //! dedicated thread — a scoped thread suffices when the driver's borrow
 //! isn't `'static` — and [`Monitor::shutdown`] stops it.
 //!
+//! ## Externally requested scans under pacing
+//!
+//! `POST /scan` exists for externally driven runs — tests and tooling
+//! that advance the executor through the endpoint. A process pacing its
+//! own scan loop instead binds with [`Monitor::bind_paced`] and drives
+//! [`Monitor::paced_scan`] on its wall-clock schedule; `POST /scan` then
+//! answers `409`, because injecting endpoint-driven ticks would break the
+//! paced schedule's determinism claims — one tick per paced period, with
+//! commands applied at the scan boundary. Paced scans run through the
+//! same mutex and are recorded exactly like endpoint-driven ones, so
+//! every endpoint — snapshot, receipts, history, journal — tracks the
+//! paced run.
+//!
 //! [`MonitorClient`] is the matching lightweight in-process client used by
 //! tests and simple tooling; it speaks plain HTTP/1.0-style requests over a
 //! `TcpStream` and needs no extra dependencies.
@@ -62,9 +76,11 @@ mod recorder;
 
 pub use recorder::MonitorConfig;
 
-use dcs_core::{Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot};
+use dcs_core::{
+    Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot, Tick,
+};
 use dcs_model::SignalIndex;
-use dcs_runtime::Executor;
+use dcs_runtime::{Executor, ScanError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -81,6 +97,10 @@ pub struct ScanRequest {
 /// The monitoring page served at `GET /` — see the crate docs.
 pub const PAGE: &str = include_str!("page.html");
 
+/// The `409` body `POST /scan` answers on a paced monitor.
+const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock time by this \
+     controller; externally requested scans would inject ticks outside the schedule";
+
 /// A monitoring server sharing one executor over HTTP+JSON.
 ///
 /// See the crate docs for the endpoint contract and the single-lock
@@ -89,6 +109,10 @@ pub struct Monitor<'d> {
     shared: Mutex<Shared<'d>>,
     signals: SignalIndex,
     server: Server,
+    /// When set — [`bind_paced`](Self::bind_paced) — the hosting process
+    /// paces scans itself through [`paced_scan`](Self::paced_scan) and
+    /// `POST /scan` is refused: the wall clock owns the scan schedule.
+    paced: bool,
 }
 
 /// The executor plus the history recorder, behind one lock so a request
@@ -129,7 +153,22 @@ impl<'d> Monitor<'d> {
             }),
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
+            paced: false,
         })
+    }
+
+    /// As [`bind`](Self::bind) for a process pacing its own scan loop:
+    /// `POST /scan` answers `409` and the paced loop drives
+    /// [`paced_scan`](Self::paced_scan) — see the crate docs for the
+    /// interleaving rule this enforces.
+    pub fn bind_paced<A: ToSocketAddrs>(
+        addr: A,
+        executor: Executor<'d>,
+        signals: SignalIndex,
+    ) -> io::Result<Self> {
+        let mut monitor = Self::bind_with(addr, executor, signals, MonitorConfig::default())?;
+        monitor.paced = true;
+        Ok(monitor)
     }
 
     /// The address the listener is bound to.
@@ -154,6 +193,33 @@ impl<'d> Monitor<'d> {
     /// Stops a [`serve`](Self::serve) loop running on another thread.
     pub fn shutdown(&self) {
         self.server.unblock();
+    }
+
+    /// Runs one executor scan through the shared lock and records it —
+    /// the entry point for a process pacing its own scan loop once the
+    /// monitor owns the executor.
+    ///
+    /// Holding the mutex for the whole scan keeps the documented
+    /// interleaving: a request never observes a half-run scan, and a
+    /// command submitted between scans still applies at the next scan's
+    /// boundary. The scan is recorded exactly like an endpoint-driven
+    /// one, so `/history` and `/journal` advance under pacing.
+    pub fn paced_scan(&self) -> Result<Tick, ScanError> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { executor, recorder } = &mut *shared;
+        let tick = executor.scan()?;
+        recorder.record_scan(executor, tick);
+        Ok(tick)
+    }
+
+    /// The executor's current telemetry snapshot, taken under the lock.
+    pub fn snapshot(&self) -> TelemetrySnapshot {
+        self.shared.lock().unwrap().executor.snapshot()
+    }
+
+    /// The executor's current virtual tick.
+    pub fn tick(&self) -> Tick {
+        self.shared.lock().unwrap().executor.tick()
     }
 
     fn handle(&self, mut request: Request) {
@@ -194,6 +260,7 @@ impl<'d> Monitor<'d> {
                 Err(response) => response,
             },
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
+                Ok(_) if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
                 Ok(body) => {
                     let mut shared = self.shared.lock().unwrap();
                     let Shared { executor, recorder } = &mut *shared;
