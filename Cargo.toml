@@ -2,6 +2,7 @@
 members = [
     "crates/dcs-blocks",
     "crates/dcs-core",
+    "crates/dcs-demo",
     "crates/dcs-model",
     "crates/dcs-runtime",
     "crates/dcs-sim",
