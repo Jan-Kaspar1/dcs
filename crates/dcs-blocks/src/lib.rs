@@ -47,7 +47,9 @@
 //! - [`MedianVoter`] — 2oo3 median voting over three redundant analog
 //!   inputs with a spread discrepancy diagnostic;
 //! - [`Totalizer`] — a rate input accumulated into a running total with
-//!   reset and rollover.
+//!   reset and rollover;
+//! - [`Sequencer`] — a declared table of steps walked in order while a
+//!   `run` input holds, each driving `out` for its tick duration.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -76,6 +78,7 @@ mod override_select;
 mod params;
 mod pid;
 mod rate_limiter;
+mod sequencer;
 mod signal_filter;
 mod timer;
 mod totalizer;
@@ -96,6 +99,7 @@ pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
 pub use rate_limiter::RateLimiter;
+pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
 pub use timer::Timer;
 pub use totalizer::Totalizer;

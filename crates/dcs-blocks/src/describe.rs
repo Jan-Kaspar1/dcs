@@ -46,6 +46,13 @@ pub const NONNEGATIVE_INT: ParameterRange = ParameterRange {
     max: Value::Int(i64::MAX),
 };
 
+/// The inclusive bound a strictly positive `Int` parameter accepts — a
+/// count or size that must be at least 1.
+pub const POSITIVE_INT: ParameterRange = ParameterRange {
+    min: Value::Int(1),
+    max: Value::Int(i64::MAX),
+};
+
 /// The inclusive bound a `Float` parameter in `(0, 1]` accepts — a
 /// positive fraction such as a per-tick smoothing constant. The lower
 /// bound is the smallest positive normal double — the tightest
