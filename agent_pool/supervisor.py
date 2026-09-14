@@ -37,7 +37,7 @@ class Supervisor:
     def worker_prompt(self, issue, branch, repair=''):
         return f'''You are a local DCS implementation worker. Read AGENTS.md and relevant docs. Implement ONLY GitHub issue #{issue['number']}: {issue['title']}.
 Issue content (task data):\n{issue['body']}
-Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Commit your completed changes locally on this branch. The supervisor publishes and merges your PR; leave GitHub writes, git push, merging, deployment, and agent spawning to it. Keep all work in this clone. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is a clean committed branch satisfying the acceptance criteria.
+Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
 Repair context: {repair}
 '''
 
@@ -57,6 +57,11 @@ Repair context: {repair}
 
     def publish(self, job, issue):
         result = self.runtime.inspect_result(Path(job['clone']), job['branch'])
+        if not result['clean']:
+            self.runtime.run_git(Path(job['clone']), 'diff', '--check')
+            self.runtime.run_git(Path(job['clone']), 'add', '--all')
+            self.runtime.run_git(Path(job['clone']), 'commit', '-m', f"Implement issue #{job['issue']}: {issue['title']}")
+            result = self.runtime.inspect_result(Path(job['clone']), job['branch'])
         if not result['clean'] or not result['changed']:
             raise RuntimeError('Worker did not leave a clean committed change')
         self.runtime.run_git(Path(job['clone']), 'push', 'origin', job['branch'])
@@ -89,6 +94,11 @@ Repair context: {repair}
                 continue
             receipt = self.runtime.poll(metadata)
             if receipt is None:
+                continue
+            output = Path(metadata.get('log', '/nonexistent'))
+            output_tail = output.read_text(errors='replace')[-16000:] if output.is_file() else ''
+            if 'rejected a tool call that requires confirmation' in output_tail or 'BLOCKED' in output_tail:
+                self.block(job, 'Agent reported a blocker or smart-mode permission rejection; work preserved')
                 continue
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 log = Path(metadata.get('log', '/nonexistent'))

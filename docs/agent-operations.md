@@ -66,3 +66,6 @@ The supervisor serializes squash merges and requires the named `rust-format`, `r
 This is supervisor policy, not server-side branch protection. If GitHub branch protection is unavailable for the repository's plan, an unrelated direct push or manual merge can bypass it. Workers operate on software and simulated I/O only; physical equipment access and live deployment are outside the autonomous loop.
 
 Before calling rollout complete, record a real issue-to-PR-to-CI-to-merge-to-closure cycle, repeated worker assignment, process-restart reconciliation, and a real Windows login recovery check. Passing unit tests or registering a service/task establishes only those individual checks, not end-to-end acceptance.
+# Smart-mode Git ownership
+
+Live validation found that Devin smart mode always prompts for mutating Git commands. Workers therefore edit and test files; the supervisor stages and commits the completed edits before publishing. Permission rejections, including those accompanied by a zero exit status, block the issue and preserve its workspace. This intentionally adapts the original worker-commit design without broadening Devin permissions.
