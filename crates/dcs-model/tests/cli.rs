@@ -26,6 +26,12 @@ fn run_diff(old: &Path, new: &Path, extra: &[&str]) -> Output {
     command.output().expect("failed to run dcs-model")
 }
 
+fn run_lint(file: &Path, extra: &[&str]) -> Output {
+    let mut command = Command::new(BIN);
+    command.arg("lint").arg(file).args(extra);
+    command.output().expect("failed to run dcs-model")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
@@ -344,6 +350,88 @@ fn diff_without_two_files_prints_usage() {
     let output = Command::new(BIN)
         .arg("diff")
         .arg(fixture("minimal.json"))
+        .output()
+        .expect("failed to run dcs-model");
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("usage: dcs-model"));
+}
+
+#[test]
+fn lint_reports_each_finding_class_naming_its_element() {
+    let output = run_lint(&fixture("lint/findings.json"), &[]);
+    // Lint is advisory: findings print and the command still exits zero.
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for line in [
+        "point_without_signal io_point 11: no signal sources this point; it renders unlabeled on the monitoring page",
+        "signal_missing_unit signal 101 \"reactor-level-switch\": declares no unit",
+        "signal_missing_group signal 101 \"reactor-level-switch\": declares no group",
+        "signal_missing_description signal 102 \"level-setpoint\": declares no description",
+        "writable_field_point io_point 10: writable field point bound to channel \"ch0\" on device 1 (operator surface)",
+        "unbound_channel device 1 channel \"ch7\": is bound by no io_point",
+        "unbound_channel device 2 channel \"ch3\": is bound by no io_point",
+    ] {
+        assert!(stdout.contains(line), "{line} missing from:\n{stdout}");
+    }
+    // A writable internal point is the ordinary setpoint mechanism, not
+    // operator-surface review — io_point 13 is not flagged.
+    assert!(
+        !stdout.contains("writable_field_point io_point 13"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn lint_clean_fixture_reports_no_findings_and_exits_zero() {
+    let output = run_lint(&fixture("lint/clean.json"), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "no findings");
+}
+
+#[test]
+fn lint_strict_exits_nonzero_on_findings() {
+    let output = run_lint(&fixture("lint/findings.json"), &["--strict"]);
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(
+        message.contains("lint finding(s) under --strict"),
+        "{message}"
+    );
+    assert!(
+        message.contains("point_without_signal io_point 11"),
+        "{message}"
+    );
+    // --strict on a clean model still exits zero.
+    let clean = run_lint(&fixture("lint/clean.json"), &["--strict"]);
+    assert!(clean.status.success(), "{}", stderr(&clean));
+}
+
+#[test]
+fn lint_reports_an_invalid_document_with_its_validation_errors() {
+    let invalid = fixture("invalid").join("unknown_channel.json");
+    for extra in [Vec::new(), vec!["--strict"]] {
+        let output = run_lint(&invalid, &extra);
+        assert!(!output.status.success(), "lint unexpectedly succeeded");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains("io point 10 binds unknown channel \"ch9\" on device 1"),
+            "stderr lacks the validation errors:\n{stderr}"
+        );
+        assert!(!stderr.contains("point_without_signal"), "{stderr}");
+    }
+}
+
+#[test]
+fn lint_output_is_deterministic_across_runs() {
+    let first = run_lint(&fixture("lint/findings.json"), &[]);
+    let second = run_lint(&fixture("lint/findings.json"), &[]);
+    assert_eq!(stdout(&first), stdout(&second));
+}
+
+#[test]
+fn lint_without_a_file_prints_usage() {
+    let output = Command::new(BIN)
+        .arg("lint")
         .output()
         .expect("failed to run dcs-model");
     assert!(!output.status.success());

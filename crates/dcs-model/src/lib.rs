@@ -14,17 +14,22 @@
 //! derives a flat [`SignalIndex`] resolving every point to its signal
 //! metadata without walking the model graph. For revision review,
 //! [`PlantModel::diff`] reports the elements a revised document adds,
-//! removes, or changes as a structured [`ModelDiff`].
+//! removes, or changes as a structured [`ModelDiff`]. For
+//! engineering-quality review, [`PlantModel::lint`] reports advisory
+//! [`LintFinding`]s — valid but probably unfinished declarations, like an
+//! io_point no signal sources.
 
 #![warn(missing_docs)]
 
 mod diff;
 mod index;
+mod lint;
 mod model;
 mod validate;
 
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
 pub use index::{PointSignal, SignalIndex};
+pub use lint::{LintFinding, LintRule};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
     Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Signal,

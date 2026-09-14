@@ -15,6 +15,11 @@
 //!   and connections, each entry naming its element. `--json` emits the
 //!   [`ModelDiff`](dcs_model::ModelDiff) as JSON instead of the human
 //!   listing.
+//! - `dcs-model lint <file>` reports advisory engineering-quality findings
+//!   — valid but probably unfinished declarations, like an io_point no
+//!   signal sources or a device channel nothing binds — one `rule element:
+//!   message` line each in model order. Findings are advisory and exit
+//!   zero; `--strict` exits nonzero when any are found.
 //!
 //! Malformed input — unreadable files, broken JSON, unsupported document
 //! versions, invalid models — produces error output naming the problem and
@@ -32,7 +37,8 @@ commands:
   validate <file>          validate a plant model document, listing every error
   summary <file>           print model element counts
   signal-index <file>      print the point-to-signal index as JSON
-  diff <old> <new>         report what a model revision changes; --json emits it as JSON";
+  diff <old> <new>         report what a model revision changes; --json emits it as JSON
+  lint <file>              report advisory engineering-quality findings; --strict exits nonzero on them";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +65,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "summary" => summary(one_file(rest)?),
         "signal-index" => signal_index(one_file(rest)?),
         "diff" => diff(rest),
+        "lint" => lint(rest),
         _ => Err(format!("unknown command {command:?}\n{USAGE}")),
     }
 }
@@ -181,6 +188,47 @@ fn format_diff(diff: &ModelDiff) -> String {
         }
     }
     output.trim_end().to_owned()
+}
+
+/// `lint <file> [--strict]` prints the model's advisory
+/// [`LintFinding`](dcs_model::LintFinding)s — one `rule element: message`
+/// line each — or `no findings`. Lint is advisory, so findings exit zero
+/// unless `--strict` is given, which fails the command with the listing.
+/// A document failing validation reports its validation errors rather
+/// than being linted.
+fn lint(args: &[String]) -> Result<String, String> {
+    let mut strict = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        if arg == "--strict" {
+            strict = true;
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option {arg:?}\n{USAGE}"));
+        } else {
+            paths.push(arg.as_str());
+        }
+    }
+    let [path] = paths.as_slice() else {
+        return Err(format!("lint takes one model file\n{USAGE}"));
+    };
+    let model = load(path)?;
+    let findings = model.lint();
+    if findings.is_empty() {
+        return Ok("no findings".to_owned());
+    }
+    let mut listing = String::new();
+    for finding in &findings {
+        let _ = writeln!(listing, "{finding}");
+    }
+    if strict {
+        Err(format!(
+            "{path}: {} lint finding(s) under --strict:\n{}",
+            findings.len(),
+            listing.trim_end()
+        ))
+    } else {
+        Ok(listing.trim_end().to_owned())
+    }
 }
 
 /// Renders one field-level change: `field: old -> new` when both sides
