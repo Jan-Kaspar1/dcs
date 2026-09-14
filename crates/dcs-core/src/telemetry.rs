@@ -14,6 +14,7 @@ use crate::descriptor::ComponentDescriptor;
 use crate::io::{Direction, DriverDiagnostics, IoError};
 use crate::signal::{PointId, Sample, Tick, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One point's active operator force: the point and the value the scan
 /// image substitutes for its input read while the force stands.
@@ -61,6 +62,28 @@ pub struct ComponentDiagnostics {
     pub step_errors: u64,
     /// The most recent `step` error's message, if any.
     pub last_error: Option<String>,
+}
+
+/// One component's current parameter values: the live reading of the
+/// tunables its descriptor declares.
+///
+/// The descriptor's [`ParameterDescriptor`](crate::ParameterDescriptor)s
+/// are the editing authority — each tunable's name, [`ValueKind`], and
+/// accepted [`ParameterRange`](crate::ParameterRange) — while this
+/// section reports what those parameters currently hold, so a faceplate
+/// can show the operator the standing tune beside the edit control.
+/// `values` carries exactly the descriptor-declared names; a component
+/// declaring no parameters reports an empty map. The producer reports
+/// from the same fields its checkpoint captures, so the value a
+/// faceplate shows is the value a standby inherits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentParameters {
+    /// The component's name — the identity its diagnostics and
+    /// descriptor are keyed by in the same snapshot.
+    pub name: String,
+    /// The current value of each descriptor-declared parameter, keyed by
+    /// parameter name.
+    pub values: BTreeMap<String, Value>,
 }
 
 /// One driver-boundary failure, recorded for the snapshot's I/O health
@@ -150,6 +173,16 @@ pub struct TelemetrySnapshot {
     /// absent from snapshots serialized before forces existed.
     #[serde(default)]
     pub forces: Vec<ForcedPoint>,
+    /// Per-component current parameter values in the same execution
+    /// order as `components` and `descriptors`: `parameters[i]` reports
+    /// the live values of the parameters `descriptors[i]` declares for
+    /// the component `components[i]` diagnoses — exactly the
+    /// descriptor-declared names, so the descriptor stays the editing
+    /// surface's sole authority. A component declaring no parameters
+    /// reports an empty `values` map; absent from snapshots serialized
+    /// before the section existed.
+    #[serde(default)]
+    pub parameters: Vec<ComponentParameters>,
 }
 
 #[cfg(test)]
@@ -251,6 +284,18 @@ mod tests {
                 point: PointId(10),
                 value: Value::Float(7.0),
             }],
+            parameters: vec![
+                ComponentParameters {
+                    name: "scale".to_string(),
+                    values: [("gain".to_string(), Value::Float(7.0))]
+                        .into_iter()
+                        .collect(),
+                },
+                ComponentParameters {
+                    name: "fragile".to_string(),
+                    values: BTreeMap::new(),
+                },
+            ],
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
@@ -258,11 +303,15 @@ mod tests {
             snapshot
         );
 
-        // A snapshot serialized before forces existed carries no field
-        // and reads back with an empty force set.
+        // A snapshot serialized before forces and parameter reporting
+        // existed carries neither field and reads back with empty
+        // sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
-        document.as_object_mut().unwrap().remove("forces");
+        let object = document.as_object_mut().unwrap();
+        object.remove("forces");
+        object.remove("parameters");
         let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
         assert_eq!(legacy.forces, Vec::new());
+        assert_eq!(legacy.parameters, Vec::new());
     }
 }

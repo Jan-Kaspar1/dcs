@@ -22,15 +22,15 @@
 //! promote, so no scan ever has two writers.
 //!
 //! Promotion is accepted only from a converged peer —
-//! [`StandbyState::Tracking`], i.e. a checkpoint has applied cleanly —
+//! [`StandbySync::Tracking`], i.e. a checkpoint has applied cleanly —
 //! and refused otherwise with a named
 //! [`SwitchError`](dcs_core::SwitchError): `NotConverged` before
 //! convergence, `AlreadyActive` on an instance already owning the field.
 //! Demotion is accepted only from a field-owning instance. A
 //! field-owning peer refuses checkpoint application outright; a
 //! non-owning one — standby or mid-demotion — applies each checkpoint at
-//! its scan boundary and tracks convergence like
-//! [`Standby`](crate::Standby) does.
+//! its scan boundary and reports convergence directly as the serde
+//! [`StandbySync`] wire state.
 //!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
@@ -38,7 +38,7 @@
 //! field `Out` image — the writes it would have issued — is stashed, and
 //! each applied checkpoint whose tick matches that image compares it
 //! against the peer's own reads of the same points. A mismatch moves the
-//! peer to [`StandbyState::Diverged`], which promotion refuses like any
+//! peer to [`StandbySync::Diverged`], which promotion refuses like any
 //! non-tracking state; the next clean transfer whose comparison matches
 //! returns the peer to `Tracking`. A diverged peer's gate stays closed
 //! throughout — the check observes, it never writes.
@@ -47,7 +47,6 @@ use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::divergence::{DivergenceReport, compare_staged};
 use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
-use crate::standby::StandbyState;
 use dcs_core::{
     Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync, SwitchError,
     TelemetrySnapshot, Tick,
@@ -69,10 +68,14 @@ pub struct Peer<'d> {
     gate: Option<&'d WriteGate<'d>>,
     /// The currently reported role.
     role: Role,
-    /// Standby sync bookkeeping, meaningful while the instance does not
-    /// own the field; reset to `Unsynchronized` on demotion.
-    sync: StandbyState,
-    /// The last applied checkpoint's tick, while `sync` is `Tracking`.
+    /// The standby's reported convergence — the serde wire state
+    /// [`RoleReport`] and [`SwitchError::NotConverged`] carry — meaningful
+    /// while the instance does not own the field; reset to
+    /// `Unsynchronized` on demotion.
+    sync: StandbySync,
+    /// The last applied checkpoint's tick, while any transfer has
+    /// succeeded — kept beside `sync` so `aligned_tick` still reports it
+    /// across a `Degraded` or `Diverged` state.
     aligned: Option<Tick>,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
@@ -81,7 +84,7 @@ pub struct Peer<'d> {
     /// compared against the field when a checkpoint lands at that tick.
     staged: Option<(Tick, BTreeMap<PointId, Sample>)>,
     /// Divergence detections not yet consumed for journaling — one per
-    /// transition into [`StandbyState::Diverged`].
+    /// transition into [`StandbySync::Diverged`].
     pending_divergences: Vec<DivergenceReport>,
 }
 
@@ -105,7 +108,7 @@ pub enum ApplyError {
     /// checkpoints apply only to a tracking peer.
     OwnsField,
     /// The checkpoint was rejected as incompatible: the run rolled back
-    /// and the peer reports [`StandbyState::Degraded`].
+    /// and the peer reports [`StandbySync::Degraded`].
     Restore(RestoreError),
 }
 
@@ -144,7 +147,7 @@ impl<'d> Peer<'d> {
             executor,
             gate,
             role: Role::Active,
-            sync: StandbyState::Unsynchronized,
+            sync: StandbySync::Unsynchronized,
             aligned: None,
             pending_changes: Vec::new(),
             staged: None,
@@ -162,7 +165,7 @@ impl<'d> Peer<'d> {
             executor,
             gate,
             role: Role::Standby,
-            sync: StandbyState::Unsynchronized,
+            sync: StandbySync::Unsynchronized,
             aligned: None,
             pending_changes: Vec::new(),
             staged: None,
@@ -175,9 +178,9 @@ impl<'d> Peer<'d> {
         self.role
     }
 
-    /// The standby's synchronization bookkeeping — meaningful while the
+    /// The standby's reported convergence — meaningful while the
     /// instance does not own the field.
-    pub fn sync_state(&self) -> &StandbyState {
+    pub fn sync_state(&self) -> &StandbySync {
         &self.sync
     }
 
@@ -209,7 +212,7 @@ impl<'d> Peer<'d> {
             tick: self.executor.tick(),
             sync: match self.role {
                 Role::Active => None,
-                _ => Some(self.sync_wire()),
+                _ => Some(self.sync.clone()),
             },
         }
     }
@@ -218,13 +221,13 @@ impl<'d> Peer<'d> {
     /// request's scan boundary and reports `promoting`, settling to
     /// `active` when the first scan under the lifted gate completes.
     ///
-    /// Only a converged peer may promote: [`StandbyState::Tracking`]
+    /// Only a converged peer may promote: [`StandbySync::Tracking`]
     /// means a checkpoint has applied cleanly and the staged-output
     /// divergence check has found the run matching the field, so the
     /// next scan writes what the run would have — bumpless by
     /// determinism. A standby that has not converged — or that reports
-    /// [`StandbyState::Diverged`] — is refused with
-    /// [`SwitchError::NotConverged`] carrying the named state; a
+    /// [`StandbySync::Diverged`] — is refused with
+    /// [`SwitchError::NotConverged`] carrying the reported state; a
     /// field-owning instance — including a still-settling promotion —
     /// with [`SwitchError::AlreadyActive`]. A refused promotion touches
     /// nothing: the gate stays as it was.
@@ -233,9 +236,9 @@ impl<'d> Peer<'d> {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
         }
-        if self.sync != StandbyState::Tracking {
+        if !matches!(self.sync, StandbySync::Tracking { .. }) {
             return Err(SwitchError::NotConverged {
-                sync: self.sync_wire(),
+                sync: self.sync.clone(),
             });
         }
         if let Some(gate) = self.gate {
@@ -251,8 +254,8 @@ impl<'d> Peer<'d> {
     /// completes.
     ///
     /// Only a field-owning instance demotes; anything else is refused
-    /// with [`SwitchError::NotActive`]. The demoted peer's sync
-    /// bookkeeping resets to [`StandbyState::Unsynchronized`]: it
+    /// with [`SwitchError::NotActive`]. The demoted peer's reported
+    /// convergence resets to [`StandbySync::Unsynchronized`]: it
     /// reconverges through fresh checkpoints from the new active.
     pub fn demote(&mut self) -> Result<(), SwitchError> {
         match self.role {
@@ -262,7 +265,7 @@ impl<'d> Peer<'d> {
         if let Some(gate) = self.gate {
             gate.close();
         }
-        self.sync = StandbyState::Unsynchronized;
+        self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
         self.staged = None;
         self.change(self.executor.tick(), Role::Demoting);
@@ -278,7 +281,7 @@ impl<'d> Peer<'d> {
     /// writing. On a tracking peer a mismatched checkpoint is rejected
     /// with [`ApplyError::Restore`], the executor rolls back to its
     /// pre-apply state, and the peer reports
-    /// [`StandbyState::Degraded`] — recoverable by the next good
+    /// [`StandbySync::Degraded`] — recoverable by the next good
     /// transfer.
     ///
     /// A successful apply also runs the standby-divergence check when
@@ -287,10 +290,10 @@ impl<'d> Peer<'d> {
     /// transfer after the staged scan, the stated detection bound: the
     /// field then holds the active's write for the tick the staged image
     /// describes. Mismatches move the peer to
-    /// [`StandbyState::Diverged`] and queue a
+    /// [`StandbySync::Diverged`] and queue a
     /// [`DivergenceReport`] for the journal — one per transition, not
     /// per transfer — while a matching comparison on a diverged peer is
-    /// the resync that returns it to [`StandbyState::Tracking`]. A
+    /// the resync that returns it to [`StandbySync::Tracking`]. A
     /// staged image the checkpoint stream has not caught up to — or has
     /// overtaken — is discarded: only a same-tick comparison is honest
     /// evidence.
@@ -300,8 +303,10 @@ impl<'d> Peer<'d> {
         }
         match self.executor.apply(checkpoint) {
             Ok(()) => {
-                let was_diverged = matches!(self.sync, StandbyState::Diverged { .. });
-                self.sync = StandbyState::Tracking;
+                let was_diverged = matches!(self.sync, StandbySync::Diverged { .. });
+                self.sync = StandbySync::Tracking {
+                    aligned: checkpoint.tick,
+                };
                 self.aligned = Some(checkpoint.tick);
                 if let Some((tick, staged)) = self.staged.take()
                     && tick == checkpoint.tick
@@ -314,13 +319,13 @@ impl<'d> Peer<'d> {
                                 mismatches: mismatches.clone(),
                             });
                         }
-                        self.sync = StandbyState::Diverged { mismatches };
+                        self.sync = StandbySync::Diverged { mismatches };
                     }
                 }
                 Ok(())
             }
             Err(error) => {
-                self.sync = StandbyState::Degraded {
+                self.sync = StandbySync::Degraded {
                     detail: error.to_string(),
                 };
                 Err(ApplyError::Restore(error))
@@ -328,11 +333,11 @@ impl<'d> Peer<'d> {
         }
     }
 
-    /// Marks the tracking peer [`Degraded`](StandbyState::Degraded)
+    /// Marks the tracking peer [`Degraded`](StandbySync::Degraded)
     /// after a transfer failure that produced no checkpoint at all — an
     /// unreachable active or a refused request.
     pub fn note_transfer_failed(&mut self, detail: impl fmt::Display) {
-        self.sync = StandbyState::Degraded {
+        self.sync = StandbySync::Degraded {
             detail: detail.to_string(),
         };
     }
@@ -370,7 +375,7 @@ impl<'d> Peer<'d> {
 
     /// Drains divergence detections queued since the last call — one
     /// [`DivergenceReport`] per transition into
-    /// [`StandbyState::Diverged`], each carrying the tick the staged
+    /// [`StandbySync::Diverged`], each carrying the tick the staged
     /// image belonged to — for the transition journal the monitoring
     /// layer records them into.
     pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
@@ -427,22 +432,6 @@ impl<'d> Peer<'d> {
     fn change(&mut self, tick: Tick, to: Role) {
         let from = std::mem::replace(&mut self.role, to);
         self.pending_changes.push(RoleChange { tick, from, to });
-    }
-
-    /// The wire form of the standby sync bookkeeping.
-    fn sync_wire(&self) -> StandbySync {
-        match &self.sync {
-            StandbyState::Unsynchronized => StandbySync::Unsynchronized,
-            StandbyState::Tracking => StandbySync::Tracking {
-                aligned: self.aligned.unwrap_or(Tick::ZERO),
-            },
-            StandbyState::Degraded { detail } => StandbySync::Degraded {
-                detail: detail.clone(),
-            },
-            StandbyState::Diverged { mismatches } => StandbySync::Diverged {
-                mismatches: mismatches.clone(),
-            },
-        }
     }
 }
 
@@ -535,7 +524,10 @@ mod tests {
         let mut source = executor(&source_driver);
         source.run(7).unwrap();
         peer.apply(&source.checkpoint()).unwrap();
-        assert_eq!(peer.sync_state(), &StandbyState::Tracking);
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(7) }
+        );
         assert_eq!(peer.aligned_tick(), Some(Tick(7)));
 
         peer.promote().unwrap();
@@ -619,7 +611,7 @@ mod tests {
 
         peer.scan().unwrap();
         assert_eq!(peer.role(), Role::Standby);
-        assert_eq!(peer.sync_state(), &StandbyState::Unsynchronized);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
 
         // Demoting a non-owner is a named error.
         assert_eq!(peer.demote(), Err(SwitchError::NotActive));
@@ -724,7 +716,10 @@ mod tests {
         for _ in 0..3 {
             cycle(&mut active, &mut standby);
         }
-        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(4) }
+        );
         assert_eq!(standby.take_divergences(), vec![]);
         assert!(matches!(
             standby.report().sync,
@@ -737,7 +732,10 @@ mod tests {
         // one transfer after the staged scan.
         biased.armed.store(true, Ordering::Relaxed);
         cycle(&mut active, &mut standby);
-        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(5) }
+        );
         cycle(&mut active, &mut standby);
 
         let diverged = StandbySync::Diverged {
@@ -776,12 +774,12 @@ mod tests {
         // more cycle.
         biased.armed.store(false, Ordering::Relaxed);
         cycle(&mut active, &mut standby);
-        assert!(matches!(
-            standby.sync_state(),
-            StandbyState::Diverged { .. }
-        ));
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         cycle(&mut active, &mut standby);
-        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(8) }
+        );
         standby.promote().unwrap();
         assert!(gate.is_open());
     }
