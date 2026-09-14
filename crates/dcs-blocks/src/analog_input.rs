@@ -54,10 +54,18 @@ pub struct Scaling {
 
 impl Scaling {
     /// The raw-range bounds in ascending order.
-    fn raw_bounds(&self) -> (f64, f64) {
+    pub(crate) fn raw_bounds(&self) -> (f64, f64) {
         (
             self.raw_min.min(self.raw_max),
             self.raw_min.max(self.raw_max),
+        )
+    }
+
+    /// The engineering-range bounds in ascending order.
+    pub(crate) fn eng_bounds(&self) -> (f64, f64) {
+        (
+            self.eng_min.min(self.eng_max),
+            self.eng_min.max(self.eng_max),
         )
     }
 
@@ -65,6 +73,13 @@ impl Scaling {
     fn apply(&self, raw: f64) -> f64 {
         self.eng_min
             + (raw - self.raw_min) * (self.eng_max - self.eng_min) / (self.raw_max - self.raw_min)
+    }
+
+    /// Applies the inverse map to an engineering value inside the range:
+    /// the raw value `apply` would map back onto `eng`.
+    pub(crate) fn apply_inverse(&self, eng: f64) -> f64 {
+        self.raw_min
+            + (eng - self.eng_min) * (self.raw_max - self.raw_min) / (self.eng_max - self.eng_min)
     }
 }
 

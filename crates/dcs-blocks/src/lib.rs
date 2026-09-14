@@ -16,18 +16,34 @@
 //!
 //! - [`AnalogInput`] — raw-range to engineering-unit scaling with
 //!   clamping and quality propagation;
+//! - [`AnalogOutput`] — engineering-unit to raw-range scaling, the
+//!   inverse of [`AnalogInput`];
+//! - [`DigitalInput`] — boolean read with optional inversion and
+//!   tick-based debounce;
+//! - [`DigitalOutput`] — boolean write with quality propagation;
 //! - [`Pid`] — parallel-form PID control with output limits and
 //!   conditional-integration anti-windup;
-//! - [`DigitalOutput`] — boolean write with quality propagation.
+//! - [`AlarmMonitor`] — high/low limit checking with hysteresis on an
+//!   analog signal.
+//!
+//! Components usable with the model-driven registry expose a `KIND`
+//! constant naming the component kind the registry maps onto their
+//! `from_parameters` constructor.
 
 #![warn(missing_docs)]
 
+mod alarm_monitor;
 mod analog_input;
+mod analog_output;
+mod digital_input;
 mod digital_output;
 mod params;
 mod pid;
 
+pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
+pub use analog_output::{AnalogOutput, RawOutput};
+pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
