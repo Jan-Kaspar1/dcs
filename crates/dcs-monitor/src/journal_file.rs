@@ -225,6 +225,7 @@ mod tests {
                 value: Value::Float(1.0),
             },
             outcome: CommandOutcome::Applied { tick: Tick(tick) },
+            actor: None,
         }
     }
 

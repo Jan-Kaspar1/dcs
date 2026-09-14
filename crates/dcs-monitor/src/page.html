@@ -155,6 +155,7 @@
   <button type="submit">Write value</button>
   <button type="button" id="command-force">Force</button>
 </form>
+<div id="command-actor"></div>
 <pre id="receipt"></pre>
 </div>
 
@@ -229,6 +230,17 @@
 // shell's scan-overrun count — so operator-facing health reads as one
 // surface.
 //
+// Command audit identity (the command-path audit-identity decision):
+// ?operator=<name> configures the actor identity every command
+// submission declares — postCommand wraps the command in the
+// attributed envelope {command, actor} so the returned receipt and the
+// journaled command_settled entry carry the attribution. The identity
+// is declared, not authenticated: the journal proves what the console
+// claimed, and a deployment fronting the monitor with an
+// authenticating proxy is the recorded seam for filling it from
+// verified context. With no ?operator the page submits the bare
+// Command body and the command journals unattributed.
+//
 // Plant overview (the plant-wide-supervision decision): repeated
 // ?pair=<name>=<host:port>,<host:port>,… URL parameters switch the page
 // into an overview mode rendering one summary card per configured pair
@@ -256,6 +268,11 @@ for (const raw of urlParams.getAll("peer")) {
     peers.push(peer);
   }
 }
+
+// The declared operator identity ?operator=<name> configures — stamped
+// on every command submission as the attributed envelope's actor (see
+// postCommand). Declared, not authenticated; null submits unattributed.
+const operator = urlParams.get("operator");
 // Per-peer last-polled state: { report: RoleReport | null, error } —
 // error non-null is the named unreachable redundancy fault.
 const peerState = peers.map(() => ({ report: null, error: null }));
@@ -627,8 +644,14 @@ function pairHref(pair) {
   const others = pair.peers
     .filter((peer, i) => i !== origin)
     .map(peer => encodeURIComponent(peer.base));
-  return pair.peers[origin].base + "/" +
+  const href = pair.peers[origin].base + "/" +
     (others.length === 0 ? "" : "?peer=" + others.join("&peer="));
+  // The configured operator identity follows the operator into the
+  // linked pair view, so commands there submit under the same declared
+  // actor.
+  if (operator === null) return href;
+  return href + (others.length === 0 ? "?" : "&") +
+    "operator=" + encodeURIComponent(operator);
 }
 
 // The card's I/O-health line: the pair view's io-health troubled rule
@@ -1541,8 +1564,12 @@ function describeEvent(event) {
   }
   if ("command_settled" in event) {
     const receipt = event.command_settled.receipt;
+    // The declared actor rides the receipt: the journal row names the
+    // attribution the audit entry carries, or reads plain when the
+    // command submitted unattributed.
     return describeCommand(receipt.command) + " — " +
-      describeOutcome(receipt.outcome);
+      describeOutcome(receipt.outcome) +
+      (receipt.actor ? " — declared by " + receipt.actor : "");
   }
   if ("step_failed" in event) {
     const failure = event.step_failed;
@@ -1677,14 +1704,22 @@ function commandValue(kind, text) {
   return { Float: parseFloat(text) };
 }
 
-// POSTs the Command JSON to a peer. Content-Type text/plain keeps a
-// cross-origin POST a simple request — no preflight — while the endpoint
-// parses the same JSON body regardless of the declared type.
+// POSTs the command to a peer: the attributed envelope
+// {"command":…,"actor":…} when ?operator= configured an identity, the
+// bare Command body otherwise — both shapes the endpoint accepts. The
+// actor is the operator's declared identity — attestation, not
+// authentication — echoed on the receipt and into the journal.
+// Content-Type text/plain keeps a cross-origin POST a simple request —
+// no preflight — while the endpoint parses the same JSON body
+// regardless of the declared type.
 async function postCommand(base, command) {
+  const body = operator === null
+    ? command
+    : { command: command, actor: operator };
   const response = await fetch(base + "/command", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
-    body: JSON.stringify(command),
+    body: JSON.stringify(body),
   });
   return response.json();
 }
@@ -1839,6 +1874,13 @@ async function init() {
   select.innerHTML = index.points.filter(p => p.writable).map(p =>
     "<option value=\"" + p.point + "\">" + esc(p.name) +
     " (point " + p.point + ")</option>").join("");
+  // The configured operator identity shows beside the form — the actor
+  // every submission declares — so the console states the attribution
+  // its commands will carry (declared, not authenticated).
+  document.getElementById("command-actor").textContent = operator === null
+    ? "commands submit unattributed — ?operator=<name> declares an actor"
+    : "commands declare actor \"" + operator +
+      "\" — declared identity, not authenticated";
   buildTrends();
   // Command affordances: delegated listeners — the affordances
   // themselves re-render on every poll. The writable gate is the same
