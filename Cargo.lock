@@ -22,6 +22,7 @@ dependencies = [
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+ "serde_json",
 ]
 
 [[package]]
@@ -70,6 +71,7 @@ name = "dcs-runtime"
 version = "0.1.0"
 dependencies = [
  "dcs-core",
+ "serde",
  "serde_json",
 ]
 

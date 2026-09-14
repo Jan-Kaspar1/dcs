@@ -10,6 +10,7 @@
 //! signal model: they are comparable to each other and to the tick stamped
 //! on every reported sample, not to a wall clock.
 
+use crate::descriptor::ComponentDescriptor;
 use crate::io::Direction;
 use crate::signal::{PointId, Sample, Tick};
 use serde::{Deserialize, Serialize};
@@ -61,12 +62,19 @@ pub struct TelemetrySnapshot {
     pub points: Vec<PointTelemetry>,
     /// Diagnostics of every registered component, in execution order.
     pub components: Vec<ComponentDiagnostics>,
+    /// One self-description per registered component, in the same
+    /// execution order as `components`: `descriptors[i]` describes the
+    /// component `components[i]` diagnoses. This is where the executor
+    /// surfaces each component's `describe()` result — the static
+    /// metadata a UI renders faceplates from.
+    pub descriptors: Vec<ComponentDescriptor>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signal::{Quality, QualityReason, Value};
+    use crate::descriptor::{ParameterDescriptor, ParameterRange, PortDescriptor, PortRole};
+    use crate::signal::{Quality, QualityReason, Value, ValueKind};
 
     #[test]
     fn snapshot_serde_roundtrip() {
@@ -100,6 +108,42 @@ mod tests {
                     last_tick: None,
                     step_errors: 2,
                     last_error: Some("computation failed".to_string()),
+                },
+            ],
+            descriptors: vec![
+                ComponentDescriptor {
+                    name: "scale".to_string(),
+                    kind: "scale".to_string(),
+                    label: "scale".to_string(),
+                    ports: vec![
+                        PortDescriptor {
+                            name: "in".to_string(),
+                            direction: Direction::In,
+                            kind: ValueKind::Float,
+                            role: Some(PortRole::ProcessValue),
+                        },
+                        PortDescriptor {
+                            name: "out".to_string(),
+                            direction: Direction::Out,
+                            kind: ValueKind::Float,
+                            role: Some(PortRole::Output),
+                        },
+                    ],
+                    parameters: vec![ParameterDescriptor {
+                        name: "gain".to_string(),
+                        kind: ValueKind::Float,
+                        range: Some(ParameterRange {
+                            min: Value::Float(0.0),
+                            max: Value::Float(10.0),
+                        }),
+                    }],
+                },
+                ComponentDescriptor {
+                    name: "fragile".to_string(),
+                    kind: "fragile".to_string(),
+                    label: "fragile".to_string(),
+                    ports: Vec::new(),
+                    parameters: Vec::new(),
                 },
             ],
         };

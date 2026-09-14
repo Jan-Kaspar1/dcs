@@ -7,7 +7,8 @@
 //! exactly the declared set.
 
 use dcs_core::{
-    Direction, IoDriver, IoError, PointId, PointType, Sample, Tick, TypedSample, ValueKind,
+    ComponentDescriptor, Direction, IoDriver, IoError, PointId, PointType, PortDescriptor, Sample,
+    StateError, StateMap, Tick, TypedSample, ValueKind,
 };
 
 /// The error type a component's [`step`](Component::step) reports.
@@ -154,4 +155,63 @@ pub trait Component: Send {
     /// error is recorded against the component and the scan continues —
     /// the component's outputs keep their last written values.
     fn step(&mut self, io: &dyn ComponentIo, tick: Tick) -> Result<(), StepError>;
+
+    /// The component's self-description for the monitoring UI.
+    ///
+    /// The executor reports one [`ComponentDescriptor`] per registered
+    /// component in the [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot):
+    /// the metadata a faceplate is rendered from. The default derives a
+    /// correct descriptor from what the contract already knows — `name`
+    /// and `label` take the component's [`name`](Component::name), `kind`
+    /// the implementor's Rust type name, every declared
+    /// [`IoRequirement`] becomes a [`PortDescriptor`] with no role hint,
+    /// and no parameters are declared — so existing components need no
+    /// changes. Components override this to report their model `kind`,
+    /// [`PortRole`](dcs_core::PortRole) hints, and tunable-parameter
+    /// metadata.
+    fn describe(&self) -> ComponentDescriptor {
+        ComponentDescriptor {
+            name: self.name().to_string(),
+            kind: std::any::type_name::<Self>().to_string(),
+            label: self.name().to_string(),
+            ports: self
+                .io_requirements()
+                .into_iter()
+                .map(|requirement| PortDescriptor {
+                    name: requirement.name,
+                    direction: requirement.direction,
+                    kind: requirement.kind,
+                    role: None,
+                })
+                .collect(),
+            parameters: Vec::new(),
+        }
+    }
+
+    /// Captures the component's internal state into a [`StateMap`].
+    ///
+    /// This is the component half of the state-capture contract behind
+    /// [`Executor::checkpoint`](crate::Executor::checkpoint): every value
+    /// `step` carries between scans — integrators, previous inputs, held
+    /// outputs — belongs in the map so a restored component continues the
+    /// run exactly as the captured one would have. The default captures
+    /// nothing; stateless components are unaffected by checkpointing.
+    /// Components override this and
+    /// [`restore_state`](Component::restore_state) as a pair.
+    fn capture_state(&self) -> StateMap {
+        StateMap::new()
+    }
+
+    /// Restores state produced by an equivalent component's
+    /// [`capture_state`](Component::capture_state).
+    ///
+    /// Implementations must validate the whole map before applying it —
+    /// a rejected restore changes nothing — and fail with a
+    /// [`StateError`] naming the component and the offending field when
+    /// the map is incompatible: missing fields, wrong value kinds, or
+    /// fields the component never captured. The default, for components
+    /// that capture nothing, accepts only an empty map.
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_empty(self.name())
+    }
 }
