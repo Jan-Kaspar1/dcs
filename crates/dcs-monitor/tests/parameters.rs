@@ -1,12 +1,15 @@
 //! End-to-end tests for the faceplate parameter-edit surface: a
 //! `set_parameter` command posted the way the page posts it applies at
 //! the next scan boundary with a receipt and the tuned behavior shows in
-//! later telemetry; out-of-range and mistyped submissions answer the
-//! named `CommandError` rejection, journaled for the page's journal
-//! pane; and the served page carries the parameter-edit markup plus the
-//! declared-range warning logic — all driven over TCP through the
-//! in-process `MonitorClient` against a multi-kind rig: a real
-//! `dcs_blocks::Pid` beside a kind declaring no parameters.
+//! later telemetry; the snapshot's `parameters` section reports each
+//! component's standing tune for the page's current-value column, the
+//! applied value landing in the next poll's section; out-of-range and
+//! mistyped submissions answer the named `CommandError` rejection,
+//! journaled for the page's journal pane; and the served page carries
+//! the parameter-edit markup plus the declared-range warning logic and
+//! the current-value join — all driven over TCP through the in-process
+//! `MonitorClient` against a multi-kind rig: a real `dcs_blocks::Pid`
+//! beside a kind declaring no parameters.
 
 use dcs_blocks::{Pid, PidConfig};
 use dcs_core::{
@@ -173,6 +176,20 @@ fn descriptor<'s>(
         .unwrap_or_else(|| panic!("no descriptor for {name}"))
 }
 
+/// The snapshot's parameters-section entry for one component — the map
+/// the page's current-value column reads by parameter name.
+fn parameter_values<'s>(
+    snapshot: &'s TelemetrySnapshot,
+    component: &str,
+) -> &'s std::collections::BTreeMap<String, Value> {
+    &snapshot
+        .parameters
+        .iter()
+        .find(|entry| entry.name == component)
+        .unwrap_or_else(|| panic!("no parameters entry for {component}"))
+        .values
+}
+
 /// Posts the exact body the page's parameter edit serializes — the
 /// `set_parameter` wire shape — and decodes the receipt like the page
 /// does.
@@ -227,6 +244,13 @@ fn a_parameter_edit_applies_at_the_scan_boundary_and_telemetry_reflects_it() {
             telemetry(&snapshot, OUT).sample.unwrap().value,
             Value::Float(1.0)
         );
+        // The standing tune the page's current-value column shows on the
+        // next poll: this snapshot's parameters section already reports
+        // the applied kp.
+        assert_eq!(
+            parameter_values(&snapshot, "level-pid")["kp"],
+            Value::Float(0.5)
+        );
 
         // Exactly one receipt, now reporting the applied tick — the
         // answer the page's status cell and journal pane display.
@@ -253,6 +277,52 @@ fn a_parameter_edit_applies_at_the_scan_boundary_and_telemetry_reflects_it() {
             )),
             "the settled tune is journaled"
         );
+    });
+}
+
+#[test]
+fn the_parameters_section_is_the_payload_the_pages_join_reads() {
+    with_monitor(|_driver, client| {
+        let snapshot = client.snapshot().unwrap();
+        // One ComponentParameters per component in the same execution
+        // order as the descriptors — the join keys entries by component
+        // name, and each entry's `values` carries exactly the names its
+        // descriptor declares.
+        assert_eq!(snapshot.parameters.len(), snapshot.descriptors.len());
+        for (entry, descriptor) in snapshot.parameters.iter().zip(&snapshot.descriptors) {
+            assert_eq!(entry.name, descriptor.name);
+            for param in &descriptor.parameters {
+                assert!(
+                    entry.values.contains_key(&param.name),
+                    "{}'s parameters entry lacks declared parameter {}",
+                    entry.name,
+                    param.name
+                );
+            }
+        }
+        // The rig's Pid was built with kp = 1 and reports it; the
+        // parameterless kind reports an empty map.
+        assert_eq!(
+            parameter_values(&snapshot, "level-pid")["kp"],
+            Value::Float(1.0)
+        );
+        assert!(parameter_values(&snapshot, "plain").is_empty());
+    });
+}
+
+#[test]
+fn a_snapshot_lacking_the_section_decodes_to_an_empty_join() {
+    with_monitor(|_driver, client| {
+        // The serde-default shape from before the section existed: strip
+        // `parameters` from the served document and it still decodes —
+        // the page's `snapshot.parameters || []` guard then finds no
+        // entry for any component and the column renders empty.
+        let (status, body) = client.request("GET", "/snapshot", None).unwrap();
+        assert_eq!(status, 200, "{body}");
+        let mut document: serde_json::Value = serde_json::from_str(&body).unwrap();
+        document.as_object_mut().unwrap().remove("parameters");
+        let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
+        assert!(legacy.parameters.is_empty());
     });
 }
 
@@ -351,6 +421,22 @@ fn page_serves_parameter_edit_markup_and_declared_range_warning() {
             "not an Int value",
             "not a Float value",
             "settled.receipt.command.set_parameter",
+        ] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        // The current-value column: the page joins the same snapshot's
+        // parameters section to the descriptor by component name and
+        // renders each declared parameter's reported Value beside its
+        // edit control. The serde-default guard finds no entry when the
+        // section — or the component's ComponentParameters — is absent,
+        // rendering the column empty rather than failing.
+        for needle in [
+            "<th>Current</th>",
+            "class=\\\"param-current\\\"",
+            "(snapshot.parameters || []).map(p => [p.name, p.values])",
+            "parameterTable(descriptor, parameters.get(descriptor.name))",
+            "hasOwnProperty.call(values, param.name)",
+            "formatValue(values[param.name])",
         ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
