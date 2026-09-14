@@ -1,7 +1,10 @@
 //! Analog input: linear raw-range to engineering-unit scaling.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, PointType, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PointType, PortRole, Quality, QualityReason, Sample, Tick, Value,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 use std::marker::PhantomData;
 
@@ -107,6 +110,10 @@ pub struct AnalogInput<R: RawInput = f64> {
 }
 
 impl<R: RawInput> AnalogInput<R> {
+    /// The component-kind string the model-driven registry maps onto this
+    /// type's constructor.
+    pub const KIND: &'static str = "analog-input";
+
     /// Builds the component from explicit points and scaling, or reports
     /// the scaling's inconsistency as a [`ParameterError`].
     pub fn new(
@@ -199,13 +206,26 @@ impl<R: RawInput> Component for AnalogInput<R> {
         )?;
         Ok(())
     }
+
+    /// Describes the channel: `raw` is the measured process value the
+    /// block scales, `out` the engineering value it publishes; the four
+    /// shared scaling parameters.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[("raw", PortRole::ProcessValue), ("out", PortRole::Output)],
+            describe::scaling_parameters(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, ValueKind};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -399,5 +419,57 @@ mod tests {
             AnalogInput::<f64>::new("ai", RAW, OUT, non_finite),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "ai");
+        assert_eq!(descriptor.kind, AnalogInput::<f64>::KIND);
+        assert_eq!(descriptor.label, "ai");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "raw".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "raw_min".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "raw_max".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "eng_min".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "eng_max".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+            ]
+        );
     }
 }

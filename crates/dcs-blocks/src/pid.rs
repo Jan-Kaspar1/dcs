@@ -1,8 +1,12 @@
 //! PID controller: parallel form, output limits, and conditional-
 //! integration anti-windup.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, StateError, StateMap,
+    Tick, Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// Tuning and limit parameters for [`Pid`].
@@ -78,6 +82,10 @@ pub struct Pid {
 }
 
 impl Pid {
+    /// The component-kind string the model-driven registry maps onto this
+    /// type's constructor.
+    pub const KIND: &'static str = "pid";
+
     /// Builds the component from explicit points and tuning, or reports
     /// the config's inconsistency as a [`ParameterError`].
     pub fn new(
@@ -213,6 +221,30 @@ impl Component for Pid {
         Ok(())
     }
 
+    /// Describes the controller: `sp` the setpoint it regulates toward,
+    /// `pv` the measured process value, `out` the manipulated variable it
+    /// drives; the tuning and limit parameters `from_parameters` reads.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[
+                ("sp", PortRole::Setpoint),
+                ("pv", PortRole::ProcessValue),
+                ("out", PortRole::Output),
+            ],
+            vec![
+                describe::parameter("kp", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter("ki", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter("kd", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter("dt", ValueKind::Float, Some(describe::POSITIVE_F64)),
+                describe::parameter("out_min", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter("out_max", ValueKind::Float, Some(describe::FINITE_F64)),
+            ],
+        )
+    }
+
     /// Captures the integrator, the previous `pv` (when any step has run),
     /// and the held last output — the state a standby needs to continue
     /// the loop bumplessly.
@@ -242,7 +274,7 @@ impl Component for Pid {
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, IoDriver, Quality};
+    use dcs_core::{Direction, IoDriver, ParameterDescriptor, PortDescriptor, Quality};
     use dcs_model::{ComponentId, ComponentInstance};
     use dcs_runtime::Executor;
     use dcs_sim::{ChannelId, ChannelMap, FirstOrderLag, PointBinding, ProcessElement, SimDriver};
@@ -371,7 +403,7 @@ mod tests {
         .collect();
         let instance = ComponentInstance {
             id: ComponentId(2),
-            kind: "pid".to_string(),
+            kind: Pid::KIND.to_string(),
             parameters,
             ports: BTreeMap::new(),
         };
@@ -406,6 +438,74 @@ mod tests {
             Pid::new("pid", SP, PV, OUT, bad_dt),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = Pid::new("pid", SP, PV, OUT, config()).unwrap().describe();
+        assert_eq!(descriptor.name, "pid");
+        assert_eq!(descriptor.kind, Pid::KIND);
+        assert_eq!(descriptor.label, "pid");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "sp".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "pv".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "kp".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "ki".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "kd".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "dt".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::POSITIVE_F64),
+                },
+                ParameterDescriptor {
+                    name: "out_min".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "out_max".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+            ]
+        );
     }
 
     fn sim_point(point: PointId, direction: dcs_sim::Direction) -> PointBinding {

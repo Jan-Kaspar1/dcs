@@ -2,8 +2,11 @@
 //! [`AnalogInput`](crate::AnalogInput).
 
 use crate::analog_input::Scaling;
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, PointType, Quality, QualityReason, Sample, Tick};
+use dcs_core::{
+    ComponentDescriptor, PointId, PointType, PortRole, Quality, QualityReason, Sample, Tick,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 use std::marker::PhantomData;
 
@@ -170,6 +173,19 @@ impl<R: RawOutput> Component for AnalogOutput<R> {
         )?;
         Ok(())
     }
+
+    /// Describes the channel: `eng` is the demanded engineering value the
+    /// block drives toward, `raw` the field value it writes; the four
+    /// shared scaling parameters.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[("eng", PortRole::Setpoint), ("raw", PortRole::Output)],
+            describe::scaling_parameters(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -177,7 +193,7 @@ mod tests {
     use super::*;
     use crate::AnalogInput;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality, Value};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, Value, ValueKind};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -414,5 +430,57 @@ mod tests {
             AnalogOutput::<f64>::new("ao", ENG, RAW, non_finite),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "ao");
+        assert_eq!(descriptor.kind, AnalogOutput::<f64>::KIND);
+        assert_eq!(descriptor.label, "ao");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "eng".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "raw".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "raw_min".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "raw_max".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "eng_min".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "eng_max".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+            ]
+        );
     }
 }

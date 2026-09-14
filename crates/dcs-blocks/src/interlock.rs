@@ -1,8 +1,11 @@
 //! Interlock: analog pass-through gated by trip inputs and a permissive,
 //! with a configured safe value and a tripped flag.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// An interlock: passes the analog `in` through to `out` while the
@@ -160,13 +163,40 @@ impl Component for Interlock {
         )?;
         Ok(())
     }
+
+    /// Describes the interlock: `in` is the process value passed through,
+    /// `permissive` and the `trip_N` inputs are the reported conditions
+    /// gating it, `out` the driven value, `tripped` the reported state;
+    /// the `safe_value` parameter.
+    fn describe(&self) -> ComponentDescriptor {
+        let mut roles: Vec<(String, PortRole)> = vec![
+            ("in".to_string(), PortRole::ProcessValue),
+            ("permissive".to_string(), PortRole::Status),
+            ("out".to_string(), PortRole::Output),
+            ("tripped".to_string(), PortRole::Status),
+        ];
+        roles.extend(
+            (1..=self.trips.len()).map(|index| (format!("trip_{index}"), PortRole::Status)),
+        );
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &roles,
+            vec![describe::parameter(
+                "safe_value",
+                ValueKind::Float,
+                Some(describe::FINITE_F64),
+            )],
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -459,5 +489,70 @@ mod tests {
             .unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "safe_value"
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "ilk");
+        assert_eq!(descriptor.kind, Interlock::KIND);
+        assert_eq!(descriptor.label, "ilk");
+        // Ports follow the declared-I/O order: in, permissive, the
+        // trip_N set, out, tripped.
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "in".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "permissive".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+                PortDescriptor {
+                    name: "trip_1".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+                PortDescriptor {
+                    name: "trip_2".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+                PortDescriptor {
+                    name: "tripped".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [ParameterDescriptor {
+                name: "safe_value".to_string(),
+                kind: ValueKind::Float,
+                range: Some(describe::FINITE_F64),
+            }]
+        );
+
+        // A trip-free instance describes no trip ports.
+        let solo = Interlock::new("ilk-0", IN, PERMISSIVE, Vec::new(), OUT, TRIPPED, 0.0).unwrap();
+        assert_eq!(solo.describe().ports.len(), 4);
     }
 }

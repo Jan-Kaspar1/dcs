@@ -1,8 +1,12 @@
 //! Alarm monitor: high/low limit checking with hysteresis on an analog
 //! signal.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, StateError, StateMap,
+    Tick, Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// Limit and deadband parameters for [`AlarmMonitor`].
@@ -170,6 +174,27 @@ impl Component for AlarmMonitor {
         Ok(())
     }
 
+    /// Describes the monitor: `in` is the measured process value checked
+    /// against the limits, `alarm` the reported trip state; the limit and
+    /// hysteresis parameters `from_parameters` reads.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[("in", PortRole::ProcessValue), ("alarm", PortRole::Status)],
+            vec![
+                describe::parameter("low_limit", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter("high_limit", ValueKind::Float, Some(describe::FINITE_F64)),
+                describe::parameter(
+                    "hysteresis",
+                    ValueKind::Float,
+                    Some(describe::NONNEGATIVE_F64),
+                ),
+            ],
+        )
+    }
+
     /// Captures which limit, if any, holds the alarm — the state the
     /// hysteresis bands act on.
     fn capture_state(&self) -> StateMap {
@@ -208,7 +233,7 @@ impl Component for AlarmMonitor {
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -436,5 +461,52 @@ mod tests {
             AlarmMonitor::new("alm", IN, ALARM, non_finite),
             Err(ParameterError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "alm");
+        assert_eq!(descriptor.kind, AlarmMonitor::KIND);
+        assert_eq!(descriptor.label, "alm");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "in".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "alarm".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "low_limit".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "high_limit".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::FINITE_F64),
+                },
+                ParameterDescriptor {
+                    name: "hysteresis".to_string(),
+                    kind: ValueKind::Float,
+                    range: Some(describe::NONNEGATIVE_F64),
+                },
+            ]
+        );
     }
 }

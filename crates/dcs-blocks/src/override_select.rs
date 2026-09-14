@@ -1,8 +1,11 @@
 //! Override selector: chooses between a control value and an operator
 //! value on a select input, propagating worst-of input quality.
 
+use crate::describe;
 use crate::params::{ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, Tick, Value,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// An override selector: writes either the `control` or the `operator`
@@ -104,13 +107,32 @@ impl Component for OverrideSelect {
         )?;
         Ok(())
     }
+
+    /// Describes the selector: `control` is the process-side value,
+    /// `operator` the operator's target, `select` the reported mode
+    /// choosing between them, `out` the driven value. The kind reads no
+    /// parameters.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[
+                ("control", PortRole::ProcessValue),
+                ("operator", PortRole::Setpoint),
+                ("select", PortRole::Status),
+                ("out", PortRole::Output),
+            ],
+            Vec::new(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality};
+    use dcs_core::{Direction, PortDescriptor, Quality, ValueKind};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -267,5 +289,44 @@ mod tests {
         let io = io(true);
         block.step(&io, Tick(1)).unwrap();
         assert_eq!(output(&io).value, Value::Float(20.0));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "ovr");
+        assert_eq!(descriptor.kind, OverrideSelect::KIND);
+        assert_eq!(descriptor.label, "ovr");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "control".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "operator".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "select".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Float,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: `from_parameters` reads no keys.
+        assert!(descriptor.parameters.is_empty());
     }
 }

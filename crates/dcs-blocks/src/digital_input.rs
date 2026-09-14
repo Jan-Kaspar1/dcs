@@ -1,8 +1,11 @@
 //! Digital input: boolean conditioning with optional inversion and
 //! tick-based debounce.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Sample, StateError, StateMap, Tick, Value};
+use dcs_core::{
+    ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value, ValueKind,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A digital input channel: conditions a boolean field `In` point onto a
@@ -124,6 +127,26 @@ impl Component for DigitalInput {
         Ok(())
     }
 
+    /// Describes the channel: `in` is the measured field signal the block
+    /// conditions, `out` the conditioned value it publishes; `invert` and
+    /// `debounce_ticks` parameters.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[("in", PortRole::ProcessValue), ("out", PortRole::Output)],
+            vec![
+                describe::parameter("invert", ValueKind::Bool, None),
+                describe::parameter(
+                    "debounce_ticks",
+                    ValueKind::Int,
+                    Some(describe::NONNEGATIVE_INT),
+                ),
+            ],
+        )
+    }
+
     /// Captures the driven output value and the debounce's in-progress
     /// observation (`stable_value`/`stable_count`, absent before the
     /// first step).
@@ -176,7 +199,7 @@ impl Component for DigitalInput {
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality, QualityReason};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, QualityReason};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -348,5 +371,47 @@ mod tests {
             DigitalInput::from_parameters("di", IN, OUT, &wrong).unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "debounce_ticks"
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = DigitalInput::new("di", IN, OUT).describe();
+        assert_eq!(descriptor.name, "di");
+        assert_eq!(descriptor.kind, DigitalInput::KIND);
+        assert_eq!(descriptor.label, "di");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "in".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Output),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                ParameterDescriptor {
+                    name: "invert".to_string(),
+                    kind: ValueKind::Bool,
+                    range: None,
+                },
+                ParameterDescriptor {
+                    name: "debounce_ticks".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+            ]
+        );
     }
 }

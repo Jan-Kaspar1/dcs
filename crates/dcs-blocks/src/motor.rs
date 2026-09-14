@@ -1,8 +1,9 @@
 //! Motor: a discrete actuator that echoes a start/stop command to the
 //! field and flags a fault when the run feedback stops following it.
 
+use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Sample, Tick, Value};
+use dcs_core::{ComponentDescriptor, PointId, PortRole, Sample, Tick, Value, ValueKind};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A motor: drives the boolean `cmd` start/stop request onto the field
@@ -130,13 +131,36 @@ impl Component for Motor {
         )?;
         Ok(())
     }
+
+    /// Describes the actuator: `cmd` is the start/stop request the block
+    /// is driven toward, `out` the field command, `run` the measured run
+    /// feedback it verifies, `fault` the reported diagnostic; the
+    /// `fault_ticks` parameter.
+    fn describe(&self) -> ComponentDescriptor {
+        describe::component(
+            &self.name,
+            Self::KIND,
+            &self.io_requirements(),
+            &[
+                ("cmd", PortRole::Setpoint),
+                ("out", PortRole::Output),
+                ("run", PortRole::ProcessValue),
+                ("fault", PortRole::Status),
+            ],
+            vec![describe::parameter(
+                "fault_ticks",
+                ValueKind::Int,
+                Some(describe::NONNEGATIVE_INT),
+            )],
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, Quality, QualityReason};
+    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, QualityReason};
     use dcs_model::{ComponentId, ComponentInstance};
     use std::collections::BTreeMap;
 
@@ -344,5 +368,52 @@ mod tests {
             Motor::from_parameters("mtr", CMD, OUT, RUN, FAULT, &wrong).unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "fault_ticks"
         ));
+    }
+
+    #[test]
+    fn describes_itself() {
+        let descriptor = component().describe();
+        assert_eq!(descriptor.name, "mtr");
+        assert_eq!(descriptor.kind, Motor::KIND);
+        assert_eq!(descriptor.label, "mtr");
+        assert_eq!(
+            descriptor.ports,
+            [
+                PortDescriptor {
+                    name: "cmd".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Setpoint),
+                },
+                PortDescriptor {
+                    name: "out".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Output),
+                },
+                PortDescriptor {
+                    name: "run".to_string(),
+                    direction: Direction::In,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::ProcessValue),
+                },
+                PortDescriptor {
+                    name: "fault".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Bool,
+                    role: Some(PortRole::Status),
+                },
+            ]
+        );
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads.
+        assert_eq!(
+            descriptor.parameters,
+            [ParameterDescriptor {
+                name: "fault_ticks".to_string(),
+                kind: ValueKind::Int,
+                range: Some(describe::NONNEGATIVE_INT),
+            }]
+        );
     }
 }
