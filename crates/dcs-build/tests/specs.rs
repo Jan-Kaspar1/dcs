@@ -22,6 +22,7 @@ use dcs_build::specs::{
     SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
+use dcs_core::IoDriver;
 use dcs_model::PlantModel;
 
 /// Builds `plant`, reloads the emitted document through `dcs-model`'s
@@ -303,6 +304,43 @@ fn edge_trigger_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, EdgeTriggerSpec::KIND);
+}
+
+#[test]
+fn field_input_stale_after_emits_and_enforces_the_budget() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level-raw", Direction::In);
+
+    let pv = plant.field_input_stale_after::<f64>(PointId(10), level_raw, false, 2);
+
+    // The emitted document carries the declared budget, and reloads
+    // through `dcs-model`'s validating loader unchanged.
+    let model = plant.build().unwrap();
+    assert_eq!(model.io_points[0].stale_after_ticks, Some(2));
+    let json = serde_json::to_string_pretty(&model).unwrap();
+    let reloaded = PlantModel::load(&json).unwrap();
+    assert_eq!(reloaded, model);
+
+    // Assembled, the budget reaches the executor: the field sample the
+    // driver stamped at its tick 0 turns Uncertain(Stale) once the lag
+    // exceeds two scans, while the image stamp stays the scan tick.
+    let driver = sim_driver(&reloaded).unwrap();
+    let mut executor = assemble(&reloaded, &dcs_controller::registry(), &driver).unwrap();
+    driver.write(pv.into(), Value::Float(7.0)).unwrap();
+    executor.run(3).unwrap();
+    let sample = executor
+        .snapshot()
+        .points
+        .iter()
+        .find(|point| point.point == pv.into())
+        .and_then(|point| point.sample)
+        .unwrap();
+    assert_eq!(
+        sample.quality,
+        dcs_core::Quality::Uncertain(dcs_core::QualityReason::Stale)
+    );
+    assert_eq!(sample.tick, dcs_core::Tick(3));
 }
 
 /// The registry-enumeration coverage check: every kind the standard
