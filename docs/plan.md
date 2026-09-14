@@ -89,7 +89,7 @@ Done when:
 
 ### M5: Lifecycle and device integration — in progress
 
-The redundant pair becomes a lifecycle platform: automatic promotion when the active is lost, checkpoint versioning for cross-build replacement, declared-behavior device kinds beyond `sim`, an integration guide for new component and device kinds, and in-service model revision through the pair. Decisions 27–30 record this milestone's approach (#70, this record); decisions 25 and 26 (recorded under #89) already supply the model-revision and divergence-gate semantics. Two layers are implemented — the scripted device kind (#67) proves the registered device seam, and the integration guide (#71) documents it; the lifecycle tickets (#65, #66, #87, #88) remain open.
+The redundant pair becomes a lifecycle platform: automatic promotion when the active is lost, checkpoint versioning for cross-build replacement, declared-behavior device kinds beyond `sim`, an integration guide for new component and device kinds, and in-service model revision through the pair. Decisions 27–30 record this milestone's approach (#70, this record); decisions 25 and 26 (recorded under #89) already supply the model-revision and divergence-gate semantics. Three layers are implemented — the scripted device kind (#67) proves the registered device seam, the integration guide (#71) documents it, and the divergence gate (#88) promotes only standbys proven to track the field; the lifecycle tickets (#65, #66, #87, #114, #115, #116) remain open.
 
 Ticket breakdown:
 
@@ -99,7 +99,7 @@ Ticket breakdown:
 - #67 — scripted-scenario simulated device kind proving the driver registry (#47). **Done** — `SIM_SCRIPTED_KIND` resolves to `ScriptedDriver`, the `"script"` device parameter declares tick-indexed playback, and `FanoutDriver::inspect` reaches the recorded-write log (decision 29).
 - #71 — component-kind and device-kind integration guide. **Done** — `docs/integration-guide.md` walks both seams end to end with compiling worked examples.
 - #87 — roll a revised plant model into production through the redundant pair, with the carryover rule and report (decision 25). **Open** — depends on #66.
-- #88 — standby output-divergence detection as a promotion gate (decision 26). **Open.**
+- #88 — standby output-divergence detection as a promotion gate (decision 26). **Done** — `Peer` stashes each quiesced scan's staged field `Out` image and compares it, at the same-tick checkpoint transfer, against the standby's own reads of those points (`divergence::compare_staged`, exact for `Bool`/`Int`, `FLOAT_TOLERANCE` for `Float`); a mismatch lands the named `StandbySync::Diverged` carrying the evidence, refuses promotion with `SwitchError::NotConverged`, keeps the gate closed, journals `DivergenceDetected` at the compared tick, and clears on a clean resync — all proven by the two-peer loopback test `crates/dcs-controller/tests/divergence.rs`.
 - #114 — a model-revision diff subcommand on the `dcs-model` CLI reporting what changed between two documents — the revision-review tooling #87's roll needs (depends on #36). **Open.**
 - #115 — persist controller checkpoints to a file for restart recovery (depends on #21, #66). **Open.**
 - #116 — demonstrate the full stack end to end: shared plant, redundant pair, and monitoring surface (depends on #64, #69). **Open.**
@@ -111,7 +111,7 @@ Done when:
 - a declared-behavior device kind beyond plain `sim` instantiates from model data through the driver registry — `sim-scripted`'s tick-indexed playback (decision 29; #67) — **done**;
 - the integration guide walks a new component kind and a new device kind from `Component`/`IoDriver` implementation through registration to a scanning model, with both worked examples compiling in the test suite (decision 29; #71) — **done**;
 - a revised plant model rolls into production through the pair: the new-model standby enters the named `reinitialized` state, the carryover report names what crossed the revision, and promotion moves the field writer preserving exactly-one-writer (decision 25; #87) — **open**;
-- a tracking standby's staged `Out` image is compared against the shared field, a mismatch lands it in a journaled `diverged` state blocking promotion until resync (decision 26; #88) — **open**;
+- a tracking standby's staged `Out` image is compared against the shared field, a mismatch lands it in a journaled `diverged` state blocking promotion until resync (decision 26; #88) — **done**;
 - the `dcs-model` CLI reports a structural diff between two model documents, naming the elements a revision changed (#114) — **open**;
 - a controller's checkpoints persist to a file and a restarted process recovers the run from one (#115) — **open**;
 - a scripted demonstration runs the full stack — a `dcs-plant-server` plant, the redundant `dcs-controller` pair, and the monitoring surface — end to end (#116) — **open**.
