@@ -16,26 +16,11 @@ use std::fmt;
 
 /// Data-flow direction of a simulated point.
 ///
-/// Mirrors the plant model's channel direction: `In` carries a value from
-/// the simulated field into the controller, `Out` carries a controller
-/// command toward the field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    /// Field-to-controller; the controller reads these points.
-    In,
-    /// Controller-to-field; the controller writes these points.
-    Out,
-}
-
-impl fmt::Display for Direction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Direction::In => "in",
-            Direction::Out => "out",
-        })
-    }
-}
+/// The shared [`dcs_core::Direction`], re-exported so the channel map, the
+/// plant model, and the [`IoDriver`](dcs_core::IoDriver) boundary name one
+/// type: `In` carries a value from the simulated field into the controller,
+/// `Out` carries a controller command toward the field.
+pub use dcs_core::Direction;
 
 /// Identifies one channel on one simulated device.
 ///
