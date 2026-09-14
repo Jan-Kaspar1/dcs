@@ -182,20 +182,20 @@ fn check_names_a_parameter_failure() {
     let path = format!("{INVALID}/bad_parameters.json");
     let output = run(&[&path, "--check"]);
     assert!(!output.status.success());
-    let stderr = stderr(&output);
+    let message = stderr(&output);
     assert!(
-        stderr.contains("component 1") && stderr.contains("\"kp\""),
-        "{stderr}"
+        message.contains("component 1") && message.contains("\"kp\""),
+        "{message}"
     );
 
     // A device-kind factory rejecting the device's parameters.
     let path = format!("{INVALID}/bad_device_parameters.json");
     let output = run(&[&path, "--check"]);
     assert!(!output.status.success());
-    let stderr = stderr(&output);
+    let message = stderr(&output);
     assert!(
-        stderr.contains("device 1") && stderr.contains("\"address\""),
-        "{stderr}"
+        message.contains("device 1") && message.contains("\"address\""),
+        "{message}"
     );
 }
 
