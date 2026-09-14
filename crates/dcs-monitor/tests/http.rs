@@ -2,8 +2,8 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError, PointId,
-    Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
+    JournalEvent, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
@@ -326,7 +326,7 @@ fn monitoring_page_is_served() {
             assert_eq!(status, 200, "{path}");
             assert!(body.contains("<title>dcs-monitor</title>"), "{path}");
             // The page drives only the JSON contract endpoints.
-            for endpoint in ["/signals", "/snapshot", "/command"] {
+            for endpoint in ["/signals", "/snapshot", "/history", "/journal", "/command"] {
                 assert!(body.contains(endpoint), "{path} lacks {endpoint}");
             }
         }
@@ -375,6 +375,120 @@ fn page_json_feed_tracks_snapshots_and_commands() {
         let snapshot = client.advance(1).unwrap();
         assert_eq!(point_value(&snapshot, 10), Some(Value::Float(7.5)));
         assert_eq!(point_value(&snapshot, 20), Some(Value::Float(15.0)));
+    });
+}
+
+#[test]
+fn page_serves_trend_and_journal_markup() {
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        // The trend pane: one inline-SVG figure per point, fed by /history
+        // with a since-cursor — dependency-free markup, no build assets.
+        for needle in ["id=\"trends\"", "<svg", "/history?since="] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        // The journal pane: a tick-ordered table fed by /journal with a
+        // since-cursor.
+        for needle in ["id=\"journal\"", "<th>Tick</th>", "/journal?since="] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        // The page stays a single dependency-free asset.
+        assert!(!page.contains("src="), "page references external assets");
+    });
+}
+
+#[test]
+fn trend_and_journal_feeds_track_the_run() {
+    with_monitor(|driver, client| {
+        driver.write(PointId(10), Value::Float(3.0)).unwrap();
+        client.advance(2).unwrap();
+
+        // The payload the trend fetches: the point's retained samples in
+        // tick order, roundtripping through the wire format.
+        let history = client.history(&[PointId(10)], 0).unwrap();
+        assert_eq!(history.len(), 1);
+        let json = serde_json::to_string(&history).unwrap();
+        let history: Vec<dcs_core::PointHistory> = serde_json::from_str(&json).unwrap();
+        let samples = &history[0].samples;
+        assert_eq!(
+            samples
+                .iter()
+                .map(|entry| entry.sample.tick)
+                .collect::<Vec<_>>(),
+            vec![Tick(1), Tick(2)]
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .map(|entry| entry.sample.value)
+                .collect::<Vec<_>>(),
+            vec![Value::Float(3.0), Value::Float(3.0)]
+        );
+
+        // The trend grows across polls: the next since-cursor fetch
+        // returns only the newer samples.
+        let seen = samples.last().unwrap().seq;
+        driver.write(PointId(10), Value::Float(4.0)).unwrap();
+        client.advance(1).unwrap();
+        let more = client.history(&[PointId(10)], seen).unwrap();
+        assert_eq!(
+            more[0]
+                .samples
+                .iter()
+                .map(|entry| (entry.seq, entry.sample))
+                .collect::<Vec<_>>(),
+            vec![(seen + 1, Sample::good(Value::Float(4.0), Tick(3)))]
+        );
+
+        // The journal feed: an injected quality fault at tick 4 and a
+        // command rejected at submission, both tick-attributed.
+        driver.faults.lock().unwrap().insert(PointId(10));
+        client.advance(1).unwrap();
+        let rejected = client
+            .command(&write_value(99, ValueKind::Float, Value::Float(1.0)))
+            .unwrap();
+        let journal = client.journal(0).unwrap();
+        let json = serde_json::to_string(&journal).unwrap();
+        let journal: Vec<dcs_core::JournalEntry> = serde_json::from_str(&json).unwrap();
+
+        let fault = journal
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.event,
+                    JournalEvent::QualityChanged {
+                        to: Quality::Bad(_),
+                        ..
+                    }
+                )
+            })
+            .expect("the injected fault is journaled");
+        assert_eq!(fault.tick, Tick(4));
+        assert_eq!(
+            fault.event,
+            JournalEvent::QualityChanged {
+                point: PointId(10),
+                from: Some(Quality::Good),
+                to: Quality::Bad(QualityReason::CommunicationFault),
+            }
+        );
+
+        let rejection = journal
+            .iter()
+            .find(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .expect("the rejected command is journaled");
+        assert_eq!(rejection.tick, Tick(4));
+        assert_eq!(
+            rejection.event,
+            JournalEvent::CommandSettled {
+                receipt: CommandReceipt {
+                    command: rejected.command,
+                    outcome: CommandOutcome::Rejected {
+                        reason: CommandError::UnknownPoint { point: PointId(99) },
+                    },
+                },
+            }
+        );
     });
 }
 

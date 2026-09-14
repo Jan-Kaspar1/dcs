@@ -67,7 +67,7 @@ Ticket breakdown:
 - #35 — bounded per-point history and the transition journal served with since-cursors (decision 17). **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18).
 - #50 — `ComponentDescriptor` contract and per-kind descriptors, served to the UI (decision 16).
-- #51 — the page itself: live telemetry plus signal metadata, descriptor-driven faceplates, trend and journal panes on incremental polling, command affordances on writable points, and the pair-as-one-controller view once #46 lands.
+- #51 — the page itself, built in slices. **Trend slice done:** live telemetry plus signal metadata (#34), per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`, all polled incrementally on the snapshot's cadence. Remaining page work: descriptor-driven faceplates (#50), command affordances restricted to writable points (#49), and the pair-as-one-controller view (#46).
 
 Done when:
 
