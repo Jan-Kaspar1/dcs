@@ -713,7 +713,10 @@ impl<'d> Executor<'d> {
     /// [`describe`](Component::describe) result in the same scan order as
     /// `components` — one descriptor per registered component, so
     /// `descriptors[i]` describes the component `components[i]`
-    /// diagnoses.
+    /// diagnoses — with each port annotated by its bound point: the
+    /// serving layer joins a port to the point its same-named declared
+    /// [`IoRequirement`] resolved to, so a monitoring UI renders the
+    /// port's live value without re-resolving the model's wiring.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
         TelemetrySnapshot {
@@ -740,7 +743,23 @@ impl<'d> Executor<'d> {
             descriptors: self
                 .components
                 .iter()
-                .map(|entry| entry.component.describe())
+                .map(|entry| {
+                    let mut descriptor = entry.component.describe();
+                    // Serving-layer annotation: a port's `point` is the
+                    // bound point of its same-named declared I/O
+                    // requirement; a port naming no declared requirement
+                    // is unwired and reports `None`.
+                    let bound: HashMap<String, PointId> = entry
+                        .component
+                        .io_requirements()
+                        .into_iter()
+                        .map(|requirement| (requirement.name, requirement.point))
+                        .collect();
+                    for port in &mut descriptor.ports {
+                        port.point = bound.get(&port.name).copied();
+                    }
+                    descriptor
+                })
                 .collect(),
         }
     }
@@ -2330,6 +2349,7 @@ mod tests {
                         direction: requirement.direction,
                         kind: requirement.kind,
                         role: None,
+                        point: None,
                     })
                     .collect(),
                 parameters: ["gain", "limit"]
@@ -3035,12 +3055,14 @@ mod tests {
                         direction: Direction::In,
                         kind: ValueKind::Float,
                         role: None,
+                        point: Some(PointId(10)),
                     },
                     PortDescriptor {
                         name: "out".to_string(),
                         direction: Direction::Out,
                         kind: ValueKind::Float,
                         role: None,
+                        point: Some(PointId(20)),
                     },
                 ],
                 parameters: Vec::new(),
@@ -3080,12 +3102,14 @@ mod tests {
                             direction: Direction::In,
                             kind: ValueKind::Float,
                             role: Some(PortRole::ProcessValue),
+                            point: None,
                         },
                         PortDescriptor {
                             name: "out".to_string(),
                             direction: Direction::Out,
                             kind: ValueKind::Float,
                             role: Some(PortRole::Output),
+                            point: None,
                         },
                     ],
                     parameters: vec![ParameterDescriptor {
@@ -3125,6 +3149,10 @@ mod tests {
         assert_eq!(descriptor.label, "Fancy loop");
         assert_eq!(descriptor.ports[0].role, Some(PortRole::ProcessValue));
         assert_eq!(descriptor.ports[1].role, Some(PortRole::Output));
+        // The serving layer annotated each port with its bound point —
+        // `Fancy`'s own `describe` reported none.
+        assert_eq!(descriptor.ports[0].point, Some(PointId(10)));
+        assert_eq!(descriptor.ports[1].point, Some(PointId(20)));
         assert_eq!(
             descriptor.parameters[0].range,
             Some(ParameterRange {

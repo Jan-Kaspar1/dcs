@@ -514,12 +514,14 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
             ]
         );

@@ -104,6 +104,10 @@ pub fn component<S: AsRef<str>>(
                     .iter()
                     .find(|(port, _)| port.as_ref() == requirement.name)
                     .map(|(_, role)| *role),
+                // The bound point is the serving layer's annotation:
+                // the executor joins it in when the descriptor is
+                // served in a snapshot.
+                point: None,
             })
             .collect(),
         parameters,
@@ -152,12 +156,14 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "out".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
             ]
         );

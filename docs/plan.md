@@ -71,15 +71,15 @@ Ticket breakdown:
 - #50 — `ComponentDescriptor` contract and per-kind descriptors, served to the UI (decision 16). **Done** — per-kind descriptors completed under #61.
 - #51 — the page's trend slice: live telemetry plus signal metadata, per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`. **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18). **Done** — `IoPoint::writable` (optional, default unset) validated `In`-only, carried through assembly into `PointSpec::writable`, enforced at `submit_command` as `CommandError::NotWritable`, reported in the signal index, and filtering the page's command select; `Out`-point writes are the recorded rejection rule.
-- #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Open.**
+- #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Done** — `PortDescriptor.point` carries the bound `PointId` as serving-layer annotation (serde-optional, joined by the executor from the declared `IoRequirement`s — the recorded wiring choice); the page renders one generic faceplate per instance with role-hinted elements, parameter kinds and ranges, and name-joined diagnostics, degrading to the generic name-plus-diagnostics-plus-wired-points view for a kind with no custom descriptor; inline write affordances render only on model-marked writable points and submit through the pair-aware `submitCommand`, with rejections visible in the receipt pane and journal.
 - #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Done** — `PairClient`/`PeerStatus`/`PairError` in `dcs-monitor`, the page's `?peer=` pair view with per-peer role polling, active-only command routing with mid-transition retry, tick-continuity merging, and cross-origin reads on the JSON endpoints.
 - #69 — showcase plant model exercising the full component library. **Open.**
 
 Done when:
 
 - the monitoring surface serves the signal index, per-kind `ComponentDescriptor`s, bounded point history, and the transition journal over the decision-8 transport (#34, #35, #50) — **done**;
-- a served page renders live telemetry and signal metadata, faceplates generated from descriptors without per-kind UI code, and trend and journal panes fed by incremental since-cursor polling (#51, #62) — **partially done** (trend and journal slices landed; faceplates open);
-- the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **partially done** (the generic command select is writable-filtered since #49; descriptor faceplate affordances remain #62);
+- a served page renders live telemetry and signal metadata, faceplates generated from descriptors without per-kind UI code, and trend and journal panes fed by incremental since-cursor polling (#51, #62) — **done**;
+- the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **done** (the generic command select and the faceplate affordances both gate on the metadata's `writable` mark);
 - under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **done**.
 
 ### M5: Lifecycle and device integration — in progress

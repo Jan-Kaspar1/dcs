@@ -533,12 +533,14 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Setpoint),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "raw".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Float,
                     role: Some(PortRole::Output),
+                    point: None,
                 },
             ]
         );

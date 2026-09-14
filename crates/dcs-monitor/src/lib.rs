@@ -58,18 +58,35 @@
 //! a monotonically increasing `seq`, so a polling consumer detects an
 //! evicted stretch as a numbering gap instead of silently missing it.
 //!
-//! The page is the trend slice of the monitoring and control UI consuming
-//! the unified contract: a static, dependency-free HTML+JavaScript asset
-//! ([`PAGE`], no build toolchain) that fetches `/signals` once for point
-//! labels, units, and display groups — the point listing organizes itself
-//! under the model-declared groups, with ungrouped points filed under the
-//! documented `"ungrouped"` default — then polls `/snapshot`, `/history`,
-//! and `/journal` on one shared one-second cadence — the snapshot
-//! refreshes each point's value, quality, and tick; the history
-//! increments grow each point's inline-SVG trend through `since`-cursor
-//! polling; the journal pane lists quality transitions and settled
-//! command receipts in tick order — and submits `write_value` commands to
-//! `/command` through a form, displaying the returned receipt.
+//! The page is the monitoring and control UI consuming the unified
+//! contract: a static, dependency-free HTML+JavaScript asset ([`PAGE`],
+//! no build toolchain) that fetches `/signals` once for point labels,
+//! units, display groups, and the model-declared `writable` marks — the
+//! point listing organizes itself under the model-declared groups, with
+//! ungrouped points filed under the documented `"ungrouped"` default —
+//! then polls `/snapshot`, `/history`, and `/journal` on one shared
+//! one-second cadence — the snapshot refreshes each point's value,
+//! quality, and tick; the history increments grow each point's
+//! inline-SVG trend through `since`-cursor polling; the journal pane
+//! lists quality transitions and settled command receipts in tick order
+//! — and submits `write_value` commands to `/command`, displaying the
+//! returned receipt.
+//!
+//! Each snapshot's `descriptors` render one faceplate per component
+//! instance, generically — no per-kind page code: a port's
+//! [`PortRole`](dcs_core::PortRole) hint picks the conventional element
+//! (process-value display, setpoint field, driven output, status flag),
+//! parameters list with their kinds and declared ranges, and the
+//! instance's diagnostics join by name. The executor annotates every
+//! served `PortDescriptor` with the `point` its port is bound to, so a
+//! port's live value comes straight from the snapshot's point telemetry
+//! and its signal metadata from the index — including the `writable`
+//! mark that gates every command affordance: only a model-declared
+//! writable point is ever offered a write, and a rejection is visible
+//! in the receipt pane and the journal. A descriptor carrying no role
+//! hints and no parameters — a kind with no custom `describe` —
+//! degrades to a generic name-plus-diagnostics-plus-wired-points
+//! faceplate, never an error.
 //!
 //! ## The pair view
 //!
@@ -767,8 +784,10 @@ fn decode<T: DeserializeOwned>(status: u16, body: &str) -> io::Result<T> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error}: {body}")))
 }
 
-/// Reads one HTTP response: headers up to the blank line, then exactly
-/// `Content-Length` body bytes (or to EOF when no length is given).
+/// Reads one HTTP response: headers up to the blank line, then the body
+/// by `Content-Length`, by `Transfer-Encoding: chunked` framing (which a
+/// server may pick over a known length once a body grows past its
+/// threshold), or to EOF when neither is given.
 fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
@@ -799,28 +818,85 @@ fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
                 format!("malformed status line: {headers}"),
             )
         })?;
-    let content_length = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
+    let header = |name: &str| {
+        headers
+            .split("\r\n")
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_string())
+    };
+    let content_length = header("content-length").and_then(|value| value.parse::<usize>().ok());
+    let chunked = header("transfer-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+    });
 
     let body_start = header_end + 4;
-    match content_length {
-        Some(length) => {
-            while buf.len() - body_start < length {
+    if chunked {
+        // Chunk framing: `<hex size>\r\n<data>\r\n` repeated, ended by a
+        // zero-size chunk. Trailers may follow; the body is complete at
+        // the zero-size chunk.
+        let mut body = Vec::new();
+        let mut pos = body_start;
+        loop {
+            let line_end = loop {
+                if let Some(end) = find_subslice(&buf[pos..], b"\r\n") {
+                    break pos + end;
+                }
                 match stream.read(&mut chunk)? {
-                    0 => break,
+                    0 => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "connection closed mid-chunked body",
+                        ));
+                    }
+                    n => buf.extend_from_slice(&chunk[..n]),
+                }
+            };
+            let size = std::str::from_utf8(&buf[pos..line_end])
+                .ok()
+                .and_then(|line| usize::from_str_radix(line.trim(), 16).ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "malformed chunk size")
+                })?;
+            pos = line_end + 2;
+            if size == 0 {
+                break;
+            }
+            while buf.len() - pos < size + 2 {
+                match stream.read(&mut chunk)? {
+                    0 => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "connection closed mid-chunked body",
+                        ));
+                    }
                     n => buf.extend_from_slice(&chunk[..n]),
                 }
             }
-            let end = (body_start + length).min(buf.len());
-            let body = String::from_utf8_lossy(&buf[body_start..end]).into_owned();
-            Ok((status, body))
+            body.extend_from_slice(&buf[pos..pos + size]);
+            pos += size + 2;
         }
-        None => {
-            stream.read_to_end(&mut buf)?;
-            let body = String::from_utf8_lossy(&buf[body_start..]).into_owned();
-            Ok((status, body))
+        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    } else {
+        match content_length {
+            Some(length) => {
+                while buf.len() - body_start < length {
+                    match stream.read(&mut chunk)? {
+                        0 => break,
+                        n => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let end = (body_start + length).min(buf.len());
+                let body = String::from_utf8_lossy(&buf[body_start..end]).into_owned();
+                Ok((status, body))
+            }
+            None => {
+                stream.read_to_end(&mut buf)?;
+                let body = String::from_utf8_lossy(&buf[body_start..]).into_owned();
+                Ok((status, body))
+            }
         }
     }
 }
