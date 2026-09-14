@@ -5,7 +5,9 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo, decode_response, encode_request,
     read_frame,
 };
-use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value, ValueKind,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -195,6 +197,15 @@ fn exchange(
 /// arrive after the fact and pair with a later request, so the driver
 /// never reuses a suspect link. `BusDriver` is [`Sync`] through its
 /// internal locks, like the driver contract expects.
+///
+/// Diagnostics: [`IoDriver::diagnostics`] reports the link as
+/// [`LinkState::Disconnected`] once a failed exchange dropped the
+/// connection — the named link degradation a dead device server
+/// produces — with the last transport failure's description. That
+/// surface is link health, distinct from the per-point [`IoError`]s
+/// `read`/`write` return: every point's read failing with
+/// `Disconnected` and the link reporting `disconnected` are the same
+/// event told at the two levels the telemetry contract keeps separate.
 pub struct BusDriver {
     connection: Mutex<Connection>,
     /// Point → register mapping plus the point's declared kind.
@@ -409,5 +420,20 @@ impl IoDriver for BusDriver {
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }
+    }
+
+    /// The link's transport-level health for the snapshot's I/O-health
+    /// section: `disconnected` once a failed exchange severed the
+    /// connection — permanently, since the driver never reconnects —
+    /// plus the last transport failure's description.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        Some(DriverDiagnostics {
+            link: if self.connected() {
+                LinkState::Connected
+            } else {
+                LinkState::Disconnected
+            },
+            last_error: self.last_failure().map(|error| error.to_string()),
+        })
     }
 }
