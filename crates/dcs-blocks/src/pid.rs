@@ -292,23 +292,31 @@ impl Component for Pid {
         Ok(())
     }
 
+    /// Reports the declared gains, period, and output limits — the same
+    /// fields [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("kp", Value::Float(self.config.kp));
+        parameters.insert("ki", Value::Float(self.config.ki));
+        parameters.insert("kd", Value::Float(self.config.kd));
+        parameters.insert("dt", Value::Float(self.config.dt));
+        parameters.insert("out_min", Value::Float(self.config.out_min));
+        parameters.insert("out_max", Value::Float(self.config.out_max));
+        parameters
+    }
+
     /// Captures the integrator, the previous `pv` (when any step has run),
     /// and the held last output — the state a standby needs to continue
     /// the loop bumplessly — plus the tuning: a `set_parameter` command's
     /// gains are run state a tracking standby must inherit.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("integrator", Value::Float(self.integrator));
         state.insert("last_output", Value::Float(self.last_output));
         if let Some(previous) = self.previous_pv {
             state.insert("previous_pv", Value::Float(previous));
         }
-        state.insert("kp", Value::Float(self.config.kp));
-        state.insert("ki", Value::Float(self.config.ki));
-        state.insert("kd", Value::Float(self.config.kd));
-        state.insert("dt", Value::Float(self.config.dt));
-        state.insert("out_min", Value::Float(self.config.out_min));
-        state.insert("out_max", Value::Float(self.config.out_max));
         state
     }
 

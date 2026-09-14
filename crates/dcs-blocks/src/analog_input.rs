@@ -256,15 +256,22 @@ impl<R: RawInput> Component for AnalogInput<R> {
         Ok(())
     }
 
+    /// Reports the declared scaling bounds — the same fields
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("raw_min", Value::Float(self.scaling.raw_min));
+        parameters.insert("raw_max", Value::Float(self.scaling.raw_max));
+        parameters.insert("eng_min", Value::Float(self.scaling.eng_min));
+        parameters.insert("eng_max", Value::Float(self.scaling.eng_max));
+        parameters
+    }
+
     /// Captures the tuned scaling bounds — runtime tuning is run state
     /// a tracking standby must inherit.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
-        state.insert("raw_min", Value::Float(self.scaling.raw_min));
-        state.insert("raw_max", Value::Float(self.scaling.raw_max));
-        state.insert("eng_min", Value::Float(self.scaling.eng_min));
-        state.insert("eng_max", Value::Float(self.scaling.eng_max));
-        state
+        self.report_parameters()
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {

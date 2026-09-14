@@ -8,9 +8,10 @@ use dcs_blocks::{
     Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
     RateLimiter, Scaling, Sequencer, SequencerStep, SignalFilter, Timer, Totalizer, Valve,
 };
-use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
+use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
+use std::collections::BTreeSet;
 
 /// Records `id` in `specs` and returns it as a [`PointId`], so a rig's
 /// point declarations and the point map built from them cannot drift.
@@ -278,7 +279,9 @@ const EXPECTED_KINDS: [&str; 19] = [
     Sequencer::KIND,
 ];
 
-fn snapshot() -> TelemetrySnapshot {
+/// The rig wired for an executor: the simulated driver serving every
+/// declared point, the resolved point map, and the component set.
+fn wired() -> (SimDriver, PointMap, Vec<Box<dyn Component>>) {
     let Rig { components, specs } = rig();
     let channel_map = specs
         .iter()
@@ -301,6 +304,11 @@ fn snapshot() -> TelemetrySnapshot {
         .fold(ChannelMap::new(), ChannelMap::with_point);
     let sim = SimDriver::new(channel_map).unwrap();
     let point_map: PointMap = specs.into_iter().collect();
+    (sim, point_map, components)
+}
+
+fn snapshot() -> TelemetrySnapshot {
+    let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
     executor.scan().unwrap();
     executor.snapshot()
@@ -347,5 +355,90 @@ fn descriptor_snapshot_serde_roundtrips() {
     assert_eq!(
         serde_json::from_str::<TelemetrySnapshot>(&json).unwrap(),
         snapshot
+    );
+}
+
+#[test]
+fn reported_parameters_match_each_kinds_declared_set() {
+    let snapshot = snapshot();
+
+    // One parameter section per component, aligned by name with the
+    // diagnostics and descriptors in scan order.
+    assert_eq!(snapshot.parameters.len(), snapshot.components.len());
+    for ((parameters, descriptor), diagnostics) in snapshot
+        .parameters
+        .iter()
+        .zip(&snapshot.descriptors)
+        .zip(&snapshot.components)
+    {
+        assert_eq!(parameters.name, diagnostics.name);
+        assert_eq!(parameters.name, descriptor.name);
+        // Drift guard: the reported names are exactly the kind's
+        // declared `ParameterDescriptor` set — every tunable reports,
+        // and nothing undeclared leaks.
+        let declared: BTreeSet<&str> = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect();
+        let reported: BTreeSet<&str> = parameters.values.keys().map(String::as_str).collect();
+        assert_eq!(reported, declared, "{}", descriptor.name);
+    }
+    // OverrideSelect declares no parameters and reports an empty set.
+    let ovr = &snapshot.parameters[7];
+    assert_eq!(ovr.name, "ovr");
+    assert!(ovr.values.is_empty());
+}
+
+#[test]
+fn reported_values_equal_the_checkpointed_fields() {
+    let (sim, point_map, components) = wired();
+    let mut executor = Executor::new(&sim, point_map, components).unwrap();
+    executor.scan().unwrap();
+
+    // Every reported value is what the same run's checkpoint persists
+    // for the component — the standby and the faceplate read one
+    // vocabulary.
+    let checkpoint = executor.checkpoint();
+    for parameters in &executor.snapshot().parameters {
+        let captured = &checkpoint.components[&parameters.name];
+        for (name, value) in &parameters.values {
+            assert_eq!(
+                captured.get(name),
+                Some(*value),
+                "{}.{name}",
+                parameters.name
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tuned_pid_parameter_reports_and_restores_identically() {
+    let (sim, point_map, components) = wired();
+    let mut executor = Executor::new(&sim, point_map, components).unwrap();
+    executor.scan().unwrap();
+
+    // A receipted tune on the `pid` instance reports its new value in
+    // the next snapshot under the declared name.
+    executor.submit_command(Command::SetParameter {
+        component: "pid".to_string(),
+        name: "kp".to_string(),
+        value: Value::Float(3.5),
+    });
+    executor.scan().unwrap();
+    let pid = &executor.snapshot().parameters[2];
+    assert_eq!(pid.name, "pid");
+    assert_eq!(pid.values["kp"], Value::Float(3.5));
+
+    // A checkpoint/restore mid-tune reports identically from the fresh
+    // executor.
+    let checkpoint = executor.checkpoint();
+    let (sim, point_map, components) = wired();
+    let mut restored = Executor::restore(&sim, point_map, components, &checkpoint, None).unwrap();
+    restored.scan().unwrap();
+    assert_eq!(
+        restored.snapshot().parameters,
+        executor.snapshot().parameters
     );
 }

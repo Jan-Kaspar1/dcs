@@ -338,15 +338,23 @@ impl Component for AlarmMonitor {
         Ok(())
     }
 
+    /// Reports the declared limit tuning — the same fields
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("low_limit", Value::Float(self.limits.low));
+        parameters.insert("high_limit", Value::Float(self.limits.high));
+        parameters.insert("hysteresis", Value::Float(self.limits.hysteresis));
+        parameters
+    }
+
     /// Captures which limit, if any, holds the alarm — the state the
     /// hysteresis bands act on — plus the tuned limits, so a tracking
     /// standby inherits runtime tuning.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
-        state.insert("low_limit", Value::Float(self.limits.low));
-        state.insert("high_limit", Value::Float(self.limits.high));
-        state.insert("hysteresis", Value::Float(self.limits.hysteresis));
         state
     }
 

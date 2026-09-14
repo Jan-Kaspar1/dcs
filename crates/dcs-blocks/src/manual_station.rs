@@ -250,13 +250,22 @@ impl Component for ManualStation {
         Ok(())
     }
 
+    /// Reports the declared `transfer_delta` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("transfer_delta", Value::Float(self.transfer_delta));
+        parameters
+    }
+
     /// Captures the value `out` is driving — absent before the first
     /// finite input — the in-progress transfer flag, the last observed
     /// mode for edge detection, and the tuned `transfer_delta`, so a
     /// checkpointed station continues a mid-slew transfer under the
     /// same bound.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         if let Some(current) = self.current {
             state.insert("current", Value::Float(current));
         }
@@ -264,7 +273,6 @@ impl Component for ManualStation {
         if let Some(mode) = self.last_mode {
             state.insert("last_mode", Value::Bool(mode));
         }
-        state.insert("transfer_delta", Value::Float(self.transfer_delta));
         state
     }
 
