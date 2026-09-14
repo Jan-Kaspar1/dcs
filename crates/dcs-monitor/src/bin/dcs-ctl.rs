@@ -1,0 +1,542 @@
+//! `dcs-ctl`: an operator command-line tool for a running controller's
+//! monitor — the controller-side counterpart of `dcs-plant-ctl`.
+//!
+//! Where `dcs-plant-ctl` speaks the plant server's protocol to perturb
+//! the simulated world, `dcs-ctl` speaks the monitoring contract — the
+//! HTTP+JSON transport decision's endpoints, through
+//! [`MonitorClient`] — to inspect and command the controller itself:
+//! the read-side subcommands fetch the served contract payloads, the
+//! write-side subcommands submit the [`Command`] their arguments
+//! describe, and `promote`/`demote`/`scan` drive the redundancy and
+//! externally-paced-run endpoints. A running controller — paced,
+//! driven, active, or standby — can be queried and commanded from a
+//! terminal without the browser page. It is operator and development
+//! tooling over the existing surface: no new endpoints, no new wire
+//! types.
+//!
+//! Every subcommand prints the server's answer as JSON on stdout — the
+//! decoded contract payload re-encoded, so a malformed answer is a
+//! decode error rather than passed through — including a rejected
+//! command's [`CommandReceipt`]. Exit status is nonzero on failure with
+//! stderr naming it: a transport failure names the monitor address, a
+//! rejected receipt names the [`CommandError`], a refused promotion or
+//! demotion names the [`SwitchError`], and malformed arguments print
+//! usage. The tool never panics.
+//!
+//! Point and parameter values parse per the declared
+//! [`ValueKind`]: a point's kind comes from the served `SignalIndex`,
+//! a parameter's from the served `ComponentDescriptor` — so `write 10
+//! 1` writes `1.0` to a `Float` point, and `write` to a `Bool` point
+//! accepts only `true`/`false`. When the target is not declared at all
+//! — a point absent from the index, a component or parameter absent
+//! from the descriptors — the literal's own kind is sent instead, so
+//! the server's receipt still answers with the contract's named
+//! rejection.
+
+use dcs_core::{
+    Command, CommandOutcome, CommandReceipt, PointId, RoleReport, SwitchError, Value, ValueKind,
+};
+use dcs_monitor::MonitorClient;
+use serde::Serialize;
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::process::ExitCode;
+
+const USAGE: &str = "\
+usage: dcs-ctl <addr> <command> [args]
+
+read commands:
+  snapshot                    the executor's current TelemetrySnapshot
+  signals                     the served SignalIndex
+  role                        the instance's RoleReport
+  receipts                    the executor's receipt log
+  journal [--since <seq>]     journal entries with a seq above <seq>
+  history --point <id>... [--since <seq>]
+                              retained samples of the selected points
+
+operator commands:
+  write <point> <value>       write <value> to a writable point
+  set-parameter <component> <name> <value>
+                              tune a component's declared parameter
+  force <point> <value>       pin a writable In point to <value>
+  unforce <point>             release a forced point
+  promote                     promote a converged standby to active
+  demote                      demote the field-owning peer to standby
+  scan <n>                    run <n> scans; only a driven, unpaced
+                              instance accepts — a paced one refuses
+
+values: <value> parses per the declared value kind — true|false for
+Bool, an integer for Int, a finite number for Float — declared by the
+served signal index for points and by the component's descriptors for
+parameters. Command subcommands print the CommandReceipt; a rejected
+receipt still prints and the exit status is nonzero naming the
+CommandError. promote/demote print the resulting RoleReport; a refusal
+exits nonzero naming the SwitchError. An unreachable <addr> exits
+nonzero naming it; malformed arguments print this text.
+
+example: dcs-ctl 127.0.0.1:8080 write 10 2.5";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match run(&args) {
+        Ok(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            // The server's answer still deserves stdout when one
+            // exists — a rejected receipt is the answer to a command
+            // subcommand — before the named failure on stderr.
+            if let Some(answer) = failure.answer {
+                println!("{answer}");
+            }
+            eprintln!("{}", failure.message);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A failed invocation: the message for stderr, plus the server's
+/// answer when one still deserves stdout — a rejected receipt is the
+/// answer to a command subcommand, printed so the run's record shows
+/// exactly what the controller answered.
+struct Failure {
+    answer: Option<String>,
+    message: String,
+}
+
+impl Failure {
+    /// A failure carrying only a message.
+    fn message(message: String) -> Self {
+        Self {
+            answer: None,
+            message,
+        }
+    }
+
+    /// A malformed-command-line failure: the message followed by the
+    /// usage text.
+    fn usage(message: String) -> Self {
+        Self::message(format!("{message}\n{USAGE}"))
+    }
+}
+
+/// Runs one command line, returning the server's answer for stdout or
+/// the failure for stderr.
+fn run(args: &[String]) -> Result<String, Failure> {
+    let (addr_arg, action) = parse(args).map_err(Failure::message)?;
+    let addr = resolve(addr_arg)?;
+    let client = MonitorClient::new(addr);
+    execute(&client, addr, &action)
+}
+
+/// Resolves the `<addr>` argument to a socket address — `host:port`
+/// names resolve through `ToSocketAddrs`. An address that does not
+/// parse is malformed input and prints usage.
+fn resolve(arg: &str) -> Result<SocketAddr, Failure> {
+    let mut addrs = arg
+        .to_socket_addrs()
+        .map_err(|error| Failure::usage(format!("invalid monitor address {arg:?}: {error}")))?;
+    addrs.next().ok_or_else(|| {
+        Failure::usage(format!(
+            "invalid monitor address {arg:?}: resolves to nothing"
+        ))
+    })
+}
+
+/// One parsed command line: the request to send. `<value>` arguments
+/// stay unparsed here — the declared kind the served contract reports
+/// rules their parse, which only happens once the server answers.
+enum Action {
+    Snapshot,
+    Signals,
+    Role,
+    Receipts,
+    Journal {
+        since: u64,
+    },
+    History {
+        points: Vec<PointId>,
+        since: u64,
+    },
+    Write {
+        point: PointId,
+        text: String,
+    },
+    SetParameter {
+        component: String,
+        name: String,
+        text: String,
+    },
+    Force {
+        point: PointId,
+        text: String,
+    },
+    Unforce {
+        point: PointId,
+    },
+    Promote,
+    Demote,
+    Scan {
+        scans: u64,
+    },
+}
+
+/// Validates the command line without touching the network, so
+/// malformed arguments fail with usage text even when no monitor is
+/// listening.
+fn parse(args: &[String]) -> Result<(&str, Action), String> {
+    let usage = |error: String| format!("{error}\n{USAGE}");
+    let [addr, command, rest @ ..] = args else {
+        return Err(usage(
+            "expected a monitor address and a command".to_string(),
+        ));
+    };
+    let action = match (command.as_str(), rest) {
+        ("snapshot", []) => Action::Snapshot,
+        ("signals", []) => Action::Signals,
+        ("role", []) => Action::Role,
+        ("receipts", []) => Action::Receipts,
+        ("journal", rest) => Action::Journal {
+            since: parse_since(rest).map_err(usage)?,
+        },
+        ("history", rest) => parse_history(rest).map_err(usage)?,
+        ("write", [point, value]) => Action::Write {
+            point: parse_point(point).map_err(usage)?,
+            text: value.clone(),
+        },
+        ("set-parameter", [component, name, value]) => Action::SetParameter {
+            component: component.clone(),
+            name: name.clone(),
+            text: value.clone(),
+        },
+        ("force", [point, value]) => Action::Force {
+            point: parse_point(point).map_err(usage)?,
+            text: value.clone(),
+        },
+        ("unforce", [point]) => Action::Unforce {
+            point: parse_point(point).map_err(usage)?,
+        },
+        ("promote", []) => Action::Promote,
+        ("demote", []) => Action::Demote,
+        ("scan", [scans]) => Action::Scan {
+            scans: parse_count(scans).map_err(usage)?,
+        },
+        (
+            "snapshot" | "signals" | "role" | "receipts" | "write" | "set-parameter" | "force"
+            | "unforce" | "promote" | "demote" | "scan",
+            _,
+        ) => return Err(usage(format!("wrong arguments for {command:?}"))),
+        _ => return Err(usage(format!("unknown command {command:?}"))),
+    };
+    Ok((addr.as_str(), action))
+}
+
+/// The `journal` flag list: an optional `--since <seq>` cursor.
+fn parse_since(rest: &[String]) -> Result<u64, String> {
+    match rest {
+        [] => Ok(0),
+        [flag, value] if flag == "--since" => parse_seq(value),
+        _ => Err("journal takes [--since <seq>]".to_string()),
+    }
+}
+
+/// The `history` flag list: one or more `--point <id>` selections and
+/// an optional `--since <seq>` cursor, in any order.
+fn parse_history(rest: &[String]) -> Result<Action, String> {
+    let mut points = Vec::new();
+    let mut since = 0;
+    let mut args = rest.iter();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--point" => points.push(parse_point(
+                args.next()
+                    .ok_or_else(|| "--point expects a point id".to_string())?,
+            )?),
+            "--since" => {
+                since = parse_seq(
+                    args.next()
+                        .ok_or_else(|| "--since expects a sequence number".to_string())?,
+                )?
+            }
+            other => return Err(format!("unknown history argument {other:?}")),
+        }
+    }
+    if points.is_empty() {
+        return Err("history selects points: pass at least one --point <id>".to_string());
+    }
+    Ok(Action::History { points, since })
+}
+
+fn parse_point(arg: &str) -> Result<PointId, String> {
+    arg.parse::<u64>()
+        .map(PointId)
+        .map_err(|_| format!("invalid point id {arg:?}: expected a non-negative integer"))
+}
+
+fn parse_seq(arg: &str) -> Result<u64, String> {
+    arg.parse::<u64>()
+        .map_err(|_| format!("invalid seq cursor {arg:?}: expected a non-negative integer"))
+}
+
+fn parse_count(arg: &str) -> Result<u64, String> {
+    arg.parse::<u64>()
+        .map_err(|_| format!("invalid scan count {arg:?}: expected a non-negative integer"))
+}
+
+/// Sends the action's request and returns the server's answer for
+/// stdout, or the failure naming what went wrong.
+fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<String, Failure> {
+    match action {
+        Action::Snapshot => print_json(&client.snapshot().map_err(|e| transport(addr, e))?, addr),
+        Action::Signals => print_json(&client.signals().map_err(|e| transport(addr, e))?, addr),
+        Action::Role => print_json(&client.role().map_err(|e| transport(addr, e))?, addr),
+        Action::Receipts => print_json(&client.receipts().map_err(|e| transport(addr, e))?, addr),
+        Action::Journal { since } => print_json(
+            &client.journal(*since).map_err(|e| transport(addr, e))?,
+            addr,
+        ),
+        Action::History { points, since } => print_json(
+            &client
+                .history(points, *since)
+                .map_err(|e| transport(addr, e))?,
+            addr,
+        ),
+        Action::Write { point, text } => {
+            let declared = declared_point_kind(client, addr, *point)?;
+            let value = parse_operand(declared, text).map_err(Failure::usage)?;
+            command(
+                client,
+                addr,
+                Command::WriteValue {
+                    point: *point,
+                    // The declared kind when the index knows the point,
+                    // else the literal's own — the server's rejection
+                    // names an undeclared point either way.
+                    kind: declared.unwrap_or_else(|| value.kind()),
+                    value,
+                },
+            )
+        }
+        Action::SetParameter {
+            component,
+            name,
+            text,
+        } => {
+            let kind = declared_parameter_kind(client, addr, component, name)?;
+            let value = parse_operand(kind, text).map_err(Failure::usage)?;
+            command(
+                client,
+                addr,
+                Command::SetParameter {
+                    component: component.clone(),
+                    name: name.clone(),
+                    value,
+                },
+            )
+        }
+        Action::Force { point, text } => {
+            let declared = declared_point_kind(client, addr, *point)?;
+            let value = parse_operand(declared, text).map_err(Failure::usage)?;
+            command(
+                client,
+                addr,
+                Command::ForcePoint {
+                    point: *point,
+                    kind: declared.unwrap_or_else(|| value.kind()),
+                    value,
+                },
+            )
+        }
+        Action::Unforce { point } => command(client, addr, Command::UnforcePoint { point: *point }),
+        Action::Promote => switchover(client, addr, "/promote", "promote"),
+        Action::Demote => switchover(client, addr, "/demote", "demote"),
+        Action::Scan { scans } => print_json(
+            &client.advance(*scans).map_err(|e| transport(addr, e))?,
+            addr,
+        ),
+    }
+}
+
+/// A transport-level failure, naming the monitor the request went to.
+fn transport(addr: SocketAddr, error: io::Error) -> Failure {
+    Failure::message(format!("dcs-ctl: {addr}: {error}"))
+}
+
+/// Encodes the decoded answer for stdout — `serde_json` pretty output,
+/// deterministic for the same payload.
+fn print_json<T: Serialize>(answer: &T, addr: SocketAddr) -> Result<String, Failure> {
+    serde_json::to_string_pretty(answer).map_err(|error| {
+        Failure::message(format!(
+            "dcs-ctl: {addr}: cannot encode the server answer: {error}"
+        ))
+    })
+}
+
+/// The point's declared kind: the served `SignalIndex` is the
+/// declaration, so `GET /signals` resolves it before the command is
+/// built. A point absent from the index has no declared kind — `None`
+/// sends the literal's own kind so the server's `unknown_point`
+/// rejection still answers by name.
+fn declared_point_kind(
+    client: &MonitorClient,
+    addr: SocketAddr,
+    point: PointId,
+) -> Result<Option<ValueKind>, Failure> {
+    let index = client.signals().map_err(|e| transport(addr, e))?;
+    Ok(index.get(point).map(|entry| entry.value_type))
+}
+
+/// The parameter's declared kind: the served snapshot's component
+/// descriptors are the declaration, so `GET /snapshot` resolves the
+/// component's parameter list before the command is built. A component
+/// or parameter absent from the descriptors has no declared kind —
+/// `None` sends the literal's own kind so the server's
+/// `unknown_component`/`unknown_parameter` rejection still answers by
+/// name.
+fn declared_parameter_kind(
+    client: &MonitorClient,
+    addr: SocketAddr,
+    component: &str,
+    name: &str,
+) -> Result<Option<ValueKind>, Failure> {
+    let snapshot = client.snapshot().map_err(|e| transport(addr, e))?;
+    Ok(snapshot
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.name == component)
+        .and_then(|descriptor| {
+            descriptor
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+        })
+        .map(|parameter| parameter.kind))
+}
+
+/// Parses a `<value>` argument: per the declared kind when the target
+/// declares one, else as the literal reads — `true`/`false` a `Bool`,
+/// an integer literal an `Int`, a finite float a `Float`.
+fn parse_operand(kind: Option<ValueKind>, text: &str) -> Result<Value, String> {
+    match kind {
+        Some(kind) => parse_value_as(kind, text),
+        None => parse_literal(text),
+    }
+}
+
+/// Parses `<value>` as the declared kind, strictly: a `Bool` takes
+/// `true`/`false`, an `Int` a signed 64-bit integer, a `Float` a finite
+/// number — a non-finite float has no wire representation, so `nan`
+/// and `inf` are malformed input, not values.
+fn parse_value_as(kind: ValueKind, arg: &str) -> Result<Value, String> {
+    match kind {
+        ValueKind::Bool => match arg {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err(format!("invalid value {arg:?}: a Bool takes true|false")),
+        },
+        ValueKind::Int => arg
+            .parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| format!("invalid value {arg:?}: an Int takes a signed integer")),
+        ValueKind::Float => match arg.parse::<f64>() {
+            Ok(value) if value.is_finite() => Ok(Value::Float(value)),
+            _ => Err(format!(
+                "invalid value {arg:?}: a Float takes a finite number"
+            )),
+        },
+    }
+}
+
+/// Parses `<value>` as the literal reads, for a target with no
+/// declaration to parse against — the server's named rejection still
+/// answers the command.
+fn parse_literal(arg: &str) -> Result<Value, String> {
+    Ok(match arg {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => {
+            if let Ok(int) = arg.parse::<i64>() {
+                Value::Int(int)
+            } else if let Ok(float) = arg.parse::<f64>()
+                && float.is_finite()
+            {
+                Value::Float(float)
+            } else {
+                return Err(format!(
+                    "invalid value {arg:?}: expected true|false, an integer, or a float"
+                ));
+            }
+        }
+    })
+}
+
+/// Submits a command and renders its receipt: the receipt JSON is the
+/// answer — printed whether the command was accepted or rejected — and
+/// a rejection additionally fails the invocation, naming the
+/// [`CommandError`].
+fn command(client: &MonitorClient, addr: SocketAddr, command: Command) -> Result<String, Failure> {
+    let receipt: CommandReceipt = client.command(&command).map_err(|e| transport(addr, e))?;
+    let answer = print_json(&receipt, addr)?;
+    match &receipt.outcome {
+        CommandOutcome::Rejected { reason } => Err(Failure {
+            answer: Some(answer),
+            message: format!(
+                "dcs-ctl: {addr}: command rejected: {}: {reason}",
+                variant_name(reason)
+            ),
+        }),
+        _ => Ok(answer),
+    }
+}
+
+/// `POST /promote` or `POST /demote`: prints the post-change
+/// [`RoleReport`] on success; a `409` refusal decodes the named
+/// [`SwitchError`] the endpoint answered and fails the invocation with
+/// it.
+fn switchover(
+    client: &MonitorClient,
+    addr: SocketAddr,
+    path: &str,
+    verb: &str,
+) -> Result<String, Failure> {
+    let (status, body) = client
+        .request("POST", path, None)
+        .map_err(|e| transport(addr, e))?;
+    match status {
+        200 => {
+            let report: RoleReport = serde_json::from_str(&body).map_err(|error| {
+                Failure::message(format!(
+                    "dcs-ctl: {addr}: cannot decode the POST {path} answer: {error}: {body}"
+                ))
+            })?;
+            print_json(&report, addr)
+        }
+        409 => {
+            let error: SwitchError = serde_json::from_str(&body).map_err(|error| {
+                Failure::message(format!(
+                    "dcs-ctl: {addr}: cannot decode the POST {path} refusal: {error}: {body}"
+                ))
+            })?;
+            Err(Failure::message(format!(
+                "dcs-ctl: {addr}: {verb} refused: {}: {error}",
+                variant_name(&error)
+            )))
+        }
+        status => Err(Failure::message(format!(
+            "dcs-ctl: {addr}: POST {path} answered HTTP {status}: {body}"
+        ))),
+    }
+}
+
+/// A contract error's wire variant name — `not_writable`,
+/// `already_active` — so a refusal reads as the same identifier the
+/// JSON contract uses. Externally tagged serde enums encode as a
+/// single-key object, or a bare string for a unit variant.
+fn variant_name<T: Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::Object(map)) if map.len() == 1 => map.keys().next().unwrap().clone(),
+        Ok(serde_json::Value::String(name)) => name,
+        _ => "unknown".to_string(),
+    }
+}
