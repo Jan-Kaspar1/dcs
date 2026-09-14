@@ -30,7 +30,7 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn validate_accepts_valid_fixtures() {
-    for name in ["minimal.json", "signal_index.json"] {
+    for name in ["minimal.json", "signal_index.json", "signal_groups.json"] {
         let output = run("validate", &fixture(name));
         assert!(
             output.status.success(),
@@ -75,9 +75,22 @@ fn summary_prints_element_counts() {
         "devices: 2",
         "io_points: 2",
         "signals: 1",
+        "signal_groups: 0",
         "components: 1",
         "connections: 2",
     ] {
+        assert!(stdout.contains(line), "{line} missing from:\n{stdout}");
+    }
+}
+
+#[test]
+fn summary_counts_declared_signal_groups() {
+    // The fixture declares two distinct groups across four signals; the
+    // ungrouped signal adds none.
+    let output = run("summary", &fixture("signal_groups.json"));
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for line in ["signals: 4", "signal_groups: 2"] {
         assert!(stdout.contains(line), "{line} missing from:\n{stdout}");
     }
 }
