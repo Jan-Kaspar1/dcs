@@ -123,9 +123,13 @@
 //! [`ParameterDescriptor`](dcs_core::ParameterDescriptor) renders an
 //! edit control typed to its declared [`ValueKind`](dcs_core::ValueKind)
 //! and labeled with its declared
-//! [`ParameterRange`](dcs_core::ParameterRange) where present, and
-//! submitting issues a `set_parameter` command addressed to the
-//! instance through the same receipted path — an out-of-range or
+//! [`ParameterRange`](dcs_core::ParameterRange) where present, with the
+//! parameter's current value beside it — joined by component and
+//! parameter name from the same snapshot's `parameters` section, so a
+//! receipted `set_parameter` shows its standing tune on the next poll
+//! and a snapshot lacking the section renders the column empty rather
+//! than failing. Submitting issues a `set_parameter` command addressed
+//! to the instance through the same receipted path — an out-of-range or
 //! mistyped entry is warned client-side against the declared range but
 //! still sent, the receipted path staying the authority, and the
 //! receipt's applied tick or named rejection lands on the parameter's
