@@ -47,6 +47,12 @@
   .faceplate .diag .errors { color: #b00; font-weight: bold; }
   .command input { width: 6rem; }
   .command button { margin-left: 0.3rem; }
+  .faceplate .param-value { width: 6.5rem; }
+  .faceplate select.param-value { width: auto; }
+  .faceplate button.tune { margin-left: 0.3rem; }
+  .faceplate .param-status { font-size: 0.8rem; color: #666; }
+  .faceplate .param-status.warn { color: #a60; }
+  .faceplate .param-status.bad { color: #b00; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -115,8 +121,13 @@
 // display, setpoint field, driven output, status flag), `port.point`
 // joins the port to its live point telemetry and signal metadata, and a
 // command affordance appears only where that metadata marks the bound
-// point writable. A descriptor with no role hints and no parameters —
-// a kind that shipped no custom describe — degrades to a generic
+// point writable. Each declared parameter renders an edit control
+// typed to its declared value kind and labeled with its declared
+// range; submitting issues a set_parameter command through the
+// receipted path, with the applied tick or named rejection surfaced on
+// the parameter's row and in the journal pane. A descriptor with no
+// role hints and no parameters — a kind that shipped no custom
+// describe — degrades to a generic
 // name-plus-diagnostics-plus-wired-points view, never an error.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
@@ -179,6 +190,19 @@ const journalEntries = [];
 // re-fetch from the new source after a switch adds each transition once.
 const journalSeen = new Set();
 let journalSince = 0;
+// component name -> its served descriptor, rebuilt on every poll: the
+// parameter edit path reads declared kinds and ranges from it — the
+// descriptor is the page's authority for what a tunable accepts.
+const descriptorByName = new Map();
+// paramKey(component, name) -> { text, warn, bad }: the receipted
+// path's latest answer for that tunable — what its row's status cell
+// shows. "accepted for tick N" at submission; "applied at tick N" or
+// "rejected: <named reason>" once the journal reports the settled
+// receipt. The map survives the per-poll faceplate re-render.
+const paramStatus = new Map();
+function paramKey(component, name) {
+  return component + "\n" + name;
+}
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
 const JOURNAL_LIMIT = 300;
@@ -465,7 +489,13 @@ function pointRow(meta, telemetry, forced) {
 // the bound point's metadata is marked writable — the model-declared
 // command surface — and a command attempted anywhere else rejects with
 // not_writable, the rejection visible in the receipt pane and the
-// journal.
+// journal. The parameter list is the other editable surface: each
+// declared parameter renders an edit control typed to its declared
+// kind, its submission issues a set_parameter command addressed to the
+// instance through the same receipted path, and the answer — applied
+// tick or named rejection — lands on the parameter's row. A kind
+// declaring no parameters renders no parameter table at all: no edit
+// affordance.
 
 // The live sample a bound port shows, or null when unwired/unseen.
 function portSample(port, telemetry) {
@@ -542,17 +572,113 @@ function portTable(ports, telemetry) {
     }).join("") + "</tbody></table>";
 }
 
-// The parameter list: name, value kind, and the declared range a tuning
-// command must satisfy. Parameters are static metadata — display only.
-function parameterTable(parameters) {
+// The parameter list: each ParameterDescriptor renders its name, value
+// kind, the declared range a tuning must satisfy, and an edit control
+// typed to the kind — a true/false select for Bool, a text input for
+// Int and Float — plus a status cell carrying the receipted path's
+// latest answer for that tunable.
+function parameterTable(descriptor) {
   return "<table class=\"params\"><thead><tr>" +
-    "<th>Parameter</th><th>Kind</th><th>Range</th></tr></thead><tbody>" +
-    parameters.map(param =>
-      "<tr><td>" + esc(param.name) + "</td><td>" + esc(param.kind) + "</td><td>" +
-      (param.range
-        ? esc(formatValue(param.range.min)) + " … " + esc(formatValue(param.range.max))
-        : "unbounded") +
-      "</td></tr>").join("") + "</tbody></table>";
+    "<th>Parameter</th><th>Kind</th><th>Range</th><th>Set</th><th></th>" +
+    "</tr></thead><tbody>" +
+    descriptor.parameters.map(param => {
+      const status = paramStatus.get(paramKey(descriptor.name, param.name));
+      return "<tr><td>" + esc(param.name) + "</td><td>" + esc(param.kind) +
+        "</td><td>" +
+        (param.range
+          ? esc(formatValue(param.range.min)) + " … " +
+            esc(formatValue(param.range.max))
+          : "unbounded") +
+        "</td><td>" + parameterControl(descriptor.name, param) +
+        "<button type=\"button\" class=\"tune\" data-component=\"" +
+        esc(descriptor.name) + "\" data-param=\"" + esc(param.name) +
+        "\">set</button></td>" +
+        "<td class=\"param-status" + (status && status.warn ? " warn" : "") +
+        (status && status.bad ? " bad" : "") + "\" data-component=\"" +
+        esc(descriptor.name) + "\" data-param=\"" + esc(param.name) + "\">" +
+        (status ? esc(status.text) : "") + "</td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+// One parameter's edit control, typed to the declared ValueKind and
+// labeled with the declared range where present — as the control's
+// tooltip, beside the Range column that states it outright. The
+// data-component/data-param/data-kind attributes are what the submit
+// handler reads.
+function parameterControl(component, param) {
+  const attrs = " data-component=\"" + esc(component) + "\" data-param=\"" +
+    esc(param.name) + "\" data-kind=\"" + esc(param.kind) + "\"" +
+    (param.range
+      ? " title=\"" + esc(formatValue(param.range.min)) + " … " +
+        esc(formatValue(param.range.max)) + "\""
+      : "");
+  if (param.kind === "Bool") {
+    return "<select class=\"param-value\"" + attrs + ">" +
+      "<option value=\"true\">true</option>" +
+      "<option value=\"false\">false</option></select>";
+  }
+  return "<input class=\"param-value\"" + attrs + " size=\"9\"" +
+    (param.kind === "Int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
+    ">";
+}
+
+// Records the receipted path's latest answer for one parameter and
+// paints it into every matching status cell — the map is the store and
+// survives re-renders, the cell only displays it.
+function setParamStatus(component, name, status) {
+  paramStatus.set(paramKey(component, name), status);
+  for (const cell of document.querySelectorAll("#faceplates .param-status")) {
+    if (cell.dataset.component === component && cell.dataset.param === name) {
+      cell.textContent = status.text;
+      cell.className = "param-status" + (status.warn ? " warn" : "") +
+        (status.bad ? " bad" : "");
+    }
+  }
+}
+
+// The client-side check against the descriptor's declared range —
+// advisory only: a failing entry is warned and still sent, the
+// receipted path staying the authority that names the rejection.
+// Mirrors the contract's rule: the bounds carry the parameter's kind,
+// so a value of a different kind — or a non-finite Float — is outside
+// every range.
+function inDeclaredRange(range, value) {
+  if ("Bool" in range.min && "Bool" in range.max && "Bool" in value) {
+    return true;
+  }
+  if ("Int" in range.min && "Int" in range.max && "Int" in value) {
+    return range.min.Int <= value.Int && value.Int <= range.max.Int;
+  }
+  if ("Float" in range.min && "Float" in range.max && "Float" in value) {
+    return range.min.Float <= value.Float && value.Float <= range.max.Float;
+  }
+  return false;
+}
+
+// Parses an operator entry into a Value of the parameter's declared
+// kind, collecting the client-side warnings the entry draws — text that
+// is not such a value, or a value outside the declared range. The
+// warnings never block: the submission still goes through the receipted
+// path, whose named rejection is what a refused edit displays.
+function parameterValue(param, text) {
+  const warnings = [];
+  let value;
+  if (param.kind === "Bool") {
+    value = { Bool: text === "true" };
+  } else if (param.kind === "Int") {
+    if (!/^[-+]?\d+$/.test(text)) warnings.push("not an Int value");
+    value = { Int: parseInt(text, 10) };
+  } else {
+    const parsed = Number(text);
+    if (Number.isNaN(parsed)) warnings.push("not a Float value");
+    value = { Float: parsed };
+  }
+  if (warnings.length === 0 && param.range &&
+      !inDeclaredRange(param.range, value)) {
+    warnings.push("outside declared range " +
+      formatValue(param.range.min) + " … " + formatValue(param.range.max));
+  }
+  return { value, warnings };
 }
 
 // The instance's diagnostics row, joined from the snapshot's components
@@ -594,7 +720,7 @@ function faceplateMarkup(descriptor, diag, telemetry) {
     if (unhinted.length > 0) parts.push(portTable(unhinted, telemetry));
   }
   if (descriptor.parameters.length > 0) {
-    parts.push(parameterTable(descriptor.parameters));
+    parts.push(parameterTable(descriptor));
   }
   parts.push(diagnosticsMarkup(diag));
   parts.push("</section>");
@@ -603,13 +729,23 @@ function faceplateMarkup(descriptor, diag, telemetry) {
 
 // Re-renders every faceplate from the polled snapshot. Values an
 // operator is mid-edit on — and an input's focus — survive the
-// re-render, keyed by bound point.
+// re-render, keyed by bound point for the write affordances and by
+// component-plus-parameter for the tuning controls.
 function renderFaceplates(snapshot, telemetry) {
   const pending = new Map();
   let focused = null;
   for (const input of document.querySelectorAll("#faceplates input.command-value")) {
     pending.set(input.dataset.point, input.value);
     if (input === document.activeElement) focused = input.dataset.point;
+  }
+  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    pending.set(key, control.value);
+    if (control === document.activeElement) focused = key;
+  }
+  descriptorByName.clear();
+  for (const descriptor of snapshot.descriptors) {
+    descriptorByName.set(descriptor.name, descriptor);
   }
   const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
   document.getElementById("faceplates").innerHTML = snapshot.descriptors
@@ -618,6 +754,11 @@ function renderFaceplates(snapshot, telemetry) {
   for (const input of document.querySelectorAll("#faceplates input.command-value")) {
     if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
     if (input.dataset.point === focused) input.focus();
+  }
+  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    if (pending.has(key)) control.value = pending.get(key);
+    if (key === focused) control.focus();
   }
 }
 
@@ -723,6 +864,19 @@ async function refreshJournal(base) {
     if (!journalSeen.has(key)) {
       journalSeen.add(key);
       journalEntries.push(entry);
+      // A settled set_parameter receipt is the authority's final word on
+      // a tuning submission: the applied tick or the named rejection
+      // surfaces on the parameter's faceplate row as well as in this
+      // pane, replacing any advisory warning the entry drew.
+      const settled = entry.event.command_settled;
+      if (settled && settled.receipt.command.set_parameter) {
+        const tuning = settled.receipt.command.set_parameter;
+        setParamStatus(tuning.component, tuning.name, {
+          text: describeOutcome(settled.receipt.outcome),
+          warn: false,
+          bad: "rejected" in settled.receipt.outcome,
+        });
+      }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
@@ -893,7 +1047,10 @@ function isNotActive(receipt) {
 // Submits an operator command to the peer reporting settled "active" —
 // never to a standby. A not_active rejection means the pair moved
 // mid-flight: roles are re-polled and the command retried once against
-// the peer now reporting active, per the pair-view rule.
+// the peer now reporting active, per the pair-view rule. Answers the
+// peer's response — normally the command's receipt — so the caller can
+// surface it beside the control that submitted; null when nothing was
+// sent.
 async function submitCommand(command) {
   const receipt = document.getElementById("receipt");
   let target = activePeer();
@@ -905,7 +1062,7 @@ async function submitCommand(command) {
   if (target < 0) {
     receipt.textContent =
       "not sent: no peer reports role active — the pair is mid-transition";
-    return;
+    return null;
   }
   let answer = await postCommand(peers[target].base, command);
   if (isNotActive(answer)) {
@@ -915,6 +1072,53 @@ async function submitCommand(command) {
     if (target >= 0) answer = await postCommand(peers[target].base, command);
   }
   receipt.textContent = JSON.stringify(answer, null, 2);
+  return answer;
+}
+
+// A parameter edit submits a set_parameter command addressed to the
+// instance — {set_parameter: {component, name, value}} — through the
+// same receipted, active-peer-routed path every operator command takes.
+// The descriptor is the page's authority for kind and range: an
+// unparseable or out-of-range entry is warned client-side on the row
+// but still sent — the receipted path stays the authority, and a named
+// rejection displays rather than the edit dropping silently.
+async function submitParameter(button) {
+  const component = button.dataset.component;
+  const name = button.dataset.param;
+  const control = button.parentElement.querySelector(".param-value");
+  const descriptor = descriptorByName.get(component);
+  const param = descriptor &&
+    descriptor.parameters.find(candidate => candidate.name === name);
+  if (!control || !param) return;
+  const text = control.value.trim();
+  if (param.kind !== "Bool" && text === "") {
+    setParamStatus(component, name,
+      { text: "enter a value", warn: true, bad: false });
+    return;
+  }
+  const parsed = parameterValue(param, text);
+  const command = { set_parameter: {
+    component: component, name: name, value: parsed.value } };
+  let answer;
+  try {
+    answer = await submitCommand(command);
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+    setParamStatus(component, name,
+      { text: "command failed: " + error, warn: false, bad: true });
+    return;
+  }
+  const verdict = answer && answer.outcome
+    ? describeOutcome(answer.outcome)
+    : answer === null
+      ? "not sent: no peer reports role active"
+      : String(answer);
+  setParamStatus(component, name, {
+    text: (parsed.warnings.length > 0
+      ? "warning: " + parsed.warnings.join("; ") + " — " : "") + verdict,
+    warn: parsed.warnings.length > 0,
+    bad: !answer || !answer.outcome || "rejected" in answer.outcome,
+  });
 }
 
 async function init() {
@@ -931,9 +1135,17 @@ async function init() {
   // Faceplate command affordances: one delegated listener — the
   // affordances themselves re-render on every poll. The writable gate
   // is the same metadata check the renderer applied: a point the model
-  // did not mark writable is never commanded from the page.
+  // did not mark writable is never commanded from the page. A tune
+  // button submits its parameter's edit through submitParameter — the
+  // same receipted path.
   const faceplates = document.getElementById("faceplates");
   faceplates.addEventListener("click", async event => {
+    const tune = event.target.closest("button.tune");
+    if (tune) {
+      await submitParameter(tune);
+      refresh();
+      return;
+    }
     const button = event.target.closest("button.write");
     if (!button) return;
     const input = button.parentElement.querySelector("input.command-value");
@@ -961,9 +1173,15 @@ async function init() {
   faceplates.addEventListener("keydown", event => {
     if (event.key !== "Enter") return;
     const input = event.target.closest("input.command-value");
-    if (!input) return;
-    const button = input.parentElement.querySelector("button.write");
-    if (button) button.click();
+    if (input) {
+      const button = input.parentElement.querySelector("button.write");
+      if (button) button.click();
+      return;
+    }
+    const control = event.target.closest(".param-value");
+    if (!control) return;
+    const tune = control.parentElement.querySelector("button.tune");
+    if (tune) tune.click();
   });
   document.getElementById("command-form").addEventListener("submit", async event => {
     event.preventDefault();
