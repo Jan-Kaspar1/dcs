@@ -268,10 +268,7 @@ fn page_serves_the_badge_and_writable_only_force_affordances() {
         // display-only.
         let index = client.signals().unwrap();
         assert!(index.get(FIELD_IN).unwrap().writable);
-        assert_eq!(
-            index.get(FIELD_IN).unwrap().direction,
-            dcs_model::Direction::In
-        );
+        assert_eq!(index.get(FIELD_IN).unwrap().direction, Direction::In);
         assert!(!index.get(UNMARKED_IN).unwrap().writable);
         assert!(!index.get(OUT).unwrap().writable);
     });
