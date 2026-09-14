@@ -14,7 +14,7 @@ The verification command shares two build slots across worker clones, limits Car
 
 ## Packaging
 
-The root `Dockerfile` builds the `dcs-controller` binary into a minimal container image. See [docs/packaging.md](docs/packaging.md) for the image build and run commands.
+The root `Dockerfile` builds the `dcs-controller` binary into a minimal container image, and `Dockerfile.plant` does the same for `dcs-plant-server` — one plant container plus a redundant controller pair is the demonstration rig. See [docs/packaging.md](docs/packaging.md) for the image build and run commands.
 
 ## Local agent pool
 
