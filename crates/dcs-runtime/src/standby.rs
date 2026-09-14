@@ -129,6 +129,13 @@ impl<'d> Standby<'d> {
         self.executor.snapshot()
     }
 
+    /// Records one scan cycle that overran its wall-clock period —
+    /// forwarded to the executor; the pacing shell calls this through
+    /// whichever wrapper it scans through.
+    pub fn record_scan_overrun(&mut self) {
+        self.executor.record_scan_overrun();
+    }
+
     /// Applies a checkpoint received from the active, aligning the run
     /// at the checkpointed tick.
     ///

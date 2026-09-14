@@ -10,7 +10,7 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{IoDriver, PointId, Value};
+use dcs_core::{IoDriver, LinkState, PointId, TelemetrySnapshot, Value};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
@@ -192,10 +192,24 @@ fn two_backend_run_matches_single_backend_reference() {
             executor.scan().unwrap();
             driver.step(0.1).unwrap();
         }
-        serde_json::to_string(&executor.snapshot()).unwrap()
+        executor.snapshot()
     });
 
-    assert_eq!(reference, mixed);
+    // The mixed run's remote backend reports its link — the live
+    // connection the reference's all-local driver has no transport to
+    // report on. That is the one legitimate difference between the two
+    // snapshots' health sections; every other field, including the
+    // executor-collected counters, is identical.
+    assert_eq!(
+        mixed.io_health.driver.as_ref().map(|driver| driver.link),
+        Some(LinkState::Connected)
+    );
+    let mut normalized = mixed;
+    normalized.io_health.driver = None;
+    assert_eq!(
+        serde_json::from_str::<TelemetrySnapshot>(&reference).unwrap(),
+        normalized
+    );
 }
 
 #[test]
