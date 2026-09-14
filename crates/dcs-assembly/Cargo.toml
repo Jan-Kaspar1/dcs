@@ -1,0 +1,16 @@
+[package]
+name = "dcs-assembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-core = { path = "../dcs-core" }
+dcs-model = { path = "../dcs-model" }
+dcs-runtime = { path = "../dcs-runtime" }
+dcs-sim = { path = "../dcs-sim" }
+
+[dev-dependencies]
+dcs-blocks = { path = "../dcs-blocks" }
+serde_json = "1.0.151"

@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "sp": { "direction": "in", "value_type": "Float" },
+        "pv": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "sp" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "pv" }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "out" }
+    }
+  ],
+  "signals": [],
+  "components": [
+    {
+      "id": 1,
+      "kind": "pid",
+      "parameters": {
+        "ki": { "Float": 0.1 },
+        "dt": { "Float": 0.1 },
+        "out_min": { "Float": 0.0 },
+        "out_max": { "Float": 10.0 }
+      },
+      "ports": {
+        "sp": { "direction": "in", "value_type": "Float" },
+        "pv": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    { "from": { "point": 10 }, "to": { "port": { "component": 1, "name": "sp" } } },
+    { "from": { "point": 11 }, "to": { "port": { "component": 1, "name": "pv" } } },
+    { "from": { "port": { "component": 1, "name": "out" } }, "to": { "point": 12 } }
+  ]
+}
