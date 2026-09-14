@@ -372,8 +372,18 @@ impl<'d> Monitor<'d> {
     /// boundary. A field-owning instance refuses with
     /// [`ApplyError::OwnsField`]; a rejected checkpoint rolls back and
     /// the peer reports itself degraded.
+    ///
+    /// The apply also runs the peer's staged-output divergence check; a
+    /// transition into `diverged` is journaled at the tick the compared
+    /// staged image belonged to.
     pub fn apply_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
-        self.shared.lock().unwrap().peer.apply(checkpoint)
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        let result = peer.apply(checkpoint);
+        for report in peer.take_divergences() {
+            recorder.note_divergence(report.tick, report.mismatches);
+        }
+        result
     }
 
     /// Marks a tracking peer degraded after a checkpoint fetch produced
@@ -461,6 +471,14 @@ impl<'d> Monitor<'d> {
                             match MonitorClient::new(active).checkpoint() {
                                 Ok(checkpoint) => {
                                     let _ = shared.peer.apply(&checkpoint);
+                                    // The apply's divergence check
+                                    // journals a transition into
+                                    // `diverged` at the compared tick.
+                                    for report in shared.peer.take_divergences() {
+                                        shared
+                                            .recorder
+                                            .note_divergence(report.tick, report.mismatches);
+                                    }
                                 }
                                 Err(error) => shared
                                     .peer
