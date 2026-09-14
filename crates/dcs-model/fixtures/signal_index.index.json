@@ -1,0 +1,31 @@
+{
+  "points": [
+    {
+      "point": 10,
+      "signal": 100,
+      "name": "reactor-temperature",
+      "direction": "in",
+      "value_type": "Float",
+      "unit": "degC",
+      "description": "Reactor core temperature"
+    },
+    {
+      "point": 11,
+      "signal": null,
+      "name": "point-11",
+      "direction": "in",
+      "value_type": "Bool",
+      "unit": null,
+      "description": null
+    },
+    {
+      "point": 12,
+      "signal": 101,
+      "name": "valve-command",
+      "direction": "out",
+      "value_type": "Float",
+      "unit": "%",
+      "description": "Control valve position command"
+    }
+  ]
+}

@@ -612,6 +612,18 @@ mod tests {
     }
 
     #[test]
+    fn signal_sourcing_unknown_point_is_rejected() {
+        let errors = load_errors(include_str!("../fixtures/invalid/dangling_signal.json"));
+        assert!(
+            errors.contains(&ValidationError::UnknownSource {
+                signal: SignalId(100),
+                point: PointId(99),
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn connection_to_unknown_component_and_port_is_rejected() {
         let mut model = minimal();
         model.connections[0].to = Endpoint::Port(PortRef {
