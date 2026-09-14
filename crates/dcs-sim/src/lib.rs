@@ -20,6 +20,14 @@
 //!   quality or makes accesses fail with an [`IoError`](dcs_core::IoError),
 //!   standing in for field-device failures in diagnostics tests.
 //!
+//! [`ScriptedDriver`] is the sibling backend for scripted scenarios: its
+//! `In` points replay a tick-indexed script of values and qualities
+//! declared in the plant model's device parameters, and its `Out` points
+//! record every accepted write for inspection via
+//! [`ScriptedDriver::writes`]. Where `SimDriver` simulates a plant,
+//! `ScriptedDriver` replays one — which is what a second device kind
+//! through the assembly registry needs.
+//!
 //! Stepping is fully deterministic: nothing in the driver reads a clock or
 //! a random source, so identical write and step sequences always produce
 //! identical [`Sample`](dcs_core::Sample)s.
@@ -36,9 +44,11 @@
 
 mod driver;
 mod map;
+mod scripted;
 
 pub use driver::{Fault, PointInfo, SimDriver};
 pub use map::{
     ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, Integrator, Loopback,
     PointBinding, ProcessElement,
 };
+pub use scripted::{RecordedWrite, ScriptEntry, ScriptError, ScriptedDriver};
