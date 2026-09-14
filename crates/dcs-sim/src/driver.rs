@@ -4,8 +4,8 @@
 use crate::map::{ChannelMap, ConfigError, Loopback, ProcessElement};
 use dcs_core::{IoDriver, IoError, PointId, Quality, Sample, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// A fault injected on a simulated point for diagnostics testing.
 ///
@@ -69,7 +69,9 @@ struct ElementState {
     y: f64,
 }
 
-/// Everything behind the driver's `RefCell`.
+/// Everything behind the driver's `Mutex` — `SimDriver` is `Sync`, so an
+/// executor running on one thread can share it with a monitoring server or
+/// fault injectors on another.
 struct State {
     points: HashMap<PointId, PointState>,
     loopbacks: Vec<Loopback>,
@@ -87,11 +89,13 @@ struct State {
 /// run, which is what makes the execution model's fixed-step scan and
 /// replayable tests possible.
 ///
-/// The driver uses interior mutability, so typed
-/// [`Input`](dcs_core::Input)/[`Output`](dcs_core::Output) handles, the
-/// stepping API, and the fault API can all share one `&SimDriver`.
+/// The driver uses interior mutability behind a `Mutex`, so it is `Sync`:
+/// typed [`Input`](dcs_core::Input)/[`Output`](dcs_core::Output) handles,
+/// the stepping API, and the fault API can all share one `&SimDriver`,
+/// including across threads when the executor lives behind the monitoring
+/// server's lock.
 pub struct SimDriver {
-    state: RefCell<State>,
+    state: Mutex<State>,
 }
 
 impl SimDriver {
@@ -123,7 +127,7 @@ impl SimDriver {
             elements.push(ElementState { element, y });
         }
         Ok(Self {
-            state: RefCell::new(State {
+            state: Mutex::new(State {
                 points,
                 loopbacks: map.loopbacks,
                 elements,
@@ -134,7 +138,7 @@ impl SimDriver {
 
     /// The driver's current logical tick.
     pub fn tick(&self) -> Tick {
-        self.state.borrow().tick
+        self.state.lock().unwrap().tick
     }
 
     /// Advances the simulation one tick of `dt` time units and returns the
@@ -162,7 +166,7 @@ impl SimDriver {
             dt.is_finite() && dt >= 0.0,
             "step dt must be finite and non-negative, got {dt}"
         );
-        let state = &mut *self.state.borrow_mut();
+        let state = &mut *self.state.lock().unwrap();
         state.tick = Tick(state.tick.0 + 1);
         let tick = state.tick;
 
@@ -193,7 +197,8 @@ impl SimDriver {
     /// point.
     pub fn inject_fault(&self, point: PointId, fault: Fault) -> Result<(), IoError> {
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .points
             .get_mut(&point)
             .ok_or(IoError::UnknownPoint(point))?
@@ -207,7 +212,8 @@ impl SimDriver {
     /// point.
     pub fn clear_fault(&self, point: PointId) -> Result<(), IoError> {
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .points
             .get_mut(&point)
             .ok_or(IoError::UnknownPoint(point))?
@@ -218,7 +224,7 @@ impl SimDriver {
 
 impl IoDriver for SimDriver {
     fn read(&self, point: PointId) -> Result<Sample, IoError> {
-        let state = self.state.borrow();
+        let state = self.state.lock().unwrap();
         let point_state = state
             .points
             .get(&point)
@@ -230,7 +236,7 @@ impl IoDriver for SimDriver {
     }
 
     fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
-        let state = &mut *self.state.borrow_mut();
+        let state = &mut *self.state.lock().unwrap();
         let point_state = state
             .points
             .get_mut(&point)

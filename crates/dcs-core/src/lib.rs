@@ -7,14 +7,19 @@
 //! logical I/O without naming a bus technology; the plant model and the
 //! driver supply the physical mapping. The telemetry contract
 //! (`TelemetrySnapshot`) is the monitoring read-side: a serializable view
-//! of a run's latest point samples and per-component diagnostics.
+//! of a run's latest point samples and per-component diagnostics. The
+//! command contract (`Command`, `CommandReceipt`, `CommandError`) is the
+//! monitoring write-side: operator writes applied by the executor at a
+//! deterministic scan boundary, each answered by a receipt.
 
 #![warn(missing_docs)]
 
+mod command;
 mod io;
 mod signal;
 mod telemetry;
 
+pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
