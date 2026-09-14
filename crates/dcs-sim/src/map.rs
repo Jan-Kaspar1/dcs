@@ -116,6 +116,28 @@ pub struct Integrator {
     pub initial: f64,
 }
 
+/// A transport-delay process element: `y(t) = u(t - delay)`.
+///
+/// The element keeps a deterministic delay line — a ring of past
+/// `(time, input)` samples advanced by the caller-supplied `dt`, never a
+/// wall clock — and outputs the newest sample at or before `t - delay`.
+/// The ring is seeded with `initial`, so outputs read `initial` until
+/// the line has filled. The realized delay is rounded up to whole steps:
+/// an input first read at one step appears at the output
+/// `ceil(delay / dt)` steps later, within one `dt` of `delay`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DeadTime {
+    /// The point read as input `u`; must be a `Float` point.
+    pub input: PointId,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// The transport delay, in the same time units as `step`'s `dt`.
+    /// Must be finite and positive.
+    pub delay: f64,
+    /// The output value until the delay line has filled. Must be finite.
+    pub initial: f64,
+}
+
 /// A simulated process element advancing one point's value from another's.
 ///
 /// Elements are stepped in declaration order by
@@ -128,6 +150,8 @@ pub enum ProcessElement {
     FirstOrderLag(FirstOrderLag),
     /// An [`Integrator`].
     Integrator(Integrator),
+    /// A [`DeadTime`].
+    DeadTime(DeadTime),
 }
 
 impl ProcessElement {
@@ -136,6 +160,7 @@ impl ProcessElement {
         match self {
             Self::FirstOrderLag(element) => element.input,
             Self::Integrator(element) => element.input,
+            Self::DeadTime(element) => element.input,
         }
     }
 
@@ -144,6 +169,7 @@ impl ProcessElement {
         match self {
             Self::FirstOrderLag(element) => element.output,
             Self::Integrator(element) => element.output,
+            Self::DeadTime(element) => element.output,
         }
     }
 
@@ -152,21 +178,7 @@ impl ProcessElement {
         match self {
             Self::FirstOrderLag(element) => element.initial,
             Self::Integrator(element) => element.initial,
-        }
-    }
-
-    /// Advances the element's state `y` one step of `dt` given input `u`.
-    ///
-    /// The lag uses the exact discretization `y += (1 - e^{-dt/τ})(u - y)`,
-    /// stable for every non-negative `dt`; the integrator uses Euler's
-    /// `y += u·dt`. Both are pure functions of their arguments, keeping
-    /// stepping deterministic.
-    pub(crate) fn advance(&self, y: f64, u: f64, dt: f64) -> f64 {
-        match self {
-            Self::FirstOrderLag(element) => {
-                y + (1.0 - (-dt / element.time_constant).exp()) * (u - y)
-            }
-            Self::Integrator(_) => y + u * dt,
+            Self::DeadTime(element) => element.initial,
         }
     }
 }
@@ -228,8 +240,8 @@ impl ChannelMap {
     /// - every loopback and element names bound points only;
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
-    /// - element ends are `Float` points, `time_constant` is finite and
-    ///   positive, and `initial` is finite;
+    /// - element ends are `Float` points, `time_constant` and `delay`
+    ///   are finite and positive, and `initial` is finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -297,6 +309,14 @@ impl ChannelMap {
                     value: lag.time_constant,
                 });
             }
+            if let ProcessElement::DeadTime(dead_time) = element
+                && (!dead_time.delay.is_finite() || dead_time.delay <= 0.0)
+            {
+                return Err(ConfigError::InvalidDelay {
+                    point: dead_time.output,
+                    value: dead_time.delay,
+                });
+            }
             if !element.initial().is_finite() {
                 return Err(ConfigError::NonFiniteInitial {
                     point: element.output(),
@@ -358,6 +378,13 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A dead-time element's `delay` is not finite and positive.
+    InvalidDelay {
+        /// The element's output point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// An element's `initial` is not finite.
     NonFiniteInitial {
         /// The element's output point.
@@ -414,6 +441,11 @@ impl fmt::Display for ConfigError {
             Self::InvalidTimeConstant { point, value } => write!(
                 f,
                 "lag driving point {} has non-positive or non-finite time constant {value}",
+                point.0
+            ),
+            Self::InvalidDelay { point, value } => write!(
+                f,
+                "dead-time element driving point {} has non-positive or non-finite delay {value}",
                 point.0
             ),
             Self::NonFiniteInitial { point, value } => write!(

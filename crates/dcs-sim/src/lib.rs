@@ -13,9 +13,9 @@
 //! - [`Loopback`] routing copies values written to an `Out` point onto its
 //!   paired `In` point at the next [`SimDriver::step`], closing simple
 //!   control loops without a process model;
-//! - [`ProcessElement`]s (a [`FirstOrderLag`] and an [`Integrator`]) drive
-//!   `Float` points from other points, advanced by the caller-supplied `dt`
-//!   each step — never by wall-clock time;
+//! - [`ProcessElement`]s ([`FirstOrderLag`], [`Integrator`], and
+//!   [`DeadTime`]) drive `Float` points from other points, advanced by
+//!   the caller-supplied `dt` each step — never by wall-clock time;
 //! - [`SimDriver::inject_fault`] marks points with non-[`Good`](dcs_core::Quality::Good)
 //!   quality or makes accesses fail with an [`IoError`](dcs_core::IoError),
 //!   standing in for field-device failures in diagnostics tests.
@@ -39,6 +39,6 @@ mod map;
 
 pub use driver::{Fault, SimDriver};
 pub use map::{
-    ChannelId, ChannelMap, ConfigError, Direction, FirstOrderLag, Integrator, Loopback,
+    ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, Integrator, Loopback,
     PointBinding, ProcessElement,
 };
