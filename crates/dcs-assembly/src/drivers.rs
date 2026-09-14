@@ -13,23 +13,26 @@
 //!
 //! The built-in registry [`DriverRegistry::standard`] serves the
 //! `sim*` prefix (local simulated devices), [`SIM_TCP_KIND`]
-//! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`), and
-//! [`SIM_SCRIPTED_KIND`] (`sim-scripted`, the tick-indexed playback
-//! driver of `dcs-sim`). New device integrations register their own
-//! kind against the same [`DeviceSpec`] contract — registering a device
-//! integration is what "adding a new device" means.
+//! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`),
+//! [`SIM_BUS_KIND`] (`sim-bus`, the register-mapped simulated fieldbus
+//! device of `dcs-sim-bus`), and [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
+//! the tick-indexed playback driver of `dcs-sim`). New device
+//! integrations register their own kind against the same [`DeviceSpec`]
+//! contract — registering a device integration is what "adding a new
+//! device" means.
 
 use crate::assembly::{neutral, resolve, sim_direction};
 use crate::error::AssemblyError;
 use dcs_core::{
-    IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
-    ValueKind,
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
     ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
     SimDriver,
 };
+use dcs_sim_bus::{BusDriver, DeviceParameters, PointRegister};
 use dcs_sim_net::RemoteDriver;
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -78,6 +81,35 @@ pub const SIM_TCP_KIND: &str = "sim-tcp";
 /// surfacing as [`AssemblyError::InvalidDeviceParameters`] naming the
 /// device.
 pub const SIM_SCRIPTED_KIND: &str = "sim-scripted";
+
+/// The register-mapped simulated fieldbus kind: a
+/// [`BusServer`](dcs_sim_bus::BusServer) register bank reached over TCP
+/// through [`BusDriver`] — a second transport beside `sim-tcp`'s
+/// line-JSON plant protocol, addressed by register index.
+///
+/// The kind is registered exactly — it outranks the `sim` prefix, which
+/// would otherwise read it as a local simulated device. Its device
+/// `parameters` carry the addressing and the channel→register map the
+/// factory validates at assembly:
+///
+/// - `"address"` (required string): the device server's `host:port`;
+/// - `"timeout_ms"` (optional non-negative number): the per-request
+///   timeout in milliseconds, defaulting to
+///   [`BusDriver::DEFAULT_TIMEOUT`];
+/// - `"registers"` (required object): every declared channel's name
+///   mapped to its register — a bare index (`"level-raw": 4`) or
+///   `{"register": <u16>, "initial": <value>}`; the map must cover the
+///   declared channel set exactly and share no register between
+///   channels.
+///
+/// Any other parameter is rejected. The factory connects eagerly and
+/// probes each mapped register — an unreachable endpoint, a register
+/// the server does not hold, or a kind disagreement is an assembly
+/// failure, not a mid-scan surprise. The full contract is
+/// [`DeviceParameters`]'s; the `dcs-sim-bus-device` binary parses the
+/// same declaration when it serves the device's registers, so a rig's
+/// two ends cannot diverge.
+pub const SIM_BUS_KIND: &str = dcs_sim_bus::DEVICE_KIND;
 
 /// One `io_point` bound to a channel on the device under construction.
 #[derive(Debug, Clone)]
@@ -257,11 +289,13 @@ impl DriverRegistry {
 
     /// The built-in registry: the `sim*` prefix served by local
     /// simulated devices, [`SIM_TCP_KIND`] (`sim-tcp`) served by the
-    /// remote simulated driver, and [`SIM_SCRIPTED_KIND`]
+    /// remote simulated driver, [`SIM_BUS_KIND`] (`sim-bus`) served by
+    /// the register-mapped fieldbus driver, and [`SIM_SCRIPTED_KIND`]
     /// (`sim-scripted`) served by the scripted playback driver.
     pub fn standard() -> Self {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
+            .with(SIM_BUS_KIND, sim_bus_device)
             .with(SIM_SCRIPTED_KIND, scripted_device)
             .with_prefix(crate::SIM_DEVICE_PREFIX, sim_device)
     }
@@ -429,6 +463,84 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         io: remote,
         step: Some(Arc::new(move |dt| {
             stepping.step(dt).map_err(|error| StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            })
+        })),
+        inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+/// The [`SIM_BUS_KIND`] factory: validates the addressing and register
+/// map against the declared channels, connects to the device server,
+/// and probes that it serves every mapped register with the declared
+/// value kind.
+fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    let channels: BTreeMap<String, ValueKind> = spec
+        .channels
+        .iter()
+        .map(|(name, channel)| (name.clone(), channel.value_type))
+        .collect();
+    let parameters =
+        DeviceParameters::parse(spec.parameters, &channels).map_err(DeviceError::parameters)?;
+    let address = parameters.address.as_str();
+    let addresses: Vec<_> = address
+        .to_socket_addrs()
+        .map_err(|error| {
+            DeviceError::parameters(format!("parameter \"address\": {address:?} does not resolve to a host:port address ({error})"))
+        })?
+        .collect();
+    if addresses.is_empty() {
+        return Err(DeviceError::parameters(format!(
+            "parameter \"address\": {address:?} resolved to no address"
+        )));
+    }
+    // Point → register bindings: the parsed register map covers every
+    // declared channel, so each bound point resolves.
+    let bindings: Vec<PointRegister> = spec
+        .points
+        .iter()
+        .map(|point| PointRegister {
+            point: point.point,
+            register: parameters.registers[point.channel.as_str()].register,
+            kind: point.kind,
+        })
+        .collect();
+    let bus = BusDriver::connect_with_timeout(addresses.as_slice(), parameters.timeout, &bindings)
+        .map_err(|error| {
+            DeviceError::backend(format!(
+                "cannot connect to device server at {address:?}: {error}"
+            ))
+        })?;
+    // Probe every declared point: the remote device must serve its
+    // register with the value kind the model declares — a server
+    // configured for a different register map fails here, at assembly,
+    // not mid-scan.
+    for point in &spec.points {
+        let sample = bus.read(point.point).map_err(|error| {
+            DeviceError::backend(format!(
+                "device server at {address:?} does not serve io point {}: {error}",
+                point.point.0
+            ))
+        })?;
+        if sample.value.kind() != point.kind {
+            return Err(DeviceError::backend(format!(
+                "device server at {address:?} serves io point {} as {:?}, model declares {:?}",
+                point.point.0,
+                sample.value.kind(),
+                point.kind
+            )));
+        }
+    }
+    let bus = Arc::new(bus);
+    let stepping = Arc::clone(&bus);
+    let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
+    let device = spec.id.0;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: bus,
+        step: Some(Arc::new(move |_dt| {
+            stepping.step().map_err(|error| StepError::Backend {
                 backend: format!("device {device}"),
                 detail: error.to_string(),
             })
@@ -1037,5 +1149,35 @@ impl IoDriver for FanoutDriver {
             backend.io.restore_state(&section)?;
         }
         Ok(())
+    }
+
+    /// The aggregate link health over the backends: `None` when none
+    /// reports — the all-local-simulated case has no transport to
+    /// diagnose — otherwise `disconnected` when any reporting backend's
+    /// link is down, with each backend's last protocol failure named by
+    /// the device it serves.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        let mut link = LinkState::Connected;
+        let mut errors = Vec::new();
+        let mut reported = false;
+        for backend in &self.backends {
+            let Some(diagnostics) = backend.io.diagnostics() else {
+                continue;
+            };
+            reported = true;
+            if diagnostics.link == LinkState::Disconnected {
+                link = LinkState::Disconnected;
+            }
+            if let Some(error) = diagnostics.last_error {
+                let name = backend
+                    .device
+                    .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
+                errors.push(format!("{name}: {error}"));
+            }
+        }
+        reported.then_some(DriverDiagnostics {
+            link,
+            last_error: (!errors.is_empty()).then(|| errors.join("; ")),
+        })
     }
 }

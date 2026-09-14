@@ -25,13 +25,14 @@
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
   tr.source td { font-weight: bold; }
-  #pair-summary.good { color: #060; }
-  #pair-summary.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health.good { color: #060; }
+  #pair-summary.bad, #io-health.bad { color: #b00; font-weight: bold; }
 </style>
 </head>
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
+<p id="io-health" hidden></p>
 
 <section id="pair" hidden>
 <h2>Controller pair</h2>
@@ -330,6 +331,7 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
+    renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
@@ -344,6 +346,54 @@ async function refresh() {
   } finally {
     polling = false;
   }
+}
+
+// The snapshot's I/O health section, rendered as its own line so link
+// degradation reads as link health — visibly separate from the
+// per-point quality column below. IoFault serializes as
+// {tick, point, direction, error} and an IoError as
+// {"Disconnected": id} | {"Timeout": id} | {"UnknownPoint": id} |
+// {"TypeMismatch": {point, expected, found}}.
+function describeIoError(error) {
+  const [variant, detail] = Object.entries(error)[0];
+  const name = variant.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  if (variant === "TypeMismatch") {
+    return name + " on point " + detail.point + " (expects " +
+      detail.expected + ", found " + formatValue(detail.found) + ")";
+  }
+  return name + " on point " + detail;
+}
+
+function renderIoHealth(health) {
+  const el = document.getElementById("io-health");
+  if (!health) { el.hidden = true; return; }
+  const parts = [];
+  let troubled = false;
+  if (health.driver) {
+    parts.push("link " + health.driver.link);
+    if (health.driver.link !== "connected") troubled = true;
+    if (health.driver.last_error) {
+      parts.push("last link failure: " + health.driver.last_error);
+    }
+  }
+  if (health.failed_reads || health.failed_writes) {
+    troubled = true;
+    parts.push("failed reads " + health.failed_reads +
+      ", failed writes " + health.failed_writes +
+      ", " + health.consecutive_failures + " in a row");
+  }
+  if (health.last_error) {
+    const fault = health.last_error;
+    parts.push("last I/O fault " + describeIoError(fault.error) +
+      " (" + fault.direction + ", tick " + fault.tick + ")");
+  }
+  if (health.scan_overruns) {
+    parts.push("scan overruns " + health.scan_overruns);
+  }
+  if (parts.length === 0) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = "I/O health: " + parts.join(" — ");
+  el.className = troubled ? "bad" : "good";
 }
 
 // One point's row in the listing table.

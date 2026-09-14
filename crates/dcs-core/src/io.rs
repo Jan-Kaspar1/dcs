@@ -102,6 +102,40 @@ impl fmt::Display for Direction {
     }
 }
 
+/// The transport-level link state a driver reports through
+/// [`IoDriver::diagnostics`].
+///
+/// This is link health, not point health: the distinction the I/O-health
+/// surface exists to make is that a dead transport and a single faulted
+/// channel produce the same per-point [`IoError`]s, but only the dead
+/// transport reports [`Disconnected`](LinkState::Disconnected) here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// The link to the field device or plant is up.
+    Connected,
+    /// The link is down or degraded: requests fail at the transport and
+    /// surface per point as [`IoError::Disconnected`]/[`IoError::Timeout`].
+    Disconnected,
+}
+
+/// The transport-level diagnostics a driver volunteers through
+/// [`IoDriver::diagnostics`] — its link state and last protocol failure.
+///
+/// This surface is deliberately distinct from the per-point [`IoError`]s
+/// `read`/`write` return: the executor's I/O-health counters attribute
+/// point faults while this section names degradation no single point
+/// owns — e.g. a plant server that stopped answering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DriverDiagnostics {
+    /// The driver's reported link state.
+    pub link: LinkState,
+    /// The most recent transport- or protocol-level failure's
+    /// description, if the driver has seen one — e.g. the error that
+    /// severed the link.
+    pub last_error: Option<String>,
+}
+
 /// The driver-facing contract: untyped access to logical I/O points.
 ///
 /// A driver serves the [`PointId`]s the plant model maps onto its physical
@@ -150,6 +184,22 @@ pub trait IoDriver {
     /// the stateless case.
     fn restore_state(&self, state: &StateMap) -> Result<(), StateError> {
         state.ensure_empty("driver")
+    }
+
+    /// Transport-level diagnostics for the telemetry snapshot's I/O
+    /// health section, or `None` when the driver has nothing
+    /// transport-level to report.
+    ///
+    /// Optional per driver kind, like
+    /// [`capture_state`](IoDriver::capture_state): a driver fronting a
+    /// link — a fieldbus coupler, the remote simulated driver — reports
+    /// its [`LinkState`] and last protocol failure so a dead link reads
+    /// as link degradation, distinct from the per-point faults the
+    /// executor counts. A driver with no transport of its own keeps the
+    /// default `None`, and a driver wrapping others — a gate, a fan-out
+    /// — should forward or aggregate rather than report its own.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        None
     }
 }
 

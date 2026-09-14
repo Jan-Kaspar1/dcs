@@ -10,8 +10,8 @@ use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    IoDriver, IoError, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
-    TelemetrySnapshot, Tick, Value, ValueKind,
+    IoDriver, IoError, IoFault, IoHealth, PointId, PointTelemetry, Quality, QualityReason, Sample,
+    StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -503,6 +503,16 @@ enum Resolved {
 ///    component never wrote keep their last output, so a failed step
 ///    holds outputs.
 ///
+/// The driver-boundary failures of phases 3 and 5 are also counted into
+/// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
+/// read and write increments its named counter and the
+/// consecutive-failure streak — which any successful boundary operation
+/// resets — and is attributed to its tick and point as the section's
+/// `last_error`. The command path's own driver rejections instead settle
+/// their receipts as [`CommandError::DriverRejected`], and a driver's
+/// volunteered [`IoDriver::diagnostics`] rides the same section, so the
+/// snapshot separates link-level degradation from per-point faults.
+///
 /// Internal points — declared in the map via
 /// [`PointMap::with_internal`] — are served by the image alone: the
 /// driver is never read or written for them. An internal `In` point
@@ -549,6 +559,11 @@ pub struct Executor<'d> {
     /// boundary; the command itself rides inside its receipt.
     pending_commands: VecDeque<usize>,
     receipts: Vec<CommandReceipt>,
+    /// The executor-collected half of the snapshot's `io_health` section:
+    /// the boundary counters and the fed overrun count. Its `driver`
+    /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
+    /// it from the driver's `diagnostics` hook at reporting time.
+    io_health: IoHealth,
     tick: Tick,
 }
 
@@ -666,6 +681,7 @@ impl<'d> Executor<'d> {
             image,
             pending_commands: VecDeque::new(),
             receipts: Vec::new(),
+            io_health: IoHealth::default(),
             tick: Tick::ZERO,
         })
     }
@@ -770,6 +786,10 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|entry| entry.component.describe())
                 .collect(),
+            io_health: IoHealth {
+                driver: self.driver.diagnostics(),
+                ..self.io_health.clone()
+            },
         }
     }
 
@@ -817,6 +837,22 @@ impl<'d> Executor<'d> {
     /// snapshot.
     pub fn receipts(&self) -> &[CommandReceipt] {
         &self.receipts
+    }
+
+    /// Records one scan cycle that overran its wall-clock period — the
+    /// documented write path by which the pacing shell (the controller's
+    /// scan loop) feeds the snapshot's `io_health.scan_overruns`.
+    ///
+    /// The executor itself never detects overruns: its clock is virtual
+    /// ticks, so pacing lives in the wall-clock shell, which compares a
+    /// cycle's `Instant` elapsed against its configured period and calls
+    /// this once per overran cycle. The call only increments a counter —
+    /// it is a report into telemetry, not a scan input, so component
+    /// determinism is untouched. The feed goes through the same wrappers
+    /// the shell already scans through (`Peer::record_scan_overrun`,
+    /// `Monitor::record_scan_overrun`).
+    pub fn record_scan_overrun(&mut self) {
+        self.io_health.scan_overruns += 1;
     }
 
     /// Runs `scans` scans and returns the tick the last one ran at.
@@ -1265,14 +1301,27 @@ impl<'d> Executor<'d> {
                 continue;
             }
             let sample = match self.driver.read(point) {
-                Ok(sample) => Sample { tick, ..sample },
-                Err(error) => Sample::new(
-                    image
-                        .get(&point)
-                        .map_or(neutral(spec.kind), |last| last.value),
-                    failure_quality(error),
-                    tick,
-                ),
+                Ok(sample) => {
+                    self.io_health.consecutive_failures = 0;
+                    Sample { tick, ..sample }
+                }
+                Err(error) => {
+                    self.io_health.failed_reads += 1;
+                    self.io_health.consecutive_failures += 1;
+                    self.io_health.last_error = Some(IoFault {
+                        tick,
+                        point: error.point(),
+                        direction: Direction::In,
+                        error,
+                    });
+                    Sample::new(
+                        image
+                            .get(&point)
+                            .map_or(neutral(spec.kind), |last| last.value),
+                        failure_quality(error),
+                        tick,
+                    )
+                }
             };
             image.insert(point, sample);
         }
@@ -1316,7 +1365,20 @@ impl<'d> Executor<'d> {
             let Some(sample) = image.get(&point) else {
                 continue;
             };
-            self.driver.write(point, sample.value)?;
+            match self.driver.write(point, sample.value) {
+                Ok(()) => self.io_health.consecutive_failures = 0,
+                Err(error) => {
+                    self.io_health.failed_writes += 1;
+                    self.io_health.consecutive_failures += 1;
+                    self.io_health.last_error = Some(IoFault {
+                        tick: self.tick,
+                        point: error.point(),
+                        direction: Direction::Out,
+                        error,
+                    });
+                    return Err(error.into());
+                }
+            }
         }
         Ok(())
     }
@@ -1343,8 +1405,8 @@ mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
     use dcs_core::{
-        ComponentDescriptor, Input, Output, ParameterDescriptor, ParameterRange, PortDescriptor,
-        PortRole,
+        ComponentDescriptor, DriverDiagnostics, Input, LinkState, Output, ParameterDescriptor,
+        ParameterRange, PortDescriptor, PortRole,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1976,6 +2038,211 @@ mod tests {
             Quality::Bad(QualityReason::CommunicationFault)
         );
         assert_eq!(sample.tick, Tick(2));
+    }
+
+    #[test]
+    fn failed_input_reads_count_into_io_health() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        // A clean scan reports an all-zero health section — and the stub
+        // has no transport, so the driver half is `None`.
+        assert_eq!(executor.snapshot().io_health, IoHealth::default());
+
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+
+        // The documented read behavior continues — the scan succeeds and
+        // the held value degrades to Bad — and each failed read is
+        // counted and attributed to its tick and point.
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_reads, 2);
+        assert_eq!(health.failed_writes, 0);
+        assert_eq!(health.consecutive_failures, 2);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(3),
+                point: PointId(10),
+                direction: Direction::In,
+                error: IoError::Disconnected(PointId(10)),
+            })
+        );
+        assert_eq!(health.driver, None);
+        assert_eq!(health.scan_overruns, 0);
+
+        // A successful boundary operation ends the consecutive streak;
+        // the counters and last-error attribution persist.
+        driver.faults.lock().unwrap().remove(&PointId(10));
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_reads, 2);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.last_error.unwrap().tick, Tick(3));
+    }
+
+    #[test]
+    fn failed_output_writes_count_into_io_health() {
+        let driver = StubDriver::new(&[float(20)], &[]);
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Constant {
+                name: "const",
+                output: PointId(20),
+                value: 1.0,
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        driver.faults.lock().unwrap().insert(PointId(20));
+
+        // The documented write behavior continues — the scan fails with
+        // ScanError — and the failure is counted and attributed.
+        assert_eq!(
+            executor.scan(),
+            Err(ScanError::Io(IoError::Disconnected(PointId(20))))
+        );
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.failed_reads, 0);
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(20),
+                direction: Direction::Out,
+                error: IoError::Disconnected(PointId(20)),
+            })
+        );
+
+        // The streak ends on the next successful write; the totals stay.
+        driver.faults.lock().unwrap().remove(&PointId(20));
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.consecutive_failures, 0);
+    }
+
+    /// A stub reporting transport diagnostics, to show the executor rides
+    /// `IoDriver::diagnostics` into the snapshot's I/O-health section.
+    struct Reporting<'a> {
+        inner: &'a StubDriver,
+        report: Mutex<Option<DriverDiagnostics>>,
+    }
+
+    impl IoDriver for Reporting<'_> {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            self.inner.read(point)
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            self.inner.write(point, value)
+        }
+
+        fn diagnostics(&self) -> Option<DriverDiagnostics> {
+            self.report.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn snapshot_rides_driver_diagnostics_in_io_health() {
+        let inner = StubDriver::new(&[float(10)], &[]);
+        let driver = Reporting {
+            inner: &inner,
+            report: Mutex::new(Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })),
+        };
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        executor.scan().unwrap();
+
+        // The driver's transport surface reports beside the counters —
+        // link health, distinct from per-point quality.
+        assert_eq!(
+            executor.snapshot().io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_fed_scan_overruns() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+
+        // The documented feed: the pacing shell reports each overran
+        // cycle through `record_scan_overrun`; the executor only counts.
+        assert_eq!(executor.snapshot().io_health.scan_overruns, 0);
+        executor.record_scan_overrun();
+        executor.record_scan_overrun();
+        assert_eq!(executor.snapshot().io_health.scan_overruns, 2);
+    }
+
+    #[test]
+    fn identical_runs_snapshot_identical_io_health() {
+        // The same fault script over two equivalent runs produces the
+        // same health payload — counters and attribution are
+        // deterministic like the rest of the snapshot.
+        let run = || {
+            let driver = StubDriver::new(&[float(10), float(20)], &[]);
+            let map: PointMap = [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect();
+            let mut executor = Executor::new(
+                &driver,
+                map,
+                vec![Box::new(Constant {
+                    name: "const",
+                    output: PointId(20),
+                    value: 1.0,
+                })],
+            )
+            .unwrap();
+            executor.scan().unwrap();
+            driver.faults.lock().unwrap().insert(PointId(10));
+            executor.scan().unwrap();
+            executor.scan().unwrap();
+            executor.snapshot().io_health
+        };
+        let health_a = run();
+        let health_b = run();
+        assert_eq!(health_a, health_b);
+        assert_eq!(
+            serde_json::to_string(&health_a).unwrap(),
+            serde_json::to_string(&health_b).unwrap()
+        );
     }
 
     #[test]

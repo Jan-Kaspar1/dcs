@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-16ai",
+      "channels": {
+        "ch0": { "direction": "in", "value_type": "Float" },
+        "ch1": { "direction": "in", "value_type": "Int" },
+        "ch2": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-4ao",
+      "channels": {
+        "ch0": { "direction": "out", "value_type": "Float" },
+        "ch1": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "sim-4do",
+      "channels": {
+        "ch0": { "direction": "out", "value_type": "Bool" }
+      },
+      "parameters": { "endpoint": "loopback:3" }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "ch1" }
+    },
+    {
+      "id": 11,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 3.5 }
+    },
+    {
+      "id": 13,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 3, "name": "ch0" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 1.0 }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "reactor-inlet-temperature",
+      "source": 10,
+      "unit": "degF",
+      "description": "first-pass outlet temperature"
+    },
+    { "id": 101, "name": "loop-setpoint", "source": 12 },
+    { "id": 102, "name": "valve-command", "source": 13, "group": "reactor" }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "pid",
+      "parameters": {
+        "kp": { "Float": 1.5 },
+        "ti": { "Float": 10.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "first-order-lag",
+      "parameters": { "tau": { "Float": 8.0 } },
+      "ports": {
+        "enable": { "direction": "in", "value_type": "Bool" },
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "alarm",
+      "parameters": { "limit": { "Float": 90.0 } },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 10 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 11 }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 13 }
+    }
+  ]
+}
