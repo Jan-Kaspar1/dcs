@@ -42,7 +42,7 @@ fn validate_accepts_valid_fixtures() {
 
 #[test]
 fn validate_rejects_each_invalid_fixture_with_its_error() {
-    let cases: [(&str, &str); 5] = [
+    let cases: [(&str, &str); 6] = [
         ("duplicate_id.json", "duplicate io_point id 10"),
         (
             "dangling_reference.json",
@@ -53,6 +53,10 @@ fn validate_rejects_each_invalid_fixture_with_its_error() {
             "signal 100 sources unknown io point 99",
         ),
         ("direction_mismatch.json", "cannot produce a value"),
+        (
+            "internal_missing_initial.json",
+            "internal io point 11 declares no initial value",
+        ),
         (
             "unknown_channel.json",
             "io point 10 binds unknown channel \"ch9\" on device 1",

@@ -314,6 +314,7 @@ struct Wiring {
     bindings: Vec<PointBinding>,
     loopbacks: Vec<Loopback>,
     specs: Vec<(PointId, dcs_core::Direction, ValueKind)>,
+    internals: Vec<(PointId, dcs_core::Direction, ValueKind, Value)>,
     kinds: HashMap<PointId, ValueKind>,
 }
 
@@ -334,6 +335,20 @@ impl Wiring {
             initial: neutral(kind),
         });
         self.specs.push((point, core_direction(direction), kind));
+        self.kinds.insert(point, kind);
+    }
+
+    /// Carries `point` in the scan image at `initial`: a point map entry
+    /// with no driver binding — the channel-less internal point.
+    fn add_internal(
+        &mut self,
+        point: PointId,
+        direction: dcs_model::Direction,
+        kind: ValueKind,
+        initial: Value,
+    ) {
+        self.internals
+            .push((point, core_direction(direction), kind, initial));
         self.kinds.insert(point, kind);
     }
 }
@@ -396,18 +411,31 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
         bindings: Vec::with_capacity(model.io_points.len()),
         loopbacks: Vec::new(),
         specs: Vec::with_capacity(model.io_points.len()),
+        internals: Vec::new(),
         kinds: HashMap::with_capacity(model.io_points.len()),
     };
     for point in &model.io_points {
-        wiring.add_point(
-            point.id,
-            ChannelId {
-                device: point.channel.device.0,
-                name: point.channel.name.clone(),
-            },
-            point.direction,
-            point.value_type,
-        );
+        match &point.channel {
+            Some(channel) => wiring.add_point(
+                point.id,
+                ChannelId {
+                    device: channel.device.0,
+                    name: channel.name.clone(),
+                },
+                point.direction,
+                point.value_type,
+            ),
+            // A channel-less internal point: the scan image carries its
+            // declared initial — validation proved it is present.
+            None => wiring.add_internal(
+                point.id,
+                point.direction,
+                point.value_type,
+                point
+                    .initial
+                    .expect("a validated internal point declares initial"),
+            ),
+        }
     }
     let mut next_internal = model
         .io_points
@@ -574,7 +602,10 @@ pub fn assemble(model: &PlantModel) -> Result<Assembly, DemoError> {
         loopbacks: wiring.loopbacks,
         elements,
     };
-    let point_map: PointMap = wiring.specs.into_iter().collect();
+    let mut point_map: PointMap = wiring.specs.into_iter().collect();
+    for (point, direction, kind, initial) in wiring.internals {
+        point_map = point_map.with_internal(point, direction, kind, initial);
+    }
 
     Ok(Assembly {
         channel_map,

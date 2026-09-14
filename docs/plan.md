@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47), the paced controller binary with active/standby modes (#32) and Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The remaining M2 gaps are model-declared internal points (#30) and writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89).
+The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47), the paced controller binary with active/standby modes (#32) and Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The remaining M2 gap is writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89).
 
 ## Milestones
 
@@ -26,18 +26,18 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 
 | Layer | Scope | Status |
 |---|---|---|
-| `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings with synthesized internal points, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47) |
+| `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47); internal points and links resolved under #30 (decision 14) |
 | `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); `--standby`/`--remote` modes track an active's checkpoints (#32); Docker packaging done (#39) |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented: `/snapshot`, `/receipts`, `/command`, `/scan` (#20); `/signals` and the live page (#34); `/history` and `/journal` with since-cursors (#35, decision 17); trend and journal panes (#51) |
 | `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18); component-targeted `set_parameter` proposed under #82 (decision 20) |
-| `dcs-model` internal points | Channel-less operator and port-to-port points | In progress — #30 open; assembly's synthesized internal-device pairs are the implemented precursor (#19, #12) |
+| `dcs-model` internal points | Channel-less operator and port-to-port points | Implemented (#30): channel-less `io_point`s carry `initial` in the scan image — held `In` setpoints, monitored `Out` writes, and internal links serving port-to-port wiring (decision 14) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); every kind ships `KIND`, `from_parameters`, and a `ComponentDescriptor` (#50, #61, decision 16) |
 
 Done when:
 
 - `dcs-assembly` resolves a validated `PlantModel` into a configured `Executor` and `SimDriver`, constructing components through a kind registry and rejecting unknown kinds before any scan (decision 6; #19) — **done**;
 - `dcs-controller` runs the paced scan and serves `TelemetrySnapshot` and the signal index over HTTP + JSON (decisions 8, 9; #19, #48, #34) — **done**;
-- internal points carry operator values and port-to-port wiring as model declarations (decision 14; #30), with writable points restricting the command surface (#49) — **open**;
+- internal points carry operator values and port-to-port wiring as model declarations (decision 14; #30) — **done** — with writable points restricting the command surface (#49) — **open**;
 - the monitoring surface serves signal metadata, a minimal live page, and bounded history (decision 8; #34, #35) — **done**.
 
 ### M3: Redundant hot-swap controllers — in progress
@@ -121,6 +121,6 @@ Done when:
 
 ## Next planning pass
 
-Inspect current main, open issues, and PRs before updating this plan. M2's critical path is now #30 and #49: they gate #62's command affordances and #84's forcing. With #32, #47, and #81 landed, M3's critical path is #46 (promotion and role reporting) then #64 proving the swap end-to-end; M5's lifecycle tickets follow the pair mechanics, with #67 able to start against the shipped driver registry. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
+Inspect current main, open issues, and PRs before updating this plan. M2's critical path is now #49: it gates #62's command affordances and #84's forcing. With #32, #47, and #81 landed, M3's critical path is #46 (promotion and role reporting) then #64 proving the swap end-to-end; M5's lifecycle tickets follow the pair mechanics, with #67 able to start against the shipped driver registry. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
 
 Update this document when milestones change or complete. Reference actual issue and PR numbers once created; mark blocked dependencies and distinguish completed work from planned work.
