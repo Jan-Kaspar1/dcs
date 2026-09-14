@@ -64,7 +64,6 @@ mod divergence;
 mod executor;
 mod gate;
 mod peer;
-mod standby;
 
 pub use checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
@@ -76,4 +75,3 @@ pub use executor::{
 };
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange};
-pub use standby::{Standby, StandbyState};

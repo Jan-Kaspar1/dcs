@@ -12,10 +12,10 @@
 
 use dcs_assembly::{assemble, sim_channel_map, sim_driver};
 use dcs_controller::registry;
-use dcs_core::{IoDriver, PointId, Tick, Value};
+use dcs_core::{IoDriver, PointId, StandbySync, Tick, Value};
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
-use dcs_runtime::{RestoreError, Standby, StandbyState, WriteGate};
+use dcs_runtime::{ApplyError, Peer, RestoreError, WriteGate};
 use dcs_sim::SimDriver;
 use dcs_sim_net::{PlantServer, RemoteDriver};
 use std::thread;
@@ -86,10 +86,10 @@ fn standby_with_local_sim_continues_the_actives_run_identically() {
     let active_client = MonitorClient::new(monitor.local_addr());
 
     // The standby: the same model and registry assemble an equivalent
-    // executor over its own private plant.
+    // executor over its own private plant — a gate-less tracking peer.
     let standby_plant = sim_driver(&model).unwrap();
-    let mut standby = Standby::new(assemble(&model, &registry, &standby_plant).unwrap());
-    assert_eq!(standby.state(), &StandbyState::Unsynchronized);
+    let mut standby = Peer::standby(assemble(&model, &registry, &standby_plant).unwrap(), None);
+    assert_eq!(standby.sync_state(), &StandbySync::Unsynchronized);
 
     thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
@@ -117,7 +117,10 @@ fn standby_with_local_sim_continues_the_actives_run_identically() {
             "a local SimDriver captures the field state the standby restores"
         );
         standby.apply(&checkpoint).unwrap();
-        assert_eq!(standby.state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(N) }
+        );
         assert_eq!(standby.aligned_tick(), Some(Tick(N)));
 
         // The continuation: each tick the active scans and the standby
@@ -127,7 +130,12 @@ fn standby_with_local_sim_continues_the_actives_run_identically() {
             if tick == N + 10 {
                 // A mid-continuation transfer reconverges without drift.
                 standby.apply(&active_client.checkpoint().unwrap()).unwrap();
-                assert_eq!(standby.state(), &StandbyState::Tracking);
+                assert_eq!(
+                    standby.sync_state(),
+                    &StandbySync::Tracking {
+                        aligned: Tick(N + 9)
+                    }
+                );
             }
             let reference = active_client.advance(1).unwrap();
             standby.scan().unwrap();
@@ -164,7 +172,7 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
     // The standby attaches to the same plant behind a closed gate.
     let standby_driver = RemoteDriver::connect(plant_addr).unwrap();
     let gate = WriteGate::closed(&standby_driver);
-    let mut standby = Standby::new(assemble(&model, &registry, &gate).unwrap());
+    let mut standby = Peer::standby(assemble(&model, &registry, &gate).unwrap(), Some(&gate));
 
     thread::scope(|scope| {
         scope.spawn(|| plant.serve());
@@ -182,7 +190,10 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
         let checkpoint = active_client.checkpoint().unwrap();
         assert!(checkpoint.driver.is_none());
         standby.apply(&checkpoint).unwrap();
-        assert_eq!(standby.state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(N) }
+        );
         assert_eq!(standby.aligned_tick(), Some(Tick(N)));
 
         // Each continuation tick the standby scans between the active's
@@ -231,7 +242,7 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
     let active_client = MonitorClient::new(monitor.local_addr());
 
     let standby_plant = sim_driver(&model).unwrap();
-    let mut standby = Standby::new(assemble(&model, &registry, &standby_plant).unwrap());
+    let mut standby = Peer::standby(assemble(&model, &registry, &standby_plant).unwrap(), None);
 
     thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
@@ -242,7 +253,10 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
             active_plant.step(DT);
         }
         standby.apply(&active_client.checkpoint().unwrap()).unwrap();
-        assert_eq!(standby.state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(5) }
+        );
         assert_eq!(standby.aligned_tick(), Some(Tick(5)));
 
         // A checkpoint from a different component set is rejected with
@@ -254,14 +268,14 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
         let error = standby.apply(&foreign).unwrap_err();
         assert_eq!(
             error,
-            RestoreError::UnknownComponent {
+            ApplyError::Restore(RestoreError::UnknownComponent {
                 component: "pid:9".to_string()
-            }
+            })
         );
         assert!(
-            matches!(standby.state(), StandbyState::Degraded { detail } if detail.contains("pid:9")),
+            matches!(standby.sync_state(), StandbySync::Degraded { detail } if detail.contains("pid:9")),
             "state {:?} names the mismatched element",
-            standby.state()
+            standby.sync_state()
         );
         assert_eq!(standby.aligned_tick(), Some(Tick(5)));
         assert_eq!(standby.tick(), Tick(5));
@@ -272,9 +286,9 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
         let error = standby.apply(&foreign).unwrap_err();
         assert_eq!(
             error,
-            RestoreError::MissingComponent {
+            ApplyError::Restore(RestoreError::MissingComponent {
                 component: "analog-input:1".to_string()
-            }
+            })
         );
 
         // A transfer that produces no checkpoint at all — an
@@ -283,9 +297,9 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
         let error = dead_client.checkpoint().unwrap_err();
         standby.note_transfer_failed(&error);
         assert!(
-            matches!(standby.state(), StandbyState::Degraded { .. }),
+            matches!(standby.sync_state(), StandbySync::Degraded { .. }),
             "{:?}",
-            standby.state()
+            standby.sync_state()
         );
 
         // The standby keeps scanning its last-known state meanwhile, and
@@ -297,7 +311,10 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
             active_plant.step(DT);
         }
         standby.apply(&active_client.checkpoint().unwrap()).unwrap();
-        assert_eq!(standby.state(), &StandbyState::Tracking);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(12) }
+        );
         assert_eq!(standby.aligned_tick(), Some(Tick(12)));
 
         // And the reconverged run again continues identically.
