@@ -171,8 +171,8 @@ fn channel_direction_and_kind_mismatches_fail_at_build() {
                 point: PointId(1),
                 device: sim,
                 channel: "out-ch".to_string(),
-                point_direction: dcs_model::Direction::In,
-                channel_direction: dcs_model::Direction::Out,
+                point_direction: Direction::In,
+                channel_direction: Direction::Out,
             }));
             assert!(errors.contains(&ValidationError::ChannelTypeMismatch {
                 point: PointId(2),
@@ -239,7 +239,7 @@ fn dynamic_connection_wrong_direction_fails_at_build() {
                         component: ComponentId(1),
                         name: "sp".to_string(),
                     }),
-                    direction: dcs_model::Direction::In,
+                    direction: Direction::In,
                 })
             );
             // The `to` end also dangles: point 9 was never declared.

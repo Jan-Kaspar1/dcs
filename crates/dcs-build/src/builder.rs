@@ -138,17 +138,6 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// The model's own [`Direction`] for the builder's `dcs_core` one — the
-/// two enums are one vocabulary (`in`/`out`) split across the contract
-/// and serialization crates; the builder's API speaks the `dcs_core`
-/// side and converts on emit.
-fn model_direction(direction: Direction) -> dcs_model::Direction {
-    match direction {
-        Direction::In => dcs_model::Direction::In,
-        Direction::Out => dcs_model::Direction::Out,
-    }
-}
-
 /// Composes a versioned [`PlantModel`] document from typed handles.
 ///
 /// See the module docs for the composition flow; the emitted document is
@@ -231,7 +220,7 @@ impl PlantBuilder {
         device.channels.insert(
             name.to_string(),
             Channel {
-                direction: model_direction(direction),
+                direction,
                 value_type: T::KIND,
             },
         );
@@ -256,7 +245,7 @@ impl PlantBuilder {
     ) -> InPoint<T> {
         self.io_points.push(IoPoint {
             id,
-            direction: dcs_model::Direction::In,
+            direction: Direction::In,
             value_type: T::KIND,
             channel: Some(channel),
             initial: None,
@@ -274,7 +263,7 @@ impl PlantBuilder {
     pub fn field_output<T: PointType>(&mut self, id: PointId, channel: ChannelRef) -> OutPoint<T> {
         self.io_points.push(IoPoint {
             id,
-            direction: dcs_model::Direction::Out,
+            direction: Direction::Out,
             value_type: T::KIND,
             channel: Some(channel),
             initial: None,
@@ -298,7 +287,7 @@ impl PlantBuilder {
     ) -> InPoint<T> {
         self.io_points.push(IoPoint {
             id,
-            direction: dcs_model::Direction::In,
+            direction: Direction::In,
             value_type: T::KIND,
             channel: None,
             initial: Some(initial.into_value()),
@@ -313,7 +302,7 @@ impl PlantBuilder {
     pub fn internal_output<T: PointType>(&mut self, id: PointId, initial: T) -> OutPoint<T> {
         self.io_points.push(IoPoint {
             id,
-            direction: dcs_model::Direction::Out,
+            direction: Direction::Out,
             value_type: T::KIND,
             channel: None,
             initial: Some(initial.into_value()),
@@ -370,7 +359,7 @@ impl PlantBuilder {
                     (
                         decl.name,
                         Port {
-                            direction: model_direction(decl.direction),
+                            direction: decl.direction,
                             value_type: decl.kind,
                         },
                     )

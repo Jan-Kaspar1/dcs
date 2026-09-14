@@ -316,10 +316,7 @@ fn wired() -> (SimDriver, PointMap, Vec<Box<dyn Component>>) {
                 device: 1,
                 name: format!("ch{}", point.0),
             },
-            direction: match direction {
-                Direction::In => dcs_sim::Direction::In,
-                Direction::Out => dcs_sim::Direction::Out,
-            },
+            direction,
             initial: match kind {
                 ValueKind::Bool => Value::Bool(false),
                 ValueKind::Int => Value::Int(0),

@@ -294,7 +294,7 @@ mod tests {
             PlantResponse::Points {
                 points: vec![PointInfo {
                     point: PointId(10),
-                    direction: dcs_sim::Direction::In,
+                    direction: dcs_core::Direction::In,
                     sample: Sample::good(Value::Float(1.5), Tick(3)),
                     fault: Some(Fault::Timeout),
                 }],
@@ -340,6 +340,20 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantResponse::Done).unwrap(),
             r#"{"result":"done"}"#
+        );
+        // The point-census payload carries the shared `Direction` as
+        // "in"/"out" — the shape the plant protocol has always emitted.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Points {
+                points: vec![PointInfo {
+                    point: PointId(10),
+                    direction: dcs_core::Direction::In,
+                    sample: Sample::good(Value::Float(1.5), Tick(3)),
+                    fault: None,
+                }],
+            })
+            .unwrap(),
+            r#"{"result":"points","points":[{"point":10,"direction":"in","sample":{"value":{"Float":1.5},"quality":"Good","tick":3},"fault":null}]}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantResponse::Stepped { tick: Tick(7) }).unwrap(),

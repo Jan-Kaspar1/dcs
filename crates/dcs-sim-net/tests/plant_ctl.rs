@@ -5,13 +5,13 @@
 //! and malformed arguments.
 
 use dcs_core::{
-    IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Sample, Tick, Value,
-    ValueKind,
+    Direction, IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Sample, Tick,
+    Value, ValueKind,
 };
 use dcs_model::SignalIndex;
 use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{Executor, PointMap};
-use dcs_sim::{ChannelId, ChannelMap, Direction, Fault, Loopback, PointBinding, SimDriver};
+use dcs_sim::{ChannelId, ChannelMap, Fault, Loopback, PointBinding, SimDriver};
 use dcs_sim_net::{PlantResponse, PlantServer, RemoteDriver};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Command, Output};
