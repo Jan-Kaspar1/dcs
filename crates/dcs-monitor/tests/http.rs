@@ -303,17 +303,21 @@ fn signals_endpoint_serves_the_models_metadata() {
         );
         assert_eq!(input.direction, dcs_model::Direction::In);
         assert_eq!(input.value_type, ValueKind::Float);
+        // The signal's display group rides the metadata endpoint.
+        assert_eq!(input.group.as_deref(), Some("reactor"));
 
         let output = index.get(PointId(20)).unwrap();
         assert_eq!(output.name, "heater-command");
         assert_eq!(output.unit.as_deref(), Some("%"));
         assert_eq!(output.direction, dcs_model::Direction::Out);
+        assert_eq!(output.group, None);
 
         // A point no signal sources still gets a default entry.
         let spare = index.get(PointId(30)).unwrap();
         assert_eq!(spare.signal, None);
         assert_eq!(spare.name, "point-30");
         assert_eq!(spare.unit, None);
+        assert_eq!(spare.group, None);
     });
 }
 
@@ -394,6 +398,36 @@ fn page_serves_trend_and_journal_markup() {
         }
         // The page stays a single dependency-free asset.
         assert!(!page.contains("src="), "page references external assets");
+    });
+}
+
+#[test]
+fn page_groups_its_listing_by_the_models_signal_groups() {
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        // The listing is organized client-side from the model's declared
+        // display groups: a per-group header row and the bucketing logic.
+        for needle in [
+            "point-group",
+            "function groupedPoints()",
+            "function pointGroup(meta)",
+        ] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        // The client-side default: a point whose entry carries no group —
+        // like the served index's ungrouped and signal-less points — is
+        // filed under the documented "ungrouped" group.
+        assert!(
+            page.contains("const DEFAULT_GROUP = \"ungrouped\""),
+            "page lacks the documented default group"
+        );
+        assert!(
+            page.contains("meta.group || DEFAULT_GROUP"),
+            "page lacks the ungrouped fallback"
+        );
+        let index = client.signals().unwrap();
+        assert_eq!(index.get(PointId(20)).unwrap().group, None);
+        assert_eq!(index.get(PointId(30)).unwrap().group, None);
     });
 }
 

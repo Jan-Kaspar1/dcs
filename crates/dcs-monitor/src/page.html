@@ -23,6 +23,7 @@
   .trend .limit { fill: #888; font-size: 9px; }
   .trend circle.uncertain { fill: #a60; }
   .trend circle.bad { fill: #b00; }
+  tr.point-group th { background: #e4e4e4; text-align: left; }
 </style>
 </head>
 <body>
@@ -67,6 +68,27 @@
 // history and journal fetches carry since-cursors, so each poll transfers
 // only entries newer than the last seen sequence. No dependencies, no
 // build step.
+
+// Signals declare an optional display group in the model; the point
+// listing organizes itself under those groups. A point whose signal —
+// or whose missing signal — declares none lists under DEFAULT_GROUP.
+const DEFAULT_GROUP = "ungrouped";
+function pointGroup(meta) {
+  return meta.group || DEFAULT_GROUP;
+}
+
+// Buckets the index's points under their display group. Groups appear in
+// the order they first occur in the index (the model's point order), so
+// the listing's organization comes from the model, not the page.
+function groupedPoints() {
+  const groups = new Map();
+  for (const meta of index.points) {
+    const group = pointGroup(meta);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(meta);
+  }
+  return groups;
+}
 
 let index = { points: [] };
 // point id -> { samples: [Sample], lastSeq } — the series a trend draws.
@@ -133,22 +155,31 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + " — polled " + new Date().toLocaleTimeString();
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
-    document.getElementById("points").innerHTML = index.points.map(meta => {
-      const sample = (telemetry.get(meta.point) || {}).sample;
-      const quality = sample ? formatQuality(sample.quality) : "no sample";
-      const cls = sample ? qualityClass(sample.quality) : "nosample";
-      return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
-        meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
-        (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
-        esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
-        (sample ? sample.tick : "") + "</td></tr>";
-    }).join("");
+    const rows = [];
+    for (const [group, metas] of groupedPoints()) {
+      rows.push("<tr class=\"point-group\"><th colspan=\"8\">" + esc(group) +
+        "</th></tr>");
+      for (const meta of metas) rows.push(pointRow(meta, telemetry));
+    }
+    document.getElementById("points").innerHTML = rows.join("");
     await Promise.all([refreshTrends(), refreshJournal()]);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
     polling = false;
   }
+}
+
+// One point's row in the listing table.
+function pointRow(meta, telemetry) {
+  const sample = (telemetry.get(meta.point) || {}).sample;
+  const quality = sample ? formatQuality(sample.quality) : "no sample";
+  const cls = sample ? qualityClass(sample.quality) : "nosample";
+  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
+    meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
+    (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
+    esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
+    (sample ? sample.tick : "") + "</td></tr>";
 }
 
 // One inline-SVG trend panel per point, built once from the signal index.
