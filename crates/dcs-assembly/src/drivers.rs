@@ -175,11 +175,11 @@ pub struct DeviceBackend {
 pub enum DeviceDriver {
     /// The device's points join the shared local simulated channel map.
     ///
-    /// The fragment merges with every other `Sim` contribution, the
-    /// synthesized internal points, and the intra-map wires into one
-    /// [`ChannelMap`] — the [`DriverPlan::sim_map`] seam stays open for
-    /// caller-added process elements before [`DriverPlan::build`] turns
-    /// it into a single [`SimDriver`].
+    /// The fragment merges with every other `Sim` contribution and the
+    /// intra-map wires into one [`ChannelMap`] — the
+    /// [`DriverPlan::sim_map`] seam stays open for caller-added process
+    /// elements before [`DriverPlan::build`] turns it into a single
+    /// [`SimDriver`].
     Sim(ChannelMap),
     /// A self-contained backend serving the device's points — remote or
     /// real field kinds.
@@ -416,11 +416,10 @@ struct PlannedBackend {
 /// the model does not describe, exactly as
 /// [`sim_channel_map`](crate::sim_channel_map) left it open.
 pub struct DriverPlan {
-    /// The merged local simulated channel map: every `Sim` contribution,
-    /// the synthesized internal points serving port-to-port wiring, and
-    /// the point-to-point wires whose ends are both sim-served. When it
-    /// is non-empty at [`build`](Self::build), one [`SimDriver`] backend
-    /// serves it — the local plant — and its points route there.
+    /// The merged local simulated channel map: every `Sim` contribution
+    /// and the point-to-point wires whose ends are both sim-served.
+    /// When it is non-empty at [`build`](Self::build), one [`SimDriver`]
+    /// backend serves it — the local plant — and its points route there.
     pub sim_map: ChannelMap,
     backends: Vec<PlannedBackend>,
     /// Point-to-point wires whose ends live on different backends —
@@ -492,9 +491,10 @@ impl DriverPlan {
 /// [`AssemblyError::DeviceBackend`]; both fail here, before any scan.
 ///
 /// `Sim` contributions merge into one local simulated map holding the
-/// devices' point bindings, the synthesized internal points, and every
-/// point-to-point wire whose ends are both sim-served; a wire spanning
-/// backends becomes a [`FanoutDriver`] route instead.
+/// devices' point bindings and every point-to-point wire whose ends are
+/// both sim-served; a wire spanning backends becomes a [`FanoutDriver`]
+/// route instead. Channel-less internal `io_point`s are image-carried —
+/// the executor's scan image serves them, so no backend sees them.
 pub fn resolve_drivers(
     model: &PlantModel,
     registry: &DriverRegistry,
@@ -503,26 +503,24 @@ pub fn resolve_drivers(
 
     let mut points_by_device: BTreeMap<DeviceId, Vec<DevicePoint>> = BTreeMap::new();
     for point in &model.io_points {
+        // Channel-less internal points are image-carried: no device
+        // serves them.
+        let Some(channel) = &point.channel else {
+            continue;
+        };
         points_by_device
-            .entry(point.channel.device)
+            .entry(channel.device)
             .or_default()
             .push(DevicePoint {
                 point: point.id,
-                channel: point.channel.name.clone(),
+                channel: channel.name.clone(),
                 direction: point.direction,
                 kind: point.value_type,
             });
     }
 
-    // Internal points and their loopbacks always live in the local
-    // simulated map — they back port-to-port wiring, not any device.
     let mut sim_map = ChannelMap::new();
     let mut sim_points = HashSet::new();
-    for binding in &resolved.internal.points {
-        sim_points.insert(binding.point);
-    }
-    sim_map.points.extend(resolved.internal.points);
-    sim_map.loopbacks.extend(resolved.internal.loopbacks);
 
     let mut backends = Vec::new();
     let mut routed = HashSet::new();
@@ -574,12 +572,16 @@ pub fn resolve_drivers(
     }
 
     // An io_point bound to a device the model never declares is unrouted —
-    // reachable only for a model assembled without validation.
+    // reachable only for a model assembled without validation. Internal
+    // points need no routing: the scan image serves them.
     for point in &model.io_points {
+        let Some(channel) = &point.channel else {
+            continue;
+        };
         if !routed.contains(&point.id) {
             return Err(AssemblyError::UnroutedPoint {
                 point: point.id,
-                device: point.channel.device,
+                device: channel.device,
             });
         }
     }
@@ -640,8 +642,8 @@ impl FanoutDriver {
     }
 
     /// The shared local simulated backend, when the model contributed
-    /// `sim` points or internal points — exposed for fault injection and
-    /// inspection; stepping goes through [`step`](Self::step).
+    /// `sim` points — exposed for fault injection and inspection;
+    /// stepping goes through [`step`](Self::step).
     pub fn sim(&self) -> Option<&SimDriver> {
         self.sim.as_deref()
     }

@@ -13,8 +13,10 @@
 //! the same plant model; the active periodically ships a [`Checkpoint`]
 //! to the standby, which restores it into its own executor so that on
 //! switchover its next scan produces what the active would have produced.
-//! The `components` and `outputs` sections transfer verbatim — they are
-//! controller-side state. The `driver` section is simulation-specific:
+//! The `components`, `outputs`, and `internal` sections transfer verbatim —
+//! they are controller-side state: `outputs` carries the image's `Out`
+//! samples and `internal` the image-carried `In` samples. The `driver`
+//! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
 //! state, so a driver that does not implement the contract simply leaves
@@ -50,10 +52,18 @@ pub struct Checkpoint {
     /// field's real values are the state.
     pub driver: Option<StateMap>,
     /// The scan image's `Out` samples at capture: the last written output
-    /// values. Restoring them means an output a component does not
-    /// rewrite on the next scan keeps its last value, exactly as the
-    /// uninterrupted run would.
+    /// values, including image-carried internal `Out` points. Restoring
+    /// them means an output a component does not rewrite on the next scan
+    /// keeps its last value, exactly as the uninterrupted run would.
     pub outputs: BTreeMap<PointId, Sample>,
+    /// The scan image's internal `In` samples at capture: held operator
+    /// values and link carriers, which field reads never refresh.
+    /// Restoring them means a commanded setpoint survives a switchover
+    /// instead of reverting to its declared initial. Absent from
+    /// checkpoints written before internal points existed; defaults to
+    /// empty.
+    #[serde(default)]
+    pub internal: BTreeMap<PointId, Sample>,
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.
@@ -98,6 +108,24 @@ pub enum RestoreError {
         /// The kind the checkpoint carries.
         found: Value,
     },
+    /// The checkpoint's internal section names a point the executor's
+    /// map does not serve as an internal `In` — a checkpoint from a
+    /// different I/O mapping.
+    UnknownInternal {
+        /// The unserved or misdirected point.
+        point: PointId,
+    },
+    /// A checkpointed internal sample's value kind differs from the kind
+    /// the point map declares for it — again a different mapping's
+    /// artifact.
+    IncompatibleInternal {
+        /// The mismatched point.
+        point: PointId,
+        /// The kind the point map declares.
+        expected: ValueKind,
+        /// The kind the checkpoint carries.
+        found: Value,
+    },
 }
 
 impl fmt::Display for RestoreError {
@@ -125,6 +153,20 @@ impl fmt::Display for RestoreError {
             } => write!(
                 f,
                 "checkpoint output point {} expects {expected:?}, found {found:?}",
+                point.0
+            ),
+            Self::UnknownInternal { point } => write!(
+                f,
+                "checkpoint carries internal point {} the point map does not serve as an internal in point",
+                point.0
+            ),
+            Self::IncompatibleInternal {
+                point,
+                expected,
+                found,
+            } => write!(
+                f,
+                "checkpoint internal point {} expects {expected:?}, found {found:?}",
                 point.0
             ),
         }

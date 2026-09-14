@@ -3,8 +3,9 @@
 //!
 //! A [`PlantModel`] document — JSON, per the serialization decision recorded
 //! in `docs/architecture.md` — declares [`Device`]s with named [`Channel`]s,
-//! logical [`IoPoint`]s bound to device channels, [`Signal`]s sourced by
-//! points, [`ComponentInstance`]s with named [`Port`]s, and the
+//! logical [`IoPoint`]s bound to device channels or carried internally by
+//! the controller's scan image, [`Signal`]s sourced by points,
+//! [`ComponentInstance`]s with named [`Port`]s, and the
 //! [`Connection`]s that wire points and ports together.
 //! [`PlantModel::load`] parses a document, checks its version, and validates
 //! it; [`PlantModel::validate`] applies the same checks to a model built

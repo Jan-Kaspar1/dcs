@@ -95,8 +95,14 @@ pub struct ChannelRef {
 /// A logical I/O point: the unit control logic binds to.
 ///
 /// [`PointId`], direction, and value type form the component-facing
-/// contract; `channel` binds the point to a physical device channel, which
-/// must exist and agree with the point's direction and type.
+/// contract. `channel` binds the point to a physical device channel, which
+/// must exist and agree with the point's direction and type. A point
+/// declared without `channel` is an *internal point* carried by the
+/// controller's scan image rather than field I/O: an internal `In` point
+/// holds `initial` until a command writes it through the command path, an
+/// internal `Out` point records component writes for monitoring, and a
+/// declared internal `In`/`Out` pair can carry a port-to-port or
+/// point-to-point wire inside the image.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -105,8 +111,30 @@ pub struct IoPoint {
     pub direction: Direction,
     /// The point's value type; drivers reject mismatched writes.
     pub value_type: ValueKind,
-    /// The device channel backing this point.
-    pub channel: ChannelRef,
+    /// The device channel backing this point, or `None` for an internal
+    /// point.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    /// An internal point is declared by omitting `channel` and supplying
+    /// `initial`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChannelRef>,
+    /// The value an internal point is seeded with; its variant must match
+    /// `value_type`. Required when `channel` is absent — the scan image
+    /// holds it until the point is written — and rejected when `channel`
+    /// is present, because the field owns a bound point's value.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial: Option<Value>,
+}
+
+impl IoPoint {
+    /// Whether this point is image-carried — declared without a device
+    /// channel — rather than bound to field I/O.
+    pub fn is_internal(&self) -> bool {
+        self.channel.is_none()
+    }
 }
 
 /// A plant signal: the monitoring/UI-facing name for the value carried by
