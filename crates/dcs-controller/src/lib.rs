@@ -12,8 +12,8 @@
 use dcs_assembly::{BuildError, ComponentRegistry};
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    LatchingAlarm, ManualStation, Motor, OverrideSelect, Pid, RateLimiter, SignalFilter, Timer,
-    Valve,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter,
+    SignalFilter, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_runtime::Component;
@@ -215,6 +215,26 @@ pub fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(MedianVoter::KIND, |spec| {
+            boxed(MedianVoter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in_1")?,
+                spec.require("in_2")?,
+                spec.require("in_3")?,
+                spec.require("out")?,
+                spec.require("discrepancy")?,
+                spec.parameters,
+            ))
+        })
+        .with(Totalizer::KIND, |spec| {
+            boxed(Totalizer::from_parameters(
+                spec.name.as_str(),
+                spec.require("rate")?,
+                spec.require("reset")?,
+                spec.require("total")?,
                 spec.parameters,
             ))
         })

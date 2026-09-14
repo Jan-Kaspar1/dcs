@@ -18,8 +18,8 @@
 //! consumers detect eviction as a numbering gap.
 
 use dcs_core::{
-    CommandOutcome, CommandReceipt, HistorySample, JournalEntry, JournalEvent, PointHistory,
-    PointId, Quality, Role, Sample, Tick,
+    CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry, JournalEvent,
+    PointHistory, PointId, Quality, Role, Sample, Tick,
 };
 use dcs_runtime::Executor;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -138,6 +138,13 @@ impl Recorder {
     /// first scan under the new mode.
     pub(super) fn note_role_change(&mut self, tick: Tick, from: Role, to: Role) {
         self.push(tick, JournalEvent::RoleChanged { from, to });
+    }
+
+    /// Journals a standby-divergence transition at `tick` — the tick the
+    /// compared staged image belonged to — with the mismatched field
+    /// `Out` points and both sides' values.
+    pub(super) fn note_divergence(&mut self, tick: Tick, mismatches: Vec<Divergence>) {
+        self.push(tick, JournalEvent::DivergenceDetected { mismatches });
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the

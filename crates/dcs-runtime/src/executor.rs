@@ -6,12 +6,14 @@
 //! [`Executor::run`] then advance a virtual [`Tick`] and cycle read → step
 //! → write deterministically.
 
-use crate::checkpoint::{Checkpoint, RestoreError};
+use crate::checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    IoDriver, IoError, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
-    TelemetrySnapshot, Tick, Value, ValueKind,
+    IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry, Quality,
+    QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -503,6 +505,16 @@ enum Resolved {
 ///    component never wrote keep their last output, so a failed step
 ///    holds outputs.
 ///
+/// The driver-boundary failures of phases 3 and 5 are also counted into
+/// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
+/// read and write increments its named counter and the
+/// consecutive-failure streak — which any successful boundary operation
+/// resets — and is attributed to its tick and point as the section's
+/// `last_error`. The command path's own driver rejections instead settle
+/// their receipts as [`CommandError::DriverRejected`], and a driver's
+/// volunteered [`IoDriver::diagnostics`] rides the same section, so the
+/// snapshot separates link-level degradation from per-point faults.
+///
 /// Internal points — declared in the map via
 /// [`PointMap::with_internal`] — are served by the image alone: the
 /// driver is never read or written for them. An internal `In` point
@@ -549,6 +561,15 @@ pub struct Executor<'d> {
     /// boundary; the command itself rides inside its receipt.
     pending_commands: VecDeque<usize>,
     receipts: Vec<CommandReceipt>,
+    /// The executor-collected half of the snapshot's `io_health` section:
+    /// the boundary counters and the fed overrun count. Its `driver`
+    /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
+    /// it from the driver's `diagnostics` hook at reporting time.
+    io_health: IoHealth,
+    /// The fingerprint of the model this run was assembled from, when
+    /// the assembling layer supplied one: stamped into every checkpoint
+    /// and the value a restored checkpoint's fingerprint must equal.
+    model_fingerprint: Option<ModelFingerprint>,
     tick: Tick,
 }
 
@@ -666,8 +687,30 @@ impl<'d> Executor<'d> {
             image,
             pending_commands: VecDeque::new(),
             receipts: Vec::new(),
+            io_health: IoHealth::default(),
+            model_fingerprint: None,
             tick: Tick::ZERO,
         })
+    }
+
+    /// Records the fingerprint of the model this run was assembled from.
+    ///
+    /// The assembling layer supplies it — the executor is model-agnostic
+    /// and never derives one. Once set, every
+    /// [`checkpoint`](Executor::checkpoint) carries it and every
+    /// [`restore`](Executor::restore)/[`apply`](Executor::apply) requires
+    /// the incoming checkpoint's fingerprint to equal it, so a standby
+    /// rejects a checkpoint captured under a different model by name
+    /// rather than discovering the skew through structural drift.
+    pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
+        self.model_fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// The fingerprint this run was assembled with — the value
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) recorded.
+    pub fn model_fingerprint(&self) -> Option<ModelFingerprint> {
+        self.model_fingerprint
     }
 
     /// The executor's current virtual tick: [`Tick::ZERO`] before the first
@@ -695,6 +738,34 @@ impl<'d> Executor<'d> {
     /// monitoring and tests.
     pub fn sample(&self, point: PointId) -> Option<Sample> {
         self.image.borrow().get(&point).copied()
+    }
+
+    /// The driver the executor's scans read and write through — the
+    /// write gate when the run was assembled behind one. Exposed for the
+    /// redundancy machinery's field comparisons, which read `Out` points
+    /// back through this same surface.
+    pub fn driver(&self) -> &'d (dyn IoDriver + Sync) {
+        self.driver
+    }
+
+    /// The staged field-`Out` image: the samples the last scan's write
+    /// phase issued toward the driver, keyed by point — what a quiesced
+    /// standby would have written had its gate been open. Internal `Out`
+    /// points are image-carried and never reach a driver, so like
+    /// [`write_outputs`](Self::write_outputs) the map excludes them;
+    /// a field `Out` point no component has written yet reports no
+    /// sample, matching the write phase's own leave-untouched rule.
+    ///
+    /// The redundancy machinery stashes one per scan while the peer does
+    /// not own the field and compares it, at checkpoint-transfer time,
+    /// against the field's actual values — the standby-divergence check.
+    pub fn staged_field_outputs(&self) -> BTreeMap<PointId, Sample> {
+        let image = self.image.borrow();
+        self.map
+            .iter()
+            .filter(|(_, spec)| spec.direction == Direction::Out && spec.internal.is_none())
+            .filter_map(|(point, _)| image.get(&point).map(|&sample| (point, sample)))
+            .collect()
     }
 
     /// A monitoring snapshot of the run: the executor's tick, the latest
@@ -742,6 +813,10 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|entry| entry.component.describe())
                 .collect(),
+            io_health: IoHealth {
+                driver: self.driver.diagnostics(),
+                ..self.io_health.clone()
+            },
         }
     }
 
@@ -791,6 +866,22 @@ impl<'d> Executor<'d> {
         &self.receipts
     }
 
+    /// Records one scan cycle that overran its wall-clock period — the
+    /// documented write path by which the pacing shell (the controller's
+    /// scan loop) feeds the snapshot's `io_health.scan_overruns`.
+    ///
+    /// The executor itself never detects overruns: its clock is virtual
+    /// ticks, so pacing lives in the wall-clock shell, which compares a
+    /// cycle's `Instant` elapsed against its configured period and calls
+    /// this once per overran cycle. The call only increments a counter —
+    /// it is a report into telemetry, not a scan input, so component
+    /// determinism is untouched. The feed goes through the same wrappers
+    /// the shell already scans through (`Peer::record_scan_overrun`,
+    /// `Monitor::record_scan_overrun`).
+    pub fn record_scan_overrun(&mut self) {
+        self.io_health.scan_overruns += 1;
+    }
+
     /// Runs `scans` scans and returns the tick the last one ran at.
     ///
     /// `run(0)` is a no-op returning the current tick. A [`ScanError`]
@@ -831,6 +922,8 @@ impl<'d> Executor<'d> {
     pub fn checkpoint(&self) -> Checkpoint {
         let image = self.image.borrow();
         Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: self.model_fingerprint,
             tick: self.tick,
             components: self
                 .components
@@ -862,25 +955,35 @@ impl<'d> Executor<'d> {
     ///
     /// `driver`, `map`, and `components` are the same inputs
     /// [`Executor::new`] takes — on a standby they are built from the same
-    /// plant model. Restore wires the components, checks that the
-    /// checkpoint's component set equals the registered set by name,
-    /// applies the driver state when the checkpoint carries one, restores
-    /// each component's state, then resumes the tick and the output image.
-    /// The result is an executor whose next [`scan`](Executor::scan)
-    /// produces outputs identical to the captured run's.
+    /// plant model — and `model_fingerprint` is the fingerprint that
+    /// model carries, supplied by the assembling layer exactly as
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) records
+    /// it. Restore wires the components, negotiates the checkpoint's
+    /// format version and fingerprint against `model_fingerprint`, checks
+    /// that the checkpoint's component set equals the registered set by
+    /// name, applies the driver state when the checkpoint carries one,
+    /// restores each component's state, then resumes the tick and the
+    /// output image. The result is an executor whose next
+    /// [`scan`](Executor::scan) produces outputs identical to the
+    /// captured run's, itself fingerprinted so the checkpoints it later
+    /// emits carry the same identity.
     ///
     /// Any incompatibility fails with a [`RestoreError`] naming the
-    /// element at fault: a [`WiringError`], a component-name mismatch, a
-    /// component's [`StateError`](dcs_core::StateError), or the driver's.
-    /// No partially restored executor is returned; the supplied driver is
+    /// element at fault: an unsupported format version or a fingerprint
+    /// mismatch before any state is examined, then a [`WiringError`], a
+    /// component-name mismatch, a component's
+    /// [`StateError`](dcs_core::StateError), or the driver's. No
+    /// partially restored executor is returned; the supplied driver is
     /// asked to validate before applying its state section.
     pub fn restore(
         driver: &'d (dyn IoDriver + Sync),
         map: PointMap,
         components: Vec<Box<dyn Component>>,
         checkpoint: &Checkpoint,
+        model_fingerprint: Option<ModelFingerprint>,
     ) -> Result<Self, RestoreError> {
         let mut executor = Self::new(driver, map, components)?;
+        executor.model_fingerprint = model_fingerprint;
         executor.check_checkpoint(checkpoint)?;
 
         // Driver state before component state: a driver that does not
@@ -918,6 +1021,8 @@ impl<'d> Executor<'d> {
     /// Where [`restore`](Executor::restore) builds a fresh equivalent
     /// executor, `apply` realigns one that is already assembled and may
     /// be mid-run: the same compatibility checks hold — the checkpoint's
+    /// format version must be supported and its model fingerprint must
+    /// equal this run's, its
     /// component set must equal the registered set, its outputs must be
     /// points the map serves as `Out` with the declared kinds, and its
     /// internal section must name image-carried `In` points — then the
@@ -998,11 +1103,29 @@ impl<'d> Executor<'d> {
     }
 
     /// The compatibility half of checkpoint restore and apply: the
-    /// checkpoint's component set must equal the registered set exactly,
+    /// checkpoint's format version must be one this build accepts and its
+    /// model fingerprint must equal this run's — the explicit negotiation
+    /// that runs before any state is examined — then the checkpoint's
+    /// component set must equal the registered set exactly,
     /// every captured output must name a point the map serves as `Out`
     /// with the declared value kind, and every captured internal sample
     /// must name an image-carried `In` point with the declared kind.
     fn check_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
+        // Negotiation first: a checkpoint this build cannot read, or one
+        // captured under a different model, is refused before any state
+        // applies.
+        if !SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
+            return Err(RestoreError::UnsupportedVersion {
+                found: checkpoint.format_version,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            });
+        }
+        if checkpoint.model_fingerprint != self.model_fingerprint {
+            return Err(RestoreError::FingerprintMismatch {
+                found: checkpoint.model_fingerprint,
+                expected: self.model_fingerprint,
+            });
+        }
         // Component names are the run's component ids: the checkpoint's
         // set must equal the registered set exactly.
         for component in checkpoint.components.keys() {
@@ -1237,14 +1360,27 @@ impl<'d> Executor<'d> {
                 continue;
             }
             let sample = match self.driver.read(point) {
-                Ok(sample) => Sample { tick, ..sample },
-                Err(error) => Sample::new(
-                    image
-                        .get(&point)
-                        .map_or(neutral(spec.kind), |last| last.value),
-                    failure_quality(error),
-                    tick,
-                ),
+                Ok(sample) => {
+                    self.io_health.consecutive_failures = 0;
+                    Sample { tick, ..sample }
+                }
+                Err(error) => {
+                    self.io_health.failed_reads += 1;
+                    self.io_health.consecutive_failures += 1;
+                    self.io_health.last_error = Some(IoFault {
+                        tick,
+                        point: error.point(),
+                        direction: Direction::In,
+                        error,
+                    });
+                    Sample::new(
+                        image
+                            .get(&point)
+                            .map_or(neutral(spec.kind), |last| last.value),
+                        failure_quality(error),
+                        tick,
+                    )
+                }
             };
             image.insert(point, sample);
         }
@@ -1288,7 +1424,20 @@ impl<'d> Executor<'d> {
             let Some(sample) = image.get(&point) else {
                 continue;
             };
-            self.driver.write(point, sample.value)?;
+            match self.driver.write(point, sample.value) {
+                Ok(()) => self.io_health.consecutive_failures = 0,
+                Err(error) => {
+                    self.io_health.failed_writes += 1;
+                    self.io_health.consecutive_failures += 1;
+                    self.io_health.last_error = Some(IoFault {
+                        tick: self.tick,
+                        point: error.point(),
+                        direction: Direction::Out,
+                        error,
+                    });
+                    return Err(error.into());
+                }
+            }
         }
         Ok(())
     }
@@ -1315,8 +1464,8 @@ mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
     use dcs_core::{
-        ComponentDescriptor, Input, Output, ParameterDescriptor, ParameterRange, PortDescriptor,
-        PortRole,
+        ComponentDescriptor, DriverDiagnostics, Input, LinkState, Output, ParameterDescriptor,
+        ParameterRange, PortDescriptor, PortRole,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1948,6 +2097,211 @@ mod tests {
             Quality::Bad(QualityReason::CommunicationFault)
         );
         assert_eq!(sample.tick, Tick(2));
+    }
+
+    #[test]
+    fn failed_input_reads_count_into_io_health() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        // A clean scan reports an all-zero health section — and the stub
+        // has no transport, so the driver half is `None`.
+        assert_eq!(executor.snapshot().io_health, IoHealth::default());
+
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+
+        // The documented read behavior continues — the scan succeeds and
+        // the held value degrades to Bad — and each failed read is
+        // counted and attributed to its tick and point.
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_reads, 2);
+        assert_eq!(health.failed_writes, 0);
+        assert_eq!(health.consecutive_failures, 2);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(3),
+                point: PointId(10),
+                direction: Direction::In,
+                error: IoError::Disconnected(PointId(10)),
+            })
+        );
+        assert_eq!(health.driver, None);
+        assert_eq!(health.scan_overruns, 0);
+
+        // A successful boundary operation ends the consecutive streak;
+        // the counters and last-error attribution persist.
+        driver.faults.lock().unwrap().remove(&PointId(10));
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_reads, 2);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.last_error.unwrap().tick, Tick(3));
+    }
+
+    #[test]
+    fn failed_output_writes_count_into_io_health() {
+        let driver = StubDriver::new(&[float(20)], &[]);
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Constant {
+                name: "const",
+                output: PointId(20),
+                value: 1.0,
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        driver.faults.lock().unwrap().insert(PointId(20));
+
+        // The documented write behavior continues — the scan fails with
+        // ScanError — and the failure is counted and attributed.
+        assert_eq!(
+            executor.scan(),
+            Err(ScanError::Io(IoError::Disconnected(PointId(20))))
+        );
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.failed_reads, 0);
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(20),
+                direction: Direction::Out,
+                error: IoError::Disconnected(PointId(20)),
+            })
+        );
+
+        // The streak ends on the next successful write; the totals stay.
+        driver.faults.lock().unwrap().remove(&PointId(20));
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.consecutive_failures, 0);
+    }
+
+    /// A stub reporting transport diagnostics, to show the executor rides
+    /// `IoDriver::diagnostics` into the snapshot's I/O-health section.
+    struct Reporting<'a> {
+        inner: &'a StubDriver,
+        report: Mutex<Option<DriverDiagnostics>>,
+    }
+
+    impl IoDriver for Reporting<'_> {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            self.inner.read(point)
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            self.inner.write(point, value)
+        }
+
+        fn diagnostics(&self) -> Option<DriverDiagnostics> {
+            self.report.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn snapshot_rides_driver_diagnostics_in_io_health() {
+        let inner = StubDriver::new(&[float(10)], &[]);
+        let driver = Reporting {
+            inner: &inner,
+            report: Mutex::new(Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })),
+        };
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        executor.scan().unwrap();
+
+        // The driver's transport surface reports beside the counters —
+        // link health, distinct from per-point quality.
+        assert_eq!(
+            executor.snapshot().io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_fed_scan_overruns() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+
+        // The documented feed: the pacing shell reports each overran
+        // cycle through `record_scan_overrun`; the executor only counts.
+        assert_eq!(executor.snapshot().io_health.scan_overruns, 0);
+        executor.record_scan_overrun();
+        executor.record_scan_overrun();
+        assert_eq!(executor.snapshot().io_health.scan_overruns, 2);
+    }
+
+    #[test]
+    fn identical_runs_snapshot_identical_io_health() {
+        // The same fault script over two equivalent runs produces the
+        // same health payload — counters and attribution are
+        // deterministic like the rest of the snapshot.
+        let run = || {
+            let driver = StubDriver::new(&[float(10), float(20)], &[]);
+            let map: PointMap = [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect();
+            let mut executor = Executor::new(
+                &driver,
+                map,
+                vec![Box::new(Constant {
+                    name: "const",
+                    output: PointId(20),
+                    value: 1.0,
+                })],
+            )
+            .unwrap();
+            executor.scan().unwrap();
+            driver.faults.lock().unwrap().insert(PointId(10));
+            executor.scan().unwrap();
+            executor.scan().unwrap();
+            executor.snapshot().io_health
+        };
+        let health_a = run();
+        let health_b = run();
+        assert_eq!(health_a, health_b);
+        assert_eq!(
+            serde_json::to_string(&health_a).unwrap(),
+            serde_json::to_string(&health_b).unwrap()
+        );
     }
 
     #[test]
@@ -2659,6 +3013,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap();
         restored.scan().unwrap();
@@ -2796,6 +3151,7 @@ mod tests {
                         }),
                     ],
                     checkpoint,
+                    None,
                 )
                 .unwrap(),
                 None => checkpoint_rig(&driver),
@@ -2851,6 +3207,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -2896,6 +3253,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -2957,6 +3315,7 @@ mod tests {
                 count: 0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3468,6 +3827,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3528,5 +3888,250 @@ mod tests {
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
         );
+    }
+
+    #[test]
+    fn checkpoint_carries_version_and_fingerprint_through_serde() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor =
+            checkpoint_rig(&driver).with_model_fingerprint(ModelFingerprint::of(b"model-a"));
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+
+        // This build stamps the version it writes and the fingerprint
+        // the assembling layer supplied.
+        assert_eq!(checkpoint.format_version, CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            checkpoint.model_fingerprint,
+            Some(ModelFingerprint::of(b"model-a"))
+        );
+
+        // Both negotiate on the wire: the serialized form carries the
+        // fields and they survive a round-trip.
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["format_version"], CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            document["model_fingerprint"],
+            ModelFingerprint::of(b"model-a").0
+        );
+        assert_eq!(
+            serde_json::from_str::<Checkpoint>(&json).unwrap(),
+            checkpoint
+        );
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_version_restores() {
+        // The documented compatible-version case: a checkpoint a
+        // pre-versioning build wrote carries no `format_version` —
+        // serde reads it as version 0, which
+        // `SUPPORTED_FORMAT_VERSIONS` accepts — and no fingerprint, so
+        // it restores onto an executor assembled without one.
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.model_fingerprint, None);
+
+        let mut document = serde_json::to_value(&checkpoint).unwrap();
+        document.as_object_mut().unwrap().remove("format_version");
+        assert!(
+            !document
+                .as_object()
+                .unwrap()
+                .contains_key("model_fingerprint")
+        );
+        let legacy: Checkpoint = serde_json::from_value(document).unwrap();
+        assert_eq!(legacy.format_version, 0);
+        assert_eq!(legacy.model_fingerprint, None);
+
+        let standby = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &standby,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ],
+            &legacy,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+
+        // And a running unfingerprinted standby applies it in place.
+        let tracking_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut tracking = checkpoint_rig(&tracking_driver);
+        tracking.apply(&legacy).unwrap();
+        assert_eq!(tracking.tick(), Tick(3));
+    }
+
+    #[test]
+    fn restore_rejects_an_unsupported_format_version() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.scan().unwrap();
+        let mut checkpoint = executor.checkpoint();
+        checkpoint.format_version = CHECKPOINT_FORMAT_VERSION + 1;
+
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![Box::new(Counter {
+                name: "count",
+                output: PointId(30),
+                count: 0,
+            })],
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::UnsupportedVersion {
+                found: CHECKPOINT_FORMAT_VERSION + 1,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            }
+        );
+
+        // The same rejection precedes any state on a running standby:
+        // the version is negotiated before the component-set check, so
+        // this checkpoint's components would have failed it anyway.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver);
+        standby.run(2).unwrap();
+        assert_eq!(standby.apply(&checkpoint), Err(error));
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_a_mismatched_model_fingerprint() {
+        let fingerprint = ModelFingerprint::of(b"model-a");
+        let other = ModelFingerprint::of(b"model-b");
+
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        let mut executor = checkpoint_rig(&driver).with_model_fingerprint(fingerprint);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+
+        let components = || {
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }) as Box<dyn Component>,
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ]
+        };
+        let map = || {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect::<PointMap>()
+        };
+
+        // A checkpoint from a different model — same component set,
+        // different fingerprint — is rejected by fingerprint before any
+        // state applies.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            Some(other),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            }
+        );
+        // So is a fingerprinted checkpoint landing on a run assembled
+        // without one — the model identity cannot be verified.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: None,
+            }
+        );
+
+        // A running standby fingerprinted for a different model rejects
+        // the same checkpoint and keeps its last-good alignment: nothing
+        // of the foreign run applied.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver).with_model_fingerprint(other);
+        standby.run(2).unwrap();
+        assert_eq!(
+            standby.apply(&checkpoint),
+            Err(RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            })
+        );
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+
+        // The matching pair restores and keeps emitting the fingerprint.
+        let restored_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &restored_driver,
+            map(),
+            components(),
+            &checkpoint,
+            Some(fingerprint),
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+        assert_eq!(restored.checkpoint().model_fingerprint, Some(fingerprint));
     }
 }

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 2,
+      "kind": "sim-bus",
+      "parameters": {
+        "address": "127.0.0.1:5599",
+        "registers": { "level-raw": 70000 }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "level-raw" }
+    }
+  ],
+  "signals": [],
+  "components": [],
+  "connections": []
+}

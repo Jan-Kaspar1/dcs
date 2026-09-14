@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "v1": { "direction": "in", "value_type": "Float" },
+        "v2": { "direction": "in", "value_type": "Float" },
+        "v3": { "direction": "in", "value_type": "Float" },
+        "rate": { "direction": "in", "value_type": "Float" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "voted": { "direction": "out", "value_type": "Float" },
+        "discrepancy": { "direction": "out", "value_type": "Bool" },
+        "total": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "v1" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "v2" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "v3" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "rate" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "reset" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "voted" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "discrepancy" }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "total" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "measurement-a",
+      "source": 10,
+      "description": "First of three redundant measurements feeding the voter"
+    },
+    {
+      "id": 101,
+      "name": "measurement-b",
+      "source": 11,
+      "description": "Second of three redundant measurements feeding the voter"
+    },
+    {
+      "id": 102,
+      "name": "measurement-c",
+      "source": 12,
+      "description": "Third of three redundant measurements feeding the voter"
+    },
+    {
+      "id": 103,
+      "name": "flow-rate",
+      "source": 13,
+      "unit": "kg/h",
+      "description": "Flow rate the totalizer integrates"
+    },
+    {
+      "id": 104,
+      "name": "totalizer-reset",
+      "source": 14,
+      "description": "Clears the accumulated total while asserted"
+    },
+    {
+      "id": 105,
+      "name": "voted-measurement",
+      "source": 20,
+      "description": "2oo3 median of the three redundant measurements"
+    },
+    {
+      "id": 106,
+      "name": "voter-discrepancy",
+      "source": 21,
+      "description": "Asserted while the input spread exceeds the tolerance"
+    },
+    {
+      "id": 107,
+      "name": "accumulated-total",
+      "source": 22,
+      "unit": "kg",
+      "description": "Running total, wrapping at the configured rollover"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "median-voter",
+      "parameters": {
+        "tolerance": { "Float": 2.0 }
+      },
+      "ports": {
+        "in_1": { "direction": "in", "value_type": "Float" },
+        "in_2": { "direction": "in", "value_type": "Float" },
+        "in_3": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" },
+        "discrepancy": { "direction": "out", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "totalizer",
+      "parameters": {
+        "rate_unit": { "Float": 0.5 },
+        "rollover": { "Float": 100.0 }
+      },
+      "ports": {
+        "rate": { "direction": "in", "value_type": "Float" },
+        "reset": { "direction": "in", "value_type": "Bool" },
+        "total": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in_1" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "in_2" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "in_3" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 2, "name": "rate" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 2, "name": "reset" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "discrepancy" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "total" } },
+      "to": { "point": 22 }
+    }
+  ]
+}

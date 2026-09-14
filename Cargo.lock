@@ -23,6 +23,7 @@ dependencies = [
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+ "dcs-sim-bus",
  "dcs-sim-net",
  "serde_json",
 ]
@@ -31,10 +32,20 @@ dependencies = [
 name = "dcs-blocks"
 version = "0.1.0"
 dependencies = [
+ "dcs-build",
  "dcs-core",
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+ "serde_json",
+]
+
+[[package]]
+name = "dcs-build"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
+ "dcs-model",
  "serde_json",
 ]
 
@@ -126,6 +137,19 @@ dependencies = [
  "dcs-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dcs-sim-bus"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
+ "dcs-sim",
+ "serde",
+ "serde_json",
+ "signal-hook",
 ]
 
 [[package]]

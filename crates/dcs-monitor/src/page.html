@@ -25,13 +25,14 @@
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
   tr.source td { font-weight: bold; }
-  #pair-summary.good { color: #060; }
-  #pair-summary.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health.good { color: #060; }
+  #pair-summary.bad, #io-health.bad { color: #b00; font-weight: bold; }
 </style>
 </head>
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
+<p id="io-health" hidden></p>
 
 <section id="pair" hidden>
 <h2>Controller pair</h2>
@@ -244,19 +245,24 @@ function activePeer() {
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}}.
+// {"degraded": {detail}} | {"diverged": {mismatches}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
     return "tracking (aligned at tick " + sync.tracking.aligned + ")";
   }
   if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  if ("diverged" in sync) {
+    return "diverged: staged outputs mismatch the field at " +
+      sync.diverged.mismatches.map(m => m.point).join(", ");
+  }
   return JSON.stringify(sync);
 }
 
 // The pair's redundancy summary: healthy, or the named redundancy
-// faults — an unreachable peer, a degraded standby convergence, or no
-// peer reporting active. These are pair health, never plant faults.
+// faults — an unreachable peer, a degraded or diverged standby
+// convergence, or no peer reporting active. These are pair health,
+// never plant faults.
 function pairSummary() {
   const faults = [];
   let activeName = null;
@@ -269,9 +275,14 @@ function pairSummary() {
     }
     if (state.report === null) return;
     if (state.report.role === "active") activeName = peer.name;
-    if (state.report.sync && typeof state.report.sync === "object" &&
-        "degraded" in state.report.sync) {
-      faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+    if (state.report.sync && typeof state.report.sync === "object") {
+      if ("degraded" in state.report.sync) {
+        faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+      }
+      if ("diverged" in state.report.sync) {
+        faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
+          state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
+      }
     }
   });
   if (activeName === null) faults.push("no peer reports role active");
@@ -320,6 +331,7 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
+    renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
@@ -334,6 +346,54 @@ async function refresh() {
   } finally {
     polling = false;
   }
+}
+
+// The snapshot's I/O health section, rendered as its own line so link
+// degradation reads as link health — visibly separate from the
+// per-point quality column below. IoFault serializes as
+// {tick, point, direction, error} and an IoError as
+// {"Disconnected": id} | {"Timeout": id} | {"UnknownPoint": id} |
+// {"TypeMismatch": {point, expected, found}}.
+function describeIoError(error) {
+  const [variant, detail] = Object.entries(error)[0];
+  const name = variant.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  if (variant === "TypeMismatch") {
+    return name + " on point " + detail.point + " (expects " +
+      detail.expected + ", found " + formatValue(detail.found) + ")";
+  }
+  return name + " on point " + detail;
+}
+
+function renderIoHealth(health) {
+  const el = document.getElementById("io-health");
+  if (!health) { el.hidden = true; return; }
+  const parts = [];
+  let troubled = false;
+  if (health.driver) {
+    parts.push("link " + health.driver.link);
+    if (health.driver.link !== "connected") troubled = true;
+    if (health.driver.last_error) {
+      parts.push("last link failure: " + health.driver.last_error);
+    }
+  }
+  if (health.failed_reads || health.failed_writes) {
+    troubled = true;
+    parts.push("failed reads " + health.failed_reads +
+      ", failed writes " + health.failed_writes +
+      ", " + health.consecutive_failures + " in a row");
+  }
+  if (health.last_error) {
+    const fault = health.last_error;
+    parts.push("last I/O fault " + describeIoError(fault.error) +
+      " (" + fault.direction + ", tick " + fault.tick + ")");
+  }
+  if (health.scan_overruns) {
+    parts.push("scan overruns " + health.scan_overruns);
+  }
+  if (parts.length === 0) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = "I/O health: " + parts.join(" — ");
+  el.className = troubled ? "bad" : "good";
 }
 
 // One point's row in the listing table.
@@ -465,7 +525,8 @@ async function refreshJournal(base) {
 
 // Journal events serialize as {"quality_changed": ...} |
 // {"command_settled": ...} | {"step_failed": ...} |
-// {"role_changed": {from, to}}.
+// {"role_changed": {from, to}} |
+// {"divergence_detected": {mismatches}}.
 function describeEvent(event) {
   if ("quality_changed" in event) {
     const change = event.quality_changed;
@@ -485,6 +546,12 @@ function describeEvent(event) {
   if ("role_changed" in event) {
     const change = event.role_changed;
     return "reported role " + change.from + " → " + change.to;
+  }
+  if ("divergence_detected" in event) {
+    return "standby diverged: staged outputs mismatch the field at " +
+      event.divergence_detected.mismatches.map(m =>
+        pointName(m.point) + " (staged " + formatValue(m.staged) +
+        ", field " + formatValue(m.field) + ")").join(", ");
   }
   return JSON.stringify(event);
 }

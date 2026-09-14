@@ -31,6 +31,7 @@
 
 mod command;
 mod descriptor;
+mod fingerprint;
 mod history;
 mod io;
 mod journal;
@@ -43,12 +44,16 @@ pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
 };
+pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
-pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
+pub use io::{
+    Direction, DriverDiagnostics, Input, IoDriver, IoError, LinkState, Output, PointType,
+    TypedSample,
+};
 pub use journal::{JournalEntry, JournalEvent};
-pub use role::{Role, RoleReport, StandbySync, SwitchError};
+pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
 pub use state::{StateError, StateMap};
-pub use telemetry::{ComponentDiagnostics, PointTelemetry, TelemetrySnapshot};
+pub use telemetry::{ComponentDiagnostics, IoFault, IoHealth, PointTelemetry, TelemetrySnapshot};

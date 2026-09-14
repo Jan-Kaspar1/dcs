@@ -121,6 +121,7 @@ fn run_with_restore() -> (Vec<Sample>, Checkpoint) {
         point_map(),
         vec![Box::new(pid("pid"))],
         &checkpoint,
+        None,
     )
     .unwrap();
     assert_eq!(restored.tick(), Tick(CHECKPOINT_AT));
@@ -216,8 +217,14 @@ fn mismatched_component_set_is_a_named_error() {
     let sim = SimDriver::new(channel_map()).unwrap();
 
     // The checkpoint's "pid" has no counterpart in the fresh executor.
-    let error = Executor::restore(&sim, point_map(), vec![Box::new(pid("other"))], &checkpoint)
-        .unwrap_err();
+    let error = Executor::restore(
+        &sim,
+        point_map(),
+        vec![Box::new(pid("other"))],
+        &checkpoint,
+        None,
+    )
+    .unwrap_err();
     assert_eq!(
         error,
         RestoreError::UnknownComponent {
@@ -232,6 +239,7 @@ fn mismatched_component_set_is_a_named_error() {
         point_map(),
         vec![Box::new(pid("pid")), Box::new(pid("pid-2"))],
         &checkpoint,
+        None,
     )
     .unwrap_err();
     assert_eq!(
@@ -334,8 +342,14 @@ fn stateless_components_and_drivers_are_unaffected() {
         (SELECT, Value::Bool(true)),
         (FIELD, Value::Float(0.0)),
     ]);
-    let mut restored =
-        Executor::restore(&standby_driver, map, vec![Box::new(block())], &checkpoint).unwrap();
+    let mut restored = Executor::restore(
+        &standby_driver,
+        map,
+        vec![Box::new(block())],
+        &checkpoint,
+        None,
+    )
+    .unwrap();
     restored.scan().unwrap();
     assert_eq!(restored.tick(), Tick(2));
     assert_eq!(standby_driver.read(FIELD).unwrap().value, Value::Float(9.0));

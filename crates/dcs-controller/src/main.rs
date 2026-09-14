@@ -487,6 +487,12 @@ fn main() -> ExitCode {
                                         "standby: rejected checkpoint from {active_addr}: {error}"
                                     );
                                 }
+                                for report in peer.take_divergences() {
+                                    eprintln!(
+                                        "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                        report.tick.0, report.mismatches
+                                    );
+                                }
                             }
                             Err(error) => {
                                 peer.note_transfer_failed(format!(
@@ -499,6 +505,7 @@ fn main() -> ExitCode {
                     },
                     || peer.borrow().snapshot(),
                     step,
+                    || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
                 )
@@ -539,6 +546,7 @@ fn main() -> ExitCode {
                     || peer.borrow_mut().scan(),
                     || peer.borrow().snapshot(),
                     || driver.step(dt, true),
+                    || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
                 )
@@ -565,7 +573,14 @@ fn run_monitored(
 ) -> ExitCode {
     std::thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
-        let result = scan_loop(scan, || monitor.snapshot(), step, options, Some(period));
+        let result = scan_loop(
+            scan,
+            || monitor.snapshot(),
+            step,
+            || monitor.record_scan_overrun(),
+            options,
+            Some(period),
+        );
         monitor.shutdown();
         result
     })
@@ -577,10 +592,19 @@ fn run_monitored(
 /// telemetry. `step` advances the simulated plant one `dt`; the
 /// `--ticks` bound, the snapshot reporting, and the wall-clock pacing
 /// are identical either way.
+///
+/// `overrun` is the paced loop's feed for the snapshot's
+/// `io_health.scan_overruns`: a cycle whose wall-clock elapsed reaches
+/// its period is reported through it once. The counter itself lives in
+/// the executor — callers wire this closure to
+/// `record_scan_overrun` on whichever wrapper they scan through — so
+/// wall-clock overrun detection stays out here in the shell and only a
+/// count, not a timestamp, enters the tick domain.
 fn scan_loop(
     mut scan: impl FnMut() -> Result<Tick, ScanError>,
     snapshot: impl Fn() -> TelemetrySnapshot,
     step: impl Fn() -> Result<(), String>,
+    mut overrun: impl FnMut(),
     options: &Options,
     period: Option<Duration>,
 ) -> ExitCode {
@@ -617,6 +641,10 @@ fn scan_loop(
             let elapsed = started.elapsed();
             if elapsed < period {
                 std::thread::sleep(period - elapsed);
+            } else {
+                // The cycle overran its period — there is nothing left
+                // to sleep off, so report it into io_health.scan_overruns.
+                overrun();
             }
         }
     }
