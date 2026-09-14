@@ -17,20 +17,33 @@
 //! configured capacity and number entries with never-reused `seq`s, so
 //! consumers detect eviction as a numbering gap.
 
+use crate::journal_file::JournalFile;
 use dcs_core::{
     CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry, JournalEvent,
     PointHistory, PointId, Quality, Role, Sample, Tick,
 };
 use dcs_runtime::Executor;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::io;
+use std::path::PathBuf;
 
-/// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded
+/// streams, plus the journal's optional durable sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorConfig {
     /// Samples retained per point in the history rings; `0` retains none.
     pub history_capacity: usize,
     /// Entries retained in the transition journal; `0` retains none.
     pub journal_capacity: usize,
+    /// When set, every journaled entry is also appended to this
+    /// line-delimited JSON file — the journal-persistence decision's
+    /// monitor-local sink. Startup replays the file into the in-memory
+    /// ring and continues `seq` numbering where it left off, so the
+    /// served journal answers continuously across a restart; a file
+    /// that cannot be replayed fails the bind naming the file and the
+    /// offending record, and a missing file is a cold start. Point
+    /// history stays volatile — only the journal persists.
+    pub journal_file: Option<PathBuf>,
 }
 
 impl Default for MonitorConfig {
@@ -40,6 +53,7 @@ impl Default for MonitorConfig {
         Self {
             history_capacity: 1024,
             journal_capacity: 1024,
+            journal_file: None,
         }
     }
 }
@@ -90,19 +104,35 @@ pub(super) struct Recorder {
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
+    /// The durable journal sink, when a path is configured — every
+    /// journaled entry is appended there too.
+    sink: Option<JournalFile>,
 }
 
 impl Recorder {
-    pub(super) fn new(config: MonitorConfig) -> Self {
-        Self {
+    /// `tick` is the tick this run starts at — `0` cold, the restored
+    /// tick under `--state-file` — recorded in the journal file's
+    /// run-boundary marker. Replaying a configured file seeds the
+    /// journal ring and continues `seq` numbering; a file that cannot
+    /// be replayed fails here naming the file and the offending record.
+    pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
+        let (sink, replay) = match &config.journal_file {
+            Some(path) => {
+                let (sink, replay) = JournalFile::open(path, config.journal_capacity, tick)?;
+                (Some(sink), replay)
+            }
+            None => (None, crate::journal_file::Replay::default()),
+        };
+        Ok(Self {
             config,
             rings: BTreeMap::new(),
-            journal: VecDeque::new(),
-            next_seq: 1,
+            journal: replay.entries,
+            next_seq: replay.next_seq,
             qualities: HashMap::new(),
             open_commands: BTreeSet::new(),
             step_counts: Vec::new(),
-        }
+            sink,
+        })
     }
 
     /// Notes the receipt a `submit_command` just produced, at
@@ -267,13 +297,23 @@ impl Recorder {
             .collect()
     }
 
-    /// Appends one journal entry, evicting the oldest past capacity.
-    fn push(&mut self, tick: Tick, event: JournalEvent) {
-        self.journal.push_back(JournalEntry {
+    /// Appends one journal entry — to the configured file sink first,
+    /// then the ring — evicting the oldest past capacity. An append the
+    /// file cannot take is fatal: the run dies naming the file rather
+    /// than running on while its audit trail silently stops, and the
+    /// partial record a crash can leave is what the next startup's
+    /// replay rejects by name.
+    pub(super) fn push(&mut self, tick: Tick, event: JournalEvent) {
+        let entry = JournalEntry {
             seq: self.next_seq,
             tick,
             event,
-        });
+        };
+        if let Some(sink) = &mut self.sink {
+            sink.append(&entry)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        self.journal.push_back(entry);
         self.next_seq += 1;
         while self.journal.len() > self.config.journal_capacity {
             self.journal.pop_front();
