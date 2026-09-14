@@ -30,7 +30,7 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 | `dcs-controller` | Paced controller binary | Not started — #19 open; monitoring integration tracked by #48 |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented (#20): `/snapshot`, `/receipts`, `/command`, `/scan`; bounded history and the transition journal implemented (#35): `/history`, `/journal` with since-cursors (decision 17); signal-metadata endpoint and minimal page proposed under #34 (blocked) |
 | `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18) |
-| `dcs-model` internal points | Channel-less operator and port-to-port points | Proposed — #30 open; the demo's synthesized internal-device pairs are the implemented precursor (#12) |
+| `dcs-model` internal points | Channel-less operator and port-to-port points | Implemented (#30): channel-less `io_point`s carry `initial` in the scan image — held `In` setpoints, monitored `Out` writes, and internal links serving port-to-port wiring (decision 14) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); `KIND` constants and `from_parameters` are in place; per-kind `ComponentDescriptor`s proposed under #50 (decision 16) |
 
 Done when:

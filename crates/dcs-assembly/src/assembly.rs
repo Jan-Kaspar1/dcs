@@ -6,7 +6,7 @@
 //! same resolution, so the point map the executor checks against always
 //! matches the channels the driver serves.
 
-use crate::error::{AssemblyError, BuildError};
+use crate::error::{AssemblyError, BuildError, InternalPointError};
 use crate::registry::{ComponentRegistry, ComponentSpec};
 use dcs_core::{Direction, IoDriver, PointId, Value, ValueKind};
 use dcs_model::{ComponentId, Direction as ModelDirection, Endpoint, PlantModel, PortRef};
@@ -23,9 +23,6 @@ use std::collections::btree_map::Entry;
 /// device of any other kind fails with
 /// [`AssemblyError::UnknownDeviceKind`].
 pub const SIM_DEVICE_PREFIX: &str = "sim";
-
-/// The [`ChannelId::device`] synthesized internal points report.
-const INTERNAL_DEVICE: u64 = u64::MAX;
 
 /// Shared empty port map for instances with no wired ports.
 static NO_PORTS: BTreeMap<String, PointId> = BTreeMap::new();
@@ -97,28 +94,42 @@ fn bind(
 /// The resolved view of a validated model: everything the driver and the
 /// executor need, before any component is constructed.
 struct Resolved {
-    /// The simulated backend's topology: declared points, field-side
-    /// loopbacks, and the internal points serving port-to-port wiring.
+    /// The simulated backend's topology: declared field points and
+    /// field-side loopbacks. Internal points are image-carried and never
+    /// enter the channel map.
     channel_map: ChannelMap,
     /// The executor-side authority every component's declared I/O is
-    /// checked against.
+    /// checked against: field and internal points plus the internal
+    /// links carrying port-to-port and internal point-to-point wiring.
     point_map: PointMap,
     /// Per component instance: port name → bound point.
     bindings: BTreeMap<ComponentId, BTreeMap<String, PointId>>,
-    /// The first port-binding failure, if any — deferred so
+    /// The first connection-wiring failure, if any — deferred so
     /// [`sim_driver`] can still build the field-side topology of a model
     /// whose component wiring is broken. [`assemble`] reports it.
     binding_error: Option<AssemblyError>,
 }
 
+/// Whether `point` resolves to an image-carried internal point.
+fn is_internal(point_map: &PointMap, point: PointId) -> bool {
+    point_map
+        .get(point)
+        .is_some_and(|spec| spec.internal.is_some())
+}
+
 /// Resolves the model's device/channel mapping and connection wiring.
 ///
 /// Device kinds are checked first — a device whose kind does not start
-/// with [`SIM_DEVICE_PREFIX`] is [`AssemblyError::UnknownDeviceKind`].
-/// Connections then bind ports to points, add field-side loopbacks for
-/// point-to-point wires, and synthesize internal point pairs for
-/// port-to-port wires. Finally every port declared on an instance must be
-/// bound.
+/// with [`SIM_DEVICE_PREFIX`] is [`AssemblyError::UnknownDeviceKind`] —
+/// then each declared `io_point` enters the point map: channel-bound
+/// points as field points served by a channel-map binding, channel-less
+/// points as internal points the scan image carries at their declared
+/// `initial` (a malformed declaration is
+/// [`AssemblyError::InvalidInternalPoint`]). Connections then bind ports
+/// to points, add field-side loopbacks for field point-to-point wires and
+/// internal links for internal ones, and synthesize linked internal point
+/// pairs for port-to-port wires. Finally every port declared on an
+/// instance must be bound.
 fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
     for device in &model.devices {
         if !device.kind.starts_with(SIM_DEVICE_PREFIX) {
@@ -132,21 +143,44 @@ fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
     let mut channel_map = ChannelMap::new();
     let mut point_map = PointMap::new();
     for point in &model.io_points {
-        point_map =
-            point_map.with_point(point.id, core_direction(point.direction), point.value_type);
-        channel_map = channel_map.with_point(PointBinding {
-            point: point.id,
-            channel: ChannelId {
-                device: point.channel.device.0,
-                name: point.channel.name.clone(),
-            },
-            direction: sim_direction(point.direction),
-            initial: neutral(point.value_type),
-        });
+        let direction = core_direction(point.direction);
+        match (&point.channel, point.initial) {
+            // A field point: the driver serves it through the declared
+            // channel, starting at the neutral value of its kind.
+            (Some(channel), _) => {
+                point_map = point_map.with_point(point.id, direction, point.value_type);
+                channel_map = channel_map.with_point(PointBinding {
+                    point: point.id,
+                    channel: ChannelId {
+                        device: channel.device.0,
+                        name: channel.name.clone(),
+                    },
+                    direction: sim_direction(point.direction),
+                    initial: neutral(point.value_type),
+                });
+            }
+            // An internal point: image-carried at its declared initial.
+            (None, Some(initial)) if initial.kind() == point.value_type => {
+                point_map = point_map.with_internal(point.id, direction, point.value_type, initial);
+            }
+            // Reachable only for a model resolved without validation.
+            (None, initial) => {
+                return Err(AssemblyError::InvalidInternalPoint {
+                    point: point.id,
+                    detail: match initial {
+                        None => InternalPointError::MissingInitial,
+                        Some(initial) => InternalPointError::InitialKindMismatch {
+                            declared: point.value_type,
+                            initial: initial.kind(),
+                        },
+                    },
+                });
+            }
+        }
     }
 
-    // Internal point ids are allocated above every declared point id, so
-    // they cannot collide with model elements.
+    // Synthesized internal point ids are allocated above every declared
+    // point id, so they cannot collide with model elements.
     let mut next_internal = model
         .io_points
         .iter()
@@ -163,18 +197,47 @@ fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
                 bind(&mut bindings, &mut binding_error, port, *point);
             }
             (Endpoint::Point(input), Endpoint::Point(output)) => {
-                // A field-side wire: the `to` (Out) channel drives the
-                // `from` (In) channel observing it.
-                channel_map = channel_map.with_loopback(Loopback {
-                    output: *output,
-                    input: *input,
-                });
+                match (
+                    is_internal(&point_map, *input),
+                    is_internal(&point_map, *output),
+                ) {
+                    // A field-side wire: the `to` (Out) channel drives
+                    // the `from` (In) channel observing it.
+                    (false, false) => {
+                        channel_map = channel_map.with_loopback(Loopback {
+                            output: *output,
+                            input: *input,
+                        });
+                    }
+                    // An internal wire: the `to` (Out) point's image
+                    // sample is routed onto the `from` (In) point at each
+                    // scan's input phase — the same one-scan-later
+                    // boundary a field loopback crosses.
+                    (true, true) => {
+                        point_map = point_map.with_internal_link(*output, *input);
+                    }
+                    // A channel-less point has no field channel, and an
+                    // internal link cannot carry one.
+                    (input_internal, _) => {
+                        let (field, internal) = if input_internal {
+                            (*output, *input)
+                        } else {
+                            (*input, *output)
+                        };
+                        binding_error.get_or_insert(AssemblyError::MixedPointLink {
+                            connection: index,
+                            field,
+                            internal,
+                        });
+                    }
+                }
             }
             (Endpoint::Port(from), Endpoint::Port(to)) => {
                 // A component-to-component wire needs a field-free path:
-                // the producing port writes a synthesized `Out` point the
-                // executor flushes to the driver, and a loopback delivers
-                // it to the consuming port's `In` point on the next scan.
+                // the producing port writes a synthesized internal `Out`
+                // point and an internal link delivers it to the consuming
+                // port's internal `In` point at the next scan's input
+                // phase.
                 let Some(kind) = port_kind(model, from) else {
                     binding_error
                         .get_or_insert(AssemblyError::UnresolvedEndpoint { connection: index });
@@ -182,22 +245,10 @@ fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
                 };
                 let (output, input) = (PointId(next_internal), PointId(next_internal + 1));
                 next_internal += 2;
-                for (point, direction) in [(output, Direction::Out), (input, Direction::In)] {
-                    point_map = point_map.with_point(point, direction, kind);
-                    channel_map = channel_map.with_point(PointBinding {
-                        point,
-                        channel: ChannelId {
-                            device: INTERNAL_DEVICE,
-                            name: format!("internal-{}", point.0),
-                        },
-                        direction: match direction {
-                            Direction::In => SimDirection::In,
-                            Direction::Out => SimDirection::Out,
-                        },
-                        initial: neutral(kind),
-                    });
-                }
-                channel_map = channel_map.with_loopback(Loopback { output, input });
+                point_map = point_map
+                    .with_internal(output, Direction::Out, kind, neutral(kind))
+                    .with_internal(input, Direction::In, kind, neutral(kind))
+                    .with_internal_link(output, input);
                 bind(&mut bindings, &mut binding_error, from, output);
                 bind(&mut bindings, &mut binding_error, to, input);
             }
@@ -232,10 +283,11 @@ fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
 /// Resolves the model's device/channel mapping into the [`ChannelMap`] a
 /// [`SimDriver`] serves.
 ///
-/// Every declared `io_point` becomes a point bound to its channel, with a
-/// neutral initial value of the point's declared kind; point-to-point and
-/// port-to-port wiring contributes the loopbacks and internal points. All
-/// devices must carry a [`SIM_DEVICE_PREFIX`] kind.
+/// Every declared channel-bound `io_point` becomes a point bound to its
+/// channel, with a neutral initial value of the point's declared kind;
+/// channel-less internal points are carried by the executor's scan image
+/// and contribute nothing here. Field point-to-point wiring contributes
+/// the loopbacks. All devices must carry a [`SIM_DEVICE_PREFIX`] kind.
 ///
 /// The returned map is open: the simulated plant lives in the channel
 /// map, not the model, so callers may add process elements
@@ -262,8 +314,9 @@ pub fn sim_driver(model: &PlantModel) -> Result<SimDriver, AssemblyError> {
 /// is [`AssemblyError::UnknownComponentKind`] and a constructor failure is
 /// [`AssemblyError::UnboundPort`] or [`AssemblyError::Component`]. Every
 /// constructed component's declared logical I/O is then verified against
-/// the driver's point map — unserved point, direction, and value-kind
-/// mismatches are named per requirement — before
+/// the resolved point map — field and internal points alike: unserved
+/// point, direction, and value-kind mismatches are named per requirement —
+/// before
 /// [`Executor::new`](dcs_runtime::Executor::new) performs its own wiring
 /// check. Components step in `components` order: the model's declared scan
 /// order.

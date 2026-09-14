@@ -27,14 +27,19 @@
 //! ends:
 //!
 //! - `point → port` and `port → point` connections bind a component port to
-//!   an `io_point`;
+//!   an `io_point` — field or internal alike;
 //! - `port → port` connections synthesize a pair of internal points — an
 //!   `Out` point bound to the producing port and an `In` point bound to the
-//!   consuming one — joined by a [`Loopback`] in the driver, so a
-//!   component-to-component wire delivers the value one scan later;
-//! - `point → point` connections describe a field-side wire on simulated
-//!   devices: the `to` (`Out`) channel drives the `from` (`In`) channel
-//!   observing it, also as a [`Loopback`].
+//!   consuming one — joined by an internal link in the executor's scan
+//!   image, so a component-to-component wire delivers the value one scan
+//!   later. A declared channel-less `Out`/`In` `io_point` pair wired the
+//!   same way serves as the carrier instead;
+//! - `point → point` connections describe a wire between two `io_point`s:
+//!   field endpoints become a field-side [`Loopback`] in the driver (the
+//!   `to` (`Out`) channel drives the `from` (`In`) channel observing it),
+//!   internal endpoints an internal link through the scan image — same
+//!   one-scan-later boundary. A mixed field/internal pair cannot be
+//!   carried and is [`AssemblyError::MixedPointLink`].
 //!
 //! Every failure is a structured [`AssemblyError`] naming the offending
 //! model element.
@@ -46,5 +51,5 @@ mod error;
 mod registry;
 
 pub use assembly::{SIM_DEVICE_PREFIX, assemble, sim_channel_map, sim_driver};
-pub use error::{AssemblyError, BuildError};
+pub use error::{AssemblyError, BuildError, InternalPointError};
 pub use registry::{ComponentRegistry, ComponentSpec};

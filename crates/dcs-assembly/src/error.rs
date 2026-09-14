@@ -140,6 +140,26 @@ pub enum AssemblyError {
         /// The constructor's failure, formatted.
         detail: String,
     },
+    /// A channel-less `io_point`'s declaration is malformed; reachable
+    /// only for a model assembled without validation, which reports the
+    /// same defect as [`ValidationError`](dcs_model::ValidationError).
+    InvalidInternalPoint {
+        /// The offending point.
+        point: PointId,
+        /// What's wrong with the declaration.
+        detail: InternalPointError,
+    },
+    /// A point-to-point connection joins a field point with an internal
+    /// point: a channel-less point has no field channel a loopback could
+    /// drive, and an internal link cannot carry a field channel.
+    MixedPointLink {
+        /// The offending connection's index in `connections`.
+        connection: usize,
+        /// The field-bound endpoint.
+        field: PointId,
+        /// The channel-less endpoint.
+        internal: PointId,
+    },
     /// A port-to-port connection references a component or port the model
     /// does not declare; reachable only for a model assembled without
     /// validation.
@@ -152,6 +172,41 @@ pub enum AssemblyError {
         /// The executor's wiring error.
         detail: WiringError,
     },
+}
+
+/// What makes a channel-less `io_point` declaration malformed at assembly.
+///
+/// [`PlantModel::validate`](dcs_model::PlantModel::validate) reports the
+/// same defects as [`ValidationError::MissingInitial`] and
+/// [`ValidationError::InitialKindMismatch`]; this is the assembly-side
+/// mirror for models resolved without validation.
+///
+/// [`ValidationError::MissingInitial`]: dcs_model::ValidationError::MissingInitial
+/// [`ValidationError::InitialKindMismatch`]: dcs_model::ValidationError::InitialKindMismatch
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InternalPointError {
+    /// The point declares no `initial` value; the scan image would have
+    /// nothing to hold.
+    MissingInitial,
+    /// The `initial` value's kind differs from the declared `value_type`.
+    InitialKindMismatch {
+        /// The declared `value_type`.
+        declared: ValueKind,
+        /// The `initial` value's actual kind.
+        initial: ValueKind,
+    },
+}
+
+impl fmt::Display for InternalPointError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingInitial => write!(f, "declares no initial value"),
+            Self::InitialKindMismatch { declared, initial } => write!(
+                f,
+                "declares initial {initial:?} against value_type {declared:?}"
+            ),
+        }
+    }
 }
 
 impl fmt::Display for AssemblyError {
@@ -219,6 +274,18 @@ impl fmt::Display for AssemblyError {
                 f,
                 "component {} of kind {kind:?} failed to build: {detail}",
                 component.0
+            ),
+            Self::InvalidInternalPoint { point, detail } => {
+                write!(f, "internal io point {} {detail}", point.0)
+            }
+            Self::MixedPointLink {
+                connection,
+                field,
+                internal,
+            } => write!(
+                f,
+                "connection {connection} joins field io point {} with internal io point {}: neither a field loopback nor an internal link can carry it",
+                field.0, internal.0
             ),
             Self::UnresolvedEndpoint { connection } => write!(
                 f,

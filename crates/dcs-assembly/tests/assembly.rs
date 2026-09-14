@@ -4,11 +4,12 @@
 //! invalid fixture or a deliberately miswired stub kind.
 
 use dcs_assembly::{
-    AssemblyError, BuildError, ComponentRegistry, assemble, sim_channel_map, sim_driver,
+    AssemblyError, BuildError, ComponentRegistry, InternalPointError, assemble, sim_channel_map,
+    sim_driver,
 };
-use dcs_blocks::{AnalogInput, DigitalOutput, Pid};
-use dcs_core::{Direction, IoDriver, PointId, Tick, Value, ValueKind};
-use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef};
+use dcs_blocks::{AnalogInput, AnalogOutput, DigitalOutput, Pid};
+use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
+use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
 use dcs_runtime::{Component, ComponentIo, IoRequirement, StepError};
 use dcs_sim::{ChannelId, ConfigError, FirstOrderLag, ProcessElement, SimDriver};
 
@@ -16,10 +17,23 @@ const TANK_LOOP: &str = include_str!("../fixtures/tank_loop.json");
 /// The M1 milestone fixture, checked in with `dcs-demo` — reused here
 /// exactly as the issue asks, through the general registry.
 const M1_TANK_LEVEL: &str = include_str!("../../dcs-demo/fixtures/tank_level.json");
+/// The internal-points fixture: a held setpoint, a declared internal
+/// carrier pair, and a port-to-port wire — plus field points.
+const INTERNAL_POINTS: &str = include_str!("../fixtures/internal_points.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
 const VALVE: PointId = PointId(12);
+
+// `internal_points.json`: the held setpoint and the declared internal
+// `Out`/`In` pair carrying the pid's output to the analog-output.
+const HELD_SETPOINT: PointId = PointId(10);
+const PID_OUT: PointId = PointId(13);
+const AO_ENG: PointId = PointId(14);
+// The synthesized carrier pair for the `ai.out` → `pid.pv` port-to-port
+// wire: internal point ids allocate above the highest declared id (14).
+const LINK_OUT: PointId = PointId(15);
+const LINK_IN: PointId = PointId(16);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -70,6 +84,25 @@ fn registry() -> ComponentRegistry {
                 spec.require("out")?,
                 spec.parameters,
             ))
+        })
+        .with(AnalogOutput::<f64>::KIND, |spec| {
+            let eng = spec.require("eng")?;
+            let raw = spec.require("raw")?;
+            if spec.point_kind(raw) == Some(ValueKind::Int) {
+                boxed(AnalogOutput::<i64>::from_parameters(
+                    spec.name.as_str(),
+                    eng,
+                    raw,
+                    spec.parameters,
+                ))
+            } else {
+                boxed(AnalogOutput::<f64>::from_parameters(
+                    spec.name.as_str(),
+                    eng,
+                    raw,
+                    spec.parameters,
+                ))
+            }
         })
 }
 
@@ -389,4 +422,192 @@ fn port_to_port_wire_on_undeclared_component_is_unresolved() {
     let driver = sim_driver(&model).unwrap();
     let error = assemble(&model, &registry(), &driver).unwrap_err();
     assert_eq!(error, AssemblyError::UnresolvedEndpoint { connection: 5 });
+}
+
+#[test]
+fn internal_points_fixture_validates_and_roundtrips() {
+    let fixture = model(INTERNAL_POINTS);
+    assert!(fixture.validate().is_empty());
+    let roundtripped = model(&serde_json::to_string(&fixture).unwrap());
+    assert_eq!(fixture, roundtripped);
+}
+
+#[test]
+fn internal_setpoint_holds_then_follows_a_command() {
+    let model = model(INTERNAL_POINTS);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The declared initial serves as the setpoint before any command —
+    // no field channel carries it.
+    assert_eq!(
+        executor.sample(HELD_SETPOINT).unwrap().value,
+        Value::Float(25.0)
+    );
+    driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
+    executor.scan().unwrap();
+    let before = executor.sample(PID_OUT).unwrap().value;
+
+    // A command to the internal point applies at the next scan boundary:
+    // the pid's output — recorded on the declared internal `Out` carrier —
+    // moves in that same scan.
+    let receipt = executor.submit_command(Command::WriteValue {
+        point: HELD_SETPOINT,
+        kind: ValueKind::Float,
+        value: Value::Float(60.0),
+    });
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(2)
+        }
+    );
+    executor.scan().unwrap();
+    assert_eq!(
+        executor.receipts()[0].outcome,
+        CommandOutcome::Applied { tick: Tick(2) }
+    );
+    assert_eq!(
+        executor.sample(HELD_SETPOINT).unwrap(),
+        dcs_core::Sample::good(Value::Float(60.0), Tick(2))
+    );
+    assert_ne!(executor.sample(PID_OUT).unwrap().value, before);
+
+    // The internal point is telemetry like any field point.
+    let snapshot = executor.snapshot();
+    let telemetry = snapshot
+        .points
+        .iter()
+        .find(|point| point.point == HELD_SETPOINT)
+        .expect("the internal setpoint is a mapped point");
+    assert_eq!(telemetry.direction, Direction::In);
+    assert_eq!(telemetry.sample.unwrap().value, Value::Float(60.0));
+}
+
+#[test]
+fn port_to_port_wire_delivers_one_scan_later() {
+    let model = model(INTERNAL_POINTS);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // Field-side input: raw 12.0 mA scales to 50.0 engineering units.
+    driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
+    executor.scan().unwrap();
+    // Scan 1: the analog-input wrote onto the synthesized internal `Out`
+    // point, but the link routes at the input phase — the consuming `In`
+    // point still held its seeded initial.
+    assert_eq!(executor.sample(LINK_OUT).unwrap().value, Value::Float(50.0));
+    assert_eq!(executor.sample(LINK_IN).unwrap().value, Value::Float(0.0));
+
+    // Scan 2's input phase delivered the producer's scan-1 write — the
+    // same boundary a field loopback crosses.
+    executor.scan().unwrap();
+    assert_eq!(executor.sample(LINK_IN).unwrap().value, Value::Float(50.0));
+}
+
+#[test]
+fn declared_internal_pair_carries_a_component_write() {
+    let model = model(INTERNAL_POINTS);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
+    executor.scan().unwrap();
+    let pid_out = executor.sample(PID_OUT).unwrap().value;
+    // Scan 1 routed the carrier's seeded initial onto the analog-output's
+    // eng point; the pid's write arrives at scan 2's input phase.
+    assert_eq!(executor.sample(AO_ENG).unwrap().value, Value::Float(0.0));
+    executor.scan().unwrap();
+    assert_eq!(executor.sample(AO_ENG).unwrap().value, pid_out);
+}
+
+#[test]
+fn malformed_internal_declarations_fail_validation_naming_the_point() {
+    // A channel-less point without `initial`.
+    let mut missing = model(INTERNAL_POINTS);
+    missing.io_points[0].initial = None;
+    assert!(
+        missing
+            .validate()
+            .contains(&ValidationError::MissingInitial {
+                point: HELD_SETPOINT
+            })
+    );
+
+    // A channel-less point whose `initial` disagrees with `value_type`.
+    let mut mismatched = model(INTERNAL_POINTS);
+    mismatched.io_points[0].initial = Some(Value::Int(25));
+    assert!(
+        mismatched
+            .validate()
+            .contains(&ValidationError::InitialKindMismatch {
+                point: HELD_SETPOINT,
+                declared: ValueKind::Float,
+                initial: ValueKind::Int,
+            })
+    );
+
+    // `initial` on a channel-bound point.
+    let mut seeded = model(INTERNAL_POINTS);
+    seeded.io_points[1].initial = Some(Value::Float(0.0));
+    assert!(
+        seeded
+            .validate()
+            .contains(&ValidationError::FieldInitial { point: LEVEL_RAW })
+    );
+}
+
+#[test]
+fn malformed_internal_declarations_fail_assembly_naming_the_point() {
+    // Assembling a model that skipped validation reports the same
+    // defects through the assembly error vocabulary.
+    let mut missing = model(INTERNAL_POINTS);
+    missing.io_points[0].initial = None;
+    assert_eq!(
+        sim_driver(&missing).err().unwrap(),
+        AssemblyError::InvalidInternalPoint {
+            point: HELD_SETPOINT,
+            detail: InternalPointError::MissingInitial,
+        }
+    );
+
+    let mut mismatched = model(INTERNAL_POINTS);
+    mismatched.io_points[0].initial = Some(Value::Bool(true));
+    let error = sim_driver(&mismatched).err().unwrap();
+    assert_eq!(
+        error,
+        AssemblyError::InvalidInternalPoint {
+            point: HELD_SETPOINT,
+            detail: InternalPointError::InitialKindMismatch {
+                declared: ValueKind::Float,
+                initial: ValueKind::Bool,
+            },
+        }
+    );
+    assert!(error.to_string().contains("io point 10"), "{error}");
+}
+
+#[test]
+fn mixed_field_internal_point_link_names_both_endpoints() {
+    // Field `In` point 11 driven by internal `Out` point 13 validates —
+    // both ends resolve, directions and kinds agree — but no carrier can
+    // serve it: the internal point has no channel a loopback could drive.
+    let mut model = model(INTERNAL_POINTS);
+    model.connections.push(Connection {
+        from: Endpoint::Point(LEVEL_RAW),
+        to: Endpoint::Point(PID_OUT),
+    });
+    assert!(model.validate().is_empty());
+    let driver = sim_driver(&model).unwrap();
+    let error = assemble(&model, &registry(), &driver).unwrap_err();
+    assert_eq!(
+        error,
+        AssemblyError::MixedPointLink {
+            connection: 7,
+            field: LEVEL_RAW,
+            internal: PID_OUT,
+        }
+    );
+    assert!(error.to_string().contains("io point 11"), "{error}");
+    assert!(error.to_string().contains("io point 13"), "{error}");
 }
