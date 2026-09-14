@@ -10,23 +10,29 @@
 //!   signal display groups declared.
 //! - `dcs-model signal-index <file>` emits the point-to-signal
 //!   [`SignalIndex`](dcs_model::SignalIndex) as JSON.
+//! - `dcs-model diff <old> <new>` reports what a revision changes —
+//!   added, removed, and changed devices, io_points, signals, components,
+//!   and connections, each entry naming its element. `--json` emits the
+//!   [`ModelDiff`](dcs_model::ModelDiff) as JSON instead of the human
+//!   listing.
 //!
 //! Malformed input — unreadable files, broken JSON, unsupported document
 //! versions, invalid models — produces error output naming the problem and
 //! a nonzero exit, never a panic.
 
-use dcs_model::{LoadError, PlantModel};
+use dcs_model::{FieldChange, LoadError, ModelDiff, PlantModel};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: dcs-model <command> <file>
+usage: dcs-model <command> <file>...
 
 commands:
-  validate <file>      validate a plant model document, listing every error
-  summary <file>       print model element counts
-  signal-index <file>  print the point-to-signal index as JSON";
+  validate <file>          validate a plant model document, listing every error
+  summary <file>           print model element counts
+  signal-index <file>      print the point-to-signal index as JSON
+  diff <old> <new>         report what a model revision changes; --json emits it as JSON";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,15 +51,24 @@ fn main() -> ExitCode {
 /// Runs one command line, returning the text for stdout or the error
 /// message for stderr.
 fn run(args: &[String]) -> Result<String, String> {
-    let [command, path] = args else {
+    let [command, rest @ ..] = args else {
         return Err(format!("expected a command and a model file\n{USAGE}"));
     };
     match command.as_str() {
-        "validate" => validate(path),
-        "summary" => summary(path),
-        "signal-index" => signal_index(path),
+        "validate" => validate(one_file(rest)?),
+        "summary" => summary(one_file(rest)?),
+        "signal-index" => signal_index(one_file(rest)?),
+        "diff" => diff(rest),
         _ => Err(format!("unknown command {command:?}\n{USAGE}")),
     }
+}
+
+/// The single model-file argument every one-file command takes.
+fn one_file(args: &[String]) -> Result<&str, String> {
+    let [path] = args else {
+        return Err(format!("expected a command and a model file\n{USAGE}"));
+    };
+    Ok(path)
 }
 
 /// Reads and fully validates a model document. A validation failure
@@ -107,4 +122,75 @@ fn signal_index(path: &str) -> Result<String, String> {
     let model = load(path)?;
     serde_json::to_string_pretty(&model.signal_index())
         .map_err(|error| format!("{path}: cannot serialize the signal index: {error}"))
+}
+
+/// `diff <old> <new> [--json]` reports what a revision declares differently.
+/// Both documents must validate; one that fails is reported with its
+/// validation errors rather than diffed.
+fn diff(args: &[String]) -> Result<String, String> {
+    let mut json = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option {arg:?}\n{USAGE}"));
+        } else {
+            paths.push(arg.as_str());
+        }
+    }
+    if paths.len() != 2 {
+        return Err(format!("diff takes two model files\n{USAGE}"));
+    }
+    let old = load(paths[0])?;
+    let new = load(paths[1])?;
+    let diff = old.diff(&new);
+    if json {
+        serde_json::to_string_pretty(&diff)
+            .map_err(|error| format!("cannot serialize the model diff: {error}"))
+    } else {
+        Ok(format_diff(&diff))
+    }
+}
+
+/// Renders a [`ModelDiff`] as a human-readable listing: one section per
+/// element class, one line per element prefixed by its change kind, and
+/// field-level changes indented beneath the changed element they belong
+/// to. An empty diff reports `no changes`.
+fn format_diff(diff: &ModelDiff) -> String {
+    if diff.is_empty() {
+        return "no changes".to_owned();
+    }
+    let mut output = String::new();
+    for (class, entries) in [
+        ("devices", &diff.devices),
+        ("io_points", &diff.io_points),
+        ("signals", &diff.signals),
+        ("components", &diff.components),
+        ("connections", &diff.connections),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+        let _ = writeln!(output, "{class}:");
+        for entry in entries {
+            let _ = writeln!(output, "  {} {}", entry.change, entry.element);
+            for field in &entry.fields {
+                let _ = writeln!(output, "    {}", format_field_change(field));
+            }
+        }
+    }
+    output.trim_end().to_owned()
+}
+
+/// Renders one field-level change: `field: old -> new` when both sides
+/// carry a value, `field: added <new>` or `field: removed <old>` when the
+/// field appears or disappears. Values print as their JSON serialization.
+fn format_field_change(field: &FieldChange) -> String {
+    match (&field.old, &field.new) {
+        (Some(old), Some(new)) => format!("{}: {old} -> {new}", field.field),
+        (None, Some(new)) => format!("{}: added {new}", field.field),
+        (Some(old), None) => format!("{}: removed {old}", field.field),
+        (None, None) => field.field.clone(),
+    }
 }

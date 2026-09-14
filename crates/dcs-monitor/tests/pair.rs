@@ -125,13 +125,10 @@ impl PeerRig {
             (PointId(20), Value::Float(0.0)),
             (PointId(30), Value::Float(0.0)),
         ])));
-        let map: PointMap = [
-            (PointId(10), Direction::In, ValueKind::Float),
-            (PointId(20), Direction::Out, ValueKind::Float),
-            (PointId(30), Direction::Out, ValueKind::Float),
-        ]
-        .into_iter()
-        .collect();
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(30), Direction::Out, ValueKind::Float);
         let executor = Executor::new(driver, map, vec![Box::new(Scale)]).unwrap();
         let peer = match role {
             Role::Active => Peer::active(executor, None),

@@ -37,7 +37,7 @@ def main():
     configdir.mkdir(parents=True, exist_ok=True)
     configfile = configdir / 'config.json'
     if not configfile.exists():
-        configfile.write_text(json.dumps({'repository':'Jan-Kaspar1/dcs','model':'swe-2-high','pool_root':str(home / 'workspace/dcs-agent-pool'),'state_root':str(base / 'state'),'required_checks':['rust-format','rust-clippy','rust-tests','supervisor-tests'],'timeout_seconds':7200,'poll_seconds':60}, indent=2) + '\n')
+        configfile.write_text(json.dumps({'repository':'Jan-Kaspar1/dcs','model':'swe-2-high','pool_root':str(home / 'workspace/dcs-agent-pool'),'state_root':str(base / 'state'),'required_checks':['rust-format','rust-clippy','rust-tests','supervisor-tests'],'timeout_seconds':7200,'poll_seconds':60,'review':{'enabled':False,'mode':'report','auto_promote':True,'time':'03:00','timezone':'Europe/Berlin','timeout_seconds':3600,'max_candidates':3,'retention_days':30}}, indent=2) + '\n')
         configfile.chmod(0o600)
     units = home / '.config/systemd/user'
     units.mkdir(parents=True, exist_ok=True)

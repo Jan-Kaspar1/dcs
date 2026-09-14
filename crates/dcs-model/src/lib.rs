@@ -12,14 +12,18 @@
 //! programmatically, returning structured [`ValidationError`]s that name the
 //! offending element. For monitoring consumers, [`PlantModel::signal_index`]
 //! derives a flat [`SignalIndex`] resolving every point to its signal
-//! metadata without walking the model graph.
+//! metadata without walking the model graph. For revision review,
+//! [`PlantModel::diff`] reports the elements a revised document adds,
+//! removes, or changes as a structured [`ModelDiff`].
 
 #![warn(missing_docs)]
 
+mod diff;
 mod index;
 mod model;
 mod validate;
 
+pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
 pub use index::{PointSignal, SignalIndex};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,

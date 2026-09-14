@@ -15,10 +15,10 @@
 //! command reports the scan tick it is scheduled to apply at and later an
 //! [`CommandOutcome::Applied`] receipt at that tick; a refused command is
 //! [`CommandOutcome::Rejected`] with a [`CommandError`] naming the
-//! reason — unknown point, type mismatch, or driver rejection for point
-//! commands; unknown component, unknown or unsupported parameter, type
-//! mismatch, or out-of-range for parameter commands — and carrying the
-//! offending point or component.
+//! reason — unknown point, not model-declared writable, type mismatch, or
+//! driver rejection for point commands; unknown component, unknown or
+//! unsupported parameter, type mismatch, or out-of-range for parameter
+//! commands — and carrying the offending point or component.
 
 use crate::descriptor::ParameterRange;
 use crate::io::IoError;
@@ -35,6 +35,12 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum Command {
     /// Writes `value` to `point`.
+    ///
+    /// `point` must be one the plant model declares writable — the
+    /// model-declared command surface is `In` points only; every `Out`
+    /// point and every point whose `io_point` declaration omits or clears
+    /// `writable` refuses the write at submission with
+    /// [`CommandError::NotWritable`].
     ///
     /// `kind` is the operator's declaration of the point's value kind — the
     /// controller rejects the command when `value`'s variant differs from
@@ -100,6 +106,14 @@ pub enum CommandError {
         expected: ValueKind,
         /// The value actually supplied.
         found: Value,
+    },
+    /// The point is not a declared command target: the plant model marks
+    /// which `In` points accept operator writes, and this point's
+    /// `io_point` declaration does not — or the point is an `Out` point,
+    /// which the command path refuses outright.
+    NotWritable {
+        /// The offending point.
+        point: PointId,
     },
     /// The field driver refused the write at the scan boundary.
     DriverRejected {
@@ -182,6 +196,7 @@ impl CommandError {
     pub fn point(&self) -> Option<PointId> {
         match self {
             CommandError::UnknownPoint { point }
+            | CommandError::NotWritable { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. } => Some(*point),
             CommandError::NotActive { point, .. } => *point,
@@ -218,6 +233,9 @@ impl fmt::Display for CommandError {
                 f,
                 "I/O point {point:?} expects {expected:?}, found {found:?}"
             ),
+            CommandError::NotWritable { point } => {
+                write!(f, "I/O point {point:?} is not declared writable")
+            }
             CommandError::DriverRejected { point, error } => {
                 write!(f, "driver rejected command on I/O point {point:?}: {error}")
             }
@@ -394,6 +412,9 @@ mod tests {
                 reason: CommandError::UnknownPoint { point: PointId(7) },
             },
             CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(7) },
+            },
+            CommandOutcome::Rejected {
                 reason: CommandError::TypeMismatch {
                     point: PointId(7),
                     expected: ValueKind::Float,
@@ -447,6 +468,7 @@ mod tests {
         let point = PointId(9);
         for error in [
             CommandError::UnknownPoint { point },
+            CommandError::NotWritable { point },
             CommandError::TypeMismatch {
                 point,
                 expected: ValueKind::Int,

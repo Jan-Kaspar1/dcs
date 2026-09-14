@@ -12,7 +12,8 @@
 use dcs_assembly::{BuildError, ComponentRegistry};
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    Motor, OverrideSelect, Pid, RateLimiter, Timer, Valve,
+    LatchingAlarm, ManualStation, Motor, OverrideSelect, Pid, RateLimiter, SignalFilter, Timer,
+    Valve,
 };
 use dcs_core::ValueKind;
 use dcs_runtime::Component;
@@ -108,6 +109,16 @@ pub fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(LatchingAlarm::KIND, |spec| {
+            boxed(LatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
+                spec.parameters,
+            ))
+        })
         .with(Interlock::KIND, |spec| {
             // Trip inputs are declared `trip_1` … `trip_N`; order the
             // bound points by numeric suffix, not lexically.
@@ -182,6 +193,25 @@ pub fn registry() -> ComponentRegistry {
         })
         .with(RateLimiter::KIND, |spec| {
             boxed(RateLimiter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(ManualStation::KIND, |spec| {
+            boxed(ManualStation::from_parameters(
+                spec.name.as_str(),
+                spec.require("control")?,
+                spec.require("manual")?,
+                spec.require("mode")?,
+                spec.require("out")?,
+                spec.require("manual_active")?,
+                spec.parameters,
+            ))
+        })
+        .with(SignalFilter::KIND, |spec| {
+            boxed(SignalFilter::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,

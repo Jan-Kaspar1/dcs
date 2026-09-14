@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "operator-target": { "direction": "in", "value_type": "Float" },
+        "measurement": { "direction": "in", "value_type": "Float" },
+        "valve": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "operator-target" },
+      "writable": true
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "measurement" }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "valve" }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 2.0 },
+      "writable": true
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 1.0 }
+    },
+    {
+      "id": 30,
+      "direction": "out",
+      "value_type": "Float",
+      "initial": { "Float": 0.0 }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "operator-target",
+      "source": 10,
+      "unit": "%",
+      "description": "Operator command target substituted into the input image"
+    },
+    {
+      "id": 101,
+      "name": "measurement",
+      "source": 11,
+      "unit": "mA",
+      "description": "Field measurement, never a command target"
+    },
+    {
+      "id": 102,
+      "name": "valve-command",
+      "source": 12,
+      "unit": "%",
+      "description": "Valve output the loop drives"
+    },
+    {
+      "id": 103,
+      "name": "slew-target",
+      "source": 20,
+      "unit": "%",
+      "description": "Operator-entered ramp target held internally"
+    },
+    {
+      "id": 104,
+      "name": "limited-output",
+      "source": 30,
+      "unit": "%",
+      "description": "Slew-bounded result recorded for monitoring"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "rate-limiter",
+      "parameters": {
+        "max_delta": { "Float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "rate-limiter",
+      "parameters": {
+        "max_delta": { "Float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 30 }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 12 }
+    }
+  ]
+}
