@@ -12,7 +12,7 @@
 //! - `GET /snapshot` → `200` [`TelemetrySnapshot`]
 //! - `GET /signals` → `200` [`SignalIndex`] — the loaded model's
 //!   point-to-signal metadata: every known point's signal name, unit,
-//!   description, direction, and value type
+//!   description, display group, direction, and value type
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
 //!   receipt log, retrievable alongside the snapshot
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
@@ -46,13 +46,15 @@
 //! The page is the trend slice of the monitoring and control UI consuming
 //! the unified contract: a static, dependency-free HTML+JavaScript asset
 //! ([`PAGE`], no build toolchain) that fetches `/signals` once for point
-//! labels and units, then polls `/snapshot`, `/history`, and `/journal` on
-//! one shared one-second cadence — the snapshot refreshes each point's
-//! value, quality, and tick; the history increments grow each point's
-//! inline-SVG trend through `since`-cursor polling; the journal pane
-//! lists quality transitions and settled command receipts in tick order —
-//! and submits `write_value` commands to `/command` through a form,
-//! displaying the returned receipt.
+//! labels, units, and display groups — the point listing organizes itself
+//! under the model-declared groups, with ungrouped points filed under the
+//! documented `"ungrouped"` default — then polls `/snapshot`, `/history`,
+//! and `/journal` on one shared one-second cadence — the snapshot
+//! refreshes each point's value, quality, and tick; the history
+//! increments grow each point's inline-SVG trend through `since`-cursor
+//! polling; the journal pane lists quality transitions and settled
+//! command receipts in tick order — and submits `write_value` commands to
+//! `/command` through a form, displaying the returned receipt.
 //!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow

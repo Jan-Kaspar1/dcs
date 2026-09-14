@@ -110,9 +110,10 @@ pub struct Signal {
     pub source: PointId,
     /// Engineering unit of the carried value, e.g. `"degC"`.
     ///
-    /// `unit` and `description` extend the version-1 schema as optional
-    /// fields: documents written before they existed deserialize them as
-    /// `None`, so the format evolves without a version bump or migration.
+    /// `unit`, `description`, and `group` extend the version-1 schema as
+    /// optional fields: documents written before they existed deserialize
+    /// them as `None`, so the format evolves without a version bump or
+    /// migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     /// Human-facing description of the signal.
@@ -120,6 +121,15 @@ pub struct Signal {
     /// Optional like [`Signal::unit`]; see its note on schema versioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Display group the monitoring UI files this signal under, e.g. the
+    /// plant area or unit it belongs to.
+    ///
+    /// Pure display metadata: validation imposes no wiring rules on it —
+    /// any string is a valid group and signals sharing a group name are
+    /// simply listed together. Optional like [`Signal::unit`]; see its
+    /// note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// An instantiation of a reusable component kind.
@@ -271,6 +281,7 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = include_str!("../fixtures/minimal.json");
+    const SIGNAL_GROUPS: &str = include_str!("../fixtures/signal_groups.json");
 
     #[test]
     fn minimal_fixture_loads() {
@@ -290,6 +301,33 @@ mod tests {
         let reloaded = PlantModel::load(&json).unwrap();
         assert_eq!(model, reloaded);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn grouped_fixture_loads_validates_and_roundtrips() {
+        let model = PlantModel::load(SIGNAL_GROUPS).unwrap();
+        // Grouped signals carry their display group; the ungrouped one
+        // parses to `None`.
+        assert_eq!(model.signals[0].group.as_deref(), Some("reactor"));
+        assert_eq!(model.signals[1].group.as_deref(), Some("reactor"));
+        assert_eq!(model.signals[2].group, None);
+        assert_eq!(model.signals[3].group.as_deref(), Some("utilities"));
+
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"group\": \"reactor\""), "{json}");
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert_eq!(model, reloaded);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_group_load_unchanged() {
+        // Signals without the optional field deserialize `group` as
+        // `None`, and `None` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert_eq!(model.signals[0].group, None);
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"group\""), "{json}");
     }
 
     #[test]
