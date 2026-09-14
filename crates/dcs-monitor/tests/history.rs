@@ -300,7 +300,9 @@ fn commands_are_journaled_with_their_final_outcomes() {
             vec![JournalEntry {
                 seq: base_seq + 1,
                 tick: Tick(2),
-                event: JournalEvent::CommandSettled { receipt: rejected },
+                event: JournalEvent::CommandSettled {
+                    receipt: rejected.clone()
+                },
             }]
         );
         assert_eq!(

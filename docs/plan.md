@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47), the paced controller binary with active/standby modes (#32) and Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The remaining M2 gap is writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89).
+The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47) now serving `sim*`, `sim-tcp`, and `sim-scripted` (#67), the paced controller binary with active/standby modes (#32), role machine, and scan-boundary promotion/demotion with role reporting (#46) plus Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The integration guide (`docs/integration-guide.md`, #71) documents both extension seams. The remaining M2 gap is writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89, #70).
 
 ## Milestones
 
@@ -29,7 +29,7 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 | `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47); internal points and links resolved under #30 (decision 14) |
 | `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); `--standby`/`--remote` modes track an active's checkpoints (#32); `--driven` mode paces scans through `POST /scan` for externally timed runs (#64); Docker packaging done (#39) |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented: `/snapshot`, `/receipts`, `/command`, `/scan` (#20); `/signals` and the live page (#34); `/history` and `/journal` with since-cursors (#35, decision 17); trend and journal panes (#51) |
-| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18); component-targeted `set_parameter` proposed under #82 (decision 20) |
+| `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); component-targeted `set_parameter` implemented under #82 (decision 20); model-declared writable targets proposed under #49 (decision 18) |
 | `dcs-model` internal points | Channel-less operator and port-to-port points | Implemented (#30): channel-less `io_point`s carry `initial` in the scan image — held `In` setpoints, monitored `Out` writes, and internal links serving port-to-port wiring (decision 14) |
 | `dcs-blocks` | Component library registered with the assembly registry | Implemented (#11, #22, #38, #52); every kind ships `KIND`, `from_parameters`, and a `ComponentDescriptor` (#50, #61, decision 16) |
 
@@ -72,7 +72,7 @@ Ticket breakdown:
 - #51 — the page's trend slice: live telemetry plus signal metadata, per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`. **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18). **Open** — M2 layer gating #62's affordances and #84's forcing.
 - #62 — descriptor-driven faceplates with writable command affordances (decisions 16, 18). **Open.**
-- #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Open.**
+- #63 — the pair-as-one-controller view (decision 19; consumes the role reporting #46 landed). **Done** — `PairClient`/`PeerStatus`/`PairError` in `dcs-monitor`, the page's `?peer=` pair view with per-peer role polling, active-only command routing with mid-transition retry, tick-continuity merging, and cross-origin reads on the JSON endpoints.
 - #69 — showcase plant model exercising the full component library. **Open.**
 
 Done when:
@@ -80,21 +80,30 @@ Done when:
 - the monitoring surface serves the signal index, per-kind `ComponentDescriptor`s, bounded point history, and the transition journal over the decision-8 transport (#34, #35, #50) — **done**;
 - a served page renders live telemetry and signal metadata, faceplates generated from descriptors without per-kind UI code, and trend and journal panes fed by incremental since-cursor polling (#51, #62) — **partially done** (trend and journal slices landed; faceplates open);
 - the page submits operator commands through the receipt-answered path and offers command affordances only on model-declared writable points, with rejections visible in the journal (decisions 7, 17, 18; #49, #62) — **open**;
-- under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **open**.
+- under redundancy the page presents an active/standby pair as one logical controller, displaying the active's telemetry plus pair health from reported roles (decision 19; #32, #46, #63) — **done**.
 
-### M5: Lifecycle and device integration — registered
+### M5: Lifecycle and device integration — in progress
 
-The redundant pair becomes a lifecycle platform: automatic promotion when the active is lost, checkpoint versioning for cross-build replacement, declared-behavior device kinds beyond `sim`, an integration guide for new component and device kinds, and in-service model revision through the pair. The milestone's own decision record lands with #70; decisions 25 and 26 (recorded under #89) already supply the model-revision and divergence-gate semantics. No layer is implemented; every ticket is open.
+The redundant pair becomes a lifecycle platform: automatic promotion when the active is lost, checkpoint versioning for cross-build replacement, declared-behavior device kinds beyond `sim`, an integration guide for new component and device kinds, and in-service model revision through the pair. Decisions 27–30 record this milestone's approach (#70, this record); decisions 25 and 26 (recorded under #89) already supply the model-revision and divergence-gate semantics. Two layers are implemented — the scripted device kind (#67) proves the registered device seam, and the integration guide (#71) documents it; the lifecycle tickets (#65, #66, #87, #88) remain open.
 
 Ticket breakdown:
 
-- #70 — M5 decision record and plan refresh.
-- #65 — detect active-controller loss and promote the converged standby automatically.
-- #66 — version the checkpoint format for cross-build controller replacement (decision 11's deferred `version` field).
-- #67 — scripted-scenario simulated device kind proving the driver registry (#47).
-- #71 — component-kind and device-kind integration guide.
-- #87 — roll a revised plant model into production through the redundant pair, with the carryover rule and report (decision 25).
-- #88 — standby output-divergence detection as a promotion gate (decision 26).
+- #70 — M5 decision record and plan refresh (decisions 27–30). **Done with this change.**
+- #65 — detect active-controller loss and promote the converged standby automatically: checkpoint-pull heartbeat, missed-transfer budget, convergence-gated self-promotion, and the field-side single-writer fencing rule (decision 28). **Open.**
+- #66 — version the checkpoint format for cross-build controller replacement (decision 11's deferred `version` field, decision 27's version + fingerprint negotiation). **Open.**
+- #67 — scripted-scenario simulated device kind proving the driver registry (#47). **Done** — `SIM_SCRIPTED_KIND` resolves to `ScriptedDriver`, the `"script"` device parameter declares tick-indexed playback, and `FanoutDriver::inspect` reaches the recorded-write log (decision 29).
+- #71 — component-kind and device-kind integration guide. **Done** — `docs/integration-guide.md` walks both seams end to end with compiling worked examples.
+- #87 — roll a revised plant model into production through the redundant pair, with the carryover rule and report (decision 25). **Open.**
+- #88 — standby output-divergence detection as a promotion gate (decision 26). **Open.**
+
+Done when:
+
+- a standby detects active loss through its checkpoint pulls — a configured budget of consecutive failed transfers — and promotes itself at a scan boundary only while converged and inside the budget, with the shared field refusing a fenced-out old active's writes (decision 28; #65) — **open**;
+- a checkpoint carries an explicit `version` and a fingerprint of the model and kind set it was captured under, a standby negotiates compatibility at fetch time with a named rejection on mismatch, and a new-build standby proves the rolling upgrade end to end (decisions 11, 27; #66) — **open**;
+- a declared-behavior device kind beyond plain `sim` instantiates from model data through the driver registry — `sim-scripted`'s tick-indexed playback (decision 29; #67) — **done**;
+- the integration guide walks a new component kind and a new device kind from `Component`/`IoDriver` implementation through registration to a scanning model, with both worked examples compiling in the test suite (decision 29; #71) — **done**;
+- a revised plant model rolls into production through the pair: the new-model standby enters the named `reinitialized` state, the carryover report names what crossed the revision, and promotion moves the field writer preserving exactly-one-writer (decision 25; #87) — **open**;
+- a tracking standby's staged `Out` image is compared against the shared field, a mismatch lands it in a journaled `diverged` state blocking promotion until resync (decision 26; #88) — **open**.
 
 ### M6: Operator ergonomics and library breadth — defined
 
@@ -103,7 +112,7 @@ The operator-facing surface and the reusable library grow together on the contra
 Ticket breakdown:
 
 - #89 — this decision record and plan refresh. **Done with this change.**
-- #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Open** — issue filed under M4.
+- #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Done.**
 - #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Open** — issue filed under M4.
 - #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; depends on #49). **Open** — issue filed under M4.
 - #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **Done** — issue filed under M4.
@@ -112,7 +121,7 @@ Ticket breakdown:
 
 Done when:
 
-- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **open**;
+- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **done**;
 - a writable field `In` point can be forced across scans at substituted quality, released at the scan boundary, badged in the snapshot, journaled, and preserved across a checkpoint (#84, with #49) — **open**;
 - the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83) — **open**;
 - the monitoring page organizes its signal list by the model's declared `group` field, with ungrouped signals under a documented default (#86) — **done**;
@@ -121,6 +130,6 @@ Done when:
 
 ## Next planning pass
 
-Inspect current main, open issues, and PRs before updating this plan. M2's critical path is now #49: it gates #62's command affordances and #84's forcing. M3 is complete — #32, #46, #47, and #81 landed the pair mechanics and #64 proved the swap end-to-end over the shared simulated plant; automatic failure detection stays deliberately post-M3 as #65 under M5. M5's lifecycle tickets follow the pair mechanics, with #67 able to start against the shipped driver registry. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
+Inspect current main, open issues, and PRs before updating this plan. M2's critical path remains #49: it gates #62's command affordances and #84's forcing. M3 is complete — #32, #46, #47, and #81 landed the pair mechanics and #64 proved the swap end-to-end between two controller processes over the shared simulated plant; automatic failure detection stays deliberately post-M3 as #65 under M5. M5's lifecycle tickets are now startable: #65 and #66 build directly on the shipped checkpoint-pull and promotion machinery, while #87 waits on #66 and #88's #64 dependency is now satisfied; #67 and #71 already landed. M6's remaining ergonomics tickets — #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
 
 Update this document when milestones change or complete. Reference actual issue and PR numbers once created; mark blocked dependencies and distinguish completed work from planned work.

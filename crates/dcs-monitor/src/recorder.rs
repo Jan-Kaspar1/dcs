@@ -162,7 +162,7 @@ impl Recorder {
             self.push(
                 event_tick,
                 JournalEvent::CommandSettled {
-                    receipt: executor.receipts()[index],
+                    receipt: executor.receipts()[index].clone(),
                 },
             );
         }

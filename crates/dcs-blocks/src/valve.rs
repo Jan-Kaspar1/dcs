@@ -4,7 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -205,6 +206,80 @@ impl Component for Valve {
                 ),
             ],
         )
+    }
+
+    /// Tunes a declared parameter at the scan boundary.
+    ///
+    /// The executor pre-checks the descriptor — declared name, kind,
+    /// and the declared range — so this hook re-states only the
+    /// constructor's finiteness rule on `tolerance`: the declared
+    /// `NONNEGATIVE_F64` bound already covers it, but the hook does not
+    /// rely on the executor's pre-check alone.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "tolerance" => {
+                let tuned = params::tune_f64(&self.name, parameter, value)?;
+                if !tuned.is_finite() || tuned < 0.0 {
+                    return Err(params::invalid_parameter(
+                        &self.name,
+                        parameter,
+                        "must be finite and non-negative",
+                    ));
+                }
+                self.tolerance = tuned;
+            }
+            "discrepancy_ticks" => {
+                self.discrepancy_ticks = params::tune_u64(&self.name, parameter, value)?;
+            }
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the banked deviating-scan count and the tuned
+    /// `tolerance`/`discrepancy_ticks` so a tracking standby continues
+    /// the discrepancy count under the same tuning.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("deviating", Value::Int(self.deviating as i64));
+        state.insert("tolerance", Value::Float(self.tolerance));
+        state.insert(
+            "discrepancy_ticks",
+            Value::Int(self.discrepancy_ticks as i64),
+        );
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["deviating", "tolerance", "discrepancy_ticks"])?;
+        let deviating = state.require_i64(&self.name, "deviating")?;
+        if deviating < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "deviating".to_string(),
+                value: Value::Int(deviating),
+            });
+        }
+        let tolerance = state.require_f64(&self.name, "tolerance")?;
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "tolerance".to_string(),
+                value: Value::Float(tolerance),
+            });
+        }
+        let discrepancy_ticks = state.require_i64(&self.name, "discrepancy_ticks")?;
+        if discrepancy_ticks < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "discrepancy_ticks".to_string(),
+                value: Value::Int(discrepancy_ticks),
+            });
+        }
+        self.deviating = deviating as u64;
+        self.tolerance = tolerance;
+        self.discrepancy_ticks = discrepancy_ticks as u64;
+        Ok(())
     }
 }
 

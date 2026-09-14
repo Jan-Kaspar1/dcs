@@ -175,7 +175,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
         assert_eq!(
             receipt,
             CommandReceipt {
-                command,
+                command: command.clone(),
                 outcome: CommandOutcome::Accepted {
                     apply_tick: Tick(2)
                 },
@@ -250,6 +250,23 @@ fn rejected_commands_return_named_reasons() {
                 reason: CommandError::DriverRejected {
                     point: PointId(30),
                     error: IoError::Disconnected(PointId(30)),
+                }
+            }
+        );
+        // A component-targeted command roundtrips through the same POST
+        // contract and is answered by the same receipt shape.
+        let command = Command::SetParameter {
+            component: "scale".to_string(),
+            name: "gain".to_string(),
+            value: Value::Float(4.0),
+        };
+        let receipt = client.command(&command).unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnsupportedParameter {
+                    component: "scale".to_string(),
+                    parameter: "gain".to_string(),
                 }
             }
         );

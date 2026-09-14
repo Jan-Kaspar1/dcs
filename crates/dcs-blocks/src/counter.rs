@@ -4,7 +4,8 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
+    Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
@@ -161,18 +162,29 @@ impl Component for Counter {
         )
     }
 
-    /// Captures the accumulated count and the previous `in` reading —
-    /// the state a standby needs to continue mid-count without
-    /// recounting a held-high input's edge.
+    /// Tunes the `preset` at the scan boundary; retuning below the
+    /// banked `count` asserts `done` on the next scan.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        match parameter {
+            "preset" => self.preset = params::tune_u64(&self.name, parameter, value)?,
+            _ => return Err(params::unknown_parameter(&self.name, parameter)),
+        }
+        Ok(())
+    }
+
+    /// Captures the accumulated count, the previous `in` reading — the
+    /// state a standby needs to continue mid-count without recounting a
+    /// held-high input's edge — and the tuned `preset`.
     fn capture_state(&self) -> StateMap {
         let mut state = StateMap::new();
         state.insert("count", Value::Int(self.count as i64));
         state.insert("previous", Value::Bool(self.previous));
+        state.insert("preset", Value::Int(self.preset as i64));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["count", "previous"])?;
+        state.ensure_known_fields(&self.name, &["count", "previous", "preset"])?;
         let count = state.require_i64(&self.name, "count")?;
         if count < 0 {
             return Err(StateError::InvalidValue {
@@ -181,8 +193,17 @@ impl Component for Counter {
                 value: Value::Int(count),
             });
         }
+        let preset = state.require_i64(&self.name, "preset")?;
+        if preset < 0 {
+            return Err(StateError::InvalidValue {
+                element: self.name.clone(),
+                field: "preset".to_string(),
+                value: Value::Int(preset),
+            });
+        }
         self.count = count as u64;
         self.previous = state.require_bool(&self.name, "previous")?;
+        self.preset = preset as u64;
         Ok(())
     }
 }
@@ -379,12 +400,14 @@ mod tests {
         let mut state = StateMap::new();
         state.insert("count", Value::Int(-1));
         state.insert("previous", Value::Bool(false));
+        state.insert("preset", Value::Int(3));
         assert!(matches!(
             block.restore_state(&state),
             Err(StateError::InvalidValue { ref field, .. }) if field == "count"
         ));
         let mut state = StateMap::new();
         state.insert("count", Value::Int(1));
+        state.insert("preset", Value::Int(3));
         assert!(matches!(
             block.restore_state(&state),
             Err(StateError::MissingField { ref field, .. }) if field == "previous"

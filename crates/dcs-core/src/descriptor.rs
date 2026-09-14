@@ -67,6 +67,26 @@ pub struct ParameterRange {
     pub max: Value,
 }
 
+impl ParameterRange {
+    /// Whether `value` satisfies the inclusive bounds.
+    ///
+    /// A value whose [`ValueKind`] differs from the bounds' is outside
+    /// the range — callers validate the declared kind separately. For
+    /// `Float` bounds, `NaN` is outside every range; the
+    /// infinite-to-infinite bounds that mean "any finite" therefore
+    /// still refuse it.
+    pub fn contains(&self, value: Value) -> bool {
+        match (self.min, self.max, value) {
+            (Value::Bool(_), Value::Bool(_), Value::Bool(_)) => true,
+            (Value::Int(min), Value::Int(max), Value::Int(value)) => (min..=max).contains(&value),
+            (Value::Float(min), Value::Float(max), Value::Float(value)) => {
+                value >= min && value <= max
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Metadata for one tunable parameter of a component.
 ///
 /// `name` matches the key the plant model's parameter map uses for the
@@ -191,6 +211,26 @@ mod tests {
             serde_json::from_str::<ComponentDescriptor>(&json).unwrap(),
             descriptor
         );
+    }
+
+    #[test]
+    fn range_membership_is_inclusive_and_kind_checked() {
+        let ints = ParameterRange {
+            min: Value::Int(0),
+            max: Value::Int(100),
+        };
+        assert!(ints.contains(Value::Int(0)));
+        assert!(ints.contains(Value::Int(100)));
+        assert!(!ints.contains(Value::Int(-1)));
+        assert!(!ints.contains(Value::Int(101)));
+        assert!(!ints.contains(Value::Float(50.0)));
+
+        let floats = ParameterRange {
+            min: Value::Float(f64::NEG_INFINITY),
+            max: Value::Float(f64::INFINITY),
+        };
+        assert!(floats.contains(Value::Float(1e300)));
+        assert!(!floats.contains(Value::Float(f64::NAN)));
     }
 
     #[test]

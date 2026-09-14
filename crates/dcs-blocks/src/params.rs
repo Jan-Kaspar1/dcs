@@ -8,7 +8,7 @@
 //! component binds is *not* a parameter: point ids come from the model's
 //! connections and are passed to the constructor separately.
 
-use dcs_core::Value;
+use dcs_core::{CommandError, Value, ValueKind};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -185,6 +185,109 @@ pub(crate) fn optional_bool(
             component,
             name,
             format!("expected a Bool or Int 0/1, found {value:?}"),
+        )),
+    }
+}
+
+/// A [`CommandError::UnknownParameter`] naming the component — a tuning
+/// hook's answer to a name its descriptor does not declare.
+pub(crate) fn unknown_parameter(component: &str, parameter: &str) -> CommandError {
+    CommandError::UnknownParameter {
+        component: component.to_string(),
+        parameter: parameter.to_string(),
+    }
+}
+
+/// A [`CommandError::InvalidParameter`] naming the component — a tuning
+/// hook's answer to a value that would break an invariant the kind owns
+/// (for example a PID's `out_min >= out_max`).
+pub(crate) fn invalid_parameter(
+    component: &str,
+    parameter: &str,
+    detail: impl Into<String>,
+) -> CommandError {
+    CommandError::InvalidParameter {
+        component: component.to_string(),
+        parameter: parameter.to_string(),
+        detail: detail.into(),
+    }
+}
+
+/// A [`CommandError::ParameterTypeMismatch`] naming the component — a
+/// hook's defense against a value kind the executor's descriptor check
+/// did not pre-filter.
+fn parameter_mismatch(
+    component: &str,
+    parameter: &str,
+    expected: ValueKind,
+    found: Value,
+) -> CommandError {
+    CommandError::ParameterTypeMismatch {
+        component: component.to_string(),
+        parameter: parameter.to_string(),
+        expected,
+        found,
+    }
+}
+
+/// Decodes the `Float` value a
+/// [`Component::apply_parameter`](dcs_runtime::Component::apply_parameter)
+/// hook was handed.
+pub(crate) fn tune_f64(
+    component: &str,
+    parameter: &str,
+    value: Value,
+) -> Result<f64, CommandError> {
+    match value {
+        Value::Float(tuned) => Ok(tuned),
+        _ => Err(parameter_mismatch(
+            component,
+            parameter,
+            ValueKind::Float,
+            value,
+        )),
+    }
+}
+
+/// Decodes the non-negative `Int` value a
+/// [`Component::apply_parameter`](dcs_runtime::Component::apply_parameter)
+/// hook was handed.
+pub(crate) fn tune_u64(
+    component: &str,
+    parameter: &str,
+    value: Value,
+) -> Result<u64, CommandError> {
+    match value {
+        Value::Int(tuned) if tuned >= 0 => Ok(tuned as u64),
+        Value::Int(_) => Err(invalid_parameter(
+            component,
+            parameter,
+            "must be non-negative",
+        )),
+        _ => Err(parameter_mismatch(
+            component,
+            parameter,
+            ValueKind::Int,
+            value,
+        )),
+    }
+}
+
+/// Decodes the `Bool` value a
+/// [`Component::apply_parameter`](dcs_runtime::Component::apply_parameter)
+/// hook was handed.
+pub(crate) fn tune_bool(
+    component: &str,
+    parameter: &str,
+    value: Value,
+) -> Result<bool, CommandError> {
+    match value {
+        Value::Bool(tuned) => Ok(tuned),
+        _ => Err(parameter_mismatch(
+            component,
+            parameter,
+            ValueKind::Bool,
+            value,
         )),
     }
 }
