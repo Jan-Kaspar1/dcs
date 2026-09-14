@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+dcs-assembly = { path = "../dcs-assembly" }
 dcs-blocks = { path = "../dcs-blocks" }
+dcs-controller = { path = "../dcs-controller" }
 dcs-core = { path = "../dcs-core" }
 dcs-model = { path = "../dcs-model" }
 dcs-runtime = { path = "../dcs-runtime" }

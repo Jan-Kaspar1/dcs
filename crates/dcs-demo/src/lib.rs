@@ -25,8 +25,18 @@
 //!
 //! The `dcs-demo` binary runs [`DEFAULT_SCANS`] scans of this loop and
 //! prints the final [`TelemetrySnapshot`] as JSON.
+//!
+//! The [`showcase`] module runs the broader plant: `fixtures/showcase.json`'s
+//! pump-and-tank line exercises every `dcs-blocks` kind, assembled with no
+//! manual wiring through the standard driver and component registries —
+//! `dcs-assembly`'s [`DriverRegistry::standard`](dcs_assembly::DriverRegistry::standard)
+//! plus `dcs-controller`'s deployed [`registry`](dcs_controller::registry) —
+//! and run through a documented command-and-fault scenario. This module's
+//! hand-rolled [`assemble`] predates that path and stays as the M1 example.
 
 #![warn(missing_docs)]
+
+pub mod showcase;
 
 use dcs_blocks::{AnalogInput, DigitalOutput, ParameterError, Pid, Scaling};
 use dcs_core::{IoDriver, IoError, PointId, TelemetrySnapshot, Value, ValueKind};
