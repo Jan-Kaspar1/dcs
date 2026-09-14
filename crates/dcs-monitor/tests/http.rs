@@ -2,8 +2,9 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
-    JournalEvent, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, DriverDiagnostics, IoDriver,
+    IoError, IoFault, JournalEvent, LinkState, PointId, Quality, QualityReason, Sample, Tick,
+    Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
@@ -21,6 +22,7 @@ use std::thread;
 struct StubDriver {
     points: Mutex<HashMap<PointId, Sample>>,
     faults: Mutex<HashSet<PointId>>,
+    report: Mutex<Option<DriverDiagnostics>>,
     tick: AtomicU64,
 }
 
@@ -34,6 +36,7 @@ impl StubDriver {
                     .collect(),
             ),
             faults: Mutex::new(HashSet::new()),
+            report: Mutex::new(None),
             tick: AtomicU64::new(0),
         }
     }
@@ -67,6 +70,13 @@ impl IoDriver for StubDriver {
         }
         *sample = Sample::good(value, Tick(self.tick.load(Ordering::Relaxed)));
         Ok(())
+    }
+
+    /// The optional transport-diagnostics hook: injectable, so a test
+    /// can report link degradation the way a dead plant server's driver
+    /// does — named link health, distinct from per-point faults.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        self.report.lock().unwrap().clone()
     }
 }
 
@@ -426,9 +436,18 @@ fn page_serves_trend_and_journal_markup() {
         for needle in ["id=\"journal\"", "<th>Tick</th>", "/journal?since="] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
-        // The I/O-health line: the snapshot's io_health section rendered
-        // as its own surface beside the per-point quality column.
-        for needle in ["id=\"io-health\"", "snapshot.io_health"] {
+        // The I/O-health pane: the snapshot's io_health section rendered
+        // as its own surface beside the pair reporting — and the
+        // link-degradation display rule that shows a dead transport as
+        // link health, distinct from the per-point quality column.
+        for needle in [
+            "id=\"health\"",
+            "id=\"io-health\"",
+            "id=\"io-health-rows\"",
+            "snapshot.io_health",
+            "health.driver.link !== \"connected\"",
+            "scan overruns",
+        ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
         // The page stays a single dependency-free asset.
@@ -565,6 +584,55 @@ fn trend_and_journal_feeds_track_the_run() {
                     },
                 },
             }
+        );
+    });
+}
+
+#[test]
+fn the_health_panes_fields_ride_the_served_snapshot() {
+    with_monitor(|driver, client| {
+        // Injected driver faults at both boundaries, plus a link-level
+        // report through the driver's optional diagnostics hook — the
+        // dead plant server's signature: named link degradation beside
+        // the per-point faults the executor counts.
+        *driver.report.lock().unwrap() = Some(DriverDiagnostics {
+            link: LinkState::Disconnected,
+            last_error: Some("no live connection to the plant server".to_string()),
+        });
+        driver.faults.lock().unwrap().insert(PointId(10));
+        driver.faults.lock().unwrap().insert(PointId(20));
+        // The failed output write fails the scan — the health section
+        // still counted and attributed it.
+        assert!(client.advance(1).is_err());
+
+        // Every field the pane reads is present in the served snapshot.
+        let health = &client.snapshot().unwrap().io_health;
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.consecutive_failures, 2);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(1),
+                point: PointId(20),
+                direction: Direction::Out,
+                error: IoError::Disconnected(PointId(20)),
+            })
+        );
+        assert_eq!(
+            health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("no live connection to the plant server".to_string()),
+            })
+        );
+        assert_eq!(health.scan_overruns, 0);
+
+        // The payloads serde-roundtrip per the #83 contract.
+        let json = serde_json::to_string(health).unwrap();
+        assert_eq!(
+            serde_json::from_str::<dcs_core::IoHealth>(&json).unwrap(),
+            health.clone()
         );
     });
 }
