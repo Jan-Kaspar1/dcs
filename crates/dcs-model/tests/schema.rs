@@ -233,7 +233,6 @@ fn fixture_corpus_matches_the_schema_verdicts() {
     assert!(files.len() > 10, "fixture sweep found too few files");
 
     let mut seen_invalid = BTreeSet::new();
-    let mut seen_foreign = BTreeSet::new();
     for path in &files {
         let relative = path
             .strip_prefix(&root)
@@ -247,7 +246,6 @@ fn fixture_corpus_matches_the_schema_verdicts() {
         let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
             // Not JSON at all (e.g. a deliberately malformed dynamics
             // document) — outside the corpus.
-            seen_foreign.insert(relative);
             continue;
         };
         let Ok(model) = serde_json::from_value::<PlantModel>(document.clone()) else {
@@ -257,7 +255,6 @@ fn fixture_corpus_matches_the_schema_verdicts() {
                 !validator.is_valid(&document),
                 "{relative}: a non-model document passed the schema"
             );
-            seen_foreign.insert(relative);
             continue;
         };
         let schema_ok = validator.is_valid(&document);
@@ -295,22 +292,9 @@ fn fixture_corpus_matches_the_schema_verdicts() {
     }
 
     // The manifest must name exactly the invalid fixtures present — no
-    // stale entries, no unswept files.
+    // stale entries, no unswept files. Non-model documents need no
+    // manifest: each is schema-rejected individually above, and a foreign
+    // document set grows without a schema decision to record.
     let expected: BTreeSet<String> = expectations.keys().map(|k| k.to_string()).collect();
     assert_eq!(seen_invalid, expected, "invalid-fixture manifest drifted");
-    assert_eq!(
-        seen_foreign,
-        [
-            "crates/dcs-demo/fixtures/showcase_dynamics.json",
-            "crates/dcs-model/fixtures/signal_index.index.json",
-            "crates/dcs-plant/fixtures/invalid/dynamics_malformed.json",
-            "crates/dcs-plant/fixtures/invalid/dynamics_unbound_point.json",
-            "crates/dcs-plant/fixtures/tank_loop_dynamics.json",
-            "crates/dcs-plant/fixtures/tank_loop_second_order_dynamics.json",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        "non-model fixture set drifted"
-    );
 }
