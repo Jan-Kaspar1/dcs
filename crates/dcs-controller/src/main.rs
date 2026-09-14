@@ -26,19 +26,25 @@
 //! — the field-observing driver mode of the standby-field-observation
 //! decision.
 //!
-//! Redundancy, per the peer-transport decision: an active instance
-//! started with `--listen ADDR` also serves `GET /checkpoint`, and its
+//! Redundancy, per the peer-transport and switchover-semantics
+//! decisions: every remote-attached instance runs behind a [`WriteGate`]
+//! at the driver boundary, and the [`Peer`] role machine decides which
+//! peer's writes pass. An active instance started with `--listen ADDR`
+//! serves `GET /checkpoint`, `GET /role`, and `POST /demote`, and its
 //! pace loop drives scans through the monitor's lock so a checkpoint is
 //! always a between-scans capture. A standby started with
-//! `--standby ADDR` pulls those checkpoints, one per scan cycle, applies
-//! each to its running executor — aligning at the checkpointed tick and
-//! continuing deterministically — and reports `tracking`/`degraded` on
-//! stderr. A standby sharing the field through `--remote` is
-//! output-quiescent: its writes are dropped by a [`WriteGate`] at the
-//! driver boundary and it never steps the shared plant. A standby-local
-//! `SimDriver` instead keeps a private plant every checkpoint's driver
-//! section resynchronizes. Promotion — lifting the gate — is the
-//! follow-up switchover ticket.
+//! `--standby ADDR --listen ADDR` pulls checkpoints from the active at
+//! the first address, one per scan cycle, applies each to its running
+//! executor — aligning at the checkpointed tick and continuing
+//! deterministically — and serves its own monitor at the second, where
+//! `GET /role` reports `standby` plus its convergence and
+//! `POST /promote` is the operator's switchover action: the gate lifts
+//! at the request's scan boundary, the next scan writes what the
+//! checkpointed run would have, and the instance starts stepping the
+//! shared plant. The documented switchover order — `POST /demote` on
+//! the old active first — keeps exactly one peer writing the field.
+//! A standby-local `SimDriver` needs no gate: its plant is a private
+//! tracking copy every checkpoint's driver section resynchronizes.
 //!
 //! The binary holds no control logic: the `dcs-blocks` component kinds
 //! are registered with the `ComponentRegistry` [`dcs_controller::registry`]
@@ -51,7 +57,7 @@ use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
-use dcs_runtime::{ScanError, Standby, WriteGate};
+use dcs_runtime::{Peer, ScanError, WriteGate};
 use dcs_sim::SimDriver;
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
@@ -132,13 +138,17 @@ driver, and runs the controller scan.
                   scan runs; requires --scan-ms. While pacing, POST /scan is
                   refused: the wall clock owns the scan schedule
   --standby ADDR  run as a standby: pull the active's checkpoints from
-                  its monitoring address ADDR and apply one per scan
+                  its monitoring address ADDR and apply one per scan;
+                  combines with --listen, whose POST /promote is the
+                  switchover action
   --remote ADDR   attach to the shared simulated plant at ADDR instead
                   of a local simulation
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
---standby does not combine with --listen.";
+A remote-attached standby is output-quiescent behind a write gate until
+POST /promote lifts it; a demoted remote active is re-quiesced the same
+way, so exactly one peer writes the shared plant.";
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -192,9 +202,6 @@ impl Options {
             }
         }
         let model = model.ok_or_else(|| "missing <model-file>".to_string())?;
-        if standby.is_some() && listen.is_some() {
-            return Err("--standby does not combine with --listen".to_string());
-        }
         if ticks.is_none() && scan_ms.is_none() {
             scan_ms = Some(100);
         }
@@ -284,13 +291,13 @@ fn main() -> ExitCode {
         },
     };
 
-    // A standby sharing the field through a remote driver is
-    // output-quiescent: its writes are gated at the driver boundary so
-    // exactly the active writes the shared plant. A standby-local
-    // SimDriver needs no gate — its plant is a private tracking copy
-    // every checkpoint's driver section resynchronizes.
+    // Every remote-attached instance runs behind the write gate: on a
+    // standby it quiesces field writes until promotion lifts it, and on
+    // an active it is what demotion re-closes — the single-writer
+    // invariant of the switchover-semantics decision. A local SimDriver
+    // is a private plant with nothing shared to quiesce, so no gate.
     let gate = match &driver {
-        Driver::Remote(remote) if options.standby.is_some() => Some(WriteGate::closed(remote)),
+        Driver::Remote(remote) => Some(WriteGate::closed(remote)),
         _ => None,
     };
     let io: &(dyn IoDriver + Sync) = match &gate {
@@ -302,6 +309,14 @@ fn main() -> ExitCode {
         Err(error) => return fail(error),
     };
 
+    // The role machine: a --standby instance tracks its active's
+    // checkpoints gate-closed until promoted; anything else owns the
+    // field from the start.
+    let peer = match &options.standby {
+        Some(_) => Peer::standby(executor, gate.as_ref()),
+        None => Peer::active(executor, gate.as_ref()),
+    };
+
     // The simulated process time per scan: explicit --dt, else the
     // wall-clock period in seconds, else one unit per unpaced tick.
     let dt = options
@@ -310,55 +325,105 @@ fn main() -> ExitCode {
         .unwrap_or(1.0);
     let period = options.scan_ms.map(Duration::from_millis);
 
-    // A remote standby never steps: the shared plant's clock belongs to
-    // the active. Every other mode advances the plant one dt per scan.
-    let steps_plant = !(options.standby.is_some() && matches!(driver, Driver::Remote(_)));
-    let step = || {
-        if steps_plant { driver.step(dt) } else { Ok(()) }
-    };
+    // A local simulated plant is private and steps every scan; the
+    // shared remote plant's clock belongs to whichever peer owns the
+    // field, so the remote case consults the role — a standby does not
+    // step, a promoted standby starts stepping, a demoted active stops.
+    let remote = matches!(driver, Driver::Remote(_));
 
-    if let Some(peer) = &options.standby {
-        // Standby operation: one checkpoint pull per scan cycle. A
-        // failed fetch or a rejected checkpoint degrades the standby —
-        // named and recoverable — while the next good transfer
-        // reconverges it.
-        let peer = match resolve(peer) {
-            Ok(peer) => peer,
+    if let Some(active_addr) = &options.standby {
+        // Standby operation: one checkpoint pull per scan cycle while the
+        // peer does not own the field. A failed fetch or a rejected
+        // checkpoint degrades the standby — named and recoverable —
+        // while the next good transfer reconverges it.
+        let active_addr = match resolve(active_addr) {
+            Ok(active_addr) => active_addr,
             Err(error) => return fail(error),
         };
-        let client = MonitorClient::new(peer);
-        // The RefCell lets the two loop closures share the standby; the
-        // loop is single-threaded, so the borrows never overlap.
-        let standby = std::cell::RefCell::new(Standby::new(executor));
-        scan_loop(
-            || {
-                let mut standby = standby.borrow_mut();
-                match client.checkpoint() {
-                    Ok(checkpoint) => {
-                        if let Err(error) = standby.apply(&checkpoint) {
-                            eprintln!(
-                                "standby {}: rejected checkpoint from {peer}: {error}",
-                                standby.state()
-                            );
+        let client = MonitorClient::new(active_addr);
+        match &options.listen {
+            Some(addr) => {
+                let monitor =
+                    match Monitor::bind_paced_peer(addr.as_str(), peer, model.signal_index()) {
+                        Ok(monitor) => monitor,
+                        Err(error) => {
+                            return fail(format!("cannot bind monitor on {addr}: {error}"));
                         }
+                    };
+                eprintln!("listening on {}", monitor.local_addr());
+                let step = || {
+                    if remote && !monitor.owns_field() {
+                        Ok(())
+                    } else {
+                        driver.step(dt)
                     }
-                    Err(error) => {
-                        standby.note_transfer_failed(format!("fetch from {peer}: {error}"));
-                        eprintln!("standby {}", standby.state());
-                    }
-                }
-                standby.scan()
-            },
-            || standby.borrow().snapshot(),
-            step,
-            &options,
-            period,
-        )
+                };
+                run_monitored(
+                    &monitor,
+                    || {
+                        if !monitor.owns_field() {
+                            match client.checkpoint() {
+                                Ok(checkpoint) => {
+                                    if let Err(error) = monitor.apply_checkpoint(&checkpoint) {
+                                        eprintln!(
+                                            "standby: rejected checkpoint from {active_addr}: {error}"
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    monitor.note_transfer_failed(format!(
+                                        "fetch from {active_addr}: {error}"
+                                    ));
+                                    eprintln!("standby: fetch from {active_addr} failed: {error}");
+                                }
+                            }
+                        }
+                        monitor.paced_scan()
+                    },
+                    step,
+                    &options,
+                    period.unwrap(),
+                )
+            }
+            None => {
+                // Without a monitor nothing can promote this standby;
+                // the RefCell lets the two loop closures share the peer.
+                let peer = std::cell::RefCell::new(peer);
+                let step = || {
+                    if remote { Ok(()) } else { driver.step(dt) }
+                };
+                scan_loop(
+                    || {
+                        let mut peer = peer.borrow_mut();
+                        match client.checkpoint() {
+                            Ok(checkpoint) => {
+                                if let Err(error) = peer.apply(&checkpoint) {
+                                    eprintln!(
+                                        "standby: rejected checkpoint from {active_addr}: {error}"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                peer.note_transfer_failed(format!(
+                                    "fetch from {active_addr}: {error}"
+                                ));
+                                eprintln!("standby: fetch from {active_addr} failed: {error}");
+                            }
+                        }
+                        peer.scan()
+                    },
+                    || peer.borrow().snapshot(),
+                    step,
+                    &options,
+                    period,
+                )
+            }
+        }
     } else {
         match &options.listen {
             Some(addr) => {
                 let monitor =
-                    match Monitor::bind_paced(addr.as_str(), executor, model.signal_index()) {
+                    match Monitor::bind_paced_peer(addr.as_str(), peer, model.signal_index()) {
                         Ok(monitor) => monitor,
                         Err(error) => {
                             return fail(format!("cannot bind monitor on {addr}: {error}"));
@@ -368,16 +433,33 @@ fn main() -> ExitCode {
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
                 eprintln!("listening on {}", monitor.local_addr());
-                run_monitored(&monitor, step, &options, period.unwrap())
+                // Demotion may re-quiesce this instance mid-run, so the
+                // remote step consults the role each scan.
+                let step = || {
+                    if remote && !monitor.owns_field() {
+                        Ok(())
+                    } else {
+                        driver.step(dt)
+                    }
+                };
+                run_monitored(
+                    &monitor,
+                    || monitor.paced_scan(),
+                    step,
+                    &options,
+                    period.unwrap(),
+                )
             }
             None => {
-                // The RefCell lets the two loop closures share the executor;
-                // the loop is single-threaded, so the borrows never overlap.
-                let executor = std::cell::RefCell::new(executor);
+                // The RefCell lets the two loop closures share the peer;
+                // the loop is single-threaded, so the borrows never
+                // overlap. No monitor means no demotion path, so the
+                // field ownership below never changes.
+                let peer = std::cell::RefCell::new(peer);
                 scan_loop(
-                    || executor.borrow_mut().scan(),
-                    || executor.borrow().snapshot(),
-                    step,
+                    || peer.borrow_mut().scan(),
+                    || peer.borrow().snapshot(),
+                    || driver.step(dt),
                     &options,
                     period,
                 )
@@ -386,28 +468,25 @@ fn main() -> ExitCode {
     }
 }
 
-/// Serves `monitor` on a scoped thread while the main thread paces scans
-/// through [`Monitor::paced_scan`]: the executor stays behind the
-/// monitor's one mutex, so a request never observes a half-run scan and a
-/// queued command applies at the next scan boundary — and a served
-/// `GET /checkpoint` is always a between-scans capture.
-/// [`Monitor::shutdown`] stops the serve loop when the run ends and the
-/// scope join completes the graceful close.
+/// Serves `monitor` on a scoped thread while the main thread paces
+/// scans: the peer stays behind the monitor's one mutex, so a request
+/// never observes a half-run scan, a queued command applies at the next
+/// scan boundary, a served `GET /checkpoint` is always a between-scans
+/// capture, and a `POST /promote`/`POST /demote` lands at the same
+/// boundary. `scan` is one scan cycle — a plain
+/// [`Monitor::paced_scan`] for an active, a checkpoint pull plus paced
+/// scan for a standby. [`Monitor::shutdown`] stops the serve loop when
+/// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
+    scan: impl FnMut() -> Result<Tick, ScanError>,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
 ) -> ExitCode {
     std::thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
-        let result = scan_loop(
-            || monitor.paced_scan(),
-            || monitor.snapshot(),
-            step,
-            options,
-            Some(period),
-        );
+        let result = scan_loop(scan, || monitor.snapshot(), step, options, Some(period));
         monitor.shutdown();
         result
     })

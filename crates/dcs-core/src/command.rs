@@ -14,6 +14,7 @@
 //! offending point.
 
 use crate::io::IoError;
+use crate::role::Role;
 use crate::signal::{PointId, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -51,8 +52,8 @@ impl Command {
     }
 }
 
-/// Why a [`Command`] was rejected. Every variant carries the offending
-/// [`PointId`]; [`CommandError::point`] retrieves it uniformly.
+/// Why a [`Command`] was rejected. Every variant carries the command's
+/// target [`PointId`]; [`CommandError::point`] retrieves it uniformly.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandError {
@@ -78,6 +79,17 @@ pub enum CommandError {
         /// The error the driver returned.
         error: IoError,
     },
+    /// The instance refused the command because of its reported role:
+    /// per the monitoring-under-redundancy decision only the peer
+    /// reporting [`Role::Active`] accepts commands — a standby or a
+    /// mid-transition instance cannot let the write reach the field.
+    /// `point` is the command's target, not a point at fault.
+    NotActive {
+        /// The point the command targeted.
+        point: PointId,
+        /// The role the instance reported.
+        role: Role,
+    },
 }
 
 impl CommandError {
@@ -86,7 +98,8 @@ impl CommandError {
         match *self {
             CommandError::UnknownPoint { point }
             | CommandError::TypeMismatch { point, .. }
-            | CommandError::DriverRejected { point, .. } => point,
+            | CommandError::DriverRejected { point, .. }
+            | CommandError::NotActive { point, .. } => point,
         }
     }
 }
@@ -108,6 +121,11 @@ impl fmt::Display for CommandError {
             CommandError::DriverRejected { point, error } => {
                 write!(f, "driver rejected command on I/O point {point:?}: {error}")
             }
+            CommandError::NotActive { point, role } => write!(
+                f,
+                "command on I/O point {point:?} refused: instance reports role {role}; \
+                 commands apply only on the active peer"
+            ),
         }
     }
 }

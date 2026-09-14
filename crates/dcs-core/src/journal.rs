@@ -2,8 +2,8 @@
 //!
 //! Where [`PointHistory`](crate::PointHistory) records each point's sample
 //! stream, the journal records the run's transitions — command outcomes,
-//! point quality changes, and component step failures — as one ordered
-//! event list an operator can audit. Every [`JournalEntry`] is stamped
+//! point quality changes, component step failures, and redundancy role
+//! changes — as one ordered event list an operator can audit. Every [`JournalEntry`] is stamped
 //! with the [`Tick`] the event is attributed to, keeping journal, history,
 //! snapshots, and receipts in one comparable timebase.
 //!
@@ -12,6 +12,7 @@
 //! a numbering gap rather than silent loss.
 
 use crate::command::CommandReceipt;
+use crate::role::Role;
 use crate::signal::{PointId, Quality, Tick};
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,17 @@ pub enum JournalEvent {
         component: String,
         /// The error the step reported.
         error: String,
+    },
+    /// The instance's reported [`Role`] changed — a promotion or
+    /// demotion applied at its scan boundary (`standby` → `promoting`,
+    /// `active` → `demoting`), or a transition settled on the first scan
+    /// under the new mode (`promoting` → `active`, `demoting` →
+    /// `standby`). The pair-as-one-controller audit trail.
+    RoleChanged {
+        /// The previously reported role.
+        from: Role,
+        /// The newly reported role.
+        to: Role,
     },
 }
 
@@ -115,6 +127,14 @@ mod tests {
                     error: "computation failed".to_string(),
                 },
             },
+            JournalEntry {
+                seq: 5,
+                tick: Tick(8),
+                event: JournalEvent::RoleChanged {
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -125,5 +145,6 @@ mod tests {
         assert!(json.contains("\"quality_changed\""), "{json}");
         assert!(json.contains("\"command_settled\""), "{json}");
         assert!(json.contains("\"step_failed\""), "{json}");
+        assert!(json.contains("\"role_changed\""), "{json}");
     }
 }

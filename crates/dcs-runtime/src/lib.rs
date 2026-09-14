@@ -33,6 +33,12 @@
 //! component's [`capture_state`](Component::capture_state), the driver's
 //! state when it implements the contract, and the last written outputs,
 //! letting a standby rebuild an equivalent executor mid-run.
+//!
+//! [`Peer`] is the switchover half of redundancy: it wraps an executor
+//! assembled behind a [`WriteGate`], reports the instance's
+//! [`Role`](dcs_core::Role), and applies promotion and demotion at a scan
+//! boundary so exactly one peer of a pair writes the field at a time —
+//! a promoted tracking standby continues the checkpointed run bumplessly.
 
 #![warn(missing_docs)]
 
@@ -40,10 +46,12 @@ mod checkpoint;
 mod component;
 mod executor;
 mod gate;
+mod peer;
 mod standby;
 
 pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};
 pub use gate::WriteGate;
+pub use peer::{ApplyError, Peer, RoleChange};
 pub use standby::{Standby, StandbyState};

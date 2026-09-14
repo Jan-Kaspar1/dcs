@@ -50,7 +50,7 @@ Ticket breakdown:
 - #33 — M3 decision record and plan refresh: decisions 10–15. **Done.**
 - #31 — remote simulated I/O driver over TCP: `dcs-sim-net`'s `PlantServer`/`RemoteDriver`, one shared simulated plant two controller processes attach to. **Done.**
 - #32 — standby synchronization: checkpoint transfer over the monitoring transport (decision 12) into a tracking standby covering both driver-observation modes (decision 13). **Done** — `GET /checkpoint` plus `MonitorClient::checkpoint`, `Executor::apply`, `Standby`/`StandbyState`, `WriteGate`, and `dcs-controller --standby`/`--listen`/`--remote`.
-- #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19).
+- #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19). **Done** — `Role`/`StandbySync`/`RoleReport`/`SwitchError` in `dcs-core`, the `Peer` role machine in `dcs-runtime`, `GET /role` plus `POST /promote`/`/demote` and role-gated commands on the monitor, `JournalEvent::RoleChanged`, and `dcs-controller --standby` + `--listen` as the promotable standby over `--remote`.
 - #47 — device-kind driver factory registry in `dcs-assembly`, including the remote-sim kind.
 - #39 — `dcs-controller` Docker packaging: a redundant pair is two containers on separate hosts sharing one plant model.
 
@@ -67,7 +67,7 @@ Ticket breakdown:
 - #35 — bounded per-point history and the transition journal served with since-cursors (decision 17). **Done.**
 - #49 — model-declared `writable` points narrowing the command surface (decision 18).
 - #50 — `ComponentDescriptor` contract and per-kind descriptors, served to the UI (decision 16).
-- #51 — the page itself, built in slices. **Trend slice done:** live telemetry plus signal metadata (#34), per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`, all polled incrementally on the snapshot's cadence. Remaining page work: descriptor-driven faceplates (#50), command affordances restricted to writable points (#49), and the pair-as-one-controller view (#46).
+- #51 — the page itself, built in slices. **Trend slice done:** live telemetry plus signal metadata (#34), per-point inline-SVG trends fed by `/history`, and the transition-journal pane fed by `/journal`, all polled incrementally on the snapshot's cadence. Remaining page work: descriptor-driven faceplates (#50), command affordances restricted to writable points (#49), and the pair-as-one-controller view over the role contract #46 landed.
 
 Done when:
 
