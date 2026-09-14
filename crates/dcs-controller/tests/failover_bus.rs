@@ -781,7 +781,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         fenced.write(VALVE, Value::Float(0.0)),
         Err(IoError::Fenced(VALVE))
     );
-    assert_eq!(fenced.step(), Err(LinkError::Fenced));
+    assert_eq!(fenced.step(DT_F64), Err(LinkError::Fenced));
     assert_eq!(fenced.read(VALVE).unwrap().value, carried);
     // The claim covered every field-facing device, not only the one the
     // promoted run writes.
@@ -790,7 +790,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         fenced_ai.write(SETPOINT, Value::Float(0.0)),
         Err(IoError::Fenced(SETPOINT))
     );
-    assert_eq!(fenced_ai.step(), Err(LinkError::Fenced));
+    assert_eq!(fenced_ai.step(DT_F64), Err(LinkError::Fenced));
 
     let error = active.advance(1).unwrap_err();
     assert!(

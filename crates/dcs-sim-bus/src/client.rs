@@ -176,10 +176,13 @@ fn exchange(
 /// The driver is the field-observing kind: the register bank lives in
 /// the server process, so
 /// [`capture_state`](IoDriver::capture_state) stays at its `None`
-/// default — there is nothing local to checkpoint. [`step`](Self::step)
-/// issues the explicit device-clock advance, so a field-owning
-/// controller paces the bank exactly where a local driver's step call
-/// sat; a second attached client observes the same stepped registers.
+/// default — there is nothing local to checkpoint, the device-side
+/// element state a declared dynamics document merges included.
+/// [`step`](Self::step) issues the explicit device-clock advance with
+/// the caller's `dt`, so a field-owning controller paces the bank —
+/// and any declared process on it — exactly where a local driver's
+/// step call sat; a second attached client observes the same stepped
+/// registers.
 ///
 /// Fencing: the device arbitrates a single writer — the failover
 /// decision's rule that a promoted peer's field writes must beat a
@@ -273,13 +276,16 @@ impl BusDriver {
         self.last_failure.lock().unwrap().clone()
     }
 
-    /// Advances the device server's bank one tick — the explicit step
-    /// behind the register protocol — and returns the bank's new tick.
-    /// Stepping mutates the shared device, so while an attachment holds
-    /// the write-ownership claim a non-holder's step answers
+    /// Advances the device server's bank one tick of `dt` time units —
+    /// the explicit step behind the register protocol, stepping any
+    /// declared dynamics by `dt` — and returns the bank's new tick.
+    /// `dt` must be finite and non-negative; a step carrying one that
+    /// is not is refused with [`LinkError::InvalidRequest`]. Stepping
+    /// mutates the shared device, so while an attachment holds the
+    /// write-ownership claim a non-holder's step answers
     /// [`LinkError::Fenced`].
-    pub fn step(&self) -> Result<Tick, LinkError> {
-        match self.request(&BusRequest::Step)? {
+    pub fn step(&self, dt: f64) -> Result<Tick, LinkError> {
+        match self.request(&BusRequest::Step { dt })? {
             BusResponse::Stepped { tick } => Ok(tick),
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
