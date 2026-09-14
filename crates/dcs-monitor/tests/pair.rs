@@ -247,6 +247,28 @@ fn commands_route_only_to_the_peer_reporting_active() {
     );
     assert!(standby.client.receipts().unwrap().is_empty());
     assert!(standby.client.journal(0).unwrap().is_empty());
+
+    // A component-targeted command — the set_parameter the faceplate's
+    // parameter edits submit — rides the same active-only routing: the
+    // active's receipt log answers with the named rejection (the Scale
+    // kind declares no parameters), and the standby was never sent it.
+    let tune = Command::SetParameter {
+        component: "scale".to_string(),
+        name: "gain".to_string(),
+        value: Value::Float(2.0),
+    };
+    let receipt = pair.command(&tune).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Rejected {
+            reason: CommandError::UnsupportedParameter {
+                component: "scale".to_string(),
+                parameter: "gain".to_string(),
+            }
+        }
+    );
+    assert_eq!(active.client.receipts().unwrap().len(), 2);
+    assert!(standby.client.receipts().unwrap().is_empty());
 }
 
 #[test]
