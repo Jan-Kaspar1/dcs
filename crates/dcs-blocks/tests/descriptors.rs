@@ -5,8 +5,8 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
-    Interlock, LatchingAlarm, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Timer,
-    Valve,
+    Interlock, LatchingAlarm, ManualStation, Motor, OverrideSelect, Pid, PidConfig, RateLimiter,
+    Scaling, SignalFilter, Timer, Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -174,10 +174,10 @@ fn rig() -> Rig {
         Box::new(
             LatchingAlarm::new(
                 "lal",
-                point(&mut specs, 140, Direction::In, ValueKind::Float),
-                point(&mut specs, 141, Direction::In, ValueKind::Bool),
-                point(&mut specs, 142, Direction::Out, ValueKind::Bool),
-                point(&mut specs, 143, Direction::Out, ValueKind::Bool),
+                point(&mut specs, 160, Direction::In, ValueKind::Float),
+                point(&mut specs, 161, Direction::In, ValueKind::Bool),
+                point(&mut specs, 162, Direction::Out, ValueKind::Bool),
+                point(&mut specs, 163, Direction::Out, ValueKind::Bool),
                 AlarmLimits {
                     low: 10.0,
                     high: 90.0,
@@ -186,12 +186,33 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            ManualStation::new(
+                "mas",
+                point(&mut specs, 140, Direction::In, ValueKind::Float),
+                point(&mut specs, 141, Direction::In, ValueKind::Float),
+                point(&mut specs, 142, Direction::In, ValueKind::Bool),
+                point(&mut specs, 143, Direction::Out, ValueKind::Float),
+                point(&mut specs, 144, Direction::Out, ValueKind::Bool),
+                5.0,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            SignalFilter::new(
+                "filt",
+                point(&mut specs, 150, Direction::In, ValueKind::Float),
+                point(&mut specs, 151, Direction::Out, ValueKind::Float),
+                0.5,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 14] = [
+const EXPECTED_KINDS: [&str; 16] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -206,6 +227,8 @@ const EXPECTED_KINDS: [&str; 14] = [
     Counter::KIND,
     RateLimiter::KIND,
     LatchingAlarm::KIND,
+    ManualStation::KIND,
+    SignalFilter::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {

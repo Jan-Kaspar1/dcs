@@ -44,6 +44,28 @@ The personal `/home/kaspar/workspace/dcs` checkout is separate from managed clon
 
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares two heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
 
+## Architecture review lane
+
+The supervisor can run a daily architecture reviewer: a read-and-report invocation pinned to the resolved `main` SHA that proposes deep-module and naming-consistency improvements. It does not refactor `main` itself — accepted candidates become ordinary managed issues that workers implement through the existing CI and merge gates.
+
+Configure it in `~/.config/dcs-agents/config.json` under `review`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. Disabling stops a running reviewer invocation; state, reports, and already-accepted implementation work are preserved. |
+| `mode` | `report` | `report` keeps reports and candidates internal; `pilot` feeds candidates to the planner until one accepted improvement passes CI and post-merge assessment, which promotes the lane to `full` daily operation. |
+| `auto_promote` | `true` | In `report` mode, promote to `pilot` automatically after the first completed report. A rejected assessment rolls the lane back to `report` and records the failure; re-enable deliberately by setting `mode` to `full`. |
+| `time` / `timezone` | `03:00` / `Europe/Berlin` | Daily schedule. A missed run executes once on resume; no backlog accumulates. |
+| `timeout_seconds` | `3600` | Per-review invocation limit. |
+| `max_candidates` | `3` | Report candidate cap. |
+| `retention_days` | `30` | Report file retention under `state/reviews/`; dedup records outlive logs. |
+
+Controls: `dcs-agents review` prints lane status (stage, running run, latest result, pending candidates and assessments); `dcs-agents review run` queues a manual run for the next cycle. The reviewer occupies one agent slot, so a full pool defers it; `pause` also defers scheduled and manual runs. One automatic retry follows a failed scheduled review. Unchanged `main` is skipped unless new blocked-job evidence or a manual run exists, and only one architecture improvement is active at a time across its dependent issues.
+
+Reviewer guidance is pinned in `agent_pool/resources/architecture/` (project policy, prompt template, MIT-licensed vendored references with a hash manifest). Preflight verifies every resource hash of the *installed* release before launch and stages a copy beside the report; the reviewed checkout's copies are never used, so a main commit cannot change live reviewer behavior without a pinned upgrade. A mismatch fails the run explicitly. Regenerate `MANIFEST.json` after changing any resource: `python3 -c "from agent_pool.review import write_manifest; write_manifest('agent_pool/resources/architecture', '<upstream revision>')"` — a test fails when the manifest is stale.
+
+Rollout: install the pinned upgrade, keep `enabled` at `false` to stage, then set `enabled`/`mode` per the table. `mode: report` with `auto_promote` exercises the staged path — one validated report promotes to `pilot` (planner ingestion for at most one active improvement), and a confirmed post-merge assessment of that pilot improvement promotes to `full` — without a manual report-inspection gate. A rejected assessment rolls back to `report`.
+
 ## Recovery and upgrades
 
 Inspect `status`, the invocation receipt, and its output before retrying a failed job. When a job blocks, the supervisor records a recovery state (branch, original checkout, last known commit, and whether preserved work exists) and commits dirty work-in-progress onto the issue branch while its checkout is still assigned. `retry` then recovers under an exclusive clone lease: an idle original checkout is switched back to the job branch; a busy one is bypassed by fetching the preserved ref into a free worker clone; and a fresh branch from current main is created only after every checkout, quarantine, and the remote prove no work exists. Recovery failures retain the recorded state and report a specific error rather than implying no work exists. A dirty managed clone is renamed with a `-quarantine-` suffix before replacement; recovery also surveys quarantines for preserved refs. Do not delete quarantines or reset a worker checkout merely to clear an error. If a process ownership record is inconsistent, stop the service and resolve the recorded process/workspace state before resuming.

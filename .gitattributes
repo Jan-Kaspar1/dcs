@@ -1,0 +1,3 @@
+# Vendored review resources are sha256-verified by the supervisor; they must
+# keep LF line endings on every platform or the manifest check fails.
+agent_pool/resources/** text eol=lf
