@@ -454,6 +454,8 @@ fn protocol_contract_types_serde_roundtrip() {
         },
         BusRequest::ListRegisters,
         BusRequest::Step,
+        BusRequest::ClaimWriter { owner: 42 },
+        BusRequest::ReleaseWriter,
     ];
     for request in requests {
         let json = serde_json::to_string(&request).unwrap();
@@ -465,11 +467,17 @@ fn protocol_contract_types_serde_roundtrip() {
         },
         BusResponse::Written { tick: Tick(7) },
         BusResponse::Stepped { tick: Tick(8) },
+        BusResponse::Done,
         BusResponse::Error {
             error: BusError::KindMismatch {
                 register: 5,
                 expected: ValueKind::Float,
                 found: Value::Bool(true),
+            },
+        },
+        BusResponse::Error {
+            error: BusError::Fenced {
+                detail: "another attachment owns register writes".to_string(),
             },
         },
     ];
@@ -480,6 +488,137 @@ fn protocol_contract_types_serde_roundtrip() {
             response
         );
     }
+}
+
+#[test]
+fn the_writer_claim_fences_every_attachment_not_holding_it() {
+    with_server(&fixture_decls(), |server, addr| {
+        // Two attachments per side — the multi-connection shape one
+        // controller presents — plus a reader that never claims.
+        let old_a = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let old_b = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let new_a = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let new_b = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let observer = BusDriver::connect(addr, &fixture_points()).unwrap();
+
+        // Unclaimed, every attachment writes — the pre-claim behavior.
+        old_a.write(PointId(2), Value::Float(1.0)).unwrap();
+        old_b.step().unwrap();
+        assert_eq!(observer.read(PointId(2)).unwrap().value, Value::Float(1.0));
+
+        // The old owner's several attachments claim the same token; all
+        // of them keep writing.
+        old_a.claim_writer(1).unwrap();
+        old_b.claim_writer(1).unwrap();
+        old_a.write(PointId(2), Value::Float(2.0)).unwrap();
+        old_b.step().unwrap();
+
+        // The takeover claim preempts unconditionally — after it, the
+        // old owner's writes and steps are refused at the field, not
+        // merely quiesced at its own gate, and a refused write leaves
+        // the register untouched rather than double-writing.
+        new_a.claim_writer(2).unwrap();
+        assert_eq!(
+            old_a.write(PointId(2), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(old_b.step(), Err(LinkError::Fenced));
+        assert_eq!(
+            server.bank().read(9).unwrap(),
+            Sample::good(Value::Float(2.0), Tick(1))
+        );
+
+        // The claim covers the whole owner token: the takeover side's
+        // second attachment claims the same token and writes.
+        new_b.claim_writer(2).unwrap();
+        new_b.write(PointId(2), Value::Float(3.0)).unwrap();
+        new_a.step().unwrap();
+        assert_eq!(observer.read(PointId(2)).unwrap().value, Value::Float(3.0));
+
+        // Reads and the register census stay open to a fenced
+        // attachment.
+        assert_eq!(old_a.read(PointId(2)).unwrap().value, Value::Float(3.0));
+        assert_eq!(old_a.list_registers().unwrap().len(), 3);
+
+        // A fenced attachment reclaims the field only by claiming again
+        // — the documented switchback, not an automatic reopen.
+        old_a.claim_writer(3).unwrap();
+        old_a.write(PointId(2), Value::Float(4.0)).unwrap();
+        assert_eq!(
+            new_a.write(PointId(2), Value::Float(5.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+    });
+}
+
+#[test]
+fn release_writer_frees_the_field() {
+    with_server(&fixture_decls(), |_, addr| {
+        let holder = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let other = BusDriver::connect(addr, &fixture_points()).unwrap();
+        holder.claim_writer(1).unwrap();
+        assert_eq!(
+            other.write(PointId(2), Value::Float(2.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+
+        // Releasing a claim the attachment does not hold is a no-op —
+        // the field stays fenced.
+        other.release_writer().unwrap();
+        assert_eq!(
+            other.write(PointId(2), Value::Float(2.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+
+        // The holder's explicit release frees the field: the other
+        // attachment writes without claiming, and its own claim then
+        // holds, fencing the released holder out.
+        holder.release_writer().unwrap();
+        other.write(PointId(2), Value::Float(2.0)).unwrap();
+        other.claim_writer(2).unwrap();
+        assert_eq!(
+            holder.write(PointId(2), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+    });
+}
+
+#[test]
+fn disconnect_releases_the_claim_for_a_promoted_peer() {
+    with_server(&fixture_decls(), |_, addr| {
+        let active = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let standby = BusDriver::connect(addr, &fixture_points()).unwrap();
+        active.claim_writer(1).unwrap();
+        active.write(PointId(2), Value::Float(1.0)).unwrap();
+        assert_eq!(
+            standby.write(PointId(2), Value::Float(2.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+
+        // The claim is bound to the attachment: the holder's
+        // disconnect releases it — a dead owner cannot keep the field
+        // fenced. The server observes the close asynchronously, so the
+        // probe write retries until the freed field accepts it.
+        drop(active);
+        let released = (0..100).any(|_| {
+            if standby.write(PointId(1), Value::Float(0.0)).is_ok() {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(
+            released,
+            "the claim must release on the holder's disconnect"
+        );
+
+        // The promoted peer's claim lands on the freed field, and its
+        // writes apply.
+        standby.claim_writer(2).unwrap();
+        standby.write(PointId(2), Value::Float(2.0)).unwrap();
+        assert_eq!(standby.read(PointId(2)).unwrap().value, Value::Float(2.0));
+    });
 }
 
 #[test]

@@ -291,7 +291,8 @@ controller scan.
                   consecutive failed checkpoint pulls self-promote the
                   standby at that scan boundary. Requires the model's
                   field-facing devices to arbitrate a single writer —
-                  sim-tcp does through the plant server's claim
+                  sim-tcp does through the plant server's claim, sim-bus
+                  through the device server's
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle — atomically, by write-then-rename —
