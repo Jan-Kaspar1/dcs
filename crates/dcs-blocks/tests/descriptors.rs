@@ -5,8 +5,8 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
-    Interlock, LatchingAlarm, ManualStation, Motor, OverrideSelect, Pid, PidConfig, RateLimiter,
-    Scaling, SignalFilter, Timer, Valve,
+    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
+    RateLimiter, Scaling, SignalFilter, Timer, Totalizer, Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -207,12 +207,35 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            MedianVoter::new(
+                "vot",
+                point(&mut specs, 170, Direction::In, ValueKind::Float),
+                point(&mut specs, 171, Direction::In, ValueKind::Float),
+                point(&mut specs, 172, Direction::In, ValueKind::Float),
+                point(&mut specs, 173, Direction::Out, ValueKind::Float),
+                point(&mut specs, 174, Direction::Out, ValueKind::Bool),
+                2.0,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            Totalizer::new(
+                "tot",
+                point(&mut specs, 180, Direction::In, ValueKind::Float),
+                point(&mut specs, 181, Direction::In, ValueKind::Bool),
+                point(&mut specs, 182, Direction::Out, ValueKind::Float),
+                1.0,
+                0.0,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 16] = [
+const EXPECTED_KINDS: [&str; 18] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -229,6 +252,8 @@ const EXPECTED_KINDS: [&str; 16] = [
     LatchingAlarm::KIND,
     ManualStation::KIND,
     SignalFilter::KIND,
+    MedianVoter::KIND,
+    Totalizer::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {
