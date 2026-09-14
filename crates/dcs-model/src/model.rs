@@ -60,6 +60,17 @@ pub struct Device {
     pub kind: String,
     /// The device's channels, keyed by channel name.
     pub channels: BTreeMap<String, Channel>,
+    /// Kind-specific addressing and configuration parameters for the
+    /// device's driver integration — e.g. a remote endpoint. The model
+    /// treats them as opaque; the registered device-kind factory
+    /// validates them at assembly.
+    ///
+    /// Unlike component parameters these are general JSON values rather
+    /// than signal [`Value`]s, so a kind can carry strings and structured
+    /// addressing data. Optional like [`Signal::unit`]; see its note on
+    /// schema versioning.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, serde_json::Value>,
 }
 
 /// A named device channel: a physical endpoint with a fixed direction and

@@ -1,5 +1,7 @@
-//! `dcs-controller`: loads a plant model, assembles it against the
-//! simulated I/O backend, and runs the deterministic scan.
+//! `dcs-controller`: loads a plant model, resolves its devices through the
+//! driver registry — local `sim*` devices plus remote `sim-tcp` ones —
+//! assembles the executor against the resulting fan-out driver, and runs
+//! the deterministic scan.
 //!
 //! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]`
 //!
@@ -15,7 +17,7 @@
 //! executor remains virtual ticks. Load, validation, and assembly failures
 //! exit nonzero naming the offending model element.
 
-use dcs_assembly::{BuildError, ComponentRegistry, assemble, sim_driver};
+use dcs_assembly::{BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers};
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, DigitalInput, DigitalOutput, Interlock, Motor,
     OverrideSelect, Pid, Valve,
@@ -189,8 +191,9 @@ struct Options {
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
 
-Loads and validates the plant model, assembles it against simulated I/O,
-and runs the controller scan.
+Loads and validates the plant model, resolves its devices through the
+driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
+controller scan.
 
   --ticks N     run N deterministic ticks, then print the telemetry snapshot
   --scan-ms MS  pace scans to a wall-clock period of MS milliseconds;
@@ -296,10 +299,11 @@ fn main() -> ExitCode {
         Ok(model) => model,
         Err(error) => return fail(error),
     };
-    let driver = match sim_driver(&model) {
-        Ok(driver) => driver,
-        Err(error) => return fail(error),
-    };
+    let driver =
+        match resolve_drivers(&model, &DriverRegistry::standard()).and_then(|plan| plan.build()) {
+            Ok(driver) => driver,
+            Err(error) => return fail(error),
+        };
     let mut executor = match assemble(&model, &registry(), &driver) {
         Ok(executor) => executor,
         Err(error) => return fail(error),
@@ -319,7 +323,9 @@ fn main() -> ExitCode {
         if let Err(error) = executor.scan() {
             return fail(format!("scan {} failed: {error}", executor.tick().0));
         }
-        driver.step(dt);
+        if let Err(error) = driver.step(dt) {
+            return fail(format!("plant step failed: {error}"));
+        }
         scanned += 1;
 
         if let Some(ticks) = options.ticks {
