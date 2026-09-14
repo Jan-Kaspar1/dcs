@@ -37,29 +37,29 @@
         }
       },
       "channels": {
-        "level": { "direction": "in", "value_type": "Float" },
-        "backup": { "direction": "in", "value_type": "Float" },
-        "run-1": { "direction": "in", "value_type": "Bool" },
-        "run-2": { "direction": "in", "value_type": "Bool" },
-        "fault-1": { "direction": "in", "value_type": "Bool" },
-        "fault-2": { "direction": "in", "value_type": "Bool" },
-        "avail-1": { "direction": "in", "value_type": "Bool" },
-        "avail-2": { "direction": "in", "value_type": "Bool" },
-        "cmd-1-echo": { "direction": "in", "value_type": "Bool" },
-        "cmd-2-echo": { "direction": "in", "value_type": "Bool" },
-        "sel-backup": { "direction": "out", "value_type": "Bool" },
-        "duty-call": { "direction": "out", "value_type": "Bool" },
-        "lag-call": { "direction": "out", "value_type": "Bool" },
-        "below-cutoff": { "direction": "out", "value_type": "Bool" },
-        "high-level": { "direction": "out", "value_type": "Bool" },
-        "cmd-1": { "direction": "out", "value_type": "Bool" },
-        "cmd-2": { "direction": "out", "value_type": "Bool" },
-        "duty": { "direction": "out", "value_type": "Int" },
-        "staged": { "direction": "out", "value_type": "Int" },
-        "none-avail": { "direction": "out", "value_type": "Bool" },
-        "all-faulted": { "direction": "out", "value_type": "Bool" },
-        "eff-1": { "direction": "out", "value_type": "Bool" },
-        "eff-2": { "direction": "out", "value_type": "Bool" }
+        "level": { "direction": "in", "value_type": "float" },
+        "backup": { "direction": "in", "value_type": "float" },
+        "run-1": { "direction": "in", "value_type": "bool" },
+        "run-2": { "direction": "in", "value_type": "bool" },
+        "fault-1": { "direction": "in", "value_type": "bool" },
+        "fault-2": { "direction": "in", "value_type": "bool" },
+        "avail-1": { "direction": "in", "value_type": "bool" },
+        "avail-2": { "direction": "in", "value_type": "bool" },
+        "cmd-1-echo": { "direction": "in", "value_type": "bool" },
+        "cmd-2-echo": { "direction": "in", "value_type": "bool" },
+        "sel-backup": { "direction": "out", "value_type": "bool" },
+        "duty-call": { "direction": "out", "value_type": "bool" },
+        "lag-call": { "direction": "out", "value_type": "bool" },
+        "below-cutoff": { "direction": "out", "value_type": "bool" },
+        "high-level": { "direction": "out", "value_type": "bool" },
+        "cmd-1": { "direction": "out", "value_type": "bool" },
+        "cmd-2": { "direction": "out", "value_type": "bool" },
+        "duty": { "direction": "out", "value_type": "int" },
+        "staged": { "direction": "out", "value_type": "int" },
+        "none-avail": { "direction": "out", "value_type": "bool" },
+        "all-faulted": { "direction": "out", "value_type": "bool" },
+        "eff-1": { "direction": "out", "value_type": "bool" },
+        "eff-2": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -67,191 +67,191 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "level" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "backup" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "run-1" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "run-2" }
     },
     {
       "id": 14,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "fault-1" }
     },
     {
       "id": 15,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "fault-2" }
     },
     {
       "id": 16,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "avail-1" }
     },
     {
       "id": 17,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "avail-2" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
     {
       "id": 21,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     },
     {
       "id": 23,
       "direction": "out",
-      "value_type": "Int",
-      "initial": { "Int": 0 }
+      "value_type": "int",
+      "initial": { "int": 0 }
     },
     {
       "id": 24,
       "direction": "in",
-      "value_type": "Int",
-      "initial": { "Int": 0 }
+      "value_type": "int",
+      "initial": { "int": 0 }
     },
     {
       "id": 30,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 31,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 32,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 33,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 41,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "sel-backup" }
     },
     {
       "id": 43,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "duty-call" }
     },
     {
       "id": 44,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "lag-call" }
     },
     {
       "id": 45,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "below-cutoff" }
     },
     {
       "id": 46,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "high-level" }
     },
     {
       "id": 50,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-1" }
     },
     {
       "id": 51,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-2" }
     },
     {
       "id": 52,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "duty" }
     },
     {
       "id": 53,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "staged" }
     },
     {
       "id": 54,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "none-avail" }
     },
     {
       "id": 55,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "all-faulted" }
     },
     {
       "id": 56,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-1-echo" }
     },
     {
       "id": 57,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "cmd-2-echo" }
     },
     {
       "id": 60,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "eff-1" }
     },
     {
       "id": 61,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "eff-2" }
     }
   ],
@@ -290,146 +290,146 @@
       "kind": "failover-select",
       "parameters": {},
       "ports": {
-        "primary": { "direction": "in", "value_type": "Float" },
-        "backup": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "backup_active": { "direction": "out", "value_type": "Bool" }
+        "primary": { "direction": "in", "value_type": "float" },
+        "backup": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "backup_active": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 2,
       "kind": "threshold-chain",
       "parameters": {
-        "cutoff": { "Float": 1.0 },
-        "stop": { "Float": 2.0 },
-        "start": { "Float": 4.0 },
-        "lag_start": { "Float": 6.0 },
-        "high": { "Float": 8.0 },
-        "on_bad_demand": { "Int": 0 }
+        "cutoff": { "float": 1.0 },
+        "stop": { "float": 2.0 },
+        "start": { "float": 4.0 },
+        "lag_start": { "float": 6.0 },
+        "high": { "float": 8.0 },
+        "on_bad_demand": { "int": 0 }
       },
       "ports": {
-        "level": { "direction": "in", "value_type": "Float" },
-        "demand": { "direction": "out", "value_type": "Int" },
-        "duty_call": { "direction": "out", "value_type": "Bool" },
-        "lag_call": { "direction": "out", "value_type": "Bool" },
-        "below_cutoff": { "direction": "out", "value_type": "Bool" },
-        "high_level": { "direction": "out", "value_type": "Bool" }
+        "level": { "direction": "in", "value_type": "float" },
+        "demand": { "direction": "out", "value_type": "int" },
+        "duty_call": { "direction": "out", "value_type": "bool" },
+        "lag_call": { "direction": "out", "value_type": "bool" },
+        "below_cutoff": { "direction": "out", "value_type": "bool" },
+        "high_level": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 3,
       "kind": "pump-group",
       "parameters": {
-        "rotation": { "Int": 0 }
+        "rotation": { "int": 0 }
       },
       "ports": {
-        "demand": { "direction": "in", "value_type": "Int" },
-        "cmd_1": { "direction": "out", "value_type": "Bool" },
-        "run_1": { "direction": "in", "value_type": "Bool" },
-        "fault_1": { "direction": "in", "value_type": "Bool" },
-        "avail_1": { "direction": "in", "value_type": "Bool" },
-        "cmd_2": { "direction": "out", "value_type": "Bool" },
-        "run_2": { "direction": "in", "value_type": "Bool" },
-        "fault_2": { "direction": "in", "value_type": "Bool" },
-        "avail_2": { "direction": "in", "value_type": "Bool" },
-        "duty": { "direction": "out", "value_type": "Int" },
-        "staged": { "direction": "out", "value_type": "Int" },
-        "none_available": { "direction": "out", "value_type": "Bool" },
-        "all_faulted": { "direction": "out", "value_type": "Bool" }
+        "demand": { "direction": "in", "value_type": "int" },
+        "cmd_1": { "direction": "out", "value_type": "bool" },
+        "run_1": { "direction": "in", "value_type": "bool" },
+        "fault_1": { "direction": "in", "value_type": "bool" },
+        "avail_1": { "direction": "in", "value_type": "bool" },
+        "cmd_2": { "direction": "out", "value_type": "bool" },
+        "run_2": { "direction": "in", "value_type": "bool" },
+        "fault_2": { "direction": "in", "value_type": "bool" },
+        "avail_2": { "direction": "in", "value_type": "bool" },
+        "duty": { "direction": "out", "value_type": "int" },
+        "staged": { "direction": "out", "value_type": "int" },
+        "none_available": { "direction": "out", "value_type": "bool" },
+        "all_faulted": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 10,
       "kind": "digital-input",
       "parameters": {
-        "invert": { "Bool": true }
+        "invert": { "bool": true }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 11,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 0 }
+        "operation": { "int": 0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 12,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 0 }
+        "operation": { "int": 0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 13,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 1 }
+        "operation": { "int": 1 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 14,
       "kind": "digital-input",
       "parameters": {
-        "invert": { "Bool": true }
+        "invert": { "bool": true }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 15,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 0 }
+        "operation": { "int": 0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 16,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 0 }
+        "operation": { "int": 0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 17,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 1 }
+        "operation": { "int": 1 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

@@ -617,7 +617,7 @@ fn identical_scripted_runs_produce_identical_snapshots_and_journals() {
 #[test]
 fn a_malformed_setpoint_table_fails_assembly_naming_the_parameter() {
     let mut document: serde_json::Value = serde_json::from_str(STATION_LEVEL).unwrap();
-    document["components"][1]["parameters"]["lag_start"] = serde_json::json!({ "Float": 3.0 });
+    document["components"][1]["parameters"]["lag_start"] = serde_json::json!({ "float": 3.0 });
     let model = model(&document.to_string());
     let driver = build_driver(&model);
     match assemble(&model, &registry(), &driver).err().unwrap() {
