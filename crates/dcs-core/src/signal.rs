@@ -22,9 +22,22 @@ pub enum Value {
     Float(f64),
 }
 
-/// The type a [`Value`] coercion was asked to produce.
+impl Value {
+    /// The kind of this value's variant.
+    pub fn kind(self) -> ValueKind {
+        match self {
+            Value::Bool(_) => ValueKind::Bool,
+            Value::Int(_) => ValueKind::Int,
+            Value::Float(_) => ValueKind::Float,
+        }
+    }
+}
+
+/// The kind of a [`Value`] variant. Used wherever a value type must be named
+/// without a concrete value: coercion targets, declared I/O point types, and
+/// type-mismatch reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CoercionTarget {
+pub enum ValueKind {
     /// `bool`
     Bool,
     /// `i64`
@@ -41,12 +54,12 @@ pub enum CoercionTarget {
 pub struct CoercionError {
     /// The value that could not be coerced.
     pub value: Value,
-    /// The type the coercion was asked to produce.
-    pub target: CoercionTarget,
+    /// The kind of value the coercion was asked to produce.
+    pub target: ValueKind,
 }
 
 impl CoercionError {
-    fn new(value: Value, target: CoercionTarget) -> Self {
+    fn new(value: Value, target: ValueKind) -> Self {
         Self { value, target }
     }
 }
@@ -78,7 +91,7 @@ impl TryFrom<Value> for bool {
             // Reject -0.0: coercing it back would produce +0.0.
             Value::Float(v) if v == 0.0 && v.is_sign_positive() => Ok(false),
             Value::Float(1.0) => Ok(true),
-            _ => Err(CoercionError::new(value, CoercionTarget::Bool)),
+            _ => Err(CoercionError::new(value, ValueKind::Bool)),
         }
     }
 }
@@ -97,7 +110,7 @@ impl TryFrom<Value> for i64 {
             }
             _ => None,
         };
-        result.ok_or_else(|| CoercionError::new(value, CoercionTarget::Int))
+        result.ok_or_else(|| CoercionError::new(value, ValueKind::Int))
     }
 }
 
@@ -115,7 +128,7 @@ impl TryFrom<Value> for f64 {
             }
             Value::Float(v) => Some(v),
         };
-        result.ok_or_else(|| CoercionError::new(value, CoercionTarget::Float))
+        result.ok_or_else(|| CoercionError::new(value, ValueKind::Float))
     }
 }
 
@@ -291,7 +304,7 @@ mod tests {
         roundtrip(PointId(22));
         roundtrip(CoercionError {
             value: Value::Float(0.5),
-            target: CoercionTarget::Int,
+            target: ValueKind::Int,
         });
     }
 
@@ -348,7 +361,7 @@ mod tests {
     fn rejected_coercions() {
         assert_eq!(
             bool::try_from(Value::Int(2)),
-            Err(CoercionError::new(Value::Int(2), CoercionTarget::Bool))
+            Err(CoercionError::new(Value::Int(2), ValueKind::Bool))
         );
         assert!(bool::try_from(Value::Float(0.5)).is_err());
         assert!(bool::try_from(Value::Float(-0.0)).is_err());

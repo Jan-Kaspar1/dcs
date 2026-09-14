@@ -50,7 +50,7 @@ When choosing a shared contract, module boundary, persistence format, or runtime
 
 ### 5. I/O abstraction
 
-- **Status:** Accepted as proposed behavior; no I/O traits or drivers exist yet.
+- **Status:** Accepted. The contract side is implemented in `dcs-core` (issue #6): `IoDriver` provides untyped `read`/`write` over `PointId` returning `Result<_, IoError>` (unknown point, disconnected, timeout, type mismatch — each carrying the point identity), and `Input<T>`/`Output<T>` handles give components typed logical I/O with strict, never-coercing value matching. Concrete drivers do not exist yet.
 - **Problem:** Per `AGENTS.md`, control logic must be hardware-independent: the same component must work whether a point is backed by local I/O, EtherCAT, Ethernet, or simulation, without code changes.
 - **Chosen approach:** Components declare typed logical I/O points — a name, a signal type (decision 2), and a direction. Binding a logical point to a physical device channel lives in the plant model (decision 3); resolving that binding and talking to field hardware lives in drivers beneath `dcs-runtime`. Component code never names a device, bus, or address.
 - **Alternatives considered:** Injecting driver handles into components (couples logic to a driver API); per-component mapping config (duplicates mapping outside the plant model, breaking the single-contract goal); a global string-keyed I/O registry (loses compile-time typing).
