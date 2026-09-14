@@ -65,7 +65,9 @@ dependencies = [
 name = "dcs-demo"
 version = "0.1.0"
 dependencies = [
+ "dcs-assembly",
  "dcs-blocks",
+ "dcs-controller",
  "dcs-core",
  "dcs-model",
  "dcs-runtime",
