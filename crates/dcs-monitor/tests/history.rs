@@ -330,6 +330,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                     receipt: CommandReceipt {
                         command: accepted.command,
                         outcome: CommandOutcome::Applied { tick: Tick(3) },
+                        actor: None,
                     },
                 },
             }]
@@ -361,6 +362,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                             error: IoError::Disconnected(PointId(10)),
                         },
                     },
+                    actor: None,
                 },
             }
         );

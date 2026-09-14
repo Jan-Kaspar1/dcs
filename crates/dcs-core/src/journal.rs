@@ -140,6 +140,7 @@ mod tests {
                             value: Value::Float(2.5),
                         },
                         outcome: CommandOutcome::Applied { tick: Tick(4) },
+                        actor: None,
                     },
                 },
             },

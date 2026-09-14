@@ -399,6 +399,7 @@ fn write_parses_per_the_declared_kind_and_reports_receipts() {
                 outcome: CommandOutcome::Accepted {
                     apply_tick: Tick(2)
                 },
+                actor: None,
             }
         );
         let receipt: CommandReceipt =
