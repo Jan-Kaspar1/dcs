@@ -4,15 +4,14 @@
 //! a scripted executor run local and remote.
 
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, IoFault, LinkState, PointId, Quality, QualityReason,
-    Sample, Tick, Value, ValueKind,
+    Direction, DriverDiagnostics, IoDriver, IoError, IoFault, LinkState, PointId, Quality,
+    QualityReason, Sample, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
 use dcs_sim::{
-    ChannelId, ChannelMap, Direction, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement,
-    SimDriver,
+    ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
 };
 use dcs_sim_net::{PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};

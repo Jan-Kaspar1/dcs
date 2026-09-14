@@ -341,7 +341,7 @@ fn signals_endpoint_serves_the_models_metadata() {
             input.description.as_deref(),
             Some("Reactor temperature measurement")
         );
-        assert_eq!(input.direction, dcs_model::Direction::In);
+        assert_eq!(input.direction, Direction::In);
         assert_eq!(input.value_type, ValueKind::Float);
         // The signal's display group rides the metadata endpoint.
         assert_eq!(input.group.as_deref(), Some("reactor"));
@@ -349,7 +349,7 @@ fn signals_endpoint_serves_the_models_metadata() {
         let output = index.get(PointId(20)).unwrap();
         assert_eq!(output.name, "heater-command");
         assert_eq!(output.unit.as_deref(), Some("%"));
-        assert_eq!(output.direction, dcs_model::Direction::Out);
+        assert_eq!(output.direction, Direction::Out);
         assert_eq!(output.group, None);
 
         // A point no signal sources still gets a default entry.

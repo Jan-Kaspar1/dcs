@@ -21,7 +21,7 @@
 //! contract — registering a device integration is what "adding a new
 //! device" means.
 
-use crate::assembly::{neutral, resolve, sim_direction};
+use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
     DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
@@ -389,7 +389,7 @@ pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceEr
                 device: spec.id.0,
                 name: point.channel.clone(),
             },
-            direction: sim_direction(point.direction),
+            direction: point.direction,
             initial: neutral(point.kind),
         });
     }
@@ -748,7 +748,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 device: spec.id.0,
                 name: point.channel.clone(),
             },
-            direction: sim_direction(point.direction),
+            direction: point.direction,
             initial: neutral(point.kind),
         })
         .collect();
