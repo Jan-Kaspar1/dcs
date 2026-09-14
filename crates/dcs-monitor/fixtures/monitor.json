@@ -43,7 +43,8 @@
       "name": "reactor-temperature",
       "source": 10,
       "unit": "degC",
-      "description": "Reactor temperature measurement"
+      "description": "Reactor temperature measurement",
+      "group": "reactor"
     },
     {
       "id": 101,

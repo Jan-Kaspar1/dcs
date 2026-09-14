@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-The Rust workspace holds ten implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors, model-driven assembly, the paced controller binary with Docker packaging, HTTP+JSON monitoring with history, journal, and the live page, and the end-to-end simulated tank loop. The remaining M2 gaps are model-declared internal points (#30) and writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89).
+The Rust workspace holds eleven implemented crates — `dcs-core`, `dcs-model`, `dcs-runtime`, `dcs-sim`, `dcs-sim-net`, `dcs-blocks`, `dcs-monitor`, `dcs-assembly`, `dcs-controller`, `dcs-plant`, and `dcs-demo` — covering the shared contracts, the versioned plant model, the deterministic executor with checkpoint/restore and the tracking standby, the simulated I/O backend with process elements and fault injection, the TCP-served shared simulated plant and remote driver plus the `dcs-plant-ctl` operator tool, the reusable component library with per-kind descriptors and timer/counter/rate-limiter kinds (#85), model-driven assembly with the device-kind driver registry (#47), the paced controller binary with active/standby modes (#32) and Docker packaging, the standalone shared-plant server accepting a declared dynamics document (#81), HTTP+JSON monitoring with signal groups (#86), history, journal, and the live page, and the end-to-end simulated tank loop. The remaining M2 gaps are model-declared internal points (#30) and writable points (#49). Decisions are recorded in `docs/architecture.md` (issues #4, #18, #33, #53, #89).
 
 ## Milestones
 
@@ -26,8 +26,8 @@ A `dcs-controller` binary loads a plant model path, assembles its driver and exe
 
 | Layer | Scope | Status |
 |---|---|---|
-| `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings with synthesized internal points, the explicit `ComponentRegistry`, and `assemble`; the device-kind factory registry is proposed under #47 |
-| `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); Docker packaging done (#39) |
+| `dcs-assembly` | Model → driver/executor resolution, component-kind registry | Implemented (#19): resolution into `ChannelMap`/`PointMap`/port bindings with synthesized internal points, the explicit `ComponentRegistry`, and `assemble`; device-kind factory registry and `FanoutDriver` done (#47) |
+| `dcs-controller` | Paced controller binary | Implemented (#19): `--scan-ms` pacing; monitoring served in-process via `Monitor::bind_paced` with `POST /scan` refused while pacing (#48); `--standby`/`--remote` modes track an active's checkpoints (#32); Docker packaging done (#39) |
 | `dcs-monitor` | HTTP+JSON monitoring transport | Implemented: `/snapshot`, `/receipts`, `/command`, `/scan` (#20); `/signals` and the live page (#34); `/history` and `/journal` with since-cursors (#35, decision 17); trend and journal panes (#51) |
 | `dcs-core` command contract | `Command`/`Receipt` applied at the scan boundary | Implemented (#20); model-declared writable targets proposed under #49 (decision 18); component-targeted `set_parameter` proposed under #82 (decision 20) |
 | `dcs-model` internal points | Channel-less operator and port-to-port points | In progress — #30 open; assembly's synthesized internal-device pairs are the implemented precursor (#19, #12) |
@@ -51,9 +51,9 @@ Ticket breakdown:
 - #31 — remote simulated I/O driver over TCP: `dcs-sim-net`'s `PlantServer`/`RemoteDriver`, one shared simulated plant two controller processes attach to. **Done.**
 - #68 — `dcs-plant-ctl`, the plant-side operator tool speaking the plant server's protocol. **Done.**
 - #39 — `dcs-controller` Docker packaging: a redundant pair is two containers on separate hosts sharing one plant model. **Done.**
-- #81 — `dcs-plant-server` binary running the shared simulated plant as a standalone process. **In progress.**
-- #32 — standby synchronization: checkpoint transfer over the monitoring transport (decision 12) into a tracking standby covering both driver-observation modes (decision 13). **In progress.**
-- #47 — device-kind driver factory registry in `dcs-assembly`, including the remote-sim kind. **In progress** — assembly resolves the `sim*` prefix convention today.
+- #81 — `dcs-plant-server` binary running the shared simulated plant as a standalone process, merging a declared dynamics document via `--dynamics` (decision 24). **Done.**
+- #32 — standby synchronization: checkpoint transfer over the monitoring transport (decision 12) into a tracking standby covering both driver-observation modes (decision 13). **Done** — `GET /checkpoint` plus `MonitorClient::checkpoint`, `Executor::apply`, `Standby`/`StandbyState`, `WriteGate`, and `dcs-controller --standby`/`--listen`/`--remote`.
+- #47 — device-kind driver factory registry in `dcs-assembly`, including the remote-sim kind. **Done** — `DriverRegistry::standard` resolves `sim*` and `sim-tcp`, and `FanoutDriver` presents one `IoDriver` over the backends.
 - #46 — switchover and promotion: role contract, output quiescence behind a driver-boundary write gate, bumpless promotion at a scan boundary (decision 15); also fixes the role-reporting shape the UI consumes (decision 19). **Open.**
 - #64 — end-to-end two-controller hot swap over the shared simulated plant. **Open.**
 
@@ -91,7 +91,7 @@ Ticket breakdown:
 - #70 — M5 decision record and plan refresh.
 - #65 — detect active-controller loss and promote the converged standby automatically.
 - #66 — version the checkpoint format for cross-build controller replacement (decision 11's deferred `version` field).
-- #67 — scripted-scenario simulated device kind proving the #47 driver registry.
+- #67 — scripted-scenario simulated device kind proving the driver registry (#47).
 - #71 — component-kind and device-kind integration guide.
 - #87 — roll a revised plant model into production through the redundant pair, with the carryover rule and report (decision 25).
 - #88 — standby output-divergence detection as a promotion gate (decision 26).
@@ -106,21 +106,21 @@ Ticket breakdown:
 - #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Open** — issue filed under M4.
 - #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Open** — issue filed under M4.
 - #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; depends on #49). **Open** — issue filed under M4.
-- #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **In progress** — issue filed under M4.
-- #85 — timer, counter, and rate-limiter kinds in `dcs-blocks`, each shipping `KIND`/`from_parameters`/`describe` per the established convention. **In progress.**
-- Declared plant-side dynamics (decision 24): the dynamics-document ticket is registered when the format lands; #81's plant server is the first consumer.
+- #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **Done** — issue filed under M4.
+- #85 — timer, counter, and rate-limiter kinds in `dcs-blocks`, each shipping `KIND`/`from_parameters`/`describe` per the established convention. **Done.**
+- Declared plant-side dynamics (decision 24). **Done** — `dcs-plant-server --dynamics` merges a JSON list of `ProcessElement` declarations (#81).
 
 Done when:
 
-- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82);
-- a writable field `In` point can be forced across scans at substituted quality, released at the scan boundary, badged in the snapshot, journaled, and preserved across a checkpoint (#84, with #49);
-- the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83);
-- the monitoring page organizes its signal list by the model's declared `group` field, with ungrouped signals under a documented default (#86);
-- `dcs-blocks` ships the timer, counter, and rate-limiter kinds with descriptors and checkpoint coverage like every existing kind (#85);
-- plant-side dynamics load from a declared document beside the model for the shared plant server and test rigs, leaving `PlantModel` schema untouched (decision 24).
+- an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **open**;
+- a writable field `In` point can be forced across scans at substituted quality, released at the scan boundary, badged in the snapshot, journaled, and preserved across a checkpoint (#84, with #49) — **open**;
+- the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83) — **open**;
+- the monitoring page organizes its signal list by the model's declared `group` field, with ungrouped signals under a documented default (#86) — **done**;
+- `dcs-blocks` ships the timer, counter, and rate-limiter kinds with descriptors and checkpoint coverage like every existing kind (#85) — **done**;
+- plant-side dynamics load from a declared document beside the model for the shared plant server and test rigs, leaving `PlantModel` schema untouched (decision 24; #81) — **done**.
 
 ## Next planning pass
 
-Inspect current main, open issues, and PRs before updating this plan. M2's critical path is now #30 and #49: they gate #62's command affordances and #84's forcing. M3's critical path is the #32 → #46 pair, with #47 unblocking non-`sim` device kinds and #81 productizing the shared plant; #64 then proves the swap end-to-end, and M5's lifecycle tickets follow the pair mechanics. M6's ergonomics tickets — #82, #83, #84, #86 — are independently startable against the existing executor, monitor, and model; #85 needs no infrastructure. Keep between six and twenty ready issues only when that much independent work exists.
+Inspect current main, open issues, and PRs before updating this plan. M2's critical path is now #30 and #49: they gate #62's command affordances and #84's forcing. With #32, #47, and #81 landed, M3's critical path is #46 (promotion and role reporting) then #64 proving the swap end-to-end; M5's lifecycle tickets follow the pair mechanics, with #67 able to start against the shipped driver registry. M6's remaining ergonomics tickets — #82, #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
 
 Update this document when milestones change or complete. Reference actual issue and PR numbers once created; mark blocked dependencies and distinguish completed work from planned work.

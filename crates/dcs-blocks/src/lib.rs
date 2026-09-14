@@ -32,7 +32,12 @@
 //! - [`Valve`] — analog actuator with a position-feedback discrepancy
 //!   diagnostic;
 //! - [`Motor`] — discrete actuator with a run-feedback fault diagnostic
-//!   covering failure to start and failure to stop.
+//!   covering failure to start and failure to stop;
+//! - [`Timer`] — on-delay/off-delay timing of a Boolean signal in ticks;
+//! - [`Counter`] — rising-edge counting with a preset-reached flag and a
+//!   reset input;
+//! - [`RateLimiter`] — an analog output slewing toward its input by a
+//!   bounded per-tick delta.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -48,6 +53,7 @@
 mod alarm_monitor;
 mod analog_input;
 mod analog_output;
+mod counter;
 pub mod describe;
 mod digital_input;
 mod digital_output;
@@ -56,11 +62,14 @@ mod motor;
 mod override_select;
 mod params;
 mod pid;
+mod rate_limiter;
+mod timer;
 mod valve;
 
 pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
 pub use analog_output::{AnalogOutput, RawOutput};
+pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use interlock::Interlock;
@@ -68,6 +77,8 @@ pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
+pub use rate_limiter::RateLimiter;
+pub use timer::Timer;
 pub use valve::Valve;
 
 #[cfg(test)]
