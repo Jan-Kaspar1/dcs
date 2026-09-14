@@ -12,7 +12,7 @@
 use dcs_assembly::{BuildError, ComponentRegistry};
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter, Sequencer,
     SignalFilter, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
@@ -235,6 +235,17 @@ pub fn registry() -> ComponentRegistry {
                 spec.require("rate")?,
                 spec.require("reset")?,
                 spec.require("total")?,
+                spec.parameters,
+            ))
+        })
+        .with(Sequencer::KIND, |spec| {
+            boxed(Sequencer::from_parameters(
+                spec.name.as_str(),
+                spec.require("run")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.require("step")?,
+                spec.require("done")?,
                 spec.parameters,
             ))
         })
