@@ -28,9 +28,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// telemetry shows the outputs the run computes. Because the gate sits
 /// at the driver boundary it covers every write, including the
 /// scan-boundary writes of queued operator commands.
+///
+/// A fan-out driver that mixes field-reaching and standby-local
+/// backends gates selectively instead: [`closed_covering`](Self::closed_covering)
+/// quiesces only the writes routed to field-facing points, so the
+/// standby's local simulated backends still see their writes and their
+/// private plant keeps tracking.
 pub struct WriteGate<'d> {
     inner: &'d (dyn IoDriver + Sync),
     open: AtomicBool,
+    covered: Option<Box<dyn Fn(PointId) -> bool + Send + Sync + 'd>>,
 }
 
 impl<'d> WriteGate<'d> {
@@ -40,7 +47,30 @@ impl<'d> WriteGate<'d> {
         Self {
             inner,
             open: AtomicBool::new(false),
+            covered: None,
         }
+    }
+
+    /// A closed gate over `inner` covering only the points `covered`
+    /// reports: while the gate is closed those writes are quiesced and
+    /// every other write passes through. Use it over a fan-out driver
+    /// so a tracking standby's writes to the shared field are quiesced
+    /// while writes to its local simulated backends still land.
+    pub fn closed_covering(
+        inner: &'d (dyn IoDriver + Sync),
+        covered: impl Fn(PointId) -> bool + Send + Sync + 'd,
+    ) -> Self {
+        Self {
+            inner,
+            open: AtomicBool::new(false),
+            covered: Some(Box::new(covered)),
+        }
+    }
+
+    /// Whether a write to `point` is gated while the gate is closed.
+    /// A gate without coverage applies to every point.
+    fn covers(&self, point: PointId) -> bool {
+        self.covered.as_ref().is_none_or(|covered| covered(point))
     }
 
     /// Lifts the gate: later writes pass through to `inner`. Promotion
@@ -76,7 +106,7 @@ impl IoDriver for WriteGate<'_> {
     }
 
     fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
-        if self.is_open() {
+        if self.is_open() || !self.covers(point) {
             self.inner.write(point, value)
         } else {
             Ok(())
@@ -149,5 +179,31 @@ mod tests {
         gate.close();
         gate.write(point, Value::Float(1.0)).unwrap();
         assert_eq!(gate.read(point).unwrap().value, Value::Float(9.0));
+    }
+
+    #[test]
+    fn covered_gate_quiesces_covered_points_only() {
+        let field = PointId(1);
+        let local = PointId(2);
+        let driver = StubDriver::new(field, Value::Float(0.0));
+        driver
+            .points
+            .lock()
+            .unwrap()
+            .insert(local, Sample::good(Value::Float(0.0), Tick::ZERO));
+        let gate = WriteGate::closed_covering(&driver, |point| point == field);
+
+        // Closed: the covered field write is dropped; the uncovered
+        // local write still reaches the backend — its private simulated
+        // plant keeps tracking.
+        gate.write(field, Value::Float(9.0)).unwrap();
+        gate.write(local, Value::Float(7.0)).unwrap();
+        assert_eq!(gate.read(field).unwrap().value, Value::Float(0.0));
+        assert_eq!(gate.read(local).unwrap().value, Value::Float(7.0));
+
+        // Open: every write passes.
+        gate.open();
+        gate.write(field, Value::Float(9.0)).unwrap();
+        assert_eq!(gate.read(field).unwrap().value, Value::Float(9.0));
     }
 }
