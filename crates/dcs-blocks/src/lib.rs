@@ -37,7 +37,11 @@
 //! - [`Counter`] — rising-edge counting with a preset-reached flag and a
 //!   reset input;
 //! - [`RateLimiter`] — an analog output slewing toward its input by a
-//!   bounded per-tick delta.
+//!   bounded per-tick delta;
+//! - [`ManualStation`] — a manual/auto station slewing bumplessly to the
+//!   newly selected source by a configured per-tick delta;
+//! - [`SignalFilter`] — a first-order per-tick smoothing of an analog
+//!   signal.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -58,11 +62,13 @@ pub mod describe;
 mod digital_input;
 mod digital_output;
 mod interlock;
+mod manual_station;
 mod motor;
 mod override_select;
 mod params;
 mod pid;
 mod rate_limiter;
+mod signal_filter;
 mod timer;
 mod valve;
 
@@ -73,11 +79,13 @@ pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use interlock::Interlock;
+pub use manual_station::ManualStation;
 pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
 pub use rate_limiter::RateLimiter;
+pub use signal_filter::SignalFilter;
 pub use timer::Timer;
 pub use valve::Valve;
 
