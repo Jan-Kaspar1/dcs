@@ -461,6 +461,12 @@ impl<'d> Executor<'d> {
     /// has produced a sample for — an output no component has written —
     /// reports `None`. Points are ordered by ascending id and components
     /// by scan order, so equal runs snapshot identically.
+    ///
+    /// The snapshot's `descriptors` carry each component's
+    /// [`describe`](Component::describe) result in the same scan order as
+    /// `components` — one descriptor per registered component, so
+    /// `descriptors[i]` describes the component `components[i]`
+    /// diagnoses.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
         TelemetrySnapshot {
@@ -483,6 +489,11 @@ impl<'d> Executor<'d> {
                     step_errors: entry.step_errors,
                     last_error: entry.last_error.clone(),
                 })
+                .collect(),
+            descriptors: self
+                .components
+                .iter()
+                .map(|entry| entry.component.describe())
                 .collect(),
         }
     }
@@ -796,7 +807,10 @@ impl fmt::Debug for Executor<'_> {
 mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
-    use dcs_core::{Input, Output};
+    use dcs_core::{
+        ComponentDescriptor, Input, Output, ParameterDescriptor, ParameterRange, PortDescriptor,
+        PortRole,
+    };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2016,6 +2030,212 @@ mod tests {
             WiringError::DuplicateComponent {
                 component: "same".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_default_descriptor_built_from_declared_io() {
+        // `Scale` does not override `describe`: the executor must still
+        // report a descriptor derived from its name and declared I/O.
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap();
+
+        let snapshot = executor.snapshot();
+        let [descriptor] = snapshot.descriptors.as_slice() else {
+            panic!("one descriptor per registered component");
+        };
+        assert_eq!(
+            *descriptor,
+            ComponentDescriptor {
+                name: "a".to_string(),
+                kind: std::any::type_name::<Scale>().to_string(),
+                label: "a".to_string(),
+                ports: vec![
+                    PortDescriptor {
+                        name: "in".to_string(),
+                        direction: Direction::In,
+                        kind: ValueKind::Float,
+                        role: None,
+                    },
+                    PortDescriptor {
+                        name: "out".to_string(),
+                        direction: Direction::Out,
+                        kind: ValueKind::Float,
+                        role: None,
+                    },
+                ],
+                parameters: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_descriptor_surfaces_in_snapshot() {
+        /// A component overriding `describe` with kind, role hints, and
+        /// parameter metadata.
+        struct Fancy {
+            input: PointId,
+            output: PointId,
+        }
+        impl Component for Fancy {
+            fn name(&self) -> &str {
+                "fancy"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![
+                    IoRequirement::input::<f64>("pv", self.input),
+                    IoRequirement::output::<f64>("out", self.output),
+                ]
+            }
+            fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+                Ok(())
+            }
+            fn describe(&self) -> ComponentDescriptor {
+                ComponentDescriptor {
+                    name: "fancy".to_string(),
+                    kind: "fancy".to_string(),
+                    label: "Fancy loop".to_string(),
+                    ports: vec![
+                        PortDescriptor {
+                            name: "pv".to_string(),
+                            direction: Direction::In,
+                            kind: ValueKind::Float,
+                            role: Some(PortRole::ProcessValue),
+                        },
+                        PortDescriptor {
+                            name: "out".to_string(),
+                            direction: Direction::Out,
+                            kind: ValueKind::Float,
+                            role: Some(PortRole::Output),
+                        },
+                    ],
+                    parameters: vec![ParameterDescriptor {
+                        name: "gain".to_string(),
+                        kind: ValueKind::Float,
+                        range: Some(ParameterRange {
+                            min: Value::Float(0.0),
+                            max: Value::Float(10.0),
+                        }),
+                    }],
+                }
+            }
+        }
+
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Fancy {
+                input: PointId(10),
+                output: PointId(20),
+            })],
+        )
+        .unwrap();
+
+        let snapshot = executor.snapshot();
+        let [descriptor] = snapshot.descriptors.as_slice() else {
+            panic!("one descriptor per registered component");
+        };
+        assert_eq!(descriptor.kind, "fancy");
+        assert_eq!(descriptor.label, "Fancy loop");
+        assert_eq!(descriptor.ports[0].role, Some(PortRole::ProcessValue));
+        assert_eq!(descriptor.ports[1].role, Some(PortRole::Output));
+        assert_eq!(
+            descriptor.parameters[0].range,
+            Some(ParameterRange {
+                min: Value::Float(0.0),
+                max: Value::Float(10.0),
+            })
+        );
+    }
+
+    /// Two-chained-`Scale` rig used to show descriptor ordering.
+    fn chain_rig(driver: &StubDriver) -> Executor<'_> {
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::In, ValueKind::Float),
+            (PointId(40), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        Executor::new(
+            driver,
+            map,
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Scale {
+                    name: "b",
+                    input: PointId(30),
+                    output: PointId(40),
+                    gain: 3.0,
+                }),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn descriptors_follow_scan_order_deterministically() {
+        let driver_a = StubDriver::new(&[float(10), float(20), float(30), float(40)], &[]);
+        let driver_b = StubDriver::new(&[float(10), float(20), float(30), float(40)], &[]);
+        let mut run_a = chain_rig(&driver_a);
+        let mut run_b = chain_rig(&driver_b);
+        run_a.scan().unwrap();
+        run_b.scan().unwrap();
+
+        let snapshot_a = run_a.snapshot();
+        let snapshot_b = run_b.snapshot();
+
+        // Descriptors align 1:1 with the diagnostics, in scan order.
+        let names: Vec<&str> = snapshot_a
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(snapshot_a.descriptors.len(), snapshot_a.components.len());
+        for (descriptor, diagnostics) in snapshot_a
+            .descriptors
+            .iter()
+            .zip(snapshot_a.components.iter())
+        {
+            assert_eq!(descriptor.name, diagnostics.name);
+        }
+
+        // Equivalent runs produce identical descriptors — and identical
+        // serialized snapshots.
+        assert_eq!(snapshot_a.descriptors, snapshot_b.descriptors);
+        assert_eq!(
+            serde_json::to_string(&snapshot_a).unwrap(),
+            serde_json::to_string(&snapshot_b).unwrap()
         );
     }
 }

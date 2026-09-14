@@ -18,8 +18,9 @@
 //!
 //! [`Executor::snapshot`] is the monitoring read-side: it returns the
 //! `dcs-core` [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot) contract —
-//! the latest sample of every known point plus per-component diagnostics —
-//! serde-serializable so a monitoring UI needs only the shared contracts.
+//! the latest sample of every known point, per-component diagnostics, and
+//! each component's [`Component::describe`] self-description — serde-
+//! serializable so a monitoring UI needs only the shared contracts.
 //!
 //! [`Executor::submit_command`] is the monitoring write-side: operator
 //! [`Command`](dcs_core::Command)s queue between scans and apply at the
