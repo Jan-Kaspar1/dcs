@@ -12,4 +12,7 @@ dcs-model = { path = "../dcs-model" }
 [dev-dependencies]
 dcs-assembly = { path = "../dcs-assembly" }
 dcs-controller = { path = "../dcs-controller" }
+dcs-core = { path = "../dcs-core" }
+dcs-runtime = { path = "../dcs-runtime" }
+dcs-sim = { path = "../dcs-sim" }
 serde_json = "1.0.151"

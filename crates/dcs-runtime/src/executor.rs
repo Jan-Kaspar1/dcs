@@ -10,11 +10,12 @@ use crate::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
 };
 use crate::component::{Component, ComponentIo, IoRequirement};
+use crate::revision::CarryoverError;
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics,
-    ComponentParameters, Direction, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
-    ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
-    TelemetrySnapshot, Tick, Value, ValueKind,
+    CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt,
+    ComponentDiagnostics, ComponentParameters, Direction, DroppedElement, ForcedPoint, IoDriver,
+    IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason,
+    Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1192,6 +1193,157 @@ impl<'d> Executor<'d> {
         // forces exactly what the active forced — no more, no less.
         self.forces.clone_from(&checkpoint.forces);
         Ok(())
+    }
+
+    /// Consumes a checkpoint captured under a *different* model — the
+    /// model-boundary carryover a revision-armed peer runs instead of
+    /// [`apply`](Self::apply), whose fingerprint gate would refuse it.
+    ///
+    /// The rule is documented in [`crate::revision`]: writable internal
+    /// `In` points and `Out` image samples matched by declared identity
+    /// carry their last values, forces carry all-or-nothing, component
+    /// and driver state reinitialize, and the tick resumes at the
+    /// checkpoint's. The rule classifies the whole checkpoint before any
+    /// state moves, so a revision that breaks it — a kind-retyped
+    /// carried point, an unservable force, an unreadable format — fails
+    /// with a named [`CarryoverError`] and changes nothing the run
+    /// observes.
+    ///
+    /// Unlike `apply`, success does not claim equivalence to the
+    /// captured run: the first post-promotion scan computes fresh
+    /// outputs from reinitialized components over the carried image.
+    /// The returned [`CarryoverReport`] is the audit record — what
+    /// carried, what initialized, what was named dropped — and rides the
+    /// peer's reported [`StandbySync::Reinitialized`](dcs_core::StandbySync)
+    /// state.
+    pub fn reinitialize(
+        &mut self,
+        checkpoint: &Checkpoint,
+    ) -> Result<CarryoverReport, CarryoverError> {
+        if !SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
+            return Err(CarryoverError::UnsupportedVersion {
+                found: checkpoint.format_version,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            });
+        }
+
+        // Classify first, apply second: every named failure is detected
+        // before any state moves, so a refused crossing leaves the run
+        // untouched.
+        let mut carried = Vec::new();
+        let mut carried_outputs = Vec::new();
+        let mut carried_samples = Vec::new();
+        let mut dropped = Vec::new();
+        for (&point, &sample) in &checkpoint.internal {
+            match self.map.get(point) {
+                Some(spec)
+                    if spec.direction == Direction::In
+                        && spec.internal.is_some()
+                        && spec.writable =>
+                {
+                    if spec.kind != sample.value.kind() {
+                        return Err(CarryoverError::InternalKindMismatch {
+                            point,
+                            expected: spec.kind,
+                            found: sample.value,
+                        });
+                    }
+                    carried.push(CarriedPoint {
+                        point,
+                        value: sample.value,
+                    });
+                    carried_samples.push((point, sample));
+                }
+                _ => dropped.push(DroppedElement::InternalPoint { point }),
+            }
+        }
+        for (&point, &sample) in &checkpoint.outputs {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::Out => {
+                    if spec.kind != sample.value.kind() {
+                        return Err(CarryoverError::OutputKindMismatch {
+                            point,
+                            expected: spec.kind,
+                            found: sample.value,
+                        });
+                    }
+                    carried_outputs.push(CarriedPoint {
+                        point,
+                        value: sample.value,
+                    });
+                    carried_samples.push((point, sample));
+                }
+                _ => dropped.push(DroppedElement::OutputPoint { point }),
+            }
+        }
+        for (&point, &value) in &checkpoint.forces {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::In && spec.writable => {
+                    if spec.kind != value.kind() {
+                        return Err(CarryoverError::ForceKindMismatch {
+                            point,
+                            expected: spec.kind,
+                            found: value,
+                        });
+                    }
+                }
+                _ => return Err(CarryoverError::ForceNotServed { point }),
+            }
+        }
+        for name in checkpoint.components.keys() {
+            if !self
+                .components
+                .iter()
+                .any(|entry| entry.component.name() == name)
+            {
+                dropped.push(DroppedElement::Component { name: name.clone() });
+            }
+        }
+        if checkpoint.driver.is_some() {
+            dropped.push(DroppedElement::DriverState);
+        }
+
+        // Apply: carried samples land verbatim — quality and tick as the
+        // checkpoint captured them — over the image's seeded initials;
+        // the force set becomes exactly the checkpoint's; the run's
+        // numbering resumes at the checkpointed tick. Components and the
+        // driver are untouched: their state is the revision's fresh
+        // construction by rule.
+        {
+            let mut image = self.image.borrow_mut();
+            image.extend(carried_samples);
+        }
+        self.forces.clone_from(&checkpoint.forces);
+        self.tick = checkpoint.tick;
+
+        let initialized = self
+            .map
+            .iter()
+            .filter(|(_, spec)| {
+                spec.direction == Direction::In && spec.internal.is_some() && spec.writable
+            })
+            .map(|(point, _)| point)
+            .filter(|point| !carried.iter().any(|carried| carried.point == *point))
+            .collect();
+        Ok(CarryoverReport {
+            from: checkpoint.model_fingerprint,
+            to: self.model_fingerprint,
+            resumed_at: checkpoint.tick,
+            carried,
+            carried_outputs,
+            carried_forces: checkpoint
+                .forces
+                .iter()
+                .map(|(&point, &value)| ForcedPoint { point, value })
+                .collect(),
+            dropped,
+            reinitialized: self
+                .components
+                .iter()
+                .map(|entry| entry.component.name().to_string())
+                .collect(),
+            initialized,
+        })
     }
 
     /// The compatibility half of checkpoint restore and apply: the
@@ -4814,6 +4966,210 @@ mod tests {
         assert_eq!(
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+    }
+
+    /// The revised-model executor of the reinitialize tests: writable
+    /// internal `In` point 10 (the carried operator value's landing), an
+    /// internal `Out` point 20 the one component writes onto, and a
+    /// writable internal `In` point 30 the old model never declared —
+    /// the `initialized` leg of the report.
+    fn revision_rig(driver: &StubDriver) -> Executor<'_> {
+        Executor::new(
+            driver,
+            internal_map().with_writable_internal(
+                PointId(30),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(9.0),
+            ),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap()
+        .with_model_fingerprint(ModelFingerprint::of(b"model-b"))
+    }
+
+    /// A checkpoint captured under `model-a` exercising every
+    /// classification leg: a carried operator value and one the revision
+    /// dropped, a carried and a dropped output, a removed component's
+    /// state, a driver section, and a force on the carried point.
+    fn foreign_checkpoint() -> Checkpoint {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            tick: Tick(50),
+            components: [
+                ("a".to_string(), StateMap::new()),
+                ("gone".to_string(), StateMap::new()),
+            ]
+            .into_iter()
+            .collect(),
+            driver: Some(StateMap::new()),
+            outputs: [
+                (PointId(20), Sample::good(Value::Float(4.5), Tick(49))),
+                (PointId(21), Sample::good(Value::Float(8.0), Tick(49))),
+            ]
+            .into_iter()
+            .collect(),
+            internal: [
+                (PointId(10), Sample::good(Value::Float(7.0), Tick(49))),
+                (PointId(11), Sample::good(Value::Float(1.0), Tick(49))),
+            ]
+            .into_iter()
+            .collect(),
+            forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn reinitialize_carries_the_documented_set_and_reports_the_rest() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_rig(&driver);
+        // The revision scanned before the crossing: its own image values
+        // are evidence the apply leg overwrites exactly the carried set.
+        executor.scan().unwrap();
+
+        let report = executor.reinitialize(&foreign_checkpoint()).unwrap();
+        assert_eq!(report.from, Some(ModelFingerprint::of(b"model-a")));
+        assert_eq!(report.to, Some(ModelFingerprint::of(b"model-b")));
+        assert_eq!(report.resumed_at, Tick(50));
+        assert_eq!(
+            report.carried,
+            vec![CarriedPoint {
+                point: PointId(10),
+                value: Value::Float(7.0),
+            }]
+        );
+        assert_eq!(
+            report.carried_outputs,
+            vec![CarriedPoint {
+                point: PointId(20),
+                value: Value::Float(4.5),
+            }]
+        );
+        assert_eq!(
+            report.carried_forces,
+            vec![ForcedPoint {
+                point: PointId(10),
+                value: Value::Float(3.0),
+            }]
+        );
+        assert_eq!(
+            report.dropped,
+            vec![
+                DroppedElement::InternalPoint { point: PointId(11) },
+                DroppedElement::OutputPoint { point: PointId(21) },
+                DroppedElement::Component {
+                    name: "gone".to_string(),
+                },
+                DroppedElement::DriverState,
+            ]
+        );
+        assert_eq!(report.reinitialized, vec!["a".to_string()]);
+        assert_eq!(report.initialized, vec![PointId(30)]);
+
+        // The carried samples land verbatim and the run resumes
+        // numbering at the checkpoint's tick.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(49)))
+        );
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(4.5), Tick(49)))
+        );
+        assert_eq!(executor.tick(), Tick(50));
+
+        executor.scan().unwrap();
+        // The carried force stands: the scan substitutes it onto the
+        // point's image at Substituted quality, and the reinitialized
+        // component computed on the forced value.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::new(
+                Value::Float(3.0),
+                Quality::Uncertain(QualityReason::Substituted),
+                Tick(51)
+            ))
+        );
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(6.0), Tick(51)))
+        );
+        // The new point stands at its declared initial — initialized,
+        // never carried.
+        assert_eq!(
+            executor.sample(PointId(30)),
+            Some(Sample::good(Value::Float(9.0), Tick(0)))
+        );
+    }
+
+    #[test]
+    fn reinitialize_rejects_a_retyped_carried_point_before_applying() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_rig(&driver);
+
+        // The carried operator value's kind disagrees with the revision's
+        // declaration under the same identity — a retype must rename, not
+        // reinterpret.
+        let mut checkpoint = foreign_checkpoint();
+        checkpoint
+            .internal
+            .insert(PointId(10), Sample::good(Value::Int(7), Tick(49)));
+        assert_eq!(
+            executor.reinitialize(&checkpoint).unwrap_err(),
+            CarryoverError::InternalKindMismatch {
+                point: PointId(10),
+                expected: ValueKind::Float,
+                found: Value::Int(7),
+            }
+        );
+
+        // A forced point the revision cannot serve — here the writable
+        // `In` mark is gone — fails the crossing: an active force is
+        // never released silently.
+        let mut checkpoint = foreign_checkpoint();
+        checkpoint.forces.insert(PointId(31), Value::Float(1.0));
+        assert_eq!(
+            executor.reinitialize(&checkpoint).unwrap_err(),
+            CarryoverError::ForceNotServed { point: PointId(31) }
+        );
+
+        // Nothing applied: the run keeps its last-defined state and tick.
+        assert_eq!(executor.tick(), Tick(0));
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick(0)))
+        );
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn reinitialize_ignores_the_fingerprint_gate_but_not_the_version() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_rig(&driver);
+
+        // The fingerprint mismatch that `apply` refuses is the expected
+        // case here — it is the revision marker, not an error.
+        let checkpoint = foreign_checkpoint();
+        assert!(executor.apply(&checkpoint).is_err());
+        assert!(executor.reinitialize(&checkpoint).is_ok());
+
+        // But the format negotiation still applies: an unreadable
+        // version fails before any state moves.
+        let mut checkpoint = foreign_checkpoint();
+        checkpoint.format_version = 99;
+        assert_eq!(
+            executor.reinitialize(&checkpoint).unwrap_err(),
+            CarryoverError::UnsupportedVersion {
+                found: 99,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            }
         );
     }
 

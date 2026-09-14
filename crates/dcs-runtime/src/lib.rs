@@ -55,6 +55,12 @@
 //! [`Role`](dcs_core::Role), and applies promotion and demotion at a scan
 //! boundary so exactly one peer of a pair writes the field at a time —
 //! a promoted tracking standby continues the checkpointed run bumplessly.
+//! A peer armed with [`Peer::with_revision`] rolls a revised plant model
+//! into production instead: a foreign-fingerprint checkpoint crosses the
+//! model boundary through [`Peer::transfer`]'s documented carryover rule
+//! ([`crate::revision`]) rather than converging, and the peer reports
+//! [`StandbySync::Reinitialized`](dcs_core::StandbySync) — promotable —
+//! with the [`CarryoverReport`](dcs_core::CarryoverReport) of what moved.
 
 #![warn(missing_docs)]
 
@@ -64,6 +70,7 @@ mod divergence;
 mod executor;
 mod gate;
 mod peer;
+mod revision;
 
 pub use checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
@@ -74,4 +81,5 @@ pub use executor::{
     ComponentStatus, Executor, LinkError, PointMap, PointSpec, ScanError, WiringError,
 };
 pub use gate::WriteGate;
-pub use peer::{ApplyError, Peer, RoleChange};
+pub use peer::{ApplyError, Peer, RoleChange, Transfer};
+pub use revision::CarryoverError;
