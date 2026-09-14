@@ -4,7 +4,8 @@
 //! a scripted executor run local and remote.
 
 use dcs_core::{
-    IoDriver, IoError, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    DriverDiagnostics, IoDriver, IoError, IoFault, LinkState, PointId, Quality, QualityReason,
+    Sample, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
@@ -284,6 +285,79 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
         assert_eq!(
             remote.read(PointId(10)),
             Err(IoError::Disconnected(PointId(10)))
+        );
+    });
+}
+
+#[test]
+fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        let point_map: PointMap = [
+            (PointId(10), dcs_core::Direction::In, ValueKind::Float),
+            (PointId(20), dcs_core::Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(
+            &remote,
+            point_map,
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        // A live link reports connected with no failure history — the
+        // driver's own diagnostics surface, beside the counters.
+        assert_eq!(
+            executor.snapshot().io_health.driver,
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+            })
+        );
+
+        server.shutdown();
+        // The dead link fails the input read — degraded to a Bad sample
+        // — and the output write, which ends the scan in ScanError.
+        assert!(executor.scan().is_err());
+
+        let snapshot = executor.snapshot();
+        let health = &snapshot.io_health;
+        // Both boundaries counted, attributed to the point and tick.
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(health.failed_writes, 1);
+        assert_eq!(health.consecutive_failures, 2);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(20),
+                direction: dcs_core::Direction::Out,
+                error: IoError::Disconnected(PointId(20)),
+            })
+        );
+        // And the link itself is named degradation on the driver's own
+        // surface — visibly separate from the per-point quality the same
+        // event left on the input sample.
+        let driver = health.driver.as_ref().unwrap();
+        assert_eq!(driver.link, LinkState::Disconnected);
+        assert_eq!(
+            driver.last_error.as_deref(),
+            Some("no live connection to the plant server")
+        );
+        assert!(!remote.connected());
+        assert_eq!(
+            snapshot.points[0].sample.unwrap().quality,
+            Quality::Bad(QualityReason::CommunicationFault)
         );
     });
 }

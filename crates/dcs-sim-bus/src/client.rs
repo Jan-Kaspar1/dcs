@@ -1,0 +1,342 @@
+//! The register-mapped driver: an [`IoDriver`] whose points live behind
+//! the register protocol of [`BusServer`](crate::BusServer).
+
+use crate::protocol::{
+    BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo, decode_response, encode_request,
+    read_frame,
+};
+use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use std::collections::HashMap;
+use std::fmt;
+use std::io::{BufReader, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Mutex;
+use std::time::Duration;
+
+/// One logical point's mapping onto a device register.
+///
+/// The device-kind factory derives one `PointRegister` per bound
+/// `io_point` from the device's declared register parameters; the driver
+/// then serves exactly these points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointRegister {
+    /// The logical point.
+    pub point: PointId,
+    /// The device register backing it.
+    pub register: u16,
+    /// The point's declared value kind — writes carrying any other
+    /// variant fail [`IoError::TypeMismatch`] before any request leaves.
+    pub kind: ValueKind,
+}
+
+/// A failure on a [`BusDriver`] operation.
+///
+/// This is the transport- and protocol-level error vocabulary; the
+/// [`IoDriver`] implementation collapses it into the point-addressed
+/// [`IoError`] contract via [`at_point`](Self::at_point), and the driver
+/// records the last such failure for the link-health surface
+/// ([`last_failure`](BusDriver::last_failure)).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkError {
+    /// There is no live connection to the device server: the link
+    /// failed mid-request or the driver already dropped it. A dead
+    /// driver does not reconnect — attaching again means connecting a
+    /// new `BusDriver`.
+    Disconnected,
+    /// The server did not answer within the driver's configured
+    /// timeout. The connection is dropped — a late answer would desync
+    /// the request/response pairing — so later requests report
+    /// `Disconnected` rather than risk reading a stale response.
+    Timeout,
+    /// The server refused the request itself — a payload that does not
+    /// decode as a [`BusRequest`]. `detail` is the server's diagnostic
+    /// text.
+    InvalidRequest(String),
+}
+
+impl LinkError {
+    /// The [`IoError`] this failure presents as at `point`.
+    ///
+    /// Transport failures become that point's `Disconnected`/`Timeout`.
+    /// A refused or incoherent answer means the peer is not serving the
+    /// point the protocol promises, which surfaces as `Disconnected`.
+    pub fn at_point(self, point: PointId) -> IoError {
+        match self {
+            Self::Disconnected | Self::InvalidRequest(_) => IoError::Disconnected(point),
+            Self::Timeout => IoError::Timeout(point),
+        }
+    }
+}
+
+impl fmt::Display for LinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected => write!(f, "no live connection to the device server"),
+            Self::Timeout => write!(f, "device server did not answer in time"),
+            Self::InvalidRequest(detail) => {
+                write!(f, "server refused the request: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LinkError {}
+
+impl BusError {
+    /// The [`IoError`] this protocol-reported failure presents as at
+    /// `point` — the point the caller addressed, whose register the
+    /// error names.
+    fn at_point(&self, point: PointId) -> IoError {
+        match *self {
+            Self::UnknownRegister { .. } => IoError::UnknownPoint(point),
+            Self::KindMismatch {
+                expected, found, ..
+            } => IoError::TypeMismatch {
+                point,
+                expected,
+                found,
+            },
+            Self::InvalidRequest { ref detail } => {
+                LinkError::InvalidRequest(detail.clone()).at_point(point)
+            }
+        }
+    }
+}
+
+/// The connection behind [`BusDriver`]'s lock: `Some` while the link is
+/// live, `None` after the first failed exchange.
+struct Connection {
+    stream: Option<BufReader<TcpStream>>,
+}
+
+/// Writes the request frame and reads the response frame on `stream`,
+/// translating `io::Error`s into the transport vocabulary.
+fn exchange(
+    stream: &mut BufReader<TcpStream>,
+    request: &BusRequest,
+) -> Result<BusResponse, LinkError> {
+    fn transport(error: std::io::Error) -> LinkError {
+        match error.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => LinkError::Timeout,
+            // A dropped connection, a mid-frame EOF, and an oversized or
+            // undecodable response all mean the peer is gone or is not
+            // speaking the protocol — Disconnected either way.
+            _ => LinkError::Disconnected,
+        }
+    }
+
+    stream
+        .get_mut()
+        .write_all(&encode_request(request))
+        .map_err(transport)?;
+    let Some(body) = read_frame(stream, MAX_FRAME).map_err(transport)? else {
+        return Err(LinkError::Disconnected);
+    };
+    decode_response(&body).map_err(|_| LinkError::Disconnected)
+}
+
+/// An [`IoDriver`] whose logical points are registers in a
+/// [`BusServer`](crate::BusServer) reached over TCP.
+///
+/// `BusDriver` is the second-transport proof that the I/O abstraction
+/// hides more than one wire protocol: where `dcs-sim-net`'s
+/// `RemoteDriver` speaks line-delimited JSON addressed by point, this
+/// driver speaks the binary register protocol, mapping each served
+/// [`PointId`] to the register address the plant model's device
+/// parameters declare. Components and the executor use it through
+/// `&dyn IoDriver` exactly as they use an in-process `SimDriver`.
+///
+/// The driver is the field-observing kind: the register bank lives in
+/// the server process, so
+/// [`capture_state`](IoDriver::capture_state) stays at its `None`
+/// default — there is nothing local to checkpoint. [`step`](Self::step)
+/// issues the explicit device-clock advance, so a field-owning
+/// controller paces the bank exactly where a local driver's step call
+/// sat; a second attached client observes the same stepped registers.
+///
+/// Failure handling: a point the driver's map does not serve is
+/// [`IoError::UnknownPoint`] without a request; a write carrying the
+/// wrong value kind is [`IoError::TypeMismatch`] likewise. On the wire,
+/// any failed exchange — broken pipe, closed connection, timed-out or
+/// oversized response, undecodable answer — drops the connection, is
+/// recorded for [`last_failure`](Self::last_failure), and every later
+/// access fails fast with `Disconnected`. A timed-out response could
+/// arrive after the fact and pair with a later request, so the driver
+/// never reuses a suspect link. `BusDriver` is [`Sync`] through its
+/// internal locks, like the driver contract expects.
+pub struct BusDriver {
+    connection: Mutex<Connection>,
+    /// Point → register mapping plus the point's declared kind.
+    points: HashMap<PointId, PointRegister>,
+    /// The last transport failure, for the link-health surface.
+    last_failure: Mutex<Option<LinkError>>,
+}
+
+impl BusDriver {
+    /// The request timeout [`connect`](Self::connect) applies to each
+    /// request's write and response wait — five seconds.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Connects to the device server at `addr` with the
+    /// [`DEFAULT_TIMEOUT`](Self::DEFAULT_TIMEOUT) request timeout,
+    /// serving `points` — see
+    /// [`connect_with_timeout`](Self::connect_with_timeout).
+    pub fn connect<A: ToSocketAddrs>(addr: A, points: &[PointRegister]) -> std::io::Result<Self> {
+        Self::connect_with_timeout(addr, Self::DEFAULT_TIMEOUT, points)
+    }
+
+    /// Connects with an explicit `timeout` applied to each request's
+    /// write and to the wait for its response.
+    ///
+    /// A refused or unreachable address fails here with the `io::Error`
+    /// from the connect, before any point is involved; once connected,
+    /// later link failures surface per-access as [`LinkError`] /
+    /// [`IoError`].
+    pub fn connect_with_timeout<A: ToSocketAddrs>(
+        addr: A,
+        timeout: Duration,
+        points: &[PointRegister],
+    ) -> std::io::Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        // Requests are small and answered immediately; coalescing delays
+        // would only add latency.
+        stream.set_nodelay(true)?;
+        Ok(Self {
+            connection: Mutex::new(Connection {
+                stream: Some(BufReader::new(stream)),
+            }),
+            points: points
+                .iter()
+                .map(|mapping| (mapping.point, *mapping))
+                .collect(),
+            last_failure: Mutex::new(None),
+        })
+    }
+
+    /// Whether the link to the server is still live — `false` after the
+    /// first failed exchange, permanently.
+    pub fn connected(&self) -> bool {
+        self.connection.lock().unwrap().stream.is_some()
+    }
+
+    /// The transport failure that ended the link, if one has occurred —
+    /// the link-health data a driver-diagnostics surface reports.
+    pub fn last_failure(&self) -> Option<LinkError> {
+        self.last_failure.lock().unwrap().clone()
+    }
+
+    /// Advances the device server's bank one tick — the explicit step
+    /// behind the register protocol — and returns the bank's new tick.
+    pub fn step(&self) -> Result<Tick, LinkError> {
+        match self.request(&BusRequest::Step)? {
+            BusResponse::Stepped { tick } => Ok(tick),
+            BusResponse::Error { error } => Err(LinkError::InvalidRequest(format!("{error:?}"))),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Lists every register the device server holds —
+    /// `RegisterBank::registers` on the server — ordered by address. The
+    /// census a rig or test inspects the device with.
+    pub fn list_registers(&self) -> Result<Vec<RegisterInfo>, LinkError> {
+        match self.request(&BusRequest::ListRegisters)? {
+            BusResponse::Registers { registers } => Ok(registers),
+            BusResponse::Error { error } => Err(LinkError::InvalidRequest(format!("{error:?}"))),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Sends one request and returns the server's response.
+    ///
+    /// The lock serializes exchanges so a response always pairs with the
+    /// request that produced it. Any failed exchange drops the
+    /// connection and is recorded as the driver's last transport
+    /// failure: the response stream's position is unknown afterward,
+    /// and a later read could pick up a stale answer.
+    fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+        let mut connection = self.connection.lock().unwrap();
+        let Some(stream) = connection.stream.as_mut() else {
+            return Err(LinkError::Disconnected);
+        };
+        match exchange(stream, request) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                connection.stream = None;
+                *self.last_failure.lock().unwrap() = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Drops the connection and reports the peer as gone: an answer
+    /// that decodes but does not correspond to the request means the
+    /// peer is not a device server, and the link can no longer be
+    /// trusted.
+    fn protocol_violation(&self) -> LinkError {
+        self.connection.lock().unwrap().stream = None;
+        let error = LinkError::Disconnected;
+        *self.last_failure.lock().unwrap() = Some(error.clone());
+        error
+    }
+}
+
+impl fmt::Debug for BusDriver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BusDriver")
+            .field("connected", &self.connected())
+            .field("points", &self.points.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl IoDriver for BusDriver {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        let Some(mapping) = self.points.get(&point).copied() else {
+            return Err(IoError::UnknownPoint(point));
+        };
+        match self.request(&BusRequest::ReadRegister {
+            register: mapping.register,
+        }) {
+            Ok(BusResponse::Sample { sample }) => {
+                // A register serving a kind other than the point's
+                // declared kind is the same failure a local driver
+                // reports: never a coercion.
+                if sample.value.kind() != mapping.kind {
+                    return Err(IoError::TypeMismatch {
+                        point,
+                        expected: mapping.kind,
+                        found: sample.value,
+                    });
+                }
+                Ok(sample)
+            }
+            Ok(BusResponse::Error { error }) => Err(error.at_point(point)),
+            Ok(_) => Err(self.protocol_violation().at_point(point)),
+            Err(error) => Err(error.at_point(point)),
+        }
+    }
+
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        let Some(mapping) = self.points.get(&point).copied() else {
+            return Err(IoError::UnknownPoint(point));
+        };
+        if value.kind() != mapping.kind {
+            return Err(IoError::TypeMismatch {
+                point,
+                expected: mapping.kind,
+                found: value,
+            });
+        }
+        match self.request(&BusRequest::WriteRegister {
+            register: mapping.register,
+            value,
+        }) {
+            Ok(BusResponse::Written { .. }) => Ok(()),
+            Ok(BusResponse::Error { error }) => Err(error.at_point(point)),
+            Ok(_) => Err(self.protocol_violation().at_point(point)),
+            Err(error) => Err(error.at_point(point)),
+        }
+    }
+}

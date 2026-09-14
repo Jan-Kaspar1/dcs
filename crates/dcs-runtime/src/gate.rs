@@ -10,7 +10,9 @@
 //! nothing reaches the field until [`open`](WriteGate::open) lifts the
 //! gate, the promotion path the follow-up switchover ticket builds on.
 
-use dcs_core::{IoDriver, IoError, PointId, Sample, StateError, StateMap, Value};
+use dcs_core::{
+    DriverDiagnostics, IoDriver, IoError, PointId, Sample, StateError, StateMap, Value,
+};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -119,6 +121,12 @@ impl IoDriver for WriteGate<'_> {
 
     fn restore_state(&self, state: &StateMap) -> Result<(), StateError> {
         self.inner.restore_state(state)
+    }
+
+    /// The gated driver's transport diagnostics pass through: a quiesced
+    /// standby still wants its field link's health reported.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        self.inner.diagnostics()
     }
 }
 
