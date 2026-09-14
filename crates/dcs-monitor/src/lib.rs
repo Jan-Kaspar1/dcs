@@ -151,10 +151,12 @@ pub const PAGE: &str = include_str!("page.html");
 const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock time by this \
      controller; externally requested scans would inject ticks outside the schedule";
 
-/// Runs once after each completed requested scan, receiving the peer's
-/// field ownership at that moment — the plant step the driving request
-/// paces the run to. A failure fails the request like a scan failure.
-pub type AfterScan<'d> = Box<dyn Fn(bool) -> Result<(), String> + Send + Sync + 'd>;
+/// Runs once after each completed requested scan, receiving the peer —
+/// the plant step the driving request paces the run to (its field
+/// ownership decides the step), and the checkpoint a state-file run
+/// persists at that boundary. A failure fails the request like a scan
+/// failure.
+pub type AfterScan<'d> = Box<dyn Fn(&Peer<'d>) -> Result<(), String> + Send + Sync + 'd>;
 
 /// The wiring an unpaced [`Monitor`]'s `POST /scan` runs around each
 /// requested scan — see [`Monitor::driven`].
@@ -348,6 +350,14 @@ impl<'d> Monitor<'d> {
         self.shared.lock().unwrap().peer.snapshot()
     }
 
+    /// The executor's current transferable state, taken under the lock —
+    /// the same between-scans [`Checkpoint`] `GET /checkpoint` serves.
+    /// A paced loop uses it to persist the run's state file at its
+    /// documented per-cycle boundary.
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.shared.lock().unwrap().peer.checkpoint()
+    }
+
     /// The executor's current virtual tick.
     pub fn tick(&self) -> Tick {
         self.shared.lock().unwrap().peer.tick()
@@ -490,7 +500,7 @@ impl<'d> Monitor<'d> {
                             break;
                         }
                         if let Some(after_scan) = &self.driven.after_scan
-                            && let Err(error) = after_scan(shared.peer.owns_field())
+                            && let Err(error) = after_scan(&shared.peer)
                         {
                             failure = Some(error);
                             break;
