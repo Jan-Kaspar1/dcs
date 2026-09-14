@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-8ai",
+      "channels": {
+        "ch0": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-4ao",
+      "channels": {
+        "ch0": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "ch0" }
+    },
+    {
+      "id": 11,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "ch0" }
+    }
+  ],
+  "signals": [
+    { "id": 100, "name": "reactor-temperature", "source": 10 }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "gain",
+      "parameters": { "k": { "Float": 2.0 } },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 99 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 11 }
+    }
+  ]
+}
