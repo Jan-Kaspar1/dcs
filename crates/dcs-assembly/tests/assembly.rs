@@ -8,8 +8,8 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{
-    AnalogInput, AnalogOutput, Counter, DigitalOutput, ManualStation, Pid, RateLimiter,
-    SignalFilter, Timer,
+    AnalogInput, AnalogOutput, Counter, DigitalOutput, LatchingAlarm, ManualStation, Pid,
+    RateLimiter, SignalFilter, Timer,
 };
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
@@ -25,6 +25,9 @@ const M1_TANK_LEVEL: &str = include_str!("../../dcs-demo/fixtures/tank_level.jso
 const INTERNAL_POINTS: &str = include_str!("../fixtures/internal_points.json");
 /// The cyclic-vocabulary fixture: a timer, a counter, and a rate limiter.
 const CYCLIC: &str = include_str!("../fixtures/cyclic.json");
+/// The latching-alarm fixture: one `latching-alarm` over a field `pv`,
+/// an internal operator `ack` point, and field `alarm`/`unack` outputs.
+const LATCHING_ALARM: &str = include_str!("../fixtures/latching_alarm.json");
 /// The operator-vocabulary fixture: a manual/auto station and a signal
 /// filter.
 const OPERATOR: &str = include_str!("../fixtures/operator.json");
@@ -51,6 +54,13 @@ const TIMED: PointId = PointId(20);
 const COUNT: PointId = PointId(21);
 const DONE: PointId = PointId(22);
 const LIMITED: PointId = PointId(23);
+
+// `latching_alarm.json`: the field measurement, the internal operator
+// ack point, and the two field-side outputs.
+const ALARM_PV: PointId = PointId(10);
+const ALARM_ACK: PointId = PointId(11);
+const ALARM_OUT: PointId = PointId(20);
+const UNACK_OUT: PointId = PointId(21);
 
 // `operator.json`: the field-side points the fixture's components drive.
 const CV: PointId = PointId(10);
@@ -153,6 +163,16 @@ fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(LatchingAlarm::KIND, |spec| {
+            boxed(LatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
                 spec.parameters,
             ))
         })
@@ -348,6 +368,77 @@ fn cyclic_fixture_runs_timer_counter_and_limiter() {
     executor.scan().unwrap();
     assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(0));
     assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(false));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn latching_alarm_fixture_trips_latches_and_acknowledges() {
+    let model = model(LATCHING_ALARM);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The registry built the declared kind: its descriptor reports
+    // `latching-alarm` and the internal `ack` point holds its declared
+    // initial.
+    assert!(
+        executor
+            .snapshot()
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.kind == LatchingAlarm::KIND)
+    );
+    assert_eq!(
+        executor.sample(ALARM_ACK).unwrap().value,
+        Value::Bool(false)
+    );
+
+    // A trip asserts both outputs on the field points.
+    driver.write(ALARM_PV, Value::Float(95.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
+
+    // The input receding inside the limits clears the alarm through the
+    // hysteresis rule; the latch stands until acknowledged.
+    driver.write(ALARM_PV, Value::Float(50.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
+
+    // The operator's ack — a command to the fixture's `writable`
+    // internal point — applies at the scan boundary and clears the
+    // latch.
+    let receipt = executor.submit_command(Command::WriteValue {
+        point: ALARM_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    });
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(3)
+        }
+    );
+    executor.scan().unwrap();
+    assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(false));
+
+    // A fresh trip after acknowledgment latches again.
+    executor.submit_command(Command::WriteValue {
+        point: ALARM_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(false),
+    });
+    driver.write(ALARM_PV, Value::Float(95.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
 
     assert!(
         executor

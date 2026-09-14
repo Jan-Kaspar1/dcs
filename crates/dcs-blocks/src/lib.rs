@@ -25,6 +25,8 @@
 //!   conditional-integration anti-windup;
 //! - [`AlarmMonitor`] — high/low limit checking with hysteresis on an
 //!   analog signal;
+//! - [`LatchingAlarm`] — the same limit checking plus an
+//!   operator-acknowledgment latch driven by an `ack` input;
 //! - [`Interlock`] — analog pass-through gated by Bool trip inputs and a
 //!   permissive, driving a configured safe value while tripped;
 //! - [`OverrideSelect`] — deterministic selection between a control and
@@ -62,6 +64,7 @@ pub mod describe;
 mod digital_input;
 mod digital_output;
 mod interlock;
+mod latching_alarm;
 mod manual_station;
 mod motor;
 mod override_select;
@@ -79,6 +82,7 @@ pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use interlock::Interlock;
+pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
 pub use motor::Motor;
 pub use override_select::OverrideSelect;
