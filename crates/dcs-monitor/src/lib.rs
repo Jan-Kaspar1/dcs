@@ -12,7 +12,7 @@
 //! - `GET /snapshot` → `200` [`TelemetrySnapshot`]
 //! - `GET /signals` → `200` [`SignalIndex`] — the loaded model's
 //!   point-to-signal metadata: every known point's signal name, unit,
-//!   description, direction, and value type
+//!   description, display group, direction, and value type
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
 //!   receipt log, retrievable alongside the snapshot
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
@@ -21,6 +21,11 @@
 //!   the caller's last seen sequence
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise
+//! - `GET /checkpoint` → `200` [`Checkpoint`] — the executor's current
+//!   transferable state. This is the peer-sync endpoint a standby
+//!   controller pulls from (the peer-transport decision): like every
+//!   request it is served at a scan boundary under the executor lock, so
+//!   the checkpoint is always a consistent between-scans capture
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
@@ -41,13 +46,15 @@
 //! The page is the trend slice of the monitoring and control UI consuming
 //! the unified contract: a static, dependency-free HTML+JavaScript asset
 //! ([`PAGE`], no build toolchain) that fetches `/signals` once for point
-//! labels and units, then polls `/snapshot`, `/history`, and `/journal` on
-//! one shared one-second cadence — the snapshot refreshes each point's
-//! value, quality, and tick; the history increments grow each point's
-//! inline-SVG trend through `since`-cursor polling; the journal pane
-//! lists quality transitions and settled command receipts in tick order —
-//! and submits `write_value` commands to `/command` through a form,
-//! displaying the returned receipt.
+//! labels, units, and display groups — the point listing organizes itself
+//! under the model-declared groups, with ungrouped points filed under the
+//! documented `"ungrouped"` default — then polls `/snapshot`, `/history`,
+//! and `/journal` on one shared one-second cadence — the snapshot
+//! refreshes each point's value, quality, and tick; the history
+//! increments grow each point's inline-SVG trend through `since`-cursor
+//! polling; the journal pane lists quality transitions and settled
+//! command receipts in tick order — and submits `write_value` commands to
+//! `/command` through a form, displaying the returned receipt.
 //!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow
@@ -80,7 +87,7 @@ use dcs_core::{
     Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{Executor, ScanError};
+use dcs_runtime::{Checkpoint, Executor, ScanError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -234,6 +241,9 @@ impl<'d> Monitor<'d> {
             }
             (Method::Get, "/receipts") => {
                 json(200, self.shared.lock().unwrap().executor.receipts())
+            }
+            (Method::Get, "/checkpoint") => {
+                json(200, &self.shared.lock().unwrap().executor.checkpoint())
             }
             (Method::Get, "/history") => match history_query(query) {
                 Ok((points, since)) => {
@@ -404,6 +414,13 @@ impl MonitorClient {
     /// `GET /receipts`: the executor's full receipt log.
     pub fn receipts(&self) -> io::Result<Vec<CommandReceipt>> {
         self.get_json("/receipts")
+    }
+
+    /// `GET /checkpoint`: the executor's current transferable state —
+    /// the endpoint a standby pulls checkpoints from, per the
+    /// peer-transport decision.
+    pub fn checkpoint(&self) -> io::Result<Checkpoint> {
+        self.get_json("/checkpoint")
     }
 
     /// `GET /history`: the retained samples of `points` — or of every

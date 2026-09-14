@@ -1,0 +1,278 @@
+//! Process-level integration tests for `dcs-plant-server`: the binary
+//! spawned against the checked-in tank-loop fixture pair, two attached
+//! `RemoteDriver`s sharing the stepped plant, stepping on explicit
+//! request only, the named failure surface, graceful shutdown, and
+//! identical scripted runs across restarts.
+
+use dcs_core::{IoDriver, IoError, PointId, Value};
+use dcs_sim_net::RemoteDriver;
+use std::io::{BufRead, BufReader, Read};
+use std::net::SocketAddr;
+use std::net::TcpListener;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Output, Stdio};
+
+/// The binary under test, built by Cargo alongside the test harness.
+const SERVER: &str = env!("CARGO_BIN_EXE_dcs-plant-server");
+const MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/tank_loop.json");
+const DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/tank_loop_dynamics.json"
+);
+const UNBOUND_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_unbound_point.json"
+);
+const MALFORMED_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_malformed.json"
+);
+const UNKNOWN_DEVICE_MODEL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-assembly/fixtures/invalid/unknown_device_kind.json"
+);
+const INVALID_MODEL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-model/fixtures/invalid/duplicate_id.json"
+);
+
+/// A running `dcs-plant-server` child: its process, bound address, and
+/// stderr stream (held open so the child's later messages never meet a
+/// closed pipe).
+struct Plant {
+    child: Child,
+    addr: SocketAddr,
+    stderr: BufReader<ChildStderr>,
+}
+
+/// Spawns the server with `args` and reads its `listening on` line to
+/// learn the bound address — `--listen 127.0.0.1:0` binds an ephemeral
+/// port with no reservation race.
+fn spawn(args: &[&str]) -> Plant {
+    let mut child = Command::new(SERVER)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("dcs-plant-server spawns");
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    if stderr.read_line(&mut line).unwrap() == 0 {
+        // The process exited before announcing its address; report why.
+        let status = child.wait().unwrap();
+        let mut rest = String::new();
+        stderr.read_to_string(&mut rest).ok();
+        panic!("dcs-plant-server exited {status} before serving: {rest}");
+    }
+    let addr = line
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap_or_else(|| panic!("unexpected server output: {line:?}"))
+        .parse()
+        .expect("the announced address parses");
+    Plant {
+        child,
+        addr,
+        stderr,
+    }
+}
+
+/// Signals the child with SIGTERM and waits for it to exit; a graceful
+/// shutdown reports `success`. Drains the child's stderr afterward so a
+/// failing wait can be diagnosed.
+fn stop(plant: &mut Plant) -> ExitStatus {
+    let status = Command::new("kill")
+        .args(["-TERM", &plant.child.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(status.success(), "kill could not signal the child");
+    let status = plant.child.wait().unwrap();
+    if !status.success() {
+        let mut rest = String::new();
+        plant.stderr.read_to_string(&mut rest).ok();
+        panic!("dcs-plant-server exited {status}, stderr: {rest}");
+    }
+    status
+}
+
+/// Runs the binary expecting failure and returns its output.
+fn run_fail(args: &[&str]) -> Output {
+    let output = Command::new(SERVER)
+        .args(args)
+        .output()
+        .expect("dcs-plant-server runs");
+    assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+    output
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn two_attached_drivers_observe_the_same_stepped_state() {
+    let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
+    let active = RemoteDriver::connect(plant.addr).unwrap();
+    let standby = RemoteDriver::connect(plant.addr).unwrap();
+
+    // The lag seeds its output — the raw tank level — at its declared
+    // initial value, before any step.
+    assert_eq!(active.read(PointId(10)).unwrap().value, Value::Float(4.0));
+
+    active.write(PointId(20), Value::Float(12.0)).unwrap();
+    let tick = active.step(0.1).unwrap();
+
+    // The lag's exact discretization y += (1 - e^{-dt/τ})(u - y), as
+    // SimDriver computes it.
+    let expected = 4.0 + (1.0 - (-0.1_f64 / 2.0).exp()) * (12.0 - 4.0);
+    let seen_by_active = active.read(PointId(10)).unwrap();
+    let seen_by_standby = standby.read(PointId(10)).unwrap();
+    assert_eq!(seen_by_active, seen_by_standby);
+    assert_eq!(seen_by_active.value, Value::Float(expected));
+    assert_eq!(seen_by_active.tick, tick);
+
+    assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn a_declared_lag_advances_only_on_explicit_step_requests() {
+    let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+
+    // Reads and writes alone never advance the plant: the tick and the
+    // lag's output hold until a step request arrives.
+    let before = driver.read(PointId(10)).unwrap();
+    driver.write(PointId(20), Value::Float(16.0)).unwrap();
+    assert_eq!(driver.read(PointId(10)).unwrap(), before);
+
+    let tick = driver.step(0.5).unwrap();
+    let after = driver.read(PointId(10)).unwrap();
+    assert_eq!(after.tick, tick);
+    let (Value::Float(start), Value::Float(level)) = (before.value, after.value) else {
+        panic!("lag points are Float")
+    };
+    assert!(
+        level > start,
+        "a step toward input 16.0 raised the level: {start} -> {level}"
+    );
+    // ...and no further: the stepped value holds across reads.
+    assert_eq!(driver.read(PointId(10)).unwrap(), after);
+
+    assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn malformed_dynamics_exit_nonzero_naming_the_element() {
+    // A process element driving a point the model does not bind.
+    let output = run_fail(&[
+        MODEL,
+        "--dynamics",
+        UNBOUND_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics element 0"), "{message}");
+    assert!(message.contains("99"), "{message}");
+
+    // A document that is not a process-element list at all.
+    let output = run_fail(&[
+        MODEL,
+        "--dynamics",
+        MALFORMED_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics"), "{message}");
+    assert!(message.contains("dynamics_malformed.json"), "{message}");
+
+    // A dynamics path that does not exist.
+    let output = run_fail(&[
+        MODEL,
+        "--dynamics",
+        "no-such-dynamics.json",
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    assert!(stderr(&output).contains("no-such-dynamics.json"));
+}
+
+#[test]
+fn unknown_model_inputs_exit_nonzero_naming_the_element() {
+    // A model path that does not exist names the path.
+    let output = run_fail(&["no-such-model.json", "--listen", "127.0.0.1:0"]);
+    assert!(stderr(&output).contains("no-such-model.json"));
+
+    // A document failing model validation names the offending element.
+    let output = run_fail(&[INVALID_MODEL, "--listen", "127.0.0.1:0"]);
+    let message = stderr(&output);
+    assert!(message.contains("invalid plant model"), "{message}");
+    assert!(message.contains("10"), "{message}");
+
+    // A device kind the simulated plant cannot serve names the device
+    // and its kind.
+    let output = run_fail(&[UNKNOWN_DEVICE_MODEL, "--listen", "127.0.0.1:0"]);
+    let message = stderr(&output);
+    assert!(message.contains("device 1"), "{message}");
+    assert!(message.contains("ethercat-8ai"), "{message}");
+}
+
+#[test]
+fn an_occupied_listen_address_exits_nonzero_naming_it() {
+    // Hold the address so the server's own bind must fail.
+    let blocker = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = blocker.local_addr().unwrap().to_string();
+    let output = run_fail(&[MODEL, "--listen", &addr]);
+    let stderr = stderr(&output);
+    assert!(stderr.contains(&addr), "{stderr}");
+}
+
+#[test]
+fn shutdown_is_graceful_and_the_port_refuses_connections() {
+    let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    assert!(driver.read(PointId(10)).is_ok());
+
+    // SIGTERM ends the run with a clean exit, not a signal status.
+    assert!(stop(&mut plant).success());
+
+    // The bound address refuses new connections...
+    let error = RemoteDriver::connect(plant.addr).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    // ...and the already-attached client sees the plant go away rather
+    // than hang.
+    assert_eq!(
+        driver.read(PointId(10)),
+        Err(IoError::Disconnected(PointId(10)))
+    );
+}
+
+#[test]
+fn identical_request_sequences_produce_identical_responses_across_restarts() {
+    // One scripted pass over a fresh plant: the serialized results are
+    // the responses a restart must reproduce bit-for-bit.
+    let script = |addr: SocketAddr| -> Vec<serde_json::Value> {
+        let driver = RemoteDriver::connect(addr).unwrap();
+        let mut responses = Vec::new();
+        responses.push(serde_json::to_value(driver.read(PointId(10)).unwrap()).unwrap());
+        driver.write(PointId(20), Value::Float(12.0)).unwrap();
+        responses.push(serde_json::to_value(driver.step(0.1).unwrap()).unwrap());
+        responses.push(serde_json::to_value(driver.read(PointId(10)).unwrap()).unwrap());
+        responses.push(serde_json::to_value(driver.step(0.1).unwrap()).unwrap());
+        responses.push(serde_json::to_value(driver.read(PointId(10)).unwrap()).unwrap());
+        responses.push(serde_json::to_value(driver.list_points().unwrap()).unwrap());
+        responses
+    };
+
+    let args = [MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"];
+    let mut first = spawn(&args);
+    let first_run = script(first.addr);
+    assert!(stop(&mut first).success());
+
+    let mut second = spawn(&args);
+    let second_run = script(second.addr);
+    assert!(stop(&mut second).success());
+
+    assert_eq!(first_run, second_run);
+}
