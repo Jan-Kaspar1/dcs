@@ -154,6 +154,15 @@ pub const FRACTION_F64: ParameterRange = ParameterRange {
     max: Value::Float(1.0),
 };
 
+/// The inclusive bound the `Int` selection-code parameters of
+/// `bool-gate` (`operation`) and `edge-trigger` (`edge`) accept — the
+/// declared codes `0`, `1`, `2`. Mirrors each kind's private range
+/// constant.
+pub(crate) const CODE_RANGE: ParameterRange = ParameterRange {
+    min: Value::Int(0),
+    max: Value::Int(2),
+};
+
 /// A component kind's declared interface, supplied to
 /// [`PlantBuilder::add`](crate::PlantBuilder::add).
 ///

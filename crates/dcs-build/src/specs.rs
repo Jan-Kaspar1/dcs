@@ -17,8 +17,8 @@
 
 use crate::endpoint::{Sink, Source};
 use crate::spec::{
-    FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64, ParamDecl,
-    Parameters, PortDecl, Spec, optional, port, required,
+    CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64,
+    ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
 use dcs_core::{Direction, PointType, ValueKind};
 use dcs_model::ComponentId;
@@ -1473,6 +1473,226 @@ impl Spec for SequencerSpec {
             out: Source::port(id, "out"),
             step: Source::port(id, "step"),
             done: Source::port(id, "done"),
+        }
+    }
+}
+
+/// Spec for the `bool-gate` kind: folding a declared `in_1`…`in_N`
+/// boolean input set through the `operation`'s truth function.
+///
+/// The port set is not static: an instance declares
+/// [`inputs`](Self::inputs) gate inputs, and [`ports`](Spec::ports)
+/// emits `in_1`…`in_N` (`In`, `Bool`) — each connected through the
+/// instance's [`input`](BoolGateInstance::input) handle — followed by
+/// `out` (`Out`, `Bool`). Mirrors the descriptor: the `in_N` set, then
+/// `out`.
+///
+/// Parameters: `operation` (required `Int` in `0..=2` — the
+/// `GateOperation` code).
+pub struct BoolGateSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many `in_N` gate inputs the instance declares.
+    pub inputs: usize,
+}
+
+/// Typed port handles for a `bool-gate` instance.
+pub struct BoolGateInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `out` port (`Out`, `Bool`): the folded truth-function result.
+    pub out: Source<bool>,
+}
+
+impl BoolGateInstance {
+    /// The `index`th gate input (`in_1`…`in_N`, where `N` is the spec's
+    /// [`inputs`](BoolGateSpec::inputs)): an `In`, `Bool` port. The
+    /// input count lives on the spec, not on this handle — an `index`
+    /// outside `1..=N` names a port the instance does not declare, and
+    /// [`build`](crate::PlantBuilder::build) reports the connection.
+    pub fn input(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("in_{index}"))
+    }
+}
+
+impl BoolGateSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "bool-gate";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] =
+        &[required("operation", ValueKind::Int, Some(CODE_RANGE))];
+
+    /// A spec for an instance declaring `inputs` gate inputs and
+    /// carrying `parameters` as its parameter map.
+    pub fn new(parameters: Parameters, inputs: usize) -> Self {
+        Self { parameters, inputs }
+    }
+}
+
+impl Spec for BoolGateSpec {
+    type Instance = BoolGateInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports: Vec<_> = (1..=self.inputs)
+            .map(|index| port(&format!("in_{index}"), Direction::In, ValueKind::Bool))
+            .collect();
+        ports.push(port("out", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BoolGateInstance {
+            id,
+            out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `sr-latch` kind: a reset-dominant set/reset bistable.
+///
+/// Ports mirror the descriptor: `set` (`In`, `Bool`), `reset` (`In`,
+/// `Bool`), `out` (`Out`, `Bool`). The kind takes no parameters.
+pub struct SrLatchSpec {
+    /// The instance's parameter map — the kind declares no parameters,
+    /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
+    /// at `build`.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for an `sr-latch` instance.
+pub struct SrLatchInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `set` port (`In`, `Bool`): the latching condition.
+    pub set: Sink<bool>,
+    /// `reset` port (`In`, `Bool`): the clearing condition; dominant
+    /// when both inputs assert.
+    pub reset: Sink<bool>,
+    /// `out` port (`Out`, `Bool`): the latched state.
+    pub out: Source<bool>,
+}
+
+impl SrLatchSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "sr-latch";
+
+    /// The declared parameter set: the kind takes none.
+    pub const PARAMETERS: &'static [ParamDecl] = &[];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for SrLatchSpec {
+    type Instance = SrLatchInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("set", Direction::In, ValueKind::Bool),
+            port("reset", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        SrLatchInstance {
+            id,
+            set: Sink::port(id, "set"),
+            reset: Sink::port(id, "reset"),
+            out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `edge-trigger` kind: emitting a one-tick pulse on a
+/// selected edge of a boolean input.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Bool`), `out` (`Out`,
+/// `Bool`). Parameters: `edge` (required `Int` in `0..=2` — the `Edge`
+/// code).
+pub struct EdgeTriggerSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for an `edge-trigger` instance.
+pub struct EdgeTriggerInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Bool`): the observed signal.
+    pub input: Sink<bool>,
+    /// `out` port (`Out`, `Bool`): the one-tick pulse.
+    pub out: Source<bool>,
+}
+
+impl EdgeTriggerSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "edge-trigger";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] =
+        &[required("edge", ValueKind::Int, Some(CODE_RANGE))];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for EdgeTriggerSpec {
+    type Instance = EdgeTriggerInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        EdgeTriggerInstance {
+            id,
+            input: Sink::port(id, "in"),
+            out: Source::port(id, "out"),
         }
     }
 }

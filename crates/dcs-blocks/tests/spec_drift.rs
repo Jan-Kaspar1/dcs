@@ -18,16 +18,17 @@ use std::collections::BTreeSet;
 
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
-    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
-    RateLimiter, Scaling, Sequencer, SequencerStep, SignalFilter, Timer, Totalizer, Valve,
+    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput,
+    DigitalOutput, Edge, EdgeTrigger, GateOperation, Interlock, LatchingAlarm, ManualStation,
+    MedianVoter, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Sequencer,
+    SequencerStep, SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, CounterSpec, DigitalInputSpec,
-    DigitalOutputSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec,
-    MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    TimerSpec, TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec,
+    SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -292,6 +293,27 @@ fn specs_match_registered_kinds_descriptors() {
         "sequencer's indexed parameter vocabulary drifted"
     );
 
+    // `bool-gate`'s `in_N` set is instance-dependent — `N` is the
+    // spec's `inputs`, matching the interlock's `trips` convention.
+    covered.insert(check(
+        &BoolGateSpec::new(Default::default(), 3),
+        &BoolGate::new(
+            "gate",
+            vec![point(1), point(2), point(3)],
+            point(4),
+            GateOperation::Or,
+        )
+        .describe(),
+    ));
+    covered.insert(check(
+        &SrLatchSpec::new(Default::default()),
+        &SrLatch::new("srl", point(1), point(2), point(3)).describe(),
+    ));
+    covered.insert(check(
+        &EdgeTriggerSpec::new(Default::default()),
+        &EdgeTrigger::new("etr", point(1), point(2), Edge::Rising).describe(),
+    ));
+
     // The coverage guard: the table must pin exactly the kinds the
     // standard registry serves — the checked-in `dcs_blocks::KINDS`
     // list the `dcs-controller` registry test keeps in step. A kind
@@ -324,6 +346,26 @@ fn interlock_spec_tracks_trip_count() {
         .unwrap();
         check(
             &InterlockSpec::new(Default::default(), trips),
+            &component.describe(),
+        );
+    }
+}
+
+#[test]
+fn bool_gate_spec_tracks_input_count() {
+    // The `in_N` set is instance-dependent, like the interlock's
+    // `trip_N` set: the spec's port list must follow the constructed
+    // component's — including the empty gate, whose descriptor declares
+    // `out` alone.
+    for inputs in [0usize, 1, 5] {
+        let component = BoolGate::new(
+            "gate",
+            (0..inputs as u64).map(|n| point(10 + n)).collect(),
+            point(1),
+            GateOperation::Or,
+        );
+        check(
+            &BoolGateSpec::new(Default::default(), inputs),
             &component.describe(),
         );
     }

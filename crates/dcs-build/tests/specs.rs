@@ -1,9 +1,9 @@
-//! The six kind specs that completed coverage — `latching-alarm`,
+//! The nine kind specs that completed coverage — `latching-alarm`,
 //! `manual-station`, `signal-filter`, `median-voter`, `totalizer`,
-//! `sequencer` — each composes into a plant that builds, loads,
-//! validates, and assembles through the standard registry
-//! (`dcs_controller::registry()`), the same path a hand-written
-//! document takes.
+//! `sequencer`, `bool-gate`, `sr-latch`, `edge-trigger` — each
+//! composes into a plant that builds, loads, validates, and assembles
+//! through the standard registry (`dcs_controller::registry()`), the
+//! same path a hand-written document takes.
 //!
 //! The registry-enumeration half of the coverage guard lives here too:
 //! `every_registered_kind_has_a_spec` enumerates
@@ -16,12 +16,12 @@ use std::collections::BTreeSet;
 
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, CounterSpec, DigitalInputSpec,
-    DigitalOutputSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec,
-    MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    TimerSpec, TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, InterlockSpec, LatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, RateLimiterSpec,
+    SequencerSpec, SignalFilterSpec, SrLatchSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
-use dcs_build::{Direction, PlantBuilder, PointId, Value, parameters};
+use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_model::PlantModel;
 
 /// Builds `plant`, reloads the emitted document through `dcs-model`'s
@@ -219,6 +219,92 @@ fn sequencer_step_table_is_checked_at_assembly() {
     }
 }
 
+#[test]
+fn bool_gate_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let first = plant.channel::<bool>(sim, "first", Direction::In);
+    let second = plant.channel::<bool>(sim, "second", Direction::In);
+    let third = plant.channel::<bool>(sim, "third", Direction::In);
+
+    let in_1 = plant.field_input::<bool>(PointId(10), first, false);
+    let in_2 = plant.field_input::<bool>(PointId(11), second, false);
+    let in_3 = plant.field_input::<bool>(PointId(12), third, false);
+    let out = plant.internal_output::<bool>(PointId(13), false);
+
+    // `or` — code 1 — over a three-wide `in_N` set.
+    let gate = plant.add(BoolGateSpec::new(
+        parameters([("operation", Value::Int(1))]),
+        3,
+    ));
+    plant.connect(in_1, gate.input(1));
+    plant.connect(in_2, gate.input(2));
+    plant.connect(in_3, gate.input(3));
+    plant.connect(&gate.out, out);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, BoolGateSpec::KIND);
+}
+
+#[test]
+fn bool_gate_rejects_an_undeclared_operation_code() {
+    // `operation` declares the `GateOperation` code range `0..=2`; a
+    // code outside it is `ParameterOutOfRange` at `build`, before the
+    // document exists.
+    let mut plant = PlantBuilder::new();
+    let in_1 = plant.internal_input::<bool>(PointId(10), false, true);
+    let out = plant.internal_output::<bool>(PointId(11), false);
+
+    let gate = plant.add(BoolGateSpec::new(
+        parameters([("operation", Value::Int(7))]),
+        1,
+    ));
+    plant.connect(in_1, gate.input(1));
+    plant.connect(&gate.out, out);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "operation"
+    ));
+}
+
+#[test]
+fn sr_latch_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let trip = plant.channel::<bool>(sim, "trip", Direction::In);
+
+    let set = plant.field_input::<bool>(PointId(10), trip, false);
+    let reset = plant.internal_input::<bool>(PointId(11), false, true);
+    let out = plant.internal_output::<bool>(PointId(12), false);
+
+    let latch = plant.add(SrLatchSpec::new(Default::default()));
+    plant.connect(set, latch.set);
+    plant.connect(reset, latch.reset);
+    plant.connect(&latch.out, out);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, SrLatchSpec::KIND);
+}
+
+#[test]
+fn edge_trigger_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let signal = plant.channel::<bool>(sim, "signal", Direction::In);
+
+    let input = plant.field_input::<bool>(PointId(10), signal, false);
+    let pulsed = plant.internal_output::<bool>(PointId(11), false);
+
+    // `rising` — code 0.
+    let trigger = plant.add(EdgeTriggerSpec::new(parameters([("edge", Value::Int(0))])));
+    plant.connect(input, trigger.input);
+    plant.connect(&trigger.out, pulsed);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, EdgeTriggerSpec::KIND);
+}
+
 /// The registry-enumeration coverage check: every kind the standard
 /// registry serves has a `dcs-build` spec, and no spec names a kind the
 /// registry does not serve. A kind registered without a spec fails
@@ -248,6 +334,9 @@ fn every_registered_kind_has_a_spec() {
         MedianVoterSpec::KIND,
         TotalizerSpec::KIND,
         SequencerSpec::KIND,
+        BoolGateSpec::KIND,
+        SrLatchSpec::KIND,
+        EdgeTriggerSpec::KIND,
     ]
     .into_iter()
     .collect();

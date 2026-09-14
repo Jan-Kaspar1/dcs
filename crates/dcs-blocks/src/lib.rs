@@ -147,6 +147,9 @@ pub const KINDS: &[&str] = &[
     MedianVoter::KIND,
     Totalizer::KIND,
     Sequencer::KIND,
+    BoolGate::KIND,
+    SrLatch::KIND,
+    EdgeTrigger::KIND,
 ];
 
 #[cfg(test)]
