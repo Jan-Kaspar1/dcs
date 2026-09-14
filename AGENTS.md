@@ -11,3 +11,10 @@ The library should encapsulate the difficult parts: communication, diagnostics, 
 
 Adding a new device should follow the same model. Once its device integration and library component exist, I can instantiate it in the plant model, connect its I/O, and automatically obtain the corresponding control behavior, monitoring information, diagnostics, and UI representation without engineering each layer separately.
 
+## Agent workflow
+
+- Implement only the assigned issue and its acceptance criteria. Read `docs/architecture.md` and `docs/plan.md` before making design decisions; planners maintain those documents through reviewed CI-gated changes.
+- Develop software against simulated I/O. Physical equipment access and live infrastructure deployment are outside this autonomous workflow.
+- Run `python3 scripts/verify.py` before reporting completion. Route heavy Rust builds through this command so shared build limits apply.
+- Commit the implementation and report the commit, verification results, and any unresolved criteria. The supervisor owns publishing PRs, issue reservations, and merging; workers leave these actions to it.
+- Preserve unrelated files and incomplete work. Report denied permissions or missing credentials as blockers; never escalate permissions or switch models to bypass a failure.
