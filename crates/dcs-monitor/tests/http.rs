@@ -184,11 +184,16 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
         assert_eq!(point_value(&snapshot, 10), Some(Value::Float(5.0)));
         assert_eq!(point_value(&snapshot, 20), Some(Value::Float(10.0)));
 
+        // Exactly one receipt per command: the submitted command's entry
+        // now reports it applied at tick 2.
         let receipts = client.receipts().unwrap();
-        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts.len(), 1);
         assert_eq!(
-            receipts[1].outcome,
-            CommandOutcome::Applied { tick: Tick(2) }
+            receipts[0],
+            CommandReceipt {
+                command,
+                outcome: CommandOutcome::Applied { tick: Tick(2) },
+            }
         );
     });
 }

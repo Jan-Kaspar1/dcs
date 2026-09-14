@@ -301,7 +301,7 @@ fn failure_quality(error: IoError) -> Quality {
 ///    timestamp authority;
 /// 2. applies every queued operator [`Command`] in submission order —
 ///    this is the documented point where commands submitted between scans
-///    take effect, each producing a receipt;
+///    take effect, each updating its receipt to the final outcome;
 /// 3. reads every `In` point in the map into the scan image, stamping the
 ///    new tick — a failed read keeps the last known value marked
 ///    [`Quality::Bad`] rather than aborting the scan;
@@ -325,7 +325,9 @@ pub struct Executor<'d> {
     map: PointMap,
     components: Vec<Entry>,
     image: RefCell<HashMap<PointId, Sample>>,
-    pending_commands: VecDeque<Command>,
+    /// Indices into `receipts` of the queued commands awaiting their scan
+    /// boundary; the command itself rides inside its receipt.
+    pending_commands: VecDeque<usize>,
     receipts: Vec<CommandReceipt>,
     tick: Tick,
 }
@@ -465,39 +467,41 @@ impl<'d> Executor<'d> {
     }
 
     /// Queues `command` for application at the start of the next scan and
-    /// returns its first receipt.
+    /// returns its receipt.
     ///
     /// Submission validates the command against the point map — the point
     /// must be served, and the declared kind must match both the map's
     /// kind and the supplied value's variant — so an invalid command is
     /// [`CommandOutcome::Rejected`] immediately and never queued. An
-    /// [`CommandOutcome::Accepted`] command applies at the head of the
-    /// next [`scan`](Executor::scan), before the input-read phase, where
-    /// it produces a second receipt: [`CommandOutcome::Applied`], or
+    /// [`CommandOutcome::Accepted`] receipt reports the tick the command
+    /// is scheduled to apply at; at the head of the next
+    /// [`scan`](Executor::scan), before the input-read phase, that same
+    /// log entry's outcome is updated to [`CommandOutcome::Applied`], or
     /// `Rejected` with [`CommandError::DriverRejected`] when the field
-    /// driver refuses the write. Every receipt is appended to the
-    /// [`receipts`](Executor::receipts) log in order.
+    /// driver refuses the write — exactly one receipt per command, kept
+    /// in the [`receipts`](Executor::receipts) log in submission order.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
         let outcome = match self.check_command(command) {
             Err(reason) => CommandOutcome::Rejected { reason },
-            Ok(_) => {
-                self.pending_commands.push_back(command);
-                CommandOutcome::Accepted {
-                    apply_tick: Tick(self.tick.0 + 1),
-                }
-            }
+            Ok(_) => CommandOutcome::Accepted {
+                apply_tick: Tick(self.tick.0 + 1),
+            },
         };
         let receipt = CommandReceipt { command, outcome };
         self.receipts.push(receipt);
+        if matches!(outcome, CommandOutcome::Accepted { .. }) {
+            self.pending_commands.push_back(self.receipts.len() - 1);
+        }
         receipt
     }
 
-    /// The receipt log: every submission and application receipt, in the
-    /// order they were produced.
+    /// The receipt log: one receipt per submitted command, in submission
+    /// order.
     ///
-    /// An accepted command appears twice — `Accepted` at submission and
-    /// `Applied` or `Rejected` at the scan boundary — so the log is the
-    /// audit trail a monitoring consumer reads alongside the snapshot.
+    /// A queued command's entry reads [`CommandOutcome::Accepted`] until
+    /// the scan boundary updates it to `Applied` or `Rejected`, so the
+    /// log is the audit trail a monitoring consumer reads alongside the
+    /// snapshot.
     pub fn receipts(&self) -> &[CommandReceipt] {
         &self.receipts
     }
@@ -558,14 +562,15 @@ impl<'d> Executor<'d> {
         }
     }
 
-    /// Applies every queued command in submission order and records each
-    /// one's receipt. Runs at the head of the scan — before the input
-    /// read — so a write to an `In` point is observed by this scan's
-    /// input phase, while a write to an `Out` point enters the image
-    /// where the step phase may still override it.
+    /// Applies every queued command in submission order, updating each
+    /// one's receipt to its final outcome. Runs at the head of the scan —
+    /// before the input read — so a write to an `In` point is observed by
+    /// this scan's input phase, while a write to an `Out` point enters the
+    /// image where the step phase may still override it.
     fn apply_commands(&mut self, tick: Tick) {
-        while let Some(command) = self.pending_commands.pop_front() {
-            let outcome = match self.check_command(command) {
+        while let Some(index) = self.pending_commands.pop_front() {
+            let command = self.receipts[index].command;
+            self.receipts[index].outcome = match self.check_command(command) {
                 Err(reason) => CommandOutcome::Rejected { reason },
                 Ok((point, value)) => match self.driver.write(point, value) {
                     Err(error) => CommandOutcome::Rejected {
@@ -579,7 +584,6 @@ impl<'d> Executor<'d> {
                     }
                 },
             };
-            self.receipts.push(CommandReceipt { command, outcome });
         }
     }
 
@@ -1537,29 +1541,20 @@ mod tests {
         };
 
         assert_eq!(run(), run());
-        // And the sequence is the documented one: each accepted command
-        // receipts Accepted at submission then Applied at the boundary;
-        // the unknown point is Rejected once at submission.
+        // And the log is the documented one: exactly one receipt per
+        // command, in submission order — accepted commands read `Applied`
+        // once their scan boundary has passed.
         let (receipts, _) = run();
         let outcomes: Vec<CommandOutcome> =
             receipts.iter().map(|receipt| receipt.outcome).collect();
         assert_eq!(
             outcomes,
             vec![
-                CommandOutcome::Accepted {
-                    apply_tick: Tick(1)
-                },
+                CommandOutcome::Applied { tick: Tick(1) },
                 CommandOutcome::Rejected {
                     reason: CommandError::UnknownPoint { point: PointId(99) }
                 },
-                CommandOutcome::Accepted {
-                    apply_tick: Tick(1)
-                },
                 CommandOutcome::Applied { tick: Tick(1) },
-                CommandOutcome::Applied { tick: Tick(1) },
-                CommandOutcome::Accepted {
-                    apply_tick: Tick(3)
-                },
                 CommandOutcome::Applied { tick: Tick(3) },
             ]
         );

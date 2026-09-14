@@ -15,6 +15,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
+name = "dcs-blocks"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
+ "dcs-sim",
+]
+
+[[package]]
 name = "dcs-core"
 version = "0.1.0"
 dependencies = [

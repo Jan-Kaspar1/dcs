@@ -1,0 +1,116 @@
+//! Reusable control components for the cyclic executor.
+//!
+//! Each component implements [`dcs_runtime::Component`]: it declares its
+//! logical I/O up front — names, point ids, value kinds, directions — and
+//! steps once per scan through the scoped [`ComponentIo`] view, never
+//! naming a device or fieldbus. Binding the declared points to physical
+//! channels is the plant model's and the driver's business, so every
+//! component here runs unchanged against `dcs-sim` or field hardware.
+//!
+//! Components are constructible from the plant model's component
+//! [`Parameters`] maps via `from_parameters`; a [`ParameterError`] names
+//! the component and the offending parameter when the map cannot supply
+//! the documented settings.
+//!
+//! The first library covers the basic analog and discrete channel blocks:
+//!
+//! - [`AnalogInput`] — raw-range to engineering-unit scaling with
+//!   clamping and quality propagation;
+//! - [`Pid`] — parallel-form PID control with output limits and
+//!   conditional-integration anti-windup;
+//! - [`DigitalOutput`] — boolean write with quality propagation.
+
+#![warn(missing_docs)]
+
+mod analog_input;
+mod digital_output;
+mod params;
+mod pid;
+
+pub use analog_input::{AnalogInput, RawInput, Scaling};
+pub use digital_output::DigitalOutput;
+pub use params::{ParameterError, Parameters};
+pub use pid::{Pid, PidConfig};
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    //! A minimal [`ComponentIo`] for stepping components directly: an
+    //! in-memory point store scoped to declared points and directions,
+    //! mirroring the executor's `ScopedIo` semantics.
+
+    use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value};
+    use dcs_runtime::ComponentIo;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// Scoped I/O over an in-memory point store. Reads serve `In` points,
+    /// writes land on `Out` points; undeclared or wrong-direction access
+    /// is `UnknownPoint`, and kind mismatches are `TypeMismatch`.
+    pub(crate) struct TestIo {
+        declared: HashMap<PointId, (Direction, dcs_core::ValueKind)>,
+        samples: RefCell<HashMap<PointId, Sample>>,
+    }
+
+    impl TestIo {
+        /// Declares `points` as `(point, direction, initial sample)`; each
+        /// sample's value kind is the point's declared kind.
+        pub(crate) fn new(points: &[(PointId, Direction, Sample)]) -> Self {
+            Self {
+                declared: points
+                    .iter()
+                    .map(|&(point, direction, sample)| (point, (direction, sample.value.kind())))
+                    .collect(),
+                samples: RefCell::new(
+                    points
+                        .iter()
+                        .map(|&(point, _, sample)| (point, sample))
+                        .collect(),
+                ),
+            }
+        }
+
+        /// Replaces the stored sample of a point — the field side feeding
+        /// an `In` point between steps.
+        pub(crate) fn feed(&self, point: PointId, sample: Sample) {
+            self.samples.borrow_mut().insert(point, sample);
+        }
+
+        /// The last sample stored for `point` — what a component wrote to
+        /// an `Out` point.
+        pub(crate) fn written(&self, point: PointId) -> Option<Sample> {
+            self.samples.borrow().get(&point).copied()
+        }
+    }
+
+    impl IoDriver for TestIo {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            match self.declared.get(&point) {
+                Some((Direction::In, _)) => Ok(self.samples.borrow()[&point]),
+                _ => Err(IoError::UnknownPoint(point)),
+            }
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            self.write_sample(point, Sample::good(value, Tick::ZERO))
+        }
+    }
+
+    impl ComponentIo for TestIo {
+        fn write_sample(&self, point: PointId, sample: Sample) -> Result<(), IoError> {
+            match self.declared.get(&point) {
+                Some((Direction::Out, kind)) => {
+                    if sample.value.kind() != *kind {
+                        return Err(IoError::TypeMismatch {
+                            point,
+                            expected: *kind,
+                            found: sample.value,
+                        });
+                    }
+                    self.samples.borrow_mut().insert(point, sample);
+                    Ok(())
+                }
+                _ => Err(IoError::UnknownPoint(point)),
+            }
+        }
+    }
+}

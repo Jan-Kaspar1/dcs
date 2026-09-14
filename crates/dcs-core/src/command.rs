@@ -116,9 +116,11 @@ impl std::error::Error for CommandError {}
 
 /// What became of a submitted [`Command`].
 ///
-/// `Accepted` and `Rejected` are produced at submission; `Accepted` commands
-/// produce a second receipt — `Applied`, or `Rejected` when the driver
-/// refuses — when they apply at the next scan boundary.
+/// Each command produces exactly one receipt. At submission the outcome is
+/// `Accepted` — reporting the tick the command is scheduled to apply at —
+/// or `Rejected` with a named reason; at the scan boundary an accepted
+/// command's receipt is updated to `Applied`, or `Rejected` when the
+/// driver refuses the write.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandOutcome {
@@ -142,10 +144,12 @@ pub enum CommandOutcome {
 
 /// The controller's verdict on one submitted [`Command`].
 ///
-/// Receipts are produced in queue order: submission yields `Accepted` or
-/// `Rejected`, and each accepted command later yields `Applied` or
-/// `Rejected` at the scan boundary. Because commands apply deterministically,
-/// identical command and scan sequences produce identical receipt sequences.
+/// Receipts are produced in submission order and live in the executor's
+/// receipt log: a queued command's entry reads
+/// [`CommandOutcome::Accepted`] until the scan boundary rewrites it
+/// `Applied` or `Rejected`. Because commands apply deterministically,
+/// identical command and scan sequences produce identical receipt
+/// sequences.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CommandReceipt {
     /// The command this receipt answers.
