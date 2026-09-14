@@ -344,7 +344,8 @@ function activePeer() {
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}} | {"diverged": {mismatches}}.
+// {"degraded": {detail}} | {"diverged": {mismatches}} |
+// {"reinitialized": {report}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
@@ -354,6 +355,12 @@ function describeSync(sync) {
   if ("diverged" in sync) {
     return "diverged: staged outputs mismatch the field at " +
       sync.diverged.mismatches.map(m => m.point).join(", ");
+  }
+  if ("reinitialized" in sync) {
+    const report = sync.reinitialized.report;
+    return "reinitialized under revised model at tick " + report.resumed_at +
+      " (" + report.carried.length + " carried, " +
+      report.dropped.length + " dropped)";
   }
   return JSON.stringify(sync);
 }
@@ -1010,7 +1017,7 @@ async function refreshJournal(base) {
 // Journal events serialize as {"quality_changed": ...} |
 // {"command_settled": ...} | {"step_failed": ...} |
 // {"role_changed": {from, to}} |
-// {"divergence_detected": {mismatches}}.
+// {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
 function describeEvent(event) {
   if ("quality_changed" in event) {
     const change = event.quality_changed;
@@ -1036,6 +1043,19 @@ function describeEvent(event) {
       event.divergence_detected.mismatches.map(m =>
         pointName(m.point) + " (staged " + formatValue(m.staged) +
         ", field " + formatValue(m.field) + ")").join(", ");
+  }
+  if ("reinitialized" in event) {
+    const report = event.reinitialized.report;
+    return "standby reinitialized under revised model at tick " +
+      report.resumed_at + ": carried " +
+      report.carried.map(c => pointName(c.point)).join(", ") +
+      (report.dropped.length > 0
+        ? "; dropped " + report.dropped.map(d =>
+            d.internal_point ? pointName(d.internal_point.point)
+            : d.output_point ? pointName(d.output_point.point)
+            : d.component ? "component " + d.component.name
+            : "driver state").join(", ")
+        : "");
   }
   return JSON.stringify(event);
 }

@@ -29,6 +29,7 @@
 
 #![warn(missing_docs)]
 
+mod carryover;
 mod command;
 mod descriptor;
 mod fingerprint;
@@ -40,6 +41,7 @@ mod signal;
 mod state;
 mod telemetry;
 
+pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement};
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,

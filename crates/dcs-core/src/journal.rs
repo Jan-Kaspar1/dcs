@@ -11,6 +11,7 @@
 //! order and never reused, so bounded eviction is visible to consumers as
 //! a numbering gap rather than silent loss.
 
+use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
 use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick};
@@ -70,6 +71,17 @@ pub enum JournalEvent {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
+    /// A revision-armed peer consumed a checkpoint captured under a
+    /// different model — the transition into
+    /// [`StandbySync::Reinitialized`](crate::StandbySync) of the rolling
+    /// model-revision decision. `report` carries the carryover audit
+    /// record: the fingerprints on each side of the boundary, the
+    /// resumed tick this entry is attributed to, and every element
+    /// classified — carried, initialized, or named as dropped.
+    Reinitialized {
+        /// The crossing's carryover record.
+        report: CarryoverReport,
+    },
 }
 
 /// One journaled event: its stream position, the tick it is attributed
@@ -91,7 +103,9 @@ pub struct JournalEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::carryover::{CarriedPoint, DroppedElement};
     use crate::command::{Command, CommandOutcome};
+    use crate::fingerprint::ModelFingerprint;
     use crate::signal::{QualityReason, Value, ValueKind};
 
     #[test]
@@ -156,6 +170,29 @@ mod tests {
                     }],
                 },
             },
+            JournalEntry {
+                seq: 7,
+                tick: Tick(12),
+                event: JournalEvent::Reinitialized {
+                    report: CarryoverReport {
+                        from: Some(ModelFingerprint(0x0123_4567_89ab_cdef)),
+                        to: Some(ModelFingerprint(0xfedc_ba98_7654_3210)),
+                        resumed_at: Tick(12),
+                        carried: vec![CarriedPoint {
+                            point: PointId(11),
+                            value: Value::Float(33.5),
+                        }],
+                        carried_outputs: vec![CarriedPoint {
+                            point: PointId(20),
+                            value: Value::Float(4.5),
+                        }],
+                        carried_forces: vec![],
+                        dropped: vec![DroppedElement::InternalPoint { point: PointId(31) }],
+                        reinitialized: vec!["level_ctrl".to_string()],
+                        initialized: vec![PointId(32)],
+                    },
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -168,5 +205,6 @@ mod tests {
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");
         assert!(json.contains("\"divergence_detected\""), "{json}");
+        assert!(json.contains("\"reinitialized\""), "{json}");
     }
 }

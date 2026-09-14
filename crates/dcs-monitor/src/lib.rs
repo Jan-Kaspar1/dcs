@@ -174,7 +174,7 @@ use dcs_core::{
     RoleReport, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError};
+use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -440,6 +440,28 @@ impl<'d> Monitor<'d> {
         result
     }
 
+    /// Consumes a checkpoint pulled from the active peer under the same
+    /// lock — the pull entry point for a peer that may be armed for a
+    /// rolling model revision. A matching fingerprint applies as
+    /// ordinary convergence exactly like
+    /// [`apply_checkpoint`](Self::apply_checkpoint); a foreign
+    /// fingerprint on a revision-armed peer crosses the model boundary
+    /// and the returned [`Transfer::Reinitialized`] carries its
+    /// [`CarryoverReport`](dcs_core::CarryoverReport), also journaled
+    /// once per transition at the resumed tick.
+    pub fn transfer_checkpoint(&self, checkpoint: &Checkpoint) -> Result<Transfer, ApplyError> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        let result = peer.transfer(checkpoint);
+        for report in peer.take_divergences() {
+            recorder.note_divergence(report.tick, report.mismatches);
+        }
+        for report in peer.take_reinitializations() {
+            recorder.note_reinitialized(report);
+        }
+        result
+    }
+
     /// Marks a tracking peer degraded after a checkpoint fetch produced
     /// nothing — an unreachable active or a refused request — and counts
     /// the heartbeat miss toward the failover budget.
@@ -549,14 +571,19 @@ impl<'d> Monitor<'d> {
                         {
                             match MonitorClient::new(active).checkpoint() {
                                 Ok(checkpoint) => {
-                                    let _ = shared.peer.apply(&checkpoint);
+                                    let _ = shared.peer.transfer(&checkpoint);
                                     // The apply's divergence check
                                     // journals a transition into
-                                    // `diverged` at the compared tick.
+                                    // `diverged` at the compared tick;
+                                    // a revision-armed crossing journals
+                                    // `reinitialized` at the resumed tick.
                                     for report in shared.peer.take_divergences() {
                                         shared
                                             .recorder
                                             .note_divergence(report.tick, report.mismatches);
+                                    }
+                                    for report in shared.peer.take_reinitializations() {
+                                        shared.recorder.note_reinitialized(report);
                                     }
                                 }
                                 Err(error) => shared
