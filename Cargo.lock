@@ -15,6 +15,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
+name = "dcs-assembly"
+version = "0.1.0"
+dependencies = [
+ "dcs-blocks",
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
+ "dcs-sim",
+ "serde_json",
+]
+
+[[package]]
 name = "dcs-blocks"
 version = "0.1.0"
 dependencies = [
@@ -22,6 +34,18 @@ dependencies = [
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+ "serde_json",
+]
+
+[[package]]
+name = "dcs-controller"
+version = "0.1.0"
+dependencies = [
+ "dcs-assembly",
+ "dcs-blocks",
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
  "serde_json",
 ]
 
