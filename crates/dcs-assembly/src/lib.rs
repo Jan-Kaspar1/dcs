@@ -70,3 +70,9 @@ pub use drivers::{
 };
 pub use error::{AssemblyError, BuildError, InternalPointError};
 pub use registry::{ComponentRegistry, ComponentSpec};
+
+/// The engineer-facing integration guide: adding component kinds and
+/// device kinds end to end. Included as crate documentation so its
+/// worked examples compile and run as doctests.
+#[doc = include_str!("../../../docs/integration-guide.md")]
+pub mod integration_guide {}
