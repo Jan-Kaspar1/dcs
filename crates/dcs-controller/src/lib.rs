@@ -9,14 +9,19 @@
 
 #![warn(missing_docs)]
 
-use dcs_assembly::{BuildError, ComponentRegistry};
+use dcs_assembly::{
+    AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
+};
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput, Interlock,
-    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, RateLimiter, Sequencer,
-    SignalFilter, Timer, Totalizer, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
+    EdgeTrigger, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid,
+    RateLimiter, Sequencer, SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
+use dcs_model::PlantModel;
 use dcs_runtime::Component;
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// Boxes a built component or lifts its construction failure into
 /// [`BuildError`].
@@ -249,4 +254,120 @@ pub fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(BoolGate::KIND, |spec| {
+            // The input set is declared `in_1` … `in_N` following the
+            // interlock's `trip_N` convention; order the bound points by
+            // numeric suffix, not lexically.
+            let mut inputs: Vec<_> = spec
+                .ports
+                .iter()
+                .filter_map(|(name, point)| {
+                    name.strip_prefix("in_")
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                        .map(|index| (index, *point))
+                })
+                .collect();
+            inputs.sort_by_key(|(index, _)| *index);
+            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            boxed(BoolGate::from_parameters(
+                spec.name.as_str(),
+                inputs,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(SrLatch::KIND, |spec| {
+            boxed(SrLatch::from_parameters(
+                spec.name.as_str(),
+                spec.require("set")?,
+                spec.require("reset")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(EdgeTrigger::KIND, |spec| {
+            boxed(EdgeTrigger::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+}
+
+/// What a `--check` run reports: the assembly surface the model built —
+/// devices resolved through the driver registry, points the assembled
+/// executor serves, and components the component registry constructed —
+/// counted so the output is deterministic across runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckReport {
+    /// Declared devices counted by `kind`, ordered by kind name.
+    pub devices: BTreeMap<String, usize>,
+    /// Declared `io_points`, field and internal alike.
+    pub declared_points: usize,
+    /// Points the assembled executor serves: the declared points plus
+    /// the internal carriers port-to-port wiring synthesizes.
+    pub served_points: usize,
+    /// Constructed components counted by `kind`, ordered by kind name.
+    pub components: BTreeMap<String, usize>,
+}
+
+impl fmt::Display for CheckReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let devices: usize = self.devices.values().sum();
+        let components: usize = self.components.values().sum();
+        writeln!(f, "devices: {devices}")?;
+        for (kind, count) in &self.devices {
+            writeln!(f, "  {kind}: {count}")?;
+        }
+        writeln!(
+            f,
+            "io_points: {} declared, {} served",
+            self.declared_points, self.served_points
+        )?;
+        writeln!(f, "components: {components}")?;
+        for (kind, count) in &self.components {
+            writeln!(f, "  {kind}: {count}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The `--check` entry function: resolves the model's devices through
+/// the standard [`DriverRegistry`], builds the fan-out driver, and
+/// constructs every component through [`registry`] — the same driver
+/// resolution and assembly a run performs — then reports what
+/// assembled. No scan executes and no listener binds; every failure is
+/// the [`AssemblyError`] a run would report, naming the offending model
+/// element.
+///
+/// The caller loads and validates the document first — `check` takes a
+/// `PlantModel`, which [`PlantModel::load`] yields only for a validated
+/// model — so a load or validation failure reports before this runs,
+/// exactly as it does in a run.
+pub fn check(model: &PlantModel) -> Result<CheckReport, AssemblyError> {
+    let driver = resolve_drivers(model, &DriverRegistry::standard())?.build()?;
+    let executor = assemble(model, &registry(), &driver)?;
+    let served_points = executor.snapshot().points.len();
+    Ok(CheckReport {
+        devices: count_by_kind(model.devices.iter().map(|device| device.kind.as_str())),
+        declared_points: model.io_points.len(),
+        served_points,
+        components: count_by_kind(
+            model
+                .components
+                .iter()
+                .map(|instance| instance.kind.as_str()),
+        ),
+    })
+}
+
+/// Kind → instance count over `kinds`, ordered by kind name so the
+/// rendered report is deterministic.
+fn count_by_kind<'k>(kinds: impl Iterator<Item = &'k str>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for kind in kinds {
+        *counts.entry(kind.to_string()).or_insert(0) += 1;
+    }
+    counts
 }

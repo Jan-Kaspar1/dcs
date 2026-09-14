@@ -24,31 +24,15 @@ pub struct ComponentId(pub u64);
 
 /// Data-flow direction of a channel, logical I/O point, or component port.
 ///
-/// For channels and points, `In` carries a value from the field into the
-/// controller and `Out` carries one from the controller to the field. For
-/// ports, `In` consumes the value a connection delivers and `Out` produces
-/// the value a connection carries away. Within a [`Connection`], an `In`
-/// point or an `Out` port can only be a `from` end, and an `Out` point or an
-/// `In` port only a `to` end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    /// Field-to-controller for channels and points; connection-to-component
-    /// for ports.
-    In,
-    /// Controller-to-field for channels and points; component-to-connection
-    /// for ports.
-    Out,
-}
-
-impl fmt::Display for Direction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Direction::In => "in",
-            Direction::Out => "out",
-        })
-    }
-}
+/// The model shares [`dcs_core::Direction`] rather than declaring its own —
+/// the same vocabulary names direction in component I/O declarations, the
+/// driver's point map, and this document. For channels and points, `In`
+/// carries a value from the field into the controller and `Out` carries one
+/// from the controller to the field. For ports, `In` consumes the value a
+/// connection delivers and `Out` produces the value a connection carries
+/// away. Within a [`Connection`], an `In` point or an `Out` port can only
+/// be a `from` end, and an `Out` point or an `In` port only a `to` end.
+pub use dcs_core::Direction;
 
 /// A field or simulated I/O device: `kind` names its driver-side device
 /// integration and `channels` the physical endpoints it exposes.
@@ -385,6 +369,10 @@ mod tests {
     fn loaded_model_serde_roundtrips() {
         let model = PlantModel::load(MINIMAL).unwrap();
         let json = serde_json::to_string_pretty(&model).unwrap();
+        // The shared `dcs_core::Direction` keeps the snake_case wire shape
+        // model documents have always carried.
+        assert!(json.contains("\"direction\": \"in\""), "{json}");
+        assert!(json.contains("\"direction\": \"out\""), "{json}");
         let reloaded = PlantModel::load(&json).unwrap();
         assert_eq!(model, reloaded);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);

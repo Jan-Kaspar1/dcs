@@ -27,6 +27,8 @@ const OP_READ_REGISTER: u8 = 0x01;
 const OP_WRITE_REGISTER: u8 = 0x02;
 const OP_LIST_REGISTERS: u8 = 0x03;
 const OP_STEP: u8 = 0x04;
+const OP_CLAIM_WRITER: u8 = 0x05;
+const OP_RELEASE_WRITER: u8 = 0x06;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -34,11 +36,13 @@ const RESP_WRITTEN: u8 = 0x02;
 const RESP_REGISTERS: u8 = 0x03;
 const RESP_STEPPED: u8 = 0x04;
 const RESP_ERROR: u8 = 0x05;
+const RESP_DONE: u8 = 0x06;
 
 // Error codes on the wire.
 const ERR_UNKNOWN_REGISTER: u8 = 0x01;
 const ERR_KIND_MISMATCH: u8 = 0x02;
 const ERR_INVALID_REQUEST: u8 = 0x03;
+const ERR_FENCED: u8 = 0x04;
 
 // Value kind tags on the wire.
 const KIND_BOOL: u8 = 0x01;
@@ -74,6 +78,31 @@ pub enum BusRequest {
     /// simulation step. The bank holds no time-dependent dynamics, so
     /// the request carries no `dt`.
     Step,
+    /// Takes the device's write-ownership claim for `owner` — the
+    /// single-writer arbitration the failover decision fences a
+    /// superseded active out with.
+    ///
+    /// `owner` is an opaque token the caller picks, unique per field
+    /// owner — one controller's several attachments claim the same
+    /// token so all of them write, while a takeover claims a fresh one.
+    /// The grant is unconditional: the claim preempts whichever owner
+    /// held the device. The claim is bound to the attachments holding
+    /// it — released when a holder's connection drops or sends
+    /// [`BusRequest::ReleaseWriter`], the last release freeing the
+    /// device — so a dead owner's claim dies with its link and a
+    /// promoted peer's claim lands on a free field. Once any owner
+    /// holds the claim, `write_register` and `step` requests from an
+    /// attachment not holding it are refused; reads and
+    /// `list_registers` stay open to every attachment.
+    ClaimWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
+    /// Releases this attachment's hold on the write-ownership claim —
+    /// the explicit half of the claim's release rule; the other is the
+    /// connection dropping. Releasing a claim the attachment does not
+    /// hold is a no-op.
+    ReleaseWriter,
 }
 
 /// The server's answer to one [`BusRequest`].
@@ -104,6 +133,9 @@ pub enum BusResponse {
         /// The tick the step advanced to.
         tick: Tick,
     },
+    /// Answer to [`BusRequest::ClaimWriter`] and
+    /// [`BusRequest::ReleaseWriter`]: the request applied.
+    Done,
     /// The request failed; `error` says why.
     Error {
         /// The failure the server reported.
@@ -144,6 +176,16 @@ pub enum BusError {
     /// decode as a [`BusRequest`]. `detail` is human-readable
     /// diagnostics, not a machine contract.
     InvalidRequest {
+        /// Why the request was refused.
+        detail: String,
+    },
+    /// The request mutates the shared device but the attachment does
+    /// not hold the device's write-ownership claim — the fencing
+    /// verdict of the failover decision. The driver's `write` path
+    /// surfaces this as the point's
+    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), the same named
+    /// failure a fenced plant-protocol write produces.
+    Fenced {
         /// Why the request was refused.
         detail: String,
     },
@@ -293,6 +335,11 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
         }
         BusRequest::ListRegisters => body.push(OP_LIST_REGISTERS),
         BusRequest::Step => body.push(OP_STEP),
+        BusRequest::ClaimWriter { owner } => {
+            body.push(OP_CLAIM_WRITER);
+            body.extend_from_slice(&owner.to_be_bytes());
+        }
+        BusRequest::ReleaseWriter => body.push(OP_RELEASE_WRITER),
     }
     frame(&body)
 }
@@ -321,6 +368,7 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
                 push_sample(&mut body, info.sample);
             }
         }
+        BusResponse::Done => body.push(RESP_DONE),
         BusResponse::Error { error } => {
             body.push(RESP_ERROR);
             match error {
@@ -340,6 +388,11 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
                 }
                 BusError::InvalidRequest { detail } => {
                     body.push(ERR_INVALID_REQUEST);
+                    body.extend_from_slice(&(detail.len() as u16).to_be_bytes());
+                    body.extend_from_slice(detail.as_bytes());
+                }
+                BusError::Fenced { detail } => {
+                    body.push(ERR_FENCED);
                     body.extend_from_slice(&(detail.len() as u16).to_be_bytes());
                     body.extend_from_slice(detail.as_bytes());
                 }
@@ -371,6 +424,10 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
         },
         OP_LIST_REGISTERS => BusRequest::ListRegisters,
         OP_STEP => BusRequest::Step,
+        OP_CLAIM_WRITER => BusRequest::ClaimWriter {
+            owner: reader.u64().ok_or_else(short)?,
+        },
+        OP_RELEASE_WRITER => BusRequest::ReleaseWriter,
         tag => return Err(format!("unknown request tag {tag:#04x}")),
     };
     if !reader.done() {
@@ -412,6 +469,7 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
         RESP_STEPPED => BusResponse::Stepped {
             tick: Tick(reader.u64().ok_or_else(short)?),
         },
+        RESP_DONE => BusResponse::Done,
         RESP_ERROR => {
             let error = match reader.u8().ok_or_else(short)? {
                 ERR_UNKNOWN_REGISTER => BusError::UnknownRegister {
@@ -423,6 +481,9 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
                     found: reader.value().ok_or_else(short)?,
                 },
                 ERR_INVALID_REQUEST => BusError::InvalidRequest {
+                    detail: reader.text().ok_or_else(short)?,
+                },
+                ERR_FENCED => BusError::Fenced {
                     detail: reader.text().ok_or_else(short)?,
                 },
                 code => return Err(format!("unknown error code {code:#04x}")),
@@ -475,6 +536,8 @@ mod tests {
             },
             BusRequest::ListRegisters,
             BusRequest::Step,
+            BusRequest::ClaimWriter { owner: 42 },
+            BusRequest::ReleaseWriter,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -489,10 +552,23 @@ mod tests {
             serde_json::to_string(&BusRequest::ListRegisters).unwrap(),
             r#"{"op":"list_registers"}"#
         );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ClaimWriter { owner: 42 }).unwrap(),
+            r#"{"op":"claim_writer","owner":42}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ReleaseWriter).unwrap(),
+            r#"{"op":"release_writer"}"#
+        );
         // The wire form of a read is exactly tag plus register.
         assert_eq!(
             encode_request(&BusRequest::ReadRegister { register: 4 }),
             vec![0, 3, 0x01, 0, 4]
+        );
+        // A claim is tag plus the eight-byte owner token.
+        assert_eq!(
+            encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
+            vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
         );
     }
 
@@ -526,9 +602,15 @@ mod tests {
                     found: Value::Bool(true),
                 },
             },
+            BusResponse::Done,
             BusResponse::Error {
                 error: BusError::InvalidRequest {
                     detail: "bad tag".to_string(),
+                },
+            },
+            BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "another attachment owns register writes".to_string(),
                 },
             },
         ];
@@ -543,6 +625,19 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BusResponse::Stepped { tick: Tick(8) }).unwrap(),
             r#"{"result":"stepped","tick":8}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusResponse::Done).unwrap(),
+            r#"{"result":"done"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "another attachment owns register writes".to_string(),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns register writes"}}"#
         );
         assert_eq!(
             serde_json::to_string(&BusResponse::Error {
@@ -588,14 +683,18 @@ mod tests {
             &[0x03, 0][..],          // trailing byte after list
             &[0xff][..],             // unknown request tag
             &[0x01, 0][..],          // read, truncated address
+            &[0x05, 0, 0][..],       // claim, truncated owner
+            &[0x06, 0][..],          // trailing byte after release
         ] {
             assert!(decode_request(body).is_err(), "{body:02x?}");
         }
         for body in [
             &[][..],
-            &[0x01, 0x03][..], // sample, truncated value
-            &[0x05, 0x09][..], // unknown error code
-            &[0x04, 0][..],    // stepped, truncated tick
+            &[0x01, 0x03][..],    // sample, truncated value
+            &[0x05, 0x09][..],    // unknown error code
+            &[0x04, 0][..],       // stepped, truncated tick
+            &[0x05, 0x04, 0][..], // fenced error, truncated detail
+            &[0x06, 0][..],       // trailing byte after done
         ] {
             assert!(decode_response(body).is_err(), "{body:02x?}");
         }

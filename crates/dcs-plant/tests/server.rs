@@ -22,6 +22,10 @@ const SECOND_ORDER_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/tank_loop_second_order_dynamics.json"
 );
+const NOISE_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/tank_loop_noise_dynamics.json"
+);
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_point.json"
@@ -210,6 +214,61 @@ fn a_declared_second_order_lag_loads_and_overshoots_its_step_input() {
     assert!((level - 12.0).abs() < 0.25, "settled level {level}");
 
     assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn a_declared_noise_element_loads_and_deviates_within_amplitude() {
+    // The document cascades the tank's lag into a noise element: point
+    // 11 follows the lag's driven level on point 10 plus a seeded
+    // deviation bounded by the declared amplitude. One scripted pass
+    // records the `(level, noisy)` pair each step — the sequence a
+    // restarted server must reproduce bit-for-bit.
+    let script = |addr: SocketAddr| -> Vec<(f64, f64)> {
+        let driver = RemoteDriver::connect(addr).unwrap();
+        // The element seeds its output at its declared initial before
+        // any step.
+        assert_eq!(driver.read(PointId(11)).unwrap().value, Value::Float(4.0));
+        driver.write(PointId(20), Value::Float(12.0)).unwrap();
+        (0..20)
+            .map(|_| {
+                driver.step(0.1).unwrap();
+                let (Value::Float(level), Value::Float(noisy)) = (
+                    driver.read(PointId(10)).unwrap().value,
+                    driver.read(PointId(11)).unwrap().value,
+                ) else {
+                    panic!("the driven points are Float")
+                };
+                (level, noisy)
+            })
+            .collect()
+    };
+
+    let args = [
+        MODEL,
+        "--dynamics",
+        NOISE_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ];
+    let mut first = spawn(&args);
+    let first_run = script(first.addr);
+    assert!(stop(&mut first).success());
+
+    let mut second = spawn(&args);
+    let second_run = script(second.addr);
+    assert!(stop(&mut second).success());
+
+    // The seeded generator replays identically across restarts.
+    assert_eq!(first_run, second_run);
+    for (step, (level, noisy)) in first_run.iter().enumerate() {
+        // The documented bound: every draw stays within u ± amplitude.
+        assert!(
+            (noisy - level).abs() <= 0.5,
+            "step {step}: noisy={noisy} outside level={level} ± 0.5"
+        );
+    }
+    // The deviation is real — the element is not a passthrough.
+    assert!(first_run.iter().any(|(level, noisy)| noisy != level));
 }
 
 #[test]
