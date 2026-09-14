@@ -122,6 +122,14 @@ pub enum ValidationError {
         /// The kind `initial` actually carries.
         initial: ValueKind,
     },
+    /// A point declares `writable` but has direction `Out`. The command
+    /// path refuses `Out`-point writes outright — operator influence on
+    /// an output is engineered through components — so the flag can only
+    /// mark an `In` point.
+    WritableOut {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -241,6 +249,11 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "internal io point {} declares type {declared:?} but its initial value is {initial:?}",
+                point.0
+            ),
+            Self::WritableOut { point } => write!(
+                f,
+                "io point {} declares writable but has direction out",
                 point.0
             ),
             Self::ChannelTypeMismatch {
@@ -407,6 +420,9 @@ impl PlantModel {
     ///   while an internal point — one declared without a channel — must
     ///   carry an `initial` value of its declared `value_type`, and a
     ///   channel-bound point must not declare one;
+    /// - `writable` marks only `In` points: the command path refuses
+    ///   `Out`-point writes outright, so an `Out` point carrying the flag
+    ///   is reported, whether the point is channel-bound or internal;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
     ///   port), with matching value types on both ends — internal points
@@ -442,6 +458,12 @@ impl PlantModel {
         );
 
         for point in &self.io_points {
+            // `writable` interacts with the direction rule: only `In`
+            // points can be command targets, so the flag on an `Out`
+            // point — field or internal — is a declaration error.
+            if point.writable && point.direction == Direction::Out {
+                errors.push(ValidationError::WritableOut { point: point.id });
+            }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
                 // state: it must exist and match the declared value type.
@@ -828,6 +850,37 @@ mod tests {
             model
                 .validate()
                 .contains(&ValidationError::FieldInitial { point: PointId(10) })
+        );
+    }
+
+    #[test]
+    fn writable_marks_only_in_points() {
+        // A writable `In` point — bound or internal — is valid: it is the
+        // model-declared command surface.
+        let mut model = minimal();
+        model.io_points[0].writable = true;
+        assert!(model.validate().is_empty());
+        make_internal(&mut model, 0, Some(Value::Float(25.0)));
+        assert!(model.validate().is_empty());
+
+        // `writable` on a bound `Out` point declares a command surface the
+        // contract cannot honor.
+        let mut model = minimal();
+        model.io_points[1].writable = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::WritableOut { point: PointId(11) })
+        );
+
+        // The same rule applies to internal `Out` points.
+        let mut model = minimal();
+        make_internal(&mut model, 1, Some(Value::Float(0.0)));
+        model.io_points[1].writable = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::WritableOut { point: PointId(11) })
         );
     }
 }
