@@ -54,19 +54,39 @@ impl std::error::Error for BuildError {
 }
 
 /// Why a validated [`PlantModel`](dcs_model::PlantModel) could not be
-/// assembled into the simulated driver and the executor.
+/// assembled into the driver surface and the executor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssemblyError {
-    /// A device declares a kind no driver integration serves. Only
-    /// [`SIM_DEVICE_PREFIX`](crate::SIM_DEVICE_PREFIX) (`sim*`) devices
-    /// can be built.
+    /// A device declares a kind no registered driver factory serves.
     UnknownDeviceKind {
         /// The offending device.
         device: DeviceId,
         /// The kind it declares.
         kind: String,
     },
-    /// The resolved simulated channel map is internally inconsistent.
+    /// A device's registered factory rejected its kind-specific
+    /// parameters — e.g. a `sim-tcp` device whose `address` is missing
+    /// or malformed.
+    InvalidDeviceParameters {
+        /// The offending device.
+        device: DeviceId,
+        /// The kind it declares.
+        kind: String,
+        /// What the parameters violate.
+        detail: String,
+    },
+    /// The backend behind a device could not be built — e.g. a `sim-tcp`
+    /// endpoint that refused the connection or does not serve a declared
+    /// point.
+    DeviceBackend {
+        /// The offending device.
+        device: DeviceId,
+        /// The kind it declares.
+        kind: String,
+        /// The backend failure, formatted.
+        detail: String,
+    },
+    /// The resolved local simulated channel map is internally inconsistent.
     InvalidChannelMap {
         /// The underlying channel-map error.
         detail: ConfigError,
@@ -167,6 +187,15 @@ pub enum AssemblyError {
         /// The offending connection's index in `connections`.
         connection: usize,
     },
+    /// An `io_point` binds a device the model does not declare, so no
+    /// backend can serve it — reachable only for a model assembled
+    /// without validation.
+    UnroutedPoint {
+        /// The offending point.
+        point: PointId,
+        /// The undeclared device it names.
+        device: DeviceId,
+    },
     /// The executor's own wiring check rejected the assembled component set.
     Wiring {
         /// The executor's wiring error.
@@ -214,7 +243,25 @@ impl fmt::Display for AssemblyError {
         match self {
             Self::UnknownDeviceKind { device, kind } => write!(
                 f,
-                "device {} has kind {kind:?}, which no driver integration serves (only sim* devices are served)",
+                "device {} has kind {kind:?}, which no registered driver factory serves",
+                device.0
+            ),
+            Self::InvalidDeviceParameters {
+                device,
+                kind,
+                detail,
+            } => write!(
+                f,
+                "device {} of kind {kind:?} has invalid parameters: {detail}",
+                device.0
+            ),
+            Self::DeviceBackend {
+                device,
+                kind,
+                detail,
+            } => write!(
+                f,
+                "device {} of kind {kind:?} has an unusable backend: {detail}",
                 device.0
             ),
             Self::InvalidChannelMap { detail } => {
@@ -290,6 +337,11 @@ impl fmt::Display for AssemblyError {
             Self::UnresolvedEndpoint { connection } => write!(
                 f,
                 "connection {connection} references a port the model does not declare"
+            ),
+            Self::UnroutedPoint { point, device } => write!(
+                f,
+                "io point {} binds a channel on device {} the model does not declare",
+                point.0, device.0
             ),
             Self::Wiring { detail } => write!(f, "executor wiring failed: {detail}"),
         }

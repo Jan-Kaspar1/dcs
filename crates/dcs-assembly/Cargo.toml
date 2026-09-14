@@ -10,7 +10,8 @@ dcs-core = { path = "../dcs-core" }
 dcs-model = { path = "../dcs-model" }
 dcs-runtime = { path = "../dcs-runtime" }
 dcs-sim = { path = "../dcs-sim" }
+dcs-sim-net = { path = "../dcs-sim-net" }
+serde_json = "1.0.151"
 
 [dev-dependencies]
 dcs-blocks = { path = "../dcs-blocks" }
-serde_json = "1.0.151"
