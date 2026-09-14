@@ -5,11 +5,11 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "run": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "step": { "direction": "out", "value_type": "Int" },
-        "done": { "direction": "out", "value_type": "Bool" }
+        "run": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "step": { "direction": "out", "value_type": "int" },
+        "done": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -17,31 +17,31 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "run" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "reset" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "out" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 1, "name": "step" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "done" }
     }
   ],
@@ -83,20 +83,20 @@
       "id": 1,
       "kind": "sequencer",
       "parameters": {
-        "step_count": { "Int": 3 },
-        "step_1_ticks": { "Int": 2 },
-        "step_1_out": { "Float": 10.0 },
-        "step_2_ticks": { "Int": 2 },
-        "step_2_out": { "Float": 20.0 },
-        "step_3_ticks": { "Int": 1 },
-        "step_3_out": { "Float": 30.0 }
+        "step_count": { "int": 3 },
+        "step_1_ticks": { "int": 2 },
+        "step_1_out": { "float": 10.0 },
+        "step_2_ticks": { "int": 2 },
+        "step_2_out": { "float": 20.0 },
+        "step_3_ticks": { "int": 1 },
+        "step_3_out": { "float": 30.0 }
       },
       "ports": {
-        "run": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "step": { "direction": "out", "value_type": "Int" },
-        "done": { "direction": "out", "value_type": "Bool" }
+        "run": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "step": { "direction": "out", "value_type": "int" },
+        "done": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

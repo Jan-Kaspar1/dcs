@@ -5,9 +5,9 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "setpoint": { "direction": "in", "value_type": "Float" },
-        "pump-enable": { "direction": "in", "value_type": "Bool" },
-        "valve": { "direction": "out", "value_type": "Float" }
+        "setpoint": { "direction": "in", "value_type": "float" },
+        "pump-enable": { "direction": "in", "value_type": "bool" },
+        "valve": { "direction": "out", "value_type": "float" }
       }
     },
     {
@@ -29,9 +29,9 @@
         }
       },
       "channels": {
-        "level-raw": { "direction": "in", "value_type": "Float" },
-        "run-hours": { "direction": "in", "value_type": "Int" },
-        "pump-cmd": { "direction": "out", "value_type": "Bool" }
+        "level-raw": { "direction": "in", "value_type": "float" },
+        "run-hours": { "direction": "in", "value_type": "int" },
+        "pump-cmd": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -39,37 +39,37 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "setpoint" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "level-raw" }
     },
     {
       "id": 12,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "valve" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Int",
+      "value_type": "int",
       "channel": { "device": 2, "name": "run-hours" }
     },
     {
       "id": 14,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 2, "name": "pump-cmd" }
     },
     {
       "id": 15,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "pump-enable" }
     }
   ],
@@ -120,31 +120,31 @@
       "id": 1,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "pid",
       "parameters": {
-        "kp": { "Float": 0.1 },
-        "ki": { "Float": 0.1 },
-        "kd": { "Float": 0.0 },
-        "dt": { "Float": 0.1 },
-        "out_min": { "Float": 4.0 },
-        "out_max": { "Float": 20.0 }
+        "kp": { "float": 0.1 },
+        "ki": { "float": 0.1 },
+        "kd": { "float": 0.0 },
+        "dt": { "float": 0.1 },
+        "out_min": { "float": 4.0 },
+        "out_max": { "float": 20.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "Float" },
-        "pv": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
     {
@@ -152,8 +152,8 @@
       "kind": "digital-output",
       "parameters": {},
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

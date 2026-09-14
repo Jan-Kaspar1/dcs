@@ -212,7 +212,7 @@ fn the_raw_envelope_and_bare_bodies_parse_side_by_side() {
                 "POST",
                 "/command",
                 Some(
-                    r#"{"command":{"write_value":{"point":10,"kind":"Float","value":{"Float":7.5}}},"actor":"console-a"}"#,
+                    r#"{"command":{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}},"actor":"console-a"}"#,
                 ),
             )
             .unwrap();
@@ -227,7 +227,7 @@ fn the_raw_envelope_and_bare_bodies_parse_side_by_side() {
             .request(
                 "POST",
                 "/command",
-                Some(r#"{"write_value":{"point":10,"kind":"Float","value":{"Float":1.0}}}"#),
+                Some(r#"{"write_value":{"point":10,"kind":"float","value":{"float":1.0}}}"#),
             )
             .unwrap();
         assert_eq!(status, 200, "{body}");
@@ -276,7 +276,7 @@ fn a_stray_actor_beside_a_bare_command_is_refused() {
                 "POST",
                 "/command",
                 Some(
-                    r#"{"write_value":{"point":10,"kind":"Float","value":{"Float":7.5}},"actor":"console-a"}"#,
+                    r#"{"write_value":{"point":10,"kind":"float","value":{"float":7.5}},"actor":"console-a"}"#,
                 ),
             )
             .unwrap();

@@ -5,8 +5,8 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "measurement": { "direction": "in", "value_type": "Float" },
-        "ambient": { "direction": "in", "value_type": "Float" }
+        "measurement": { "direction": "in", "value_type": "float" },
+        "ambient": { "direction": "in", "value_type": "float" }
       }
     },
     {
@@ -17,7 +17,7 @@
         "registers": { "level-raw": 4 }
       },
       "channels": {
-        "level-raw": { "direction": "in", "value_type": "Float" }
+        "level-raw": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -25,21 +25,21 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "measurement" },
       "stale_after_ticks": 2
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "level-raw" },
       "stale_after_ticks": 3
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ambient" }
     }
   ],

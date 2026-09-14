@@ -5,9 +5,9 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "operator-target": { "direction": "in", "value_type": "Float" },
-        "measurement": { "direction": "in", "value_type": "Float" },
-        "valve": { "direction": "out", "value_type": "Float" }
+        "operator-target": { "direction": "in", "value_type": "float" },
+        "measurement": { "direction": "in", "value_type": "float" },
+        "valve": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -15,40 +15,40 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "operator-target" },
       "writable": true
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "measurement" }
     },
     {
       "id": 12,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "valve" }
     },
     {
       "id": 20,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 2.0 },
+      "value_type": "float",
+      "initial": { "float": 2.0 },
       "writable": true
     },
     {
       "id": 21,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 1.0 }
+      "value_type": "float",
+      "initial": { "float": 1.0 }
     },
     {
       "id": 30,
       "direction": "out",
-      "value_type": "Float",
-      "initial": { "Float": 0.0 }
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     }
   ],
   "signals": [
@@ -93,22 +93,22 @@
       "id": 1,
       "kind": "rate-limiter",
       "parameters": {
-        "max_delta": { "Float": 5.0 }
+        "max_delta": { "float": 5.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "rate-limiter",
       "parameters": {
-        "max_delta": { "Float": 5.0 }
+        "max_delta": { "float": 5.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],

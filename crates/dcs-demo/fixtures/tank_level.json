@@ -5,15 +5,15 @@
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "lt101_raw": { "direction": "in", "value_type": "Float" },
-        "lic101_sp": { "direction": "in", "value_type": "Float" }
+        "lt101_raw": { "direction": "in", "value_type": "float" },
+        "lic101_sp": { "direction": "in", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "sim-ao",
       "channels": {
-        "lv101_cmd": { "direction": "out", "value_type": "Float" }
+        "lv101_cmd": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -21,19 +21,19 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "lt101_raw" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "lic101_sp" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "lv101_cmd" }
     }
   ],
@@ -65,30 +65,30 @@
       "id": 1,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "pid",
       "parameters": {
-        "kp": { "Float": 0.5 },
-        "ki": { "Float": 0.3 },
-        "dt": { "Float": 0.1 },
-        "out_min": { "Float": 4.0 },
-        "out_max": { "Float": 20.0 }
+        "kp": { "float": 0.5 },
+        "ki": { "float": 0.3 },
+        "dt": { "float": 0.1 },
+        "out_min": { "float": 4.0 },
+        "out_max": { "float": 20.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "Float" },
-        "pv": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],

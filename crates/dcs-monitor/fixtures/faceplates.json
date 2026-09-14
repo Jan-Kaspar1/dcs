@@ -5,18 +5,18 @@
       "id": 1,
       "kind": "sim-ai",
       "channels": {
-        "temperature": { "direction": "in", "value_type": "Float" },
-        "feed": { "direction": "in", "value_type": "Float" }
+        "temperature": { "direction": "in", "value_type": "float" },
+        "feed": { "direction": "in", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "sim-ao",
       "channels": {
-        "drive": { "direction": "out", "value_type": "Float" },
-        "alarm": { "direction": "out", "value_type": "Bool" },
-        "debug": { "direction": "out", "value_type": "Float" },
-        "spare": { "direction": "out", "value_type": "Float" }
+        "drive": { "direction": "out", "value_type": "float" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "debug": { "direction": "out", "value_type": "float" },
+        "spare": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -24,44 +24,44 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "temperature" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 50.0 },
+      "value_type": "float",
+      "initial": { "float": 50.0 },
       "writable": true
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "drive" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 2, "name": "alarm" }
     },
     {
       "id": 30,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "debug" }
     },
     {
       "id": 31,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "spare" }
     },
     {
       "id": 40,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "feed" }
     }
   ],

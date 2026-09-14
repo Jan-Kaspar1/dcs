@@ -5,9 +5,9 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "pv": { "direction": "in", "value_type": "Float" },
-        "alarm": { "direction": "out", "value_type": "Bool" },
-        "unack": { "direction": "out", "value_type": "Bool" }
+        "pv": { "direction": "in", "value_type": "float" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unack": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -15,26 +15,26 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "pv" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
-      "initial": { "Bool": false },
+      "value_type": "bool",
+      "initial": { "bool": false },
       "writable": true
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "alarm" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "unack" }
     }
   ],
@@ -69,15 +69,15 @@
       "id": 1,
       "kind": "latching-alarm",
       "parameters": {
-        "low_limit": { "Float": 10.0 },
-        "high_limit": { "Float": 90.0 },
-        "hysteresis": { "Float": 5.0 }
+        "low_limit": { "float": 10.0 },
+        "high_limit": { "float": 90.0 },
+        "hysteresis": { "float": 5.0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "ack": { "direction": "in", "value_type": "Bool" },
-        "alarm": { "direction": "out", "value_type": "Bool" },
-        "unacknowledged": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "float" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

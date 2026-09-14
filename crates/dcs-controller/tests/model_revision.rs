@@ -182,13 +182,13 @@ fn base_model(plant: SocketAddr) -> serde_json::Value {
         .find(|point| point["id"] == SETPOINT.0)
         .unwrap();
     setpoint.as_object_mut().unwrap().remove("channel");
-    setpoint["initial"] = serde_json::json!({ "Float": 25.0 });
+    setpoint["initial"] = serde_json::json!({ "float": 25.0 });
     points.push(serde_json::json!({
         "id": DROPPED_KNOB.0,
         "direction": "in",
-        "value_type": "Float",
+        "value_type": "float",
         "writable": true,
-        "initial": { "Float": 0.0 }
+        "initial": { "float": 0.0 }
     }));
     document
 }
@@ -208,9 +208,9 @@ fn revise(document: &mut serde_json::Value) {
     points.push(serde_json::json!({
         "id": NEW_KNOB.0,
         "direction": "in",
-        "value_type": "Float",
+        "value_type": "float",
         "writable": true,
-        "initial": { "Float": 5.0 }
+        "initial": { "float": 5.0 }
     }));
     let pid = document["components"]
         .as_array_mut()
@@ -248,13 +248,13 @@ fn broken_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
         .iter_mut()
         .find(|point| point["id"] == SETPOINT.0)
         .unwrap();
-    setpoint["value_type"] = "Int".into();
-    setpoint["initial"] = serde_json::json!({ "Int": 50 });
+    setpoint["value_type"] = "int".into();
+    setpoint["initial"] = serde_json::json!({ "int": 50 });
     points.push(serde_json::json!({
         "id": 14,
         "direction": "in",
-        "value_type": "Float",
-        "initial": { "Float": 25.0 }
+        "value_type": "float",
+        "initial": { "float": 25.0 }
     }));
     for connection in document["connections"].as_array_mut().unwrap() {
         if connection["to"]["port"]["name"] == "sp" {
@@ -546,7 +546,7 @@ fn breaking_revision_is_rejected_before_promotion() {
         panic!("the breaking revision must report degraded, found {report:?}");
     };
     assert!(
-        detail.contains("internal point 11") && detail.contains("Int"),
+        detail.contains("internal point 11") && detail.contains("int"),
         "the named error must identify the element and the kind: {detail}"
     );
 

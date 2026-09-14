@@ -17,23 +17,23 @@
       "channels": {
         "level_raw": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "pump_run": {
           "direction": "in",
-          "value_type": "Bool"
+          "value_type": "bool"
         },
         "valve_fb": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "valve_cmd": {
           "direction": "out",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "pump_cmd": {
           "direction": "out",
-          "value_type": "Bool"
+          "value_type": "bool"
         }
       }
     }
@@ -42,7 +42,7 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": {
         "device": 1,
         "name": "level_raw"
@@ -52,7 +52,7 @@
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": {
         "device": 1,
         "name": "pump_run"
@@ -61,7 +61,7 @@
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": {
         "device": 1,
         "name": "valve_fb"
@@ -70,7 +70,7 @@
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": {
         "device": 1,
         "name": "valve_cmd"
@@ -79,7 +79,7 @@
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": {
         "device": 1,
         "name": "pump_cmd"
@@ -88,35 +88,35 @@
     {
       "id": 50,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "initial": {
-        "Float": 50.0
+        "float": 50.0
       },
       "writable": true
     },
     {
       "id": 51,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "initial": {
-        "Bool": false
+        "bool": false
       },
       "writable": true
     },
     {
       "id": 70,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "initial": {
-        "Bool": false
+        "bool": false
       }
     },
     {
       "id": 71,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "initial": {
-        "Bool": false
+        "bool": false
       }
     }
   ],
@@ -195,26 +195,26 @@
       "kind": "analog-input",
       "parameters": {
         "raw_min": {
-          "Float": 4.0
+          "float": 4.0
         },
         "raw_max": {
-          "Float": 20.0
+          "float": 20.0
         },
         "eng_min": {
-          "Float": 0.0
+          "float": 0.0
         },
         "eng_max": {
-          "Float": 100.0
+          "float": 100.0
         }
       },
       "ports": {
         "raw": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "out": {
           "direction": "out",
-          "value_type": "Float"
+          "value_type": "float"
         }
       }
     },
@@ -223,36 +223,36 @@
       "kind": "pid",
       "parameters": {
         "kp": {
-          "Float": 0.5
+          "float": 0.5
         },
         "ki": {
-          "Float": 0.2
+          "float": 0.2
         },
         "kd": {
-          "Float": 0.0
+          "float": 0.0
         },
         "dt": {
-          "Float": 0.1
+          "float": 0.1
         },
         "out_min": {
-          "Float": 4.0
+          "float": 4.0
         },
         "out_max": {
-          "Float": 20.0
+          "float": 20.0
         }
       },
       "ports": {
         "sp": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "pv": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "out": {
           "direction": "out",
-          "value_type": "Float"
+          "value_type": "float"
         }
       }
     },
@@ -261,28 +261,28 @@
       "kind": "valve",
       "parameters": {
         "tolerance": {
-          "Float": 1.0
+          "float": 1.0
         },
         "discrepancy_ticks": {
-          "Int": 3
+          "int": 3
         }
       },
       "ports": {
         "cmd": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "out": {
           "direction": "out",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "fb": {
           "direction": "in",
-          "value_type": "Float"
+          "value_type": "float"
         },
         "discrepancy": {
           "direction": "out",
-          "value_type": "Bool"
+          "value_type": "bool"
         }
       }
     },
@@ -293,11 +293,11 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "Bool"
+          "value_type": "bool"
         },
         "out": {
           "direction": "out",
-          "value_type": "Bool"
+          "value_type": "bool"
         }
       }
     },
@@ -306,25 +306,25 @@
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
-          "Int": 5
+          "int": 5
         }
       },
       "ports": {
         "cmd": {
           "direction": "in",
-          "value_type": "Bool"
+          "value_type": "bool"
         },
         "out": {
           "direction": "out",
-          "value_type": "Bool"
+          "value_type": "bool"
         },
         "run": {
           "direction": "in",
-          "value_type": "Bool"
+          "value_type": "bool"
         },
         "fault": {
           "direction": "out",
-          "value_type": "Bool"
+          "value_type": "bool"
         }
       }
     }

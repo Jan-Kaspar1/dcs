@@ -5,15 +5,15 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "a": { "direction": "in", "value_type": "Bool" },
-        "b": { "direction": "in", "value_type": "Bool" },
-        "c": { "direction": "in", "value_type": "Bool" },
-        "set": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "pulse": { "direction": "in", "value_type": "Bool" },
-        "gated": { "direction": "out", "value_type": "Bool" },
-        "latched": { "direction": "out", "value_type": "Bool" },
-        "pulsed": { "direction": "out", "value_type": "Bool" }
+        "a": { "direction": "in", "value_type": "bool" },
+        "b": { "direction": "in", "value_type": "bool" },
+        "c": { "direction": "in", "value_type": "bool" },
+        "set": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "pulse": { "direction": "in", "value_type": "bool" },
+        "gated": { "direction": "out", "value_type": "bool" },
+        "latched": { "direction": "out", "value_type": "bool" },
+        "pulsed": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -21,55 +21,55 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "a" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "b" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "c" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "set" }
     },
     {
       "id": 14,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "reset" }
     },
     {
       "id": 15,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "pulse" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "gated" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "latched" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "pulsed" }
     }
   ],
@@ -134,13 +134,13 @@
       "id": 1,
       "kind": "bool-gate",
       "parameters": {
-        "operation": { "Int": 0 }
+        "operation": { "int": 0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Bool" },
-        "in_2": { "direction": "in", "value_type": "Bool" },
-        "in_3": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "bool" },
+        "in_2": { "direction": "in", "value_type": "bool" },
+        "in_3": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
@@ -148,20 +148,20 @@
       "kind": "sr-latch",
       "parameters": {},
       "ports": {
-        "set": { "direction": "in", "value_type": "Bool" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "set": { "direction": "in", "value_type": "bool" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 3,
       "kind": "edge-trigger",
       "parameters": {
-        "edge": { "Int": 0 }
+        "edge": { "int": 0 }
       },
       "ports": {
-        "in": { "direction": "in", "value_type": "Bool" },
-        "out": { "direction": "out", "value_type": "Bool" }
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
       }
     }
   ],

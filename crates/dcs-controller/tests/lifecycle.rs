@@ -242,13 +242,13 @@ fn base_model(plant: SocketAddr) -> serde_json::Value {
         .find(|point| point["id"] == SETPOINT.0)
         .unwrap();
     setpoint.as_object_mut().unwrap().remove("channel");
-    setpoint["initial"] = serde_json::json!({ "Float": 25.0 });
+    setpoint["initial"] = serde_json::json!({ "float": 25.0 });
     points.push(serde_json::json!({
         "id": DROPPED_KNOB.0,
         "direction": "in",
-        "value_type": "Float",
+        "value_type": "float",
         "writable": true,
-        "initial": { "Float": 0.0 }
+        "initial": { "float": 0.0 }
     }));
     document
 }
@@ -269,9 +269,9 @@ fn v2_model(dir: &Path, name: &str, plant: SocketAddr) -> (PathBuf, PlantModel) 
     points.push(serde_json::json!({
         "id": NEW_KNOB.0,
         "direction": "in",
-        "value_type": "Float",
+        "value_type": "float",
         "writable": true,
-        "initial": { "Float": 5.0 }
+        "initial": { "float": 5.0 }
     }));
     let pid = document["components"]
         .as_array_mut()

@@ -32,7 +32,7 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 /// server wraps: the two [`IoDriver`](dcs_core::IoDriver) accesses plus
 /// the explicit simulation controls — stepping and fault injection — that
 /// keep the shared plant deterministic and testable. The `op` tag is the
-/// wire discriminator: `{"op":"write","point":2,"value":{"Float":1.5}}`.
+/// wire discriminator: `{"op":"write","point":2,"value":{"float":1.5}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PlantRequest {
@@ -353,7 +353,7 @@ mod tests {
                 }],
             })
             .unwrap(),
-            r#"{"result":"points","points":[{"point":10,"direction":"in","sample":{"value":{"Float":1.5},"quality":"Good","tick":3},"fault":null}]}"#
+            r#"{"result":"points","points":[{"point":10,"direction":"in","sample":{"value":{"float":1.5},"quality":"good","tick":3},"fault":null}]}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantResponse::Stepped { tick: Tick(7) }).unwrap(),
@@ -366,7 +366,55 @@ mod tests {
                 },
             })
             .unwrap(),
-            r#"{"result":"error","error":{"kind":"io","error":{"UnknownPoint":4}}}"#
+            r#"{"result":"error","error":{"kind":"io","error":{"unknown_point":4}}}"#
+        );
+    }
+
+    #[test]
+    fn protocol_reads_legacy_pascal_case_payloads() {
+        // A peer running an earlier build spells Value, Quality, and
+        // IoError PascalCase; the variant aliases keep those payloads
+        // readable on this side.
+        let request: PlantRequest =
+            serde_json::from_str(r#"{"op":"write","point":2,"value":{"Float":1.5}}"#).unwrap();
+        assert_eq!(
+            request,
+            PlantRequest::Write {
+                point: PointId(2),
+                value: Value::Float(1.5),
+            }
+        );
+
+        let response: PlantResponse = serde_json::from_str(
+            r#"{"result":"sample","sample":{"value":{"Int":-3},"quality":{"Uncertain":"Substituted"},"tick":9}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response,
+            PlantResponse::Sample {
+                sample: Sample::new(
+                    Value::Int(-3),
+                    Quality::Uncertain(QualityReason::Substituted),
+                    Tick(9),
+                ),
+            }
+        );
+
+        let response: PlantResponse = serde_json::from_str(
+            r#"{"result":"error","error":{"kind":"io","error":{"TypeMismatch":{"point":5,"expected":"Float","found":{"Bool":true}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response,
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::TypeMismatch {
+                        point: PointId(5),
+                        expected: ValueKind::Float,
+                        found: Value::Bool(true),
+                    },
+                },
+            }
         );
     }
 }

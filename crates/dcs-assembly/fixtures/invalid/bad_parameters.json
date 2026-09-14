@@ -5,9 +5,9 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "sp": { "direction": "in", "value_type": "Float" },
-        "pv": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -15,19 +15,19 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "sp" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "pv" }
     },
     {
       "id": 12,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "out" }
     }
   ],
@@ -37,15 +37,15 @@
       "id": 1,
       "kind": "pid",
       "parameters": {
-        "ki": { "Float": 0.1 },
-        "dt": { "Float": 0.1 },
-        "out_min": { "Float": 0.0 },
-        "out_max": { "Float": 10.0 }
+        "ki": { "float": 0.1 },
+        "dt": { "float": 0.1 },
+        "out_min": { "float": 0.0 },
+        "out_max": { "float": 10.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "Float" },
-        "pv": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],

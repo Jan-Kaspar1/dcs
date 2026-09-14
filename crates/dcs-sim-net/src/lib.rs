@@ -30,7 +30,7 @@
 //!
 //! - `{"op":"read","point":1}` — `IoDriver::read`; answers
 //!   `{"result":"sample","sample":{"value":…,"quality":…,"tick":…}}`.
-//! - `{"op":"write","point":2,"value":{"Float":1.5}}` —
+//! - `{"op":"write","point":2,"value":{"float":1.5}}` —
 //!   `IoDriver::write` with its kind check; answers `{"result":"done"}`.
 //! - `{"op":"step","dt":0.1}` — `SimDriver::step`; answers
 //!   `{"result":"stepped","tick":7}`. A negative or non-finite `dt` is

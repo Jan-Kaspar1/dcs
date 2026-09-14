@@ -5,14 +5,14 @@
       "id": 1,
       "kind": "sim-8ai",
       "channels": {
-        "ch0": { "direction": "in", "value_type": "Float" }
+        "ch0": { "direction": "in", "value_type": "float" }
       }
     },
     {
       "id": 2,
       "kind": "sim-4ao",
       "channels": {
-        "ch0": { "direction": "out", "value_type": "Float" }
+        "ch0": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -20,20 +20,20 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "ch0" }
     },
     {
       "id": 11,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "ch0" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
-      "initial": { "Float": 20.0 },
+      "value_type": "float",
+      "initial": { "float": 20.0 },
       "writable": true
     }
   ],
@@ -67,11 +67,11 @@
     {
       "id": 1,
       "kind": "pid",
-      "parameters": { "kp": { "Float": 1.5 }, "ti": { "Float": 10.0 } },
+      "parameters": { "kp": { "float": 1.5 }, "ti": { "float": 10.0 } },
       "ports": {
-        "in": { "direction": "in", "value_type": "Float" },
-        "setpoint": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "in": { "direction": "in", "value_type": "float" },
+        "setpoint": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],

@@ -273,7 +273,7 @@ mod tests {
         // back without the key — the bound point is serving-layer
         // annotation, not part of the kind's static interface.
         let port: PortDescriptor = serde_json::from_str(
-            r#"{"name":"pv","direction":"in","kind":"Float","role":"process_value"}"#,
+            r#"{"name":"pv","direction":"in","kind":"float","role":"process_value"}"#,
         )
         .unwrap();
         assert_eq!(port.point, None);

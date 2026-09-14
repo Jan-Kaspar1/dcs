@@ -379,6 +379,90 @@ fn monitoring_page_is_served() {
     });
 }
 
+/// The wire spelling serde emits for a unit or externally tagged enum
+/// variant: the bare string for a unit variant, the sole object key for
+/// a tagged one.
+fn emitted_spelling(value: &impl serde::Serialize) -> String {
+    match serde_json::to_value(value).unwrap() {
+        serde_json::Value::String(name) => name,
+        serde_json::Value::Object(map) => map.keys().next().unwrap().clone(),
+        other => panic!(
+            "an externally tagged variant serializes as a string or single-key object: {other}"
+        ),
+    }
+}
+
+#[test]
+fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        // Every name the page pattern-matches or constructs is the
+        // audited enum's canonical snake_case spelling — derived from
+        // serde itself so the page and the rename rules cannot fork.
+        for spelling in [
+            emitted_spelling(&Value::Bool(true)),
+            emitted_spelling(&Value::Int(0)),
+            emitted_spelling(&Value::Float(0.0)),
+            emitted_spelling(&ValueKind::Bool),
+            emitted_spelling(&ValueKind::Int),
+            emitted_spelling(&ValueKind::Float),
+            emitted_spelling(&Quality::Good),
+            emitted_spelling(&Quality::Uncertain(QualityReason::Substituted)),
+            emitted_spelling(&Quality::Bad(QualityReason::Substituted)),
+            emitted_spelling(&QualityReason::Substituted),
+            emitted_spelling(&IoError::UnknownPoint(PointId(0))),
+            emitted_spelling(&IoError::Disconnected(PointId(0))),
+            emitted_spelling(&IoError::Timeout(PointId(0))),
+            emitted_spelling(&IoError::Fenced(PointId(0))),
+            emitted_spelling(&IoError::TypeMismatch {
+                point: PointId(0),
+                expected: ValueKind::Bool,
+                found: Value::Bool(false),
+            }),
+        ] {
+            assert!(
+                page.contains(&spelling),
+                "page lacks the emitted spelling {spelling}"
+            );
+        }
+        // The legacy PascalCase spellings the read aliases keep
+        // deserializable survive nowhere as wire operands — only as
+        // display output the `pascal` helper computes at render time.
+        for legacy in [
+            "Bool",
+            "Int",
+            "Float",
+            "Good",
+            "Uncertain",
+            "Bad",
+            "Unspecified",
+            "Substituted",
+            "Stale",
+            "OutOfRange",
+            "CommunicationFault",
+            "DeviceFault",
+            "ConfigurationFault",
+            "UnknownPoint",
+            "Disconnected",
+            "Timeout",
+            "TypeMismatch",
+            "Fenced",
+        ] {
+            for operand in [
+                format!("=== \"{legacy}\""),
+                format!("=== '{legacy}'"),
+                format!("\"{legacy}\" in "),
+                format!(" {{ {legacy}: "),
+            ] {
+                assert!(
+                    !page.contains(&operand),
+                    "page still matches the legacy spelling: {operand}"
+                );
+            }
+        }
+    });
+}
+
 #[test]
 fn page_json_feed_tracks_snapshots_and_commands() {
     with_monitor(|driver, client| {
@@ -404,7 +488,7 @@ fn page_json_feed_tracks_snapshots_and_commands() {
             .request(
                 "POST",
                 "/command",
-                Some(r#"{"write_value":{"point":10,"kind":"Float","value":{"Float":7.5}}}"#),
+                Some(r#"{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}}"#),
             )
             .unwrap();
         assert_eq!(status, 200);

@@ -5,14 +5,14 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "v1": { "direction": "in", "value_type": "Float" },
-        "v2": { "direction": "in", "value_type": "Float" },
-        "v3": { "direction": "in", "value_type": "Float" },
-        "rate": { "direction": "in", "value_type": "Float" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "voted": { "direction": "out", "value_type": "Float" },
-        "discrepancy": { "direction": "out", "value_type": "Bool" },
-        "total": { "direction": "out", "value_type": "Float" }
+        "v1": { "direction": "in", "value_type": "float" },
+        "v2": { "direction": "in", "value_type": "float" },
+        "v3": { "direction": "in", "value_type": "float" },
+        "rate": { "direction": "in", "value_type": "float" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "voted": { "direction": "out", "value_type": "float" },
+        "discrepancy": { "direction": "out", "value_type": "bool" },
+        "total": { "direction": "out", "value_type": "float" }
       }
     }
   ],
@@ -20,49 +20,49 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "v1" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "v2" }
     },
     {
       "id": 12,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "v3" }
     },
     {
       "id": 13,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "rate" }
     },
     {
       "id": 14,
       "direction": "in",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "reset" }
     },
     {
       "id": 20,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "voted" }
     },
     {
       "id": 21,
       "direction": "out",
-      "value_type": "Bool",
+      "value_type": "bool",
       "channel": { "device": 1, "name": "discrepancy" }
     },
     {
       "id": 22,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "total" }
     }
   ],
@@ -123,27 +123,27 @@
       "id": 1,
       "kind": "median-voter",
       "parameters": {
-        "tolerance": { "Float": 2.0 }
+        "tolerance": { "float": 2.0 }
       },
       "ports": {
-        "in_1": { "direction": "in", "value_type": "Float" },
-        "in_2": { "direction": "in", "value_type": "Float" },
-        "in_3": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" },
-        "discrepancy": { "direction": "out", "value_type": "Bool" }
+        "in_1": { "direction": "in", "value_type": "float" },
+        "in_2": { "direction": "in", "value_type": "float" },
+        "in_3": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "discrepancy": { "direction": "out", "value_type": "bool" }
       }
     },
     {
       "id": 2,
       "kind": "totalizer",
       "parameters": {
-        "rate_unit": { "Float": 0.5 },
-        "rollover": { "Float": 100.0 }
+        "rate_unit": { "float": 0.5 },
+        "rollover": { "float": 100.0 }
       },
       "ports": {
-        "rate": { "direction": "in", "value_type": "Float" },
-        "reset": { "direction": "in", "value_type": "Bool" },
-        "total": { "direction": "out", "value_type": "Float" }
+        "rate": { "direction": "in", "value_type": "float" },
+        "reset": { "direction": "in", "value_type": "bool" },
+        "total": { "direction": "out", "value_type": "float" }
       }
     }
   ],

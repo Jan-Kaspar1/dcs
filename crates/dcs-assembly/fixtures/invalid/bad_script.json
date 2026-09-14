@@ -5,8 +5,8 @@
       "id": 1,
       "kind": "sim",
       "channels": {
-        "setpoint": { "direction": "in", "value_type": "Float" },
-        "valve": { "direction": "out", "value_type": "Float" }
+        "setpoint": { "direction": "in", "value_type": "float" },
+        "valve": { "direction": "out", "value_type": "float" }
       }
     },
     {
@@ -22,7 +22,7 @@
         }
       },
       "channels": {
-        "level-raw": { "direction": "in", "value_type": "Float" }
+        "level-raw": { "direction": "in", "value_type": "float" }
       }
     }
   ],
@@ -30,19 +30,19 @@
     {
       "id": 10,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "setpoint" }
     },
     {
       "id": 11,
       "direction": "in",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 2, "name": "level-raw" }
     },
     {
       "id": 12,
       "direction": "out",
-      "value_type": "Float",
+      "value_type": "float",
       "channel": { "device": 1, "name": "valve" }
     }
   ],
@@ -60,14 +60,14 @@
       "id": 1,
       "kind": "analog-input",
       "parameters": {
-        "raw_min": { "Float": 4.0 },
-        "raw_max": { "Float": 20.0 },
-        "eng_min": { "Float": 0.0 },
-        "eng_max": { "Float": 100.0 }
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "Float" },
-        "out": { "direction": "out", "value_type": "Float" }
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
       }
     }
   ],
