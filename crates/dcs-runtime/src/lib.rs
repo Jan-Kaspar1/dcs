@@ -60,7 +60,9 @@ mod gate;
 mod peer;
 mod standby;
 
-pub use checkpoint::{Checkpoint, RestoreError};
+pub use checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
 pub use executor::{

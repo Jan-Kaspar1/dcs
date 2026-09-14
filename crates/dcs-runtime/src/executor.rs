@@ -6,12 +6,14 @@
 //! [`Executor::run`] then advance a virtual [`Tick`] and cycle read → step
 //! → write deterministically.
 
-use crate::checkpoint::{Checkpoint, RestoreError};
+use crate::checkpoint::{
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    IoDriver, IoError, IoFault, IoHealth, PointId, PointTelemetry, Quality, QualityReason, Sample,
-    StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
+    IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry, Quality,
+    QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -564,6 +566,10 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// The fingerprint of the model this run was assembled from, when
+    /// the assembling layer supplied one: stamped into every checkpoint
+    /// and the value a restored checkpoint's fingerprint must equal.
+    model_fingerprint: Option<ModelFingerprint>,
     tick: Tick,
 }
 
@@ -682,8 +688,29 @@ impl<'d> Executor<'d> {
             pending_commands: VecDeque::new(),
             receipts: Vec::new(),
             io_health: IoHealth::default(),
+            model_fingerprint: None,
             tick: Tick::ZERO,
         })
+    }
+
+    /// Records the fingerprint of the model this run was assembled from.
+    ///
+    /// The assembling layer supplies it — the executor is model-agnostic
+    /// and never derives one. Once set, every
+    /// [`checkpoint`](Executor::checkpoint) carries it and every
+    /// [`restore`](Executor::restore)/[`apply`](Executor::apply) requires
+    /// the incoming checkpoint's fingerprint to equal it, so a standby
+    /// rejects a checkpoint captured under a different model by name
+    /// rather than discovering the skew through structural drift.
+    pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
+        self.model_fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// The fingerprint this run was assembled with — the value
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) recorded.
+    pub fn model_fingerprint(&self) -> Option<ModelFingerprint> {
+        self.model_fingerprint
     }
 
     /// The executor's current virtual tick: [`Tick::ZERO`] before the first
@@ -895,6 +922,8 @@ impl<'d> Executor<'d> {
     pub fn checkpoint(&self) -> Checkpoint {
         let image = self.image.borrow();
         Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: self.model_fingerprint,
             tick: self.tick,
             components: self
                 .components
@@ -926,25 +955,35 @@ impl<'d> Executor<'d> {
     ///
     /// `driver`, `map`, and `components` are the same inputs
     /// [`Executor::new`] takes — on a standby they are built from the same
-    /// plant model. Restore wires the components, checks that the
-    /// checkpoint's component set equals the registered set by name,
-    /// applies the driver state when the checkpoint carries one, restores
-    /// each component's state, then resumes the tick and the output image.
-    /// The result is an executor whose next [`scan`](Executor::scan)
-    /// produces outputs identical to the captured run's.
+    /// plant model — and `model_fingerprint` is the fingerprint that
+    /// model carries, supplied by the assembling layer exactly as
+    /// [`with_model_fingerprint`](Self::with_model_fingerprint) records
+    /// it. Restore wires the components, negotiates the checkpoint's
+    /// format version and fingerprint against `model_fingerprint`, checks
+    /// that the checkpoint's component set equals the registered set by
+    /// name, applies the driver state when the checkpoint carries one,
+    /// restores each component's state, then resumes the tick and the
+    /// output image. The result is an executor whose next
+    /// [`scan`](Executor::scan) produces outputs identical to the
+    /// captured run's, itself fingerprinted so the checkpoints it later
+    /// emits carry the same identity.
     ///
     /// Any incompatibility fails with a [`RestoreError`] naming the
-    /// element at fault: a [`WiringError`], a component-name mismatch, a
-    /// component's [`StateError`](dcs_core::StateError), or the driver's.
-    /// No partially restored executor is returned; the supplied driver is
+    /// element at fault: an unsupported format version or a fingerprint
+    /// mismatch before any state is examined, then a [`WiringError`], a
+    /// component-name mismatch, a component's
+    /// [`StateError`](dcs_core::StateError), or the driver's. No
+    /// partially restored executor is returned; the supplied driver is
     /// asked to validate before applying its state section.
     pub fn restore(
         driver: &'d (dyn IoDriver + Sync),
         map: PointMap,
         components: Vec<Box<dyn Component>>,
         checkpoint: &Checkpoint,
+        model_fingerprint: Option<ModelFingerprint>,
     ) -> Result<Self, RestoreError> {
         let mut executor = Self::new(driver, map, components)?;
+        executor.model_fingerprint = model_fingerprint;
         executor.check_checkpoint(checkpoint)?;
 
         // Driver state before component state: a driver that does not
@@ -982,6 +1021,8 @@ impl<'d> Executor<'d> {
     /// Where [`restore`](Executor::restore) builds a fresh equivalent
     /// executor, `apply` realigns one that is already assembled and may
     /// be mid-run: the same compatibility checks hold — the checkpoint's
+    /// format version must be supported and its model fingerprint must
+    /// equal this run's, its
     /// component set must equal the registered set, its outputs must be
     /// points the map serves as `Out` with the declared kinds, and its
     /// internal section must name image-carried `In` points — then the
@@ -1062,11 +1103,29 @@ impl<'d> Executor<'d> {
     }
 
     /// The compatibility half of checkpoint restore and apply: the
-    /// checkpoint's component set must equal the registered set exactly,
+    /// checkpoint's format version must be one this build accepts and its
+    /// model fingerprint must equal this run's — the explicit negotiation
+    /// that runs before any state is examined — then the checkpoint's
+    /// component set must equal the registered set exactly,
     /// every captured output must name a point the map serves as `Out`
     /// with the declared value kind, and every captured internal sample
     /// must name an image-carried `In` point with the declared kind.
     fn check_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
+        // Negotiation first: a checkpoint this build cannot read, or one
+        // captured under a different model, is refused before any state
+        // applies.
+        if !SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
+            return Err(RestoreError::UnsupportedVersion {
+                found: checkpoint.format_version,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            });
+        }
+        if checkpoint.model_fingerprint != self.model_fingerprint {
+            return Err(RestoreError::FingerprintMismatch {
+                found: checkpoint.model_fingerprint,
+                expected: self.model_fingerprint,
+            });
+        }
         // Component names are the run's component ids: the checkpoint's
         // set must equal the registered set exactly.
         for component in checkpoint.components.keys() {
@@ -2954,6 +3013,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap();
         restored.scan().unwrap();
@@ -3091,6 +3151,7 @@ mod tests {
                         }),
                     ],
                     checkpoint,
+                    None,
                 )
                 .unwrap(),
                 None => checkpoint_rig(&driver),
@@ -3146,6 +3207,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert_eq!(
@@ -3191,6 +3253,7 @@ mod tests {
                 }),
             ],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3252,6 +3315,7 @@ mod tests {
                 count: 0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -3763,6 +3827,7 @@ mod tests {
                 gain: 2.0,
             })],
             &checkpoint,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3823,5 +3888,250 @@ mod tests {
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
         );
+    }
+
+    #[test]
+    fn checkpoint_carries_version_and_fingerprint_through_serde() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor =
+            checkpoint_rig(&driver).with_model_fingerprint(ModelFingerprint::of(b"model-a"));
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+
+        // This build stamps the version it writes and the fingerprint
+        // the assembling layer supplied.
+        assert_eq!(checkpoint.format_version, CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            checkpoint.model_fingerprint,
+            Some(ModelFingerprint::of(b"model-a"))
+        );
+
+        // Both negotiate on the wire: the serialized form carries the
+        // fields and they survive a round-trip.
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["format_version"], CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(
+            document["model_fingerprint"],
+            ModelFingerprint::of(b"model-a").0
+        );
+        assert_eq!(
+            serde_json::from_str::<Checkpoint>(&json).unwrap(),
+            checkpoint
+        );
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_version_restores() {
+        // The documented compatible-version case: a checkpoint a
+        // pre-versioning build wrote carries no `format_version` —
+        // serde reads it as version 0, which
+        // `SUPPORTED_FORMAT_VERSIONS` accepts — and no fingerprint, so
+        // it restores onto an executor assembled without one.
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.model_fingerprint, None);
+
+        let mut document = serde_json::to_value(&checkpoint).unwrap();
+        document.as_object_mut().unwrap().remove("format_version");
+        assert!(
+            !document
+                .as_object()
+                .unwrap()
+                .contains_key("model_fingerprint")
+        );
+        let legacy: Checkpoint = serde_json::from_value(document).unwrap();
+        assert_eq!(legacy.format_version, 0);
+        assert_eq!(legacy.model_fingerprint, None);
+
+        let standby = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &standby,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ],
+            &legacy,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+
+        // And a running unfingerprinted standby applies it in place.
+        let tracking_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut tracking = checkpoint_rig(&tracking_driver);
+        tracking.apply(&legacy).unwrap();
+        assert_eq!(tracking.tick(), Tick(3));
+    }
+
+    #[test]
+    fn restore_rejects_an_unsupported_format_version() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.scan().unwrap();
+        let mut checkpoint = executor.checkpoint();
+        checkpoint.format_version = CHECKPOINT_FORMAT_VERSION + 1;
+
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![Box::new(Counter {
+                name: "count",
+                output: PointId(30),
+                count: 0,
+            })],
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::UnsupportedVersion {
+                found: CHECKPOINT_FORMAT_VERSION + 1,
+                supported: SUPPORTED_FORMAT_VERSIONS,
+            }
+        );
+
+        // The same rejection precedes any state on a running standby:
+        // the version is negotiated before the component-set check, so
+        // this checkpoint's components would have failed it anyway.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver);
+        standby.run(2).unwrap();
+        assert_eq!(standby.apply(&checkpoint), Err(error));
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_a_mismatched_model_fingerprint() {
+        let fingerprint = ModelFingerprint::of(b"model-a");
+        let other = ModelFingerprint::of(b"model-b");
+
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        let mut executor = checkpoint_rig(&driver).with_model_fingerprint(fingerprint);
+        executor.run(3).unwrap();
+        let checkpoint = executor.checkpoint();
+
+        let components = || {
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }) as Box<dyn Component>,
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ]
+        };
+        let map = || {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect::<PointMap>()
+        };
+
+        // A checkpoint from a different model — same component set,
+        // different fingerprint — is rejected by fingerprint before any
+        // state applies.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            Some(other),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            }
+        );
+        // So is a fingerprinted checkpoint landing on a run assembled
+        // without one — the model identity cannot be verified.
+        let error = Executor::restore(
+            &StubDriver::new(&[float(10), float(20), int(30)], &[]),
+            map(),
+            components(),
+            &checkpoint,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: None,
+            }
+        );
+
+        // A running standby fingerprinted for a different model rejects
+        // the same checkpoint and keeps its last-good alignment: nothing
+        // of the foreign run applied.
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut standby = checkpoint_rig(&standby_driver).with_model_fingerprint(other);
+        standby.run(2).unwrap();
+        assert_eq!(
+            standby.apply(&checkpoint),
+            Err(RestoreError::FingerprintMismatch {
+                found: Some(fingerprint),
+                expected: Some(other),
+            })
+        );
+        assert_eq!(standby.tick(), Tick(2));
+        assert_eq!(
+            standby.sample(PointId(30)),
+            Some(Sample::good(Value::Int(2), Tick(2)))
+        );
+
+        // The matching pair restores and keeps emitting the fingerprint.
+        let restored_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let restored = Executor::restore(
+            &restored_driver,
+            map(),
+            components(),
+            &checkpoint,
+            Some(fingerprint),
+        )
+        .unwrap();
+        assert_eq!(restored.tick(), Tick(3));
+        assert_eq!(restored.checkpoint().model_fingerprint, Some(fingerprint));
     }
 }
