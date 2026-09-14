@@ -1,9 +1,9 @@
 //! The component-kind registry: model `kind` strings to constructors.
 
 use crate::BuildError;
-use dcs_core::{PointId, Value};
+use dcs_core::{PointId, Value, ValueKind};
 use dcs_model::ComponentId;
-use dcs_runtime::Component;
+use dcs_runtime::{Component, PointMap};
 use std::collections::BTreeMap;
 
 /// What a registered constructor receives to build one model instance.
@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 /// each wired port to the logical point the model binds it to — an
 /// `io_point`, or a synthesized internal point for port-to-port wiring.
 /// Which port names a kind requires is the kind's contract, mirroring its
-/// declared logical I/O.
+/// declared logical I/O. `points` is the resolved driver point map, so a
+/// kind with type-parameterized variants can pick one from the bound
+/// point's value kind.
 pub struct ComponentSpec<'m> {
     /// The instance's diagnostic name — `"<kind>:<id>"`, e.g. `"pid:1"` —
     /// carried into executor diagnostics.
@@ -23,6 +25,8 @@ pub struct ComponentSpec<'m> {
     pub parameters: &'m BTreeMap<String, Value>,
     /// The instance's bound ports: port name → bound logical point.
     pub ports: &'m BTreeMap<String, PointId>,
+    /// The resolved point map: every served point's direction and kind.
+    pub points: &'m PointMap,
 }
 
 impl ComponentSpec<'_> {
@@ -41,6 +45,13 @@ impl ComponentSpec<'_> {
     /// optional.
     pub fn get(&self, port: &str) -> Option<PointId> {
         self.ports.get(port).copied()
+    }
+
+    /// The value kind the point map records for `point`, if it serves
+    /// it — e.g. for choosing between a kind's `f64` and `i64` variants
+    /// from the bound point's kind.
+    pub fn point_kind(&self, point: PointId) -> Option<ValueKind> {
+        self.points.get(point).map(|spec| spec.kind)
     }
 }
 

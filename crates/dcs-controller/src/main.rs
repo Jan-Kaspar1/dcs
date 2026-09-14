@@ -20,76 +20,103 @@ use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, DigitalInput, DigitalOutput, Interlock, Motor,
     OverrideSelect, Pid, Valve,
 };
+use dcs_core::ValueKind;
 use dcs_model::PlantModel;
 use dcs_runtime::Component;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+/// Boxes a built component or lifts its construction failure into
+/// [`BuildError`].
+fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
+where
+    C: Component + 'static,
+    E: std::error::Error + 'static,
+{
+    result
+        .map(|component| Box::new(component) as Box<dyn Component>)
+        .map_err(BuildError::other)
+}
+
 /// The `dcs-blocks` kinds this controller can instantiate — every kind
 /// the component library ships, keyed by each type's `KIND` constant.
+/// Analog kinds dispatch on the bound raw point's value kind: an `Int`
+/// channel builds the `i64` variant, anything else the `f64` one (a
+/// `Bool` raw point then fails wiring as a type mismatch, naming the
+/// element).
 fn registry() -> ComponentRegistry {
     ComponentRegistry::new()
         .with(AnalogInput::<f64>::KIND, |spec| {
-            AnalogInput::<f64>::from_parameters(
-                spec.name.as_str(),
-                spec.require("raw")?,
-                spec.require("out")?,
-                spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            let raw = spec.require("raw")?;
+            let out = spec.require("out")?;
+            if spec.point_kind(raw) == Some(ValueKind::Int) {
+                boxed(AnalogInput::<i64>::from_parameters(
+                    spec.name.as_str(),
+                    raw,
+                    out,
+                    spec.parameters,
+                ))
+            } else {
+                boxed(AnalogInput::<f64>::from_parameters(
+                    spec.name.as_str(),
+                    raw,
+                    out,
+                    spec.parameters,
+                ))
+            }
         })
         .with(AnalogOutput::<f64>::KIND, |spec| {
-            AnalogOutput::<f64>::from_parameters(
-                spec.name.as_str(),
-                spec.require("eng")?,
-                spec.require("raw")?,
-                spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            let eng = spec.require("eng")?;
+            let raw = spec.require("raw")?;
+            if spec.point_kind(raw) == Some(ValueKind::Int) {
+                boxed(AnalogOutput::<i64>::from_parameters(
+                    spec.name.as_str(),
+                    eng,
+                    raw,
+                    spec.parameters,
+                ))
+            } else {
+                boxed(AnalogOutput::<f64>::from_parameters(
+                    spec.name.as_str(),
+                    eng,
+                    raw,
+                    spec.parameters,
+                ))
+            }
         })
         .with(Pid::KIND, |spec| {
-            Pid::from_parameters(
+            boxed(Pid::from_parameters(
                 spec.name.as_str(),
                 spec.require("sp")?,
                 spec.require("pv")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(DigitalInput::KIND, |spec| {
-            DigitalInput::from_parameters(
+            boxed(DigitalInput::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(DigitalOutput::KIND, |spec| {
-            DigitalOutput::from_parameters(
+            boxed(DigitalOutput::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(AlarmMonitor::KIND, |spec| {
-            AlarmMonitor::from_parameters(
+            boxed(AlarmMonitor::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("alarm")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(Interlock::KIND, |spec| {
             // Trip inputs are declared `trip_1` … `trip_N`; order the
@@ -105,7 +132,7 @@ fn registry() -> ComponentRegistry {
                 .collect();
             trips.sort_by_key(|(index, _)| *index);
             let trips: Vec<_> = trips.into_iter().map(|(_, point)| point).collect();
-            Interlock::from_parameters(
+            boxed(Interlock::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("permissive")?,
@@ -113,45 +140,37 @@ fn registry() -> ComponentRegistry {
                 spec.require("out")?,
                 spec.require("tripped")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(OverrideSelect::KIND, |spec| {
-            OverrideSelect::from_parameters(
+            boxed(OverrideSelect::from_parameters(
                 spec.name.as_str(),
                 spec.require("control")?,
                 spec.require("operator")?,
                 spec.require("select")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(Valve::KIND, |spec| {
-            Valve::from_parameters(
+            boxed(Valve::from_parameters(
                 spec.name.as_str(),
                 spec.require("cmd")?,
                 spec.require("out")?,
                 spec.require("fb")?,
                 spec.require("discrepancy")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
         .with(Motor::KIND, |spec| {
-            Motor::from_parameters(
+            boxed(Motor::from_parameters(
                 spec.name.as_str(),
                 spec.require("cmd")?,
                 spec.require("out")?,
                 spec.require("run")?,
                 spec.require("fault")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
 }
 

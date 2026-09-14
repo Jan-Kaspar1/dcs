@@ -6,10 +6,13 @@
 //! instances, and the connections wiring them together. Assembly resolves
 //! that document in two steps:
 //!
-//! - [`sim_driver`] translates the model's device/channel mapping into the
-//!   simulated backend's [`ChannelMap`] and builds the [`SimDriver`] serving
-//!   every declared point. Only the [`SIM_DEVICE_KIND`] device kind can be
-//!   built; any other kind is [`AssemblyError::UnknownDeviceKind`].
+//! - [`sim_channel_map`] translates the model's device/channel mapping
+//!   into the simulated backend's [`ChannelMap`], open for callers to add
+//!   simulated process elements (the field physics the model does not
+//!   describe) before building the [`SimDriver`]; [`sim_driver`] is the
+//!   no-elements convenience. Only [`SIM_DEVICE_PREFIX`] kinds (`sim`,
+//!   `sim-ai`, …) can be built; any other kind is
+//!   [`AssemblyError::UnknownDeviceKind`].
 //! - [`assemble`] constructs every component instance through a
 //!   [`ComponentRegistry`], binds each declared logical I/O requirement to
 //!   the `io_point` the model wires to its port — synthesizing internal
@@ -42,6 +45,6 @@ mod assembly;
 mod error;
 mod registry;
 
-pub use assembly::{SIM_DEVICE_KIND, assemble, sim_driver};
+pub use assembly::{SIM_DEVICE_PREFIX, assemble, sim_channel_map, sim_driver};
 pub use error::{AssemblyError, BuildError};
 pub use registry::{ComponentRegistry, ComponentSpec};

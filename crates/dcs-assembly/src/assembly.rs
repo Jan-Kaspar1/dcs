@@ -17,10 +17,12 @@ use dcs_sim::{
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-/// The only device kind assembly can build: the simulated backend. A model
+/// The device-kind prefix assembly can build: every `sim*` kind resolves
+/// to [`SimDriver`] channels — `sim` itself plus role-flavored kinds like
+/// `sim-ai` or `sim-ao`, the convention `dcs-demo` established. A model
 /// device of any other kind fails with
 /// [`AssemblyError::UnknownDeviceKind`].
-pub const SIM_DEVICE_KIND: &str = "sim";
+pub const SIM_DEVICE_PREFIX: &str = "sim";
 
 /// The [`ChannelId::device`] synthesized internal points report.
 const INTERNAL_DEVICE: u64 = u64::MAX;
@@ -111,14 +113,15 @@ struct Resolved {
 
 /// Resolves the model's device/channel mapping and connection wiring.
 ///
-/// Device kinds are checked first — a non-[`SIM_DEVICE_KIND`] device is
-/// [`AssemblyError::UnknownDeviceKind`]. Connections then bind ports to
-/// points, add field-side loopbacks for point-to-point wires, and
-/// synthesize internal point pairs for port-to-port wires. Finally every
-/// port declared on an instance must be bound.
+/// Device kinds are checked first — a device whose kind does not start
+/// with [`SIM_DEVICE_PREFIX`] is [`AssemblyError::UnknownDeviceKind`].
+/// Connections then bind ports to points, add field-side loopbacks for
+/// point-to-point wires, and synthesize internal point pairs for
+/// port-to-port wires. Finally every port declared on an instance must be
+/// bound.
 fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
     for device in &model.devices {
-        if device.kind != SIM_DEVICE_KIND {
+        if !device.kind.starts_with(SIM_DEVICE_PREFIX) {
             return Err(AssemblyError::UnknownDeviceKind {
                 device: device.id,
                 kind: device.kind.clone(),
@@ -226,16 +229,28 @@ fn resolve(model: &PlantModel) -> Result<Resolved, AssemblyError> {
     })
 }
 
-/// Builds the [`SimDriver`] serving the model's device/channel mapping.
+/// Resolves the model's device/channel mapping into the [`ChannelMap`] a
+/// [`SimDriver`] serves.
 ///
 /// Every declared `io_point` becomes a point bound to its channel, with a
 /// neutral initial value of the point's declared kind; point-to-point and
 /// port-to-port wiring contributes the loopbacks and internal points. All
-/// devices must be [`SIM_DEVICE_KIND`]; the resolved [`ChannelMap`]'s own
-/// consistency check surfaces as [`AssemblyError::InvalidChannelMap`].
+/// devices must carry a [`SIM_DEVICE_PREFIX`] kind.
+///
+/// The returned map is open: the simulated plant lives in the channel
+/// map, not the model, so callers may add process elements
+/// ([`ProcessElement`](dcs_sim::ProcessElement)) standing in for field
+/// physics before constructing the driver.
+pub fn sim_channel_map(model: &PlantModel) -> Result<ChannelMap, AssemblyError> {
+    Ok(resolve(model)?.channel_map)
+}
+
+/// Builds the [`SimDriver`] serving the model's device/channel mapping —
+/// [`sim_channel_map`] plus the map's own consistency check, surfaced as
+/// [`AssemblyError::InvalidChannelMap`]. Callers needing simulated process
+/// elements build the driver from the extended map themselves.
 pub fn sim_driver(model: &PlantModel) -> Result<SimDriver, AssemblyError> {
-    let resolved = resolve(model)?;
-    SimDriver::new(resolved.channel_map)
+    SimDriver::new(sim_channel_map(model)?)
         .map_err(|detail| AssemblyError::InvalidChannelMap { detail })
 }
 
@@ -255,7 +270,7 @@ pub fn sim_driver(model: &PlantModel) -> Result<SimDriver, AssemblyError> {
 pub fn assemble<'d>(
     model: &PlantModel,
     registry: &ComponentRegistry,
-    driver: &'d dyn IoDriver,
+    driver: &'d (dyn IoDriver + Sync),
 ) -> Result<Executor<'d>, AssemblyError> {
     let resolved = resolve(model)?;
     if let Some(error) = resolved.binding_error {
@@ -274,6 +289,7 @@ pub fn assemble<'d>(
             id: instance.id,
             parameters: &instance.parameters,
             ports: resolved.bindings.get(&instance.id).unwrap_or(&NO_PORTS),
+            points: &resolved.point_map,
         };
         let component = constructor(&spec).map_err(|error| match error {
             BuildError::UnboundPort { port } => AssemblyError::UnboundPort {

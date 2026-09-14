@@ -58,7 +58,8 @@ impl std::error::Error for BuildError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssemblyError {
     /// A device declares a kind no driver integration serves. Only
-    /// [`SIM_DEVICE_KIND`](crate::SIM_DEVICE_KIND) devices can be built.
+    /// [`SIM_DEVICE_PREFIX`](crate::SIM_DEVICE_PREFIX) (`sim*`) devices
+    /// can be built.
     UnknownDeviceKind {
         /// The offending device.
         device: DeviceId,
@@ -158,7 +159,7 @@ impl fmt::Display for AssemblyError {
         match self {
             Self::UnknownDeviceKind { device, kind } => write!(
                 f,
-                "device {} has kind {kind:?}, which no driver integration serves",
+                "device {} has kind {kind:?}, which no driver integration serves (only sim* devices are served)",
                 device.0
             ),
             Self::InvalidChannelMap { detail } => {

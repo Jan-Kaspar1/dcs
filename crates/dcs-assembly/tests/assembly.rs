@@ -3,52 +3,73 @@
 //! wiring — and every [`AssemblyError`] kind is produced by a corresponding
 //! invalid fixture or a deliberately miswired stub kind.
 
-use dcs_assembly::{AssemblyError, BuildError, ComponentRegistry, assemble, sim_driver};
+use dcs_assembly::{
+    AssemblyError, BuildError, ComponentRegistry, assemble, sim_channel_map, sim_driver,
+};
 use dcs_blocks::{AnalogInput, DigitalOutput, Pid};
 use dcs_core::{Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef};
 use dcs_runtime::{Component, ComponentIo, IoRequirement, StepError};
-use dcs_sim::{ChannelId, ConfigError};
+use dcs_sim::{ChannelId, ConfigError, FirstOrderLag, ProcessElement, SimDriver};
 
 const TANK_LOOP: &str = include_str!("../fixtures/tank_loop.json");
+/// The M1 milestone fixture, checked in with `dcs-demo` — reused here
+/// exactly as the issue asks, through the general registry.
+const M1_TANK_LEVEL: &str = include_str!("../../dcs-demo/fixtures/tank_level.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
 const VALVE: PointId = PointId(12);
 
-/// The `dcs-blocks` registration the `dcs-controller` binary performs.
+fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
+where
+    C: Component + 'static,
+    E: std::error::Error + 'static,
+{
+    result
+        .map(|component| Box::new(component) as Box<dyn Component>)
+        .map_err(BuildError::other)
+}
+
+/// The `dcs-blocks` registration the `dcs-controller` binary performs,
+/// restricted to the kinds these fixtures use.
 fn registry() -> ComponentRegistry {
     ComponentRegistry::new()
-        .with("analog-input", |spec| {
-            AnalogInput::<f64>::from_parameters(
-                spec.name.as_str(),
-                spec.require("raw")?,
-                spec.require("out")?,
-                spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+        .with(AnalogInput::<f64>::KIND, |spec| {
+            let raw = spec.require("raw")?;
+            let out = spec.require("out")?;
+            if spec.point_kind(raw) == Some(ValueKind::Int) {
+                boxed(AnalogInput::<i64>::from_parameters(
+                    spec.name.as_str(),
+                    raw,
+                    out,
+                    spec.parameters,
+                ))
+            } else {
+                boxed(AnalogInput::<f64>::from_parameters(
+                    spec.name.as_str(),
+                    raw,
+                    out,
+                    spec.parameters,
+                ))
+            }
         })
-        .with("pid", |spec| {
-            Pid::from_parameters(
+        .with(Pid::KIND, |spec| {
+            boxed(Pid::from_parameters(
                 spec.name.as_str(),
                 spec.require("sp")?,
                 spec.require("pv")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
-        .with("digital-output", |spec| {
-            DigitalOutput::from_parameters(
+        .with(DigitalOutput::KIND, |spec| {
+            boxed(DigitalOutput::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
                 spec.parameters,
-            )
-            .map(|block| Box::new(block) as Box<dyn Component>)
-            .map_err(BuildError::other)
+            ))
         })
 }
 
@@ -91,6 +112,50 @@ fn tank_loop_reaches_setpoint_with_no_manual_wiring() {
             .all(|component| component.step_errors == 0),
         "{:?}",
         snapshot.components
+    );
+}
+
+#[test]
+fn m1_tank_level_fixture_reaches_setpoint() {
+    // The M1 fixture (`dcs-demo`'s tank_level.json) declares `sim-ai` and
+    // `sim-ao` devices, an analog-input, and a pid. Its simulated plant is
+    // not part of the model: the test adds the tank's first-order lag to
+    // the resolved channel map — process emulation, not component wiring —
+    // then assembles through the registry with no manual wiring code.
+    let model = model(M1_TANK_LEVEL);
+    let level_raw = PointId(10); // lt101_raw, driven by the lag
+    let setpoint = PointId(11); // lic101_sp, written field-side
+    let valve = PointId(20); // lv101_cmd, the pid's output
+
+    let map = sim_channel_map(&model)
+        .unwrap()
+        .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
+            input: valve,
+            output: level_raw,
+            time_constant: 2.0,
+            initial: 4.0,
+        }));
+    let driver = SimDriver::new(map).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    driver.write(setpoint, Value::Float(60.0)).unwrap();
+    for _ in 0..400 {
+        executor.scan().unwrap();
+        driver.step(0.1);
+    }
+
+    // 60% of the 4–20 mA raw range settles at 13.6 mA; stated tolerance
+    // is 0.5 mA.
+    let Value::Float(raw) = driver.read(level_raw).unwrap().value else {
+        panic!("level raw must be Float")
+    };
+    assert!((raw - 13.6).abs() < 0.5, "raw={raw}");
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
     );
 }
 

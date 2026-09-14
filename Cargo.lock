@@ -43,6 +43,7 @@ version = "0.1.0"
 dependencies = [
  "dcs-assembly",
  "dcs-blocks",
+ "dcs-core",
  "dcs-model",
  "dcs-runtime",
  "serde_json",
