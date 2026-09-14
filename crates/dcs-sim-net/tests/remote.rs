@@ -442,3 +442,58 @@ fn two_identical_scripted_runs_produce_identical_sample_sequences() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn the_writer_claim_fences_every_attachment_not_holding_it() {
+    with_server(loopback_map(), |addr| {
+        // Two attachments per side — the multi-connection shape one
+        // controller presents — plus a reader that never claims.
+        let old_a = RemoteDriver::connect(addr).unwrap();
+        let old_b = RemoteDriver::connect(addr).unwrap();
+        let new_a = RemoteDriver::connect(addr).unwrap();
+        let new_b = RemoteDriver::connect(addr).unwrap();
+        let observer = RemoteDriver::connect(addr).unwrap();
+
+        // Unclaimed, every attachment writes — the pre-claim behavior.
+        old_a.write(PointId(20), Value::Float(1.0)).unwrap();
+        old_b.step(0.1).unwrap();
+        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(1.0));
+
+        // The old owner's several attachments claim the same token; all
+        // of them keep writing.
+        old_a.claim_writer(1).unwrap();
+        old_b.claim_writer(1).unwrap();
+        old_a.write(PointId(20), Value::Float(2.0)).unwrap();
+        old_b.step(0.1).unwrap();
+
+        // The takeover claim preempts unconditionally — after it, the
+        // old owner's writes and steps are refused at the field, not
+        // merely quiesced at its own gate.
+        new_a.claim_writer(2).unwrap();
+        assert_eq!(
+            old_a.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(old_b.step(0.1), Err(RemoteError::Fenced));
+        // The claim covers the whole owner token: the takeover side's
+        // second attachment claims the same token and writes.
+        new_b.claim_writer(2).unwrap();
+        new_b.write(PointId(20), Value::Float(3.0)).unwrap();
+        new_a.step(0.1).unwrap();
+        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(3.0));
+
+        // Reads and plant tooling stay open to a fenced attachment.
+        assert_eq!(old_a.read(PointId(20)).unwrap().value, Value::Float(3.0));
+        old_a.inject_fault(PointId(10), Fault::Timeout).unwrap();
+        assert_eq!(new_a.read(PointId(10)), Err(IoError::Timeout(PointId(10))));
+
+        // A fenced attachment reclaims the field only by claiming again
+        // — the documented switchback, not an automatic reopen.
+        old_a.claim_writer(3).unwrap();
+        old_a.write(PointId(20), Value::Float(4.0)).unwrap();
+        assert_eq!(
+            new_a.write(PointId(20), Value::Float(5.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+    });
+}

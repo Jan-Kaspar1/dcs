@@ -461,7 +461,7 @@ fn neutral(kind: ValueKind) -> Value {
 /// faults degrade control inputs to `Bad` — they never abort the scan.
 fn failure_quality(error: IoError) -> Quality {
     match error {
-        IoError::Disconnected(_) | IoError::Timeout(_) => {
+        IoError::Disconnected(_) | IoError::Timeout(_) | IoError::Fenced(_) => {
             Quality::Bad(QualityReason::CommunicationFault)
         }
         IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } => {

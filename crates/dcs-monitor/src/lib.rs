@@ -441,13 +441,38 @@ impl<'d> Monitor<'d> {
     }
 
     /// Marks a tracking peer degraded after a checkpoint fetch produced
-    /// nothing — an unreachable active or a refused request.
+    /// nothing — an unreachable active or a refused request — and counts
+    /// the heartbeat miss toward the failover budget.
     pub fn note_transfer_failed(&self, detail: impl std::fmt::Display) {
         self.shared
             .lock()
             .unwrap()
             .peer
             .note_transfer_failed(detail);
+    }
+
+    /// Whether the heartbeat's consecutive failed pulls have reached the
+    /// peer's configured failover budget — the scan boundary at which a
+    /// still-converged standby may self-promote. See
+    /// [`Peer::failover_due`](dcs_runtime::Peer::failover_due).
+    pub fn failover_due(&self) -> bool {
+        self.shared.lock().unwrap().peer.failover_due()
+    }
+
+    /// The automatic-failover half of `POST /promote`, for the scan loop
+    /// that detects active loss: applies the self-promotion at this
+    /// boundary under the lock and journals the reported transition.
+    /// A refusal — the named [`SwitchError`](dcs_core::SwitchError) —
+    /// leaves the peer reporting its convergence state, which `GET
+    /// /role` already serves; the scan cycle continues.
+    pub fn self_promote(&self) -> Result<RoleReport, dcs_core::SwitchError> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        peer.self_promote()?;
+        for change in peer.take_role_changes() {
+            recorder.note_role_change(change.tick, change.from, change.to);
+        }
+        Ok(peer.report())
     }
 
     fn handle(&self, mut request: Request) {
@@ -537,6 +562,21 @@ impl<'d> Monitor<'d> {
                                 Err(error) => shared
                                     .peer
                                     .note_transfer_failed(format!("fetch from {active}: {error}")),
+                            }
+                            // Active loss detected at this boundary: the
+                            // miss budget is met, so a still-converged
+                            // standby promotes itself; a refusal is the
+                            // peer's named convergence state, which
+                            // `GET /role` serves — the scan runs either
+                            // way.
+                            if shared.peer.failover_due() && shared.peer.self_promote().is_ok() {
+                                for change in shared.peer.take_role_changes() {
+                                    shared.recorder.note_role_change(
+                                        change.tick,
+                                        change.from,
+                                        change.to,
+                                    );
+                                }
                             }
                         }
                         if let Err(error) = scan_and_record(&mut shared) {
