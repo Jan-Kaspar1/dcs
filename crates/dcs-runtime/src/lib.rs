@@ -20,6 +20,12 @@
 //! `dcs-core` [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot) contract —
 //! the latest sample of every known point plus per-component diagnostics —
 //! serde-serializable so a monitoring UI needs only the shared contracts.
+//!
+//! [`Executor::submit_command`] is the monitoring write-side: operator
+//! [`Command`](dcs_core::Command)s queue between scans and apply at the
+//! head of the next scan — before the input read — each producing a
+//! [`CommandReceipt`](dcs_core::CommandReceipt) in the
+//! [`receipts`](Executor::receipts) log.
 
 #![warn(missing_docs)]
 

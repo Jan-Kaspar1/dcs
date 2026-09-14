@@ -8,11 +8,12 @@
 
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
-    ComponentDiagnostics, Direction, IoDriver, IoError, PointId, PointTelemetry, Quality,
-    QualityReason, Sample, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
+    IoDriver, IoError, PointId, PointTelemetry, Quality, QualityReason, Sample, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 
 /// How the controller may use one point the driver serves.
@@ -298,22 +299,36 @@ fn failure_quality(error: IoError) -> Quality {
 ///
 /// 1. advances the virtual tick by one — the executor's tick is the only
 ///    timestamp authority;
-/// 2. reads every `In` point in the map into the scan image, stamping the
+/// 2. applies every queued operator [`Command`] in submission order —
+///    this is the documented point where commands submitted between scans
+///    take effect, each updating its receipt to the final outcome;
+/// 3. reads every `In` point in the map into the scan image, stamping the
 ///    new tick — a failed read keeps the last known value marked
 ///    [`Quality::Bad`] rather than aborting the scan;
-/// 3. steps the components in scan order, each seeing a [`ComponentIo`]
+/// 4. steps the components in scan order, each seeing a [`ComponentIo`]
 ///    scoped to its declared points — a failing step is recorded and the
 ///    scan continues;
-/// 4. writes the image's `Out` points to the driver — points a component
+/// 5. writes the image's `Out` points to the driver — points a component
 ///    never wrote keep their last output, so a failed step holds outputs.
+///
+/// Applying commands before the input read gives a command to an `In`
+/// point setpoint semantics: the same scan's input phase observes the
+/// written value, and it holds for later scans until the field-side value
+/// changes again. A command to an `Out` point lands in the image where a
+/// component write later in the same scan may still override it —
+/// components win, keeping control logic authoritative inside a scan.
 ///
 /// Nothing reads a wall clock: identical driver behavior over identical
 /// scans produces identical samples on every host.
 pub struct Executor<'d> {
-    driver: &'d dyn IoDriver,
+    driver: &'d (dyn IoDriver + Sync),
     map: PointMap,
     components: Vec<Entry>,
     image: RefCell<HashMap<PointId, Sample>>,
+    /// Indices into `receipts` of the queued commands awaiting their scan
+    /// boundary; the command itself rides inside its receipt.
+    pending_commands: VecDeque<usize>,
+    receipts: Vec<CommandReceipt>,
     tick: Tick,
 }
 
@@ -325,8 +340,12 @@ impl<'d> Executor<'d> {
     /// kind must match exactly. The first violation stops wiring with a
     /// [`WiringError`] naming the component and point; nothing runs.
     /// Components step in `components` order — the configured scan order.
+    ///
+    /// The driver must be [`Sync`] so the executor can be shared across
+    /// threads — e.g. behind the monitoring server's mutex — while tests
+    /// and fault injectors reach it through their own references.
     pub fn new(
-        driver: &'d dyn IoDriver,
+        driver: &'d (dyn IoDriver + Sync),
         map: PointMap,
         components: Vec<Box<dyn Component>>,
     ) -> Result<Self, WiringError> {
@@ -377,6 +396,8 @@ impl<'d> Executor<'d> {
             map,
             components: entries,
             image: RefCell::new(HashMap::new()),
+            pending_commands: VecDeque::new(),
+            receipts: Vec::new(),
             tick: Tick::ZERO,
         })
     }
@@ -445,6 +466,46 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// Queues `command` for application at the start of the next scan and
+    /// returns its receipt.
+    ///
+    /// Submission validates the command against the point map — the point
+    /// must be served, and the declared kind must match both the map's
+    /// kind and the supplied value's variant — so an invalid command is
+    /// [`CommandOutcome::Rejected`] immediately and never queued. An
+    /// [`CommandOutcome::Accepted`] receipt reports the tick the command
+    /// is scheduled to apply at; at the head of the next
+    /// [`scan`](Executor::scan), before the input-read phase, that same
+    /// log entry's outcome is updated to [`CommandOutcome::Applied`], or
+    /// `Rejected` with [`CommandError::DriverRejected`] when the field
+    /// driver refuses the write — exactly one receipt per command, kept
+    /// in the [`receipts`](Executor::receipts) log in submission order.
+    pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
+        let outcome = match self.check_command(command) {
+            Err(reason) => CommandOutcome::Rejected { reason },
+            Ok(_) => CommandOutcome::Accepted {
+                apply_tick: Tick(self.tick.0 + 1),
+            },
+        };
+        let receipt = CommandReceipt { command, outcome };
+        self.receipts.push(receipt);
+        if matches!(outcome, CommandOutcome::Accepted { .. }) {
+            self.pending_commands.push_back(self.receipts.len() - 1);
+        }
+        receipt
+    }
+
+    /// The receipt log: one receipt per submitted command, in submission
+    /// order.
+    ///
+    /// A queued command's entry reads [`CommandOutcome::Accepted`] until
+    /// the scan boundary updates it to `Applied` or `Rejected`, so the
+    /// log is the audit trail a monitoring consumer reads alongside the
+    /// snapshot.
+    pub fn receipts(&self) -> &[CommandReceipt] {
+        &self.receipts
+    }
+
     /// Runs `scans` scans and returns the tick the last one ran at.
     ///
     /// `run(0)` is a no-op returning the current tick. A [`ScanError`]
@@ -456,17 +517,74 @@ impl<'d> Executor<'d> {
         Ok(self.tick)
     }
 
-    /// Executes one scan — read inputs, step components, write outputs —
-    /// and returns the tick it ran at. See the type docs for the phase
-    /// order.
+    /// Executes one scan — apply commands, read inputs, step components,
+    /// write outputs — and returns the tick it ran at. See the type docs
+    /// for the phase order.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
         self.tick = Tick(self.tick.0 + 1);
         let tick = self.tick;
 
+        self.apply_commands(tick);
         self.read_inputs(tick);
         self.step_components(tick);
         self.write_outputs()?;
         Ok(tick)
+    }
+
+    /// Validates `command` against the point map, returning the target
+    /// point and value to write. The checks are static — the map fixes
+    /// which points exist and their declared kinds — so the same check at
+    /// submission and at application can only differ when the driver
+    /// refuses the write itself.
+    fn check_command(&self, command: Command) -> Result<(PointId, Value), CommandError> {
+        match command {
+            Command::WriteValue { point, kind, value } => {
+                let spec = self
+                    .map
+                    .get(point)
+                    .ok_or(CommandError::UnknownPoint { point })?;
+                if kind != spec.kind {
+                    return Err(CommandError::TypeMismatch {
+                        point,
+                        expected: spec.kind,
+                        found: value,
+                    });
+                }
+                if value.kind() != kind {
+                    return Err(CommandError::TypeMismatch {
+                        point,
+                        expected: kind,
+                        found: value,
+                    });
+                }
+                Ok((point, value))
+            }
+        }
+    }
+
+    /// Applies every queued command in submission order, updating each
+    /// one's receipt to its final outcome. Runs at the head of the scan —
+    /// before the input read — so a write to an `In` point is observed by
+    /// this scan's input phase, while a write to an `Out` point enters the
+    /// image where the step phase may still override it.
+    fn apply_commands(&mut self, tick: Tick) {
+        while let Some(index) = self.pending_commands.pop_front() {
+            let command = self.receipts[index].command;
+            self.receipts[index].outcome = match self.check_command(command) {
+                Err(reason) => CommandOutcome::Rejected { reason },
+                Ok((point, value)) => match self.driver.write(point, value) {
+                    Err(error) => CommandOutcome::Rejected {
+                        reason: CommandError::DriverRejected { point, error },
+                    },
+                    Ok(()) => {
+                        self.image
+                            .borrow_mut()
+                            .insert(point, Sample::good(value, tick));
+                        CommandOutcome::Applied { tick }
+                    }
+                },
+            };
+        }
     }
 
     /// Reads every `In` point in the map into the image, stamping `tick`.
@@ -551,9 +669,9 @@ mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
     use dcs_core::{Input, Output};
-    use std::cell::Cell;
     use std::collections::HashSet;
-    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// In-memory driver stub with deferred `Out`→`In` routing: writes land
     /// immediately, and `advance` copies each loopback's output sample onto
@@ -561,32 +679,31 @@ mod tests {
     /// `Loopback`s. Samples carry the stub's own tick counter; the executor
     /// re-stamps them into its domain on read.
     struct StubDriver {
-        points: RefCell<HashMap<PointId, Sample>>,
+        points: Mutex<HashMap<PointId, Sample>>,
         loopbacks: Vec<(PointId, PointId)>,
-        faults: RefCell<HashSet<PointId>>,
-        tick: Cell<u64>,
+        faults: Mutex<HashSet<PointId>>,
+        tick: AtomicU64,
     }
 
     impl StubDriver {
         fn new(points: &[(PointId, Value)], loopbacks: &[(PointId, PointId)]) -> Self {
             Self {
-                points: RefCell::new(
+                points: Mutex::new(
                     points
                         .iter()
                         .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
                         .collect(),
                 ),
                 loopbacks: loopbacks.to_vec(),
-                faults: RefCell::new(HashSet::new()),
-                tick: Cell::new(0),
+                faults: Mutex::new(HashSet::new()),
+                tick: AtomicU64::new(0),
             }
         }
 
         /// Routes pending loopbacks and advances the driver's own tick.
         fn advance(&self) {
-            self.tick.set(self.tick.get() + 1);
-            let tick = Tick(self.tick.get());
-            let mut points = self.points.borrow_mut();
+            let tick = Tick(self.tick.fetch_add(1, Ordering::Relaxed) + 1);
+            let mut points = self.points.lock().unwrap();
             for &(output, input) in &self.loopbacks {
                 let sample = points[&output];
                 points.insert(input, Sample { tick, ..sample });
@@ -596,21 +713,22 @@ mod tests {
 
     impl IoDriver for StubDriver {
         fn read(&self, point: PointId) -> Result<Sample, IoError> {
-            if self.faults.borrow().contains(&point) {
+            if self.faults.lock().unwrap().contains(&point) {
                 return Err(IoError::Disconnected(point));
             }
             self.points
-                .borrow()
+                .lock()
+                .unwrap()
                 .get(&point)
                 .copied()
                 .ok_or(IoError::UnknownPoint(point))
         }
 
         fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
-            if self.faults.borrow().contains(&point) {
+            if self.faults.lock().unwrap().contains(&point) {
                 return Err(IoError::Disconnected(point));
             }
-            let mut points = self.points.borrow_mut();
+            let mut points = self.points.lock().unwrap();
             let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
             if value.kind() != sample.value.kind() {
                 return Err(IoError::TypeMismatch {
@@ -619,7 +737,7 @@ mod tests {
                     found: value,
                 });
             }
-            *sample = Sample::good(value, Tick(self.tick.get()));
+            *sample = Sample::good(value, Tick(self.tick.load(Ordering::Relaxed)));
             Ok(())
         }
     }
@@ -893,7 +1011,7 @@ mod tests {
         // Records (step tick, input sample tick) each scan.
         struct Recorder {
             input: PointId,
-            seen: Rc<RefCell<Vec<(Tick, Tick)>>>,
+            seen: Arc<Mutex<Vec<(Tick, Tick)>>>,
         }
         impl Component for Recorder {
             fn name(&self) -> &str {
@@ -908,7 +1026,7 @@ mod tests {
             fn step(&mut self, io: &dyn ComponentIo, tick: Tick) -> Result<(), StepError> {
                 // The typed `Input`/`Output` handles work over `ComponentIo`.
                 let sample = Input::<f64, _>::new(io, self.input).read()?;
-                self.seen.borrow_mut().push((tick, sample.tick));
+                self.seen.lock().unwrap().push((tick, sample.tick));
                 Output::<f64, _>::new(io, PointId(20)).write(1.0)?;
                 Ok(())
             }
@@ -921,13 +1039,13 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let mut executor = Executor::new(
             &driver,
             map,
             vec![Box::new(Recorder {
                 input: PointId(10),
-                seen: Rc::clone(&seen),
+                seen: Arc::clone(&seen),
             })],
         )
         .unwrap();
@@ -940,7 +1058,7 @@ mod tests {
         // The step tick and the stamped input sample agree per scan.
         let expected: Vec<(Tick, Tick)> =
             [1, 2, 3].into_iter().map(|n| (Tick(n), Tick(n))).collect();
-        assert_eq!(*seen.borrow(), expected);
+        assert_eq!(*seen.lock().unwrap(), expected);
         assert_eq!(executor.component_statuses()[0].last_tick, Some(Tick(3)));
         // The image keeps the scan's tick-numbered samples.
         assert_eq!(executor.sample(PointId(10)).unwrap().tick, Tick(3));
@@ -970,7 +1088,7 @@ mod tests {
             Value::Float(7.0)
         );
 
-        driver.faults.borrow_mut().insert(PointId(10));
+        driver.faults.lock().unwrap().insert(PointId(10));
         executor.scan().unwrap();
         let sample = executor.sample(PointId(10)).unwrap();
         // The last known value is held and marked bad; the scan continues.
@@ -1043,7 +1161,7 @@ mod tests {
         .collect();
         let mut executor = Executor::new(&driver, map, vec![Box::new(Passthrough)]).unwrap();
 
-        driver.faults.borrow_mut().insert(PointId(10));
+        driver.faults.lock().unwrap().insert(PointId(10));
         executor.scan().unwrap();
         let output = executor.sample(PointId(20)).unwrap();
         assert_eq!(
@@ -1170,7 +1288,7 @@ mod tests {
         .unwrap();
 
         executor.scan().unwrap();
-        driver.faults.borrow_mut().insert(PointId(10));
+        driver.faults.lock().unwrap().insert(PointId(10));
         executor.scan().unwrap();
 
         let sample = executor.snapshot().points[0].sample.unwrap();
@@ -1238,5 +1356,207 @@ mod tests {
         let json = serde_json::to_string(&executor.snapshot()).unwrap();
         let snapshot: TelemetrySnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snapshot, executor.snapshot());
+    }
+
+    fn write_value(point: u64, kind: ValueKind, value: Value) -> Command {
+        Command::WriteValue {
+            point: PointId(point),
+            kind,
+            value,
+        }
+    }
+
+    /// Setpoint rig: `Scale` reads `In` point 10 and drives `Out` point 20
+    /// at gain 2, plus an unwritten `Out` point 30.
+    fn setpoint_rig(driver: &StubDriver) -> Executor<'_> {
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        Executor::new(
+            driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn setpoint_command_applies_at_next_scan_and_holds() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+
+        let receipt = executor.submit_command(command);
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command,
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(1)
+                },
+            }
+        );
+        // Queued, not yet applied: the driver still holds the old value.
+        assert_eq!(driver_value(&driver, 10), Value::Float(0.0));
+
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The write landed on the field, so the setpoint holds for later
+        // scans rather than reverting.
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().value,
+            Value::Float(5.0)
+        );
+    }
+
+    #[test]
+    fn invalid_commands_are_rejected_at_submission() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+
+        let receipt = executor.submit_command(write_value(99, ValueKind::Float, Value::Float(1.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownPoint { point: PointId(99) }
+            }
+        );
+        assert_eq!(receipt.outcome, executor.receipts().last().unwrap().outcome);
+
+        // The declared kind disagrees with the map's kind.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Int, Value::Int(1)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::TypeMismatch {
+                    point: PointId(10),
+                    expected: ValueKind::Float,
+                    found: Value::Int(1),
+                }
+            }
+        );
+
+        // The value's variant disagrees with the declared kind.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Bool(true)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::TypeMismatch {
+                    point: PointId(10),
+                    expected: ValueKind::Float,
+                    found: Value::Bool(true),
+                }
+            }
+        );
+
+        // Rejected commands were never queued: the next scan adds no
+        // application receipts.
+        executor.scan().unwrap();
+        assert_eq!(executor.receipts().len(), 3);
+        assert!(driver_value(&driver, 10) == Value::Float(0.0));
+    }
+
+    #[test]
+    fn driver_rejection_is_recorded_at_the_scan_boundary() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        driver.faults.lock().unwrap().insert(PointId(30));
+
+        let command = write_value(30, ValueKind::Float, Value::Float(9.0));
+        let receipt = executor.submit_command(command);
+        // Static checks pass — the fault only surfaces at the driver.
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::DriverRejected {
+                    point: PointId(30),
+                    error: IoError::Disconnected(PointId(30)),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn output_command_without_a_component_writer_persists() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+
+        executor.submit_command(write_value(30, ValueKind::Float, Value::Float(7.0)));
+        executor.scan().unwrap();
+
+        // No component writes point 30, so the command's value reaches the
+        // field and the snapshot.
+        assert_eq!(driver_value(&driver, 30), Value::Float(7.0));
+        assert_eq!(
+            executor.snapshot().points[2].sample.unwrap().value,
+            Value::Float(7.0)
+        );
+
+        // A component writing the same `Out` point wins inside the scan:
+        // it rewrites point 20 from the (still zero) input.
+        executor.submit_command(write_value(20, ValueKind::Float, Value::Float(-1.0)));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 20), Value::Float(0.0));
+    }
+
+    #[test]
+    fn identical_command_runs_produce_identical_receipts() {
+        let run = || {
+            let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+            let mut executor = setpoint_rig(&driver);
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+            executor.submit_command(write_value(99, ValueKind::Float, Value::Float(0.0)));
+            executor.submit_command(write_value(30, ValueKind::Float, Value::Float(7.0)));
+            executor.run(2).unwrap();
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(8.0)));
+            executor.scan().unwrap();
+            (
+                executor.receipts().to_vec(),
+                serde_json::to_string(&executor.snapshot()).unwrap(),
+            )
+        };
+
+        assert_eq!(run(), run());
+        // And the log is the documented one: exactly one receipt per
+        // command, in submission order — accepted commands read `Applied`
+        // once their scan boundary has passed.
+        let (receipts, _) = run();
+        let outcomes: Vec<CommandOutcome> =
+            receipts.iter().map(|receipt| receipt.outcome).collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                CommandOutcome::Applied { tick: Tick(1) },
+                CommandOutcome::Rejected {
+                    reason: CommandError::UnknownPoint { point: PointId(99) }
+                },
+                CommandOutcome::Applied { tick: Tick(1) },
+                CommandOutcome::Applied { tick: Tick(3) },
+            ]
+        );
     }
 }

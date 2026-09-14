@@ -132,7 +132,11 @@ impl<T: ComponentIo + ?Sized> ComponentIoExt for T {}
 /// [`ComponentIo`] view serving exactly those points. `step` must be a
 /// pure function of its state, its I/O, and `tick` — reading a wall clock
 /// or random source would break the run's determinism.
-pub trait Component {
+///
+/// Components must be [`Send`]: the executor may live on another thread —
+/// e.g. shared behind the monitoring server's mutex — and carries its
+/// components with it.
+pub trait Component: Send {
     /// The component's stable name, used in wiring errors and diagnostics.
     fn name(&self) -> &str;
 
