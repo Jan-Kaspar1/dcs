@@ -190,6 +190,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 outcome: CommandOutcome::Accepted {
                     apply_tick: Tick(2)
                 },
+                actor: None,
             }
         );
         // Between scans nothing has changed yet.
@@ -214,6 +215,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
             CommandReceipt {
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
+                actor: None,
             }
         );
     });
@@ -582,6 +584,7 @@ fn trend_and_journal_feeds_track_the_run() {
                     outcome: CommandOutcome::Rejected {
                         reason: CommandError::UnknownPoint { point: PointId(99) },
                     },
+                    actor: None,
                 },
             }
         );
@@ -727,10 +730,12 @@ fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
                 CommandReceipt {
                     command: force,
                     outcome: CommandOutcome::Applied { tick: Tick(2) },
+                    actor: None,
                 },
                 CommandReceipt {
                     command: unforce,
                     outcome: CommandOutcome::Applied { tick: Tick(4) },
+                    actor: None,
                 },
             ]
         );

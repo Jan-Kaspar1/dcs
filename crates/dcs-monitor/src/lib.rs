@@ -38,6 +38,13 @@
 //!   [`SwitchError`]
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`.
+//!   The attributed envelope `{"command":…,"actor":…}` is also accepted
+//!   — the wire shape the command-path audit-identity decision records:
+//!   `actor` is the submitter's *declared* identity (attestation, not
+//!   authentication — verifying it is deployment machinery such as a
+//!   fronting proxy filling it from authenticated context), stamped
+//!   onto the receipt and carried into the journaled `CommandSettled`
+//!   entry; an absent actor journals unattributed, never a rejection.
 //!   Only a peer reporting settled `active` accepts commands — on a
 //!   standby or mid-transition instance the command is refused with a
 //!   [`CommandError::NotActive`] rejection receipt, so an operator write
@@ -147,7 +154,10 @@
 //! presents an active/standby pair as one logical controller. It is
 //! configured with both peers' monitor addresses: the serving origin is
 //! one peer, and each `?peer=host:port` URL parameter names another —
-//! e.g. `http://active:8080/?peer=standby:8081`. Every refresh polls
+//! e.g. `http://active:8080/?peer=standby:8081`. `?operator=<name>`
+//! configures the declared actor identity the page stamps on every
+//! command submission — the audit-attribution decision's page-side
+//! source, attestation rather than authentication. Every refresh polls
 //! `GET /role` on each configured peer; data fetches go to the peer
 //! reporting `active`, so the point listing, trends, and journal are the
 //! one logical controller's, while the pair section renders per-peer
@@ -227,6 +237,28 @@ use tiny_http::{Header, Method, Request, Response, Server};
 pub struct ScanRequest {
     /// The number of scans to run.
     pub scans: u64,
+}
+
+/// The attributed `POST /command` envelope — the wire shape recorded
+/// for the command-path audit-identity decision:
+/// `{"command": <Command>, "actor": "<identity>"}` submitted beside the
+/// still-accepted bare [`Command`]. `actor` is the submitter's
+/// *declared* identity — attestation, not authentication — carried onto
+/// the [`CommandReceipt`] and so into the journaled `CommandSettled`
+/// entry; a deployment fronting the monitor with an authenticating
+/// proxy fills it from verified context. Strict fields: an envelope
+/// carrying neither key's expected shape is a `400`, so a stray
+/// top-level `actor` beside a bare command is refused rather than
+/// silently dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandEnvelope {
+    /// The command to submit.
+    command: Command,
+    /// The submitter's declared actor identity; absent submits
+    /// unattributed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -576,16 +608,18 @@ impl<'d> Monitor<'d> {
             },
             (Method::Post, "/promote") => self.switchover(true),
             (Method::Post, "/demote") => self.switchover(false),
-            (Method::Post, "/command") => match read_json::<Command>(&mut request) {
-                Ok(command) => {
+            (Method::Post, "/command") => match read_command_submission(&mut request) {
+                Ok(CommandEnvelope { command, actor }) => {
                     let mut shared = self.shared.lock().unwrap();
                     let Shared { peer, recorder } = &mut *shared;
                     // Only the settled-active peer accepts commands: on a
                     // standby or mid-transition instance the write gate
                     // would keep the write from the field, so refuse with
                     // a receipt rather than report a phantom application.
+                    // Either way the declared actor is stamped onto the
+                    // receipt — the settled entry the journal echoes.
                     let receipt = if peer.accepts_commands() {
-                        let receipt = peer.submit_command(command);
+                        let receipt = peer.submit_command_as(command, actor);
                         let index = peer.receipts().len() - 1;
                         let tick = peer.tick();
                         recorder.note_command(index, receipt.clone(), tick);
@@ -599,6 +633,7 @@ impl<'d> Monitor<'d> {
                                     role: peer.role(),
                                 },
                             },
+                            actor,
                         };
                         recorder.note_settled(receipt.clone(), peer.tick());
                         receipt
@@ -779,6 +814,41 @@ fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<C
     serde_json::from_str(&body).map_err(|error| json(400, &error.to_string()))
 }
 
+/// Reads a `POST /command` body into its [`CommandEnvelope`]. The
+/// attributed shape — `{"command":…,"actor":…}` — is selected by either
+/// envelope key; anything else parses as the bare [`Command`]
+/// pre-attribution shape, so existing clients submit unchanged and
+/// journal unattributed (`actor: None`). A body naming `command` or
+/// `actor` without the envelope's shape is a `400` — an attribution the
+/// body meant to carry never silently drops. Parse failures produce the
+/// `400` response directly.
+fn read_command_submission(
+    request: &mut Request,
+) -> Result<CommandEnvelope, Response<Cursor<Vec<u8>>>> {
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        return Err(json(400, "unreadable request body"));
+    }
+    let value: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(error) => return Err(json(400, &error.to_string())),
+    };
+    let attributed = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("command") || object.contains_key("actor"));
+    if attributed {
+        serde_json::from_value::<CommandEnvelope>(value)
+            .map_err(|error| json(400, &error.to_string()))
+    } else {
+        serde_json::from_value::<Command>(value)
+            .map(|command| CommandEnvelope {
+                command,
+                actor: None,
+            })
+            .map_err(|error| json(400, &error.to_string()))
+    }
+}
+
 /// An HTML response with a `Content-Type: text/html` header.
 fn html(body: &'static str) -> Response<Cursor<Vec<u8>>> {
     Response::from_data(body.as_bytes().to_vec())
@@ -898,9 +968,28 @@ impl MonitorClient {
 
     /// `POST /command`: submits `command`, returning its receipt —
     /// `accepted` when queued for the next scan boundary, `rejected` with
-    /// a named reason otherwise.
+    /// a named reason otherwise. The bare-`Command` body submits
+    /// unattributed.
     pub fn command(&self, command: &Command) -> io::Result<CommandReceipt> {
         self.post_json("/command", command)
+    }
+
+    /// `POST /command` with `actor` as the submitter's declared identity
+    /// — the attributed envelope `{"command":…,"actor":…}`; the returned
+    /// receipt and the journaled `CommandSettled` carry the attribution.
+    /// `None` submits the same bare-`Command` body
+    /// [`command`](Self::command) sends, journaling unattributed.
+    pub fn command_as(&self, command: &Command, actor: Option<&str>) -> io::Result<CommandReceipt> {
+        match actor {
+            Some(actor) => self.post_json(
+                "/command",
+                &CommandEnvelope {
+                    command: command.clone(),
+                    actor: Some(actor.to_string()),
+                },
+            ),
+            None => self.command(command),
+        }
     }
 
     /// `POST /scan`: runs `scans` scans, returning the snapshot taken

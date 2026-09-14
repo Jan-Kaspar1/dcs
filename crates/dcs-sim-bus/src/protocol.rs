@@ -10,7 +10,7 @@
 //! connection, which is what makes the synchronous exchange's failure
 //! semantics well-defined.
 
-use dcs_core::{Sample, Tick, Value, ValueKind};
+use dcs_core::{Quality, QualityReason, Sample, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, BufReader, Read};
@@ -30,6 +30,8 @@ const OP_LIST_REGISTERS: u8 = 0x03;
 const OP_STEP: u8 = 0x04;
 const OP_CLAIM_WRITER: u8 = 0x05;
 const OP_RELEASE_WRITER: u8 = 0x06;
+const OP_INJECT_QUALITY: u8 = 0x07;
+const OP_CLEAR_QUALITY: u8 = 0x08;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -49,6 +51,20 @@ const ERR_FENCED: u8 = 0x04;
 const KIND_BOOL: u8 = 0x01;
 const KIND_INT: u8 = 0x02;
 const KIND_FLOAT: u8 = 0x03;
+
+// Quality severity tags on the wire.
+const QUALITY_GOOD: u8 = 0x01;
+const QUALITY_UNCERTAIN: u8 = 0x02;
+const QUALITY_BAD: u8 = 0x03;
+
+// Quality reason tags on the wire, in `QualityReason` declaration order.
+const REASON_UNSPECIFIED: u8 = 0x01;
+const REASON_SUBSTITUTED: u8 = 0x02;
+const REASON_STALE: u8 = 0x03;
+const REASON_OUT_OF_RANGE: u8 = 0x04;
+const REASON_COMMUNICATION_FAULT: u8 = 0x05;
+const REASON_DEVICE_FAULT: u8 = 0x06;
+const REASON_CONFIGURATION_FAULT: u8 = 0x07;
 
 /// One request a client sends to the device server.
 ///
@@ -93,8 +109,9 @@ pub enum BusRequest {
     /// device — so a dead owner's claim dies with its link and a
     /// promoted peer's claim lands on a free field. Once any owner
     /// holds the claim, `write_register` and `step` requests from an
-    /// attachment not holding it are refused; reads and
-    /// `list_registers` stay open to every attachment.
+    /// attachment not holding it are refused; reads,
+    /// `list_registers`, and quality injection stay open to every
+    /// attachment.
     ClaimWriter {
         /// The ownership token the claim asserts.
         owner: u64,
@@ -104,6 +121,34 @@ pub enum BusRequest {
     /// connection dropping. Releasing a claim the attachment does not
     /// hold is a no-op.
     ReleaseWriter,
+    /// Stamps `register`'s stored sample with `quality` — the inject
+    /// half of the quality-override pair, this protocol's analogue of
+    /// `dcs-sim-net`'s `inject_fault` carrying a quality fault. The
+    /// stored value and tick are untouched; the declared quality stands
+    /// on the stored sample — reported by every read and the register
+    /// census — until [`BusRequest::ClearQuality`] or a real
+    /// [`BusRequest::WriteRegister`], which stores a `Good` sample,
+    /// overwrites it.
+    ///
+    /// Injection is development tooling, not field ownership: like a
+    /// read it is never fenced, so an attachment not holding the
+    /// write-ownership claim can fault a point while a controller pair
+    /// owns the field.
+    InjectQuality {
+        /// The register address.
+        register: u16,
+        /// The quality the stored sample reports.
+        quality: Quality,
+    },
+    /// Restores `register`'s stored sample to
+    /// [`Quality::Good`](dcs_core::Quality::Good) — the clear half of
+    /// the quality-override pair. Clearing a register carrying no
+    /// injection leaves the `Good` it already reports. Like the
+    /// inject, the clear is open to every attachment.
+    ClearQuality {
+        /// The register address.
+        register: u16,
+    },
 }
 
 /// The server's answer to one [`BusRequest`].
@@ -111,8 +156,9 @@ pub enum BusRequest {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum BusResponse {
     /// Answer to [`BusRequest::ReadRegister`]: the register's stored
-    /// sample — its value, [`Quality::Good`](dcs_core::Quality::Good),
-    /// and the device tick that stamped it.
+    /// sample — its value, its quality (`Good` unless a
+    /// [`BusRequest::InjectQuality`] stamped it), and the device tick
+    /// that stamped it.
     Sample {
         /// The stored sample.
         sample: Sample,
@@ -134,8 +180,9 @@ pub enum BusResponse {
         /// The tick the step advanced to.
         tick: Tick,
     },
-    /// Answer to [`BusRequest::ClaimWriter`] and
-    /// [`BusRequest::ReleaseWriter`]: the request applied.
+    /// Answer to [`BusRequest::ClaimWriter`],
+    /// [`BusRequest::ReleaseWriter`], [`BusRequest::InjectQuality`],
+    /// and [`BusRequest::ClearQuality`]: the request applied.
     Done,
     /// The request failed; `error` says why.
     Error {
@@ -301,6 +348,38 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn reason(&mut self) -> Option<QualityReason> {
+        Some(match self.u8()? {
+            REASON_UNSPECIFIED => QualityReason::Unspecified,
+            REASON_SUBSTITUTED => QualityReason::Substituted,
+            REASON_STALE => QualityReason::Stale,
+            REASON_OUT_OF_RANGE => QualityReason::OutOfRange,
+            REASON_COMMUNICATION_FAULT => QualityReason::CommunicationFault,
+            REASON_DEVICE_FAULT => QualityReason::DeviceFault,
+            REASON_CONFIGURATION_FAULT => QualityReason::ConfigurationFault,
+            _ => return None,
+        })
+    }
+
+    fn quality(&mut self) -> Option<Quality> {
+        Some(match self.u8()? {
+            QUALITY_GOOD => Quality::Good,
+            QUALITY_UNCERTAIN => Quality::Uncertain(self.reason()?),
+            QUALITY_BAD => Quality::Bad(self.reason()?),
+            _ => return None,
+        })
+    }
+
+    /// A stored sample: value, the tick that stamped it, then its
+    /// quality — `Good` unless an injection stamped it otherwise. The
+    /// quality bytes were appended to the original value-plus-tick
+    /// shape when injection made registers carry non-`Good` quality.
+    fn sample(&mut self) -> Option<Sample> {
+        let value = self.value()?;
+        let tick = Tick(self.u64()?);
+        Some(Sample::new(value, self.quality()?, tick))
+    }
+
     fn text(&mut self) -> Option<String> {
         let length = self.u16()? as usize;
         String::from_utf8(self.take(length)?.to_vec()).ok()
@@ -330,9 +409,38 @@ fn push_value(out: &mut Vec<u8>, value: Value) {
     }
 }
 
+fn push_reason(out: &mut Vec<u8>, reason: QualityReason) {
+    out.push(match reason {
+        QualityReason::Unspecified => REASON_UNSPECIFIED,
+        QualityReason::Substituted => REASON_SUBSTITUTED,
+        QualityReason::Stale => REASON_STALE,
+        QualityReason::OutOfRange => REASON_OUT_OF_RANGE,
+        QualityReason::CommunicationFault => REASON_COMMUNICATION_FAULT,
+        QualityReason::DeviceFault => REASON_DEVICE_FAULT,
+        QualityReason::ConfigurationFault => REASON_CONFIGURATION_FAULT,
+    });
+}
+
+/// A quality is its severity tag; a non-`Good` severity is followed by
+/// its reason tag — `Good` carries no reason, so none is written.
+fn push_quality(out: &mut Vec<u8>, quality: Quality) {
+    match quality {
+        Quality::Good => out.push(QUALITY_GOOD),
+        Quality::Uncertain(reason) => {
+            out.push(QUALITY_UNCERTAIN);
+            push_reason(out, reason);
+        }
+        Quality::Bad(reason) => {
+            out.push(QUALITY_BAD);
+            push_reason(out, reason);
+        }
+    }
+}
+
 fn push_sample(out: &mut Vec<u8>, sample: Sample) {
     push_value(out, sample.value);
     out.extend_from_slice(&sample.tick.0.to_be_bytes());
+    push_quality(out, sample.quality);
 }
 
 /// Frames `body`: the two-byte length prefix plus the payload.
@@ -363,6 +471,15 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
             body.extend_from_slice(&owner.to_be_bytes());
         }
         BusRequest::ReleaseWriter => body.push(OP_RELEASE_WRITER),
+        BusRequest::InjectQuality { register, quality } => {
+            body.push(OP_INJECT_QUALITY);
+            body.extend_from_slice(&register.to_be_bytes());
+            push_quality(&mut body, quality);
+        }
+        BusRequest::ClearQuality { register } => {
+            body.push(OP_CLEAR_QUALITY);
+            body.extend_from_slice(&register.to_be_bytes());
+        }
     }
     frame(&body)
 }
@@ -451,6 +568,13 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
             owner: reader.u64().ok_or_else(short)?,
         },
         OP_RELEASE_WRITER => BusRequest::ReleaseWriter,
+        OP_INJECT_QUALITY => BusRequest::InjectQuality {
+            register: reader.u16().ok_or_else(short)?,
+            quality: reader.quality().ok_or_else(short)?,
+        },
+        OP_CLEAR_QUALITY => BusRequest::ClearQuality {
+            register: reader.u16().ok_or_else(short)?,
+        },
         tag => return Err(format!("unknown request tag {tag:#04x}")),
     };
     if !reader.done() {
@@ -467,10 +591,7 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
     let short = || truncated("response frame");
     let response = match reader.u8().ok_or_else(short)? {
         RESP_SAMPLE => BusResponse::Sample {
-            sample: Sample::good(
-                reader.value().ok_or_else(short)?,
-                Tick(reader.u64().ok_or_else(short)?),
-            ),
+            sample: reader.sample().ok_or_else(short)?,
         },
         RESP_WRITTEN => BusResponse::Written {
             tick: Tick(reader.u64().ok_or_else(short)?),
@@ -481,10 +602,7 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
             for _ in 0..count {
                 registers.push(RegisterInfo {
                     register: reader.u16().ok_or_else(short)?,
-                    sample: Sample::good(
-                        reader.value().ok_or_else(short)?,
-                        Tick(reader.u64().ok_or_else(short)?),
-                    ),
+                    sample: reader.sample().ok_or_else(short)?,
                 });
             }
             BusResponse::Registers { registers }
@@ -561,6 +679,19 @@ mod tests {
             BusRequest::Step,
             BusRequest::ClaimWriter { owner: 42 },
             BusRequest::ReleaseWriter,
+            BusRequest::InjectQuality {
+                register: 4,
+                quality: Quality::Bad(QualityReason::DeviceFault),
+            },
+            BusRequest::InjectQuality {
+                register: 7,
+                quality: Quality::Uncertain(QualityReason::Stale),
+            },
+            BusRequest::InjectQuality {
+                register: 9,
+                quality: Quality::Good,
+            },
+            BusRequest::ClearQuality { register: 4 },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -592,6 +723,39 @@ mod tests {
         assert_eq!(
             encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
             vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::InjectQuality {
+                register: 4,
+                quality: Quality::Bad(QualityReason::DeviceFault),
+            })
+            .unwrap(),
+            r#"{"op":"inject_quality","register":4,"quality":{"Bad":"DeviceFault"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ClearQuality { register: 4 }).unwrap(),
+            r#"{"op":"clear_quality","register":4}"#
+        );
+        // An inject is tag, register, then the quality's severity and
+        // reason bytes — 0x03 bad, 0x06 device_fault. A `Good` inject
+        // carries no reason byte; a clear is tag plus register.
+        assert_eq!(
+            encode_request(&BusRequest::InjectQuality {
+                register: 4,
+                quality: Quality::Bad(QualityReason::DeviceFault),
+            }),
+            vec![0, 5, 0x07, 0, 4, 0x03, 0x06]
+        );
+        assert_eq!(
+            encode_request(&BusRequest::InjectQuality {
+                register: 4,
+                quality: Quality::Good,
+            }),
+            vec![0, 4, 0x07, 0, 4, 0x01]
+        );
+        assert_eq!(
+            encode_request(&BusRequest::ClearQuality { register: 4 }),
+            vec![0, 3, 0x08, 0, 4]
         );
     }
 
@@ -669,9 +833,9 @@ mod tests {
             .unwrap(),
             r#"{"result":"error","error":{"kind":"unknown_register","register":4}}"#
         );
-        // The serde contract carries a full `Sample`, quality included;
-        // the wire form does not — a register holds a value, and a
-        // decoded sample is always Good.
+        // The serde contract and the wire form both carry a full
+        // `Sample`, quality included: an injected quality survives the
+        // framing round trip.
         let degraded = BusResponse::Sample {
             sample: Sample::new(
                 Value::Int(-3),
@@ -684,12 +848,15 @@ mod tests {
             serde_json::from_str::<BusResponse>(&json).unwrap(),
             degraded
         );
-        let wire = encode_response(&degraded);
+        framed_roundtrip(&degraded, encode_response, decode_response);
+        // The wire sample is value, tick, then severity and reason —
+        // int kind 0x02, uncertain 0x02, substituted 0x02.
         assert_eq!(
-            decode_response(&wire[2..]).unwrap(),
-            BusResponse::Sample {
-                sample: Sample::good(Value::Int(-3), Tick(9)),
-            }
+            encode_response(&degraded),
+            vec![
+                0, 20, 0x01, 0x02, 255, 255, 255, 255, 255, 255, 255, 253, 0, 0, 0, 0, 0, 0, 0, 9,
+                0x02, 0x02,
+            ]
         );
     }
 
@@ -700,14 +867,21 @@ mod tests {
         // client drops the link; neither panics.
         for body in [
             &[][..],
-            &[0x01][..],             // read register, missing address
-            &[0x02, 0, 1][..],       // write, missing value
-            &[0x02, 0, 1, 0x09][..], // write, unknown kind tag
-            &[0x03, 0][..],          // trailing byte after list
-            &[0xff][..],             // unknown request tag
-            &[0x01, 0][..],          // read, truncated address
-            &[0x05, 0, 0][..],       // claim, truncated owner
-            &[0x06, 0][..],          // trailing byte after release
+            &[0x01][..],                   // read register, missing address
+            &[0x02, 0, 1][..],             // write, missing value
+            &[0x02, 0, 1, 0x09][..],       // write, unknown kind tag
+            &[0x03, 0][..],                // trailing byte after list
+            &[0xff][..],                   // unknown request tag
+            &[0x01, 0][..],                // read, truncated address
+            &[0x05, 0, 0][..],             // claim, truncated owner
+            &[0x06, 0][..],                // trailing byte after release
+            &[0x07, 0][..],                // inject, truncated register
+            &[0x07, 0, 4][..],             // inject, missing quality
+            &[0x07, 0, 4, 0x09][..],       // inject, unknown severity
+            &[0x07, 0, 4, 0x02][..],       // inject, missing reason
+            &[0x07, 0, 4, 0x02, 0x09][..], // inject, unknown reason
+            &[0x08][..],                   // clear, missing register
+            &[0x08, 0, 4, 0][..],          // trailing byte after clear
         ] {
             assert!(decode_request(body).is_err(), "{body:02x?}");
         }
@@ -718,6 +892,12 @@ mod tests {
             &[0x04, 0][..],       // stepped, truncated tick
             &[0x05, 0x04, 0][..], // fenced error, truncated detail
             &[0x06, 0][..],       // trailing byte after done
+            // Sample carrying value and tick but no quality.
+            &[0x01, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
+            // Sample with an unknown quality severity.
+            &[
+                0x01, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09,
+            ][..],
         ] {
             assert!(decode_response(body).is_err(), "{body:02x?}");
         }

@@ -5,7 +5,7 @@
 //! answers, malformed arguments — and identical output for identical
 //! request sequences.
 
-use dcs_core::{PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{IoDriver, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind};
 use dcs_sim_bus::{BusDriver, BusResponse, BusServer, PointRegister, RegisterBank, RegisterDecl};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Command, Output};
@@ -192,6 +192,117 @@ fn read_write_and_step_roundtrip() {
 }
 
 #[test]
+fn inject_and_clear_quality_roundtrip_through_the_tool() {
+    with_server(&fixture_decls(), |server, addr| {
+        // The inject stamps the stored sample's declared quality; a
+        // read reports it.
+        assert_eq!(
+            ctl_ok(addr, &["inject-quality", "4", "bad:device_fault"]),
+            BusResponse::Done
+        );
+        assert_eq!(
+            ctl_ok(addr, &["read", "4"]),
+            BusResponse::Sample {
+                sample: Sample::new(
+                    Value::Float(0.0),
+                    Quality::Bad(QualityReason::DeviceFault),
+                    Tick::ZERO,
+                )
+            }
+        );
+        assert_eq!(
+            server.bank().read(4).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+
+        // `uncertain` without a reason defaults to unspecified.
+        assert_eq!(
+            ctl_ok(addr, &["inject-quality", "4", "uncertain"]),
+            BusResponse::Done
+        );
+        assert_eq!(
+            ctl_ok(addr, &["read", "4"]),
+            BusResponse::Sample {
+                sample: Sample::new(
+                    Value::Float(0.0),
+                    Quality::Uncertain(QualityReason::Unspecified),
+                    Tick::ZERO,
+                )
+            }
+        );
+
+        // The clear restores Good on the stored sample; a real write
+        // overwrites an injection the same way.
+        assert_eq!(ctl_ok(addr, &["clear-quality", "4"]), BusResponse::Done);
+        assert_eq!(
+            ctl_ok(addr, &["read", "4"]),
+            BusResponse::Sample {
+                sample: Sample::good(Value::Float(0.0), Tick::ZERO)
+            }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["inject-quality", "9", "bad:stale"]),
+            BusResponse::Done
+        );
+        assert_eq!(
+            ctl_ok(addr, &["write", "9", "3"]),
+            BusResponse::Written { tick: Tick::ZERO }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["read", "9"]),
+            BusResponse::Sample {
+                sample: Sample::good(Value::Int(3), Tick::ZERO)
+            }
+        );
+
+        // Injecting a register the device does not serve names the
+        // error and exits nonzero.
+        let output = ctl(addr, &["inject-quality", "99", "bad"]);
+        assert!(!output.status.success());
+        let text = stderr(&output);
+        assert!(text.contains("no register 99"), "{text}");
+        let output = ctl(addr, &["clear-quality", "99"]);
+        assert!(!output.status.success());
+        let text = stderr(&output);
+        assert!(text.contains("no register 99"), "{text}");
+    });
+}
+
+#[test]
+fn injection_is_open_while_the_writer_claim_is_held() {
+    with_server(&fixture_decls(), |_, addr| {
+        // A third attachment holds the write claim — a controller pair
+        // owning the field. The tool's writes and steps are fenced,
+        // but its quality injection is not.
+        let holder = BusDriver::connect(
+            addr,
+            &[PointRegister {
+                point: PointId(1),
+                register: 4,
+                kind: ValueKind::Float,
+            }],
+        )
+        .unwrap();
+        holder.claim_writer(7).unwrap();
+
+        assert_eq!(
+            ctl_ok(addr, &["inject-quality", "4", "bad:communication_fault"]),
+            BusResponse::Done
+        );
+        assert_eq!(
+            holder.read(PointId(1)).unwrap().quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        // Arbitration is undisturbed: the ctl attachment is still
+        // fenced out of writes and steps.
+        assert!(!ctl(addr, &["write", "4", "1.0"]).status.success());
+        assert!(!ctl(addr, &["step"]).status.success());
+        assert_eq!(ctl_ok(addr, &["clear-quality", "4"]), BusResponse::Done);
+        assert!(holder.read(PointId(1)).unwrap().quality.is_good());
+    });
+}
+
+#[test]
 fn an_unreachable_server_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
     // address refuses connections.
@@ -280,6 +391,16 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "step", "1.5"],
         vec![dead, "step", "abc"],
         vec![dead, "step", "1", "extra"],
+        vec![dead, "inject-quality"],
+        vec![dead, "inject-quality", "4"],
+        vec![dead, "inject-quality", "abc", "bad"],
+        vec![dead, "inject-quality", "4", "bogus"],
+        vec![dead, "inject-quality", "4", "bad:bogus"],
+        vec![dead, "inject-quality", "4", "good:stale"],
+        vec![dead, "inject-quality", "4", "bad", "extra"],
+        vec![dead, "clear-quality"],
+        vec![dead, "clear-quality", "abc"],
+        vec![dead, "clear-quality", "4", "extra"],
     ];
     for args in &cases {
         let output = ctl_args(args);
@@ -298,9 +419,12 @@ fn identical_request_sequences_produce_identical_output() {
             vec!["read", "4"],
             vec!["write", "4", "2.5"],
             vec!["read", "4"],
+            vec!["inject-quality", "4", "bad:device_fault"],
+            vec!["read", "4"],
             vec!["step"],
             vec!["write", "9", "-3"],
             vec!["write", "7", "true"],
+            vec!["clear-quality", "4"],
             vec!["step", "2"],
             vec!["list"],
             vec!["read", "9"],

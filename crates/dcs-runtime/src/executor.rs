@@ -926,7 +926,23 @@ impl<'d> Executor<'d> {
     /// `Rejected` when the driver refuses the write or the component
     /// refuses the tuned value — exactly one receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
+    ///
+    /// The receipt is unattributed; [`submit_command_as`](Self::submit_command_as)
+    /// is the attributed variant the audit path submits through.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
+        self.submit_command_as(command, None)
+    }
+
+    /// As [`submit_command`](Self::submit_command), stamping the receipt
+    /// with the submitter's declared actor identity — the
+    /// audit-attribution field of the command-path audit-identity
+    /// decision. The actor is submission metadata: it rides the receipt
+    /// untouched by validation, so an attributed command validates,
+    /// queues, and settles exactly as an unattributed one, and the
+    /// journaled `CommandSettled` echoing this receipt carries the
+    /// attribution. `None` submits unattributed — identical to
+    /// [`submit_command`](Self::submit_command).
+    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
         let outcome = match self.check_command(&command) {
             Err(reason) => CommandOutcome::Rejected { reason },
             Ok(_) => CommandOutcome::Accepted {
@@ -934,7 +950,11 @@ impl<'d> Executor<'d> {
             },
         };
         let accepted = matches!(outcome, CommandOutcome::Accepted { .. });
-        let receipt = CommandReceipt { command, outcome };
+        let receipt = CommandReceipt {
+            command,
+            outcome,
+            actor,
+        };
         self.receipts.push(receipt.clone());
         if accepted {
             self.pending_commands.push_back(self.receipts.len() - 1);
@@ -2704,6 +2724,46 @@ mod tests {
     }
 
     #[test]
+    fn attributed_commands_stamp_the_receipt_without_touching_validation() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+
+        // The declared actor rides the receipt from submission through
+        // the scan boundary, untouched by validation.
+        let receipt = executor.submit_command_as(command.clone(), Some("operator-7".to_string()));
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command: command.clone(),
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(1)
+                },
+                actor: Some("operator-7".to_string()),
+            }
+        );
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().actor.as_deref(),
+            Some("operator-7")
+        );
+
+        // A rejected attributed command is the same rejection with the
+        // actor stamped — attribution never changes validation.
+        let rejected = executor.submit_command_as(
+            write_value(99, ValueKind::Float, Value::Float(1.0)),
+            Some("operator-7".to_string()),
+        );
+        assert_eq!(
+            rejected.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownPoint { point: PointId(99) }
+            }
+        );
+        assert_eq!(rejected.actor.as_deref(), Some("operator-7"));
+    }
+
+    #[test]
     fn setpoint_command_applies_at_next_scan_and_holds() {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
@@ -2717,6 +2777,7 @@ mod tests {
                 outcome: CommandOutcome::Accepted {
                     apply_tick: Tick(1)
                 },
+                actor: None,
             }
         );
         // Queued, not yet applied: the driver still holds the old value.
@@ -3720,6 +3781,7 @@ mod tests {
                 outcome: CommandOutcome::Accepted {
                     apply_tick: Tick(2)
                 },
+                actor: None,
             }
         );
         // Queued, not yet applied: the component still runs the old gain.

@@ -390,6 +390,25 @@ pub struct CommandReceipt {
     pub command: Command,
     /// The verdict.
     pub outcome: CommandOutcome,
+    /// The actor identity the submitter declared, when it declared one.
+    ///
+    /// This is the audit-attribution field of the command-path
+    /// audit-identity decision: the monitoring submit path stamps it
+    /// from the submission, the receipt carries it unchanged through
+    /// the scan boundary, and the journaled
+    /// [`CommandSettled`](crate::JournalEvent::CommandSettled) entry —
+    /// which echoes this receipt — gains the attribution for free. An
+    /// absent actor journals as unattributed, never a rejection.
+    ///
+    /// The identity is *declared*, not authenticated: the receipt proves
+    /// what the submitter claimed, not who sent it. Verifying an actor —
+    /// e.g. a fronting proxy filling the field from authenticated
+    /// context — is deployment machinery the contract deliberately does
+    /// not prescribe. Serde-optional: receipts and journaled entries
+    /// predating the field deserialize with `None`, and an unattributed
+    /// receipt serializes without the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 #[cfg(test)]
@@ -522,6 +541,7 @@ mod tests {
             let receipt = CommandReceipt {
                 command: set_parameter(),
                 outcome,
+                actor: None,
             };
             let json = serde_json::to_string(&receipt).unwrap();
             assert_eq!(
@@ -529,6 +549,35 @@ mod tests {
                 receipt
             );
         }
+    }
+
+    #[test]
+    fn receipt_actor_is_serde_optional() {
+        let attributed = CommandReceipt {
+            command: write_value(),
+            outcome: CommandOutcome::Applied { tick: Tick(4) },
+            actor: Some("operator-7".to_string()),
+        };
+        let json = serde_json::to_string(&attributed).unwrap();
+        assert!(json.contains("\"actor\":\"operator-7\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap(),
+            attributed
+        );
+
+        // An unattributed receipt carries no actor key on the wire, and
+        // a receipt predating the field still deserializes.
+        let bare = CommandReceipt {
+            actor: None,
+            ..attributed.clone()
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("actor"), "{json}");
+        assert_eq!(serde_json::from_str::<CommandReceipt>(&json).unwrap(), bare);
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap().actor,
+            None
+        );
     }
 
     #[test]
@@ -612,6 +661,7 @@ mod tests {
             outcome: CommandOutcome::Rejected {
                 reason: CommandError::UnknownPoint { point: PointId(7) },
             },
+            actor: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.contains("\"rejected\""), "{json}");

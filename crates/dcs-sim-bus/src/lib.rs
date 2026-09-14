@@ -33,26 +33,46 @@
 //! | `0x04` | step | none |
 //! | `0x05` | claim writer | `u64 owner` |
 //! | `0x06` | release writer | none |
+//! | `0x07` | inject quality | `u16 register`, quality bytes |
+//! | `0x08` | clear quality | `u16 register` |
 //!
 //! A value's `kind` byte is `0x01` bool, `0x02` int, `0x03` float,
 //! followed by its payload: one byte (`0x00`/`0x01`) for bool, eight
 //! bytes for the `i64` or `f64` bit pattern.
+//!
+//! A quality's first byte is its severity — `0x01` good, `0x02`
+//! uncertain, `0x03` bad — and a non-good severity is followed by one
+//! reason byte: `0x01` unspecified, `0x02` substituted, `0x03` stale,
+//! `0x04` out_of_range, `0x05` communication_fault, `0x06`
+//! device_fault, `0x07` configuration_fault. `good` carries no reason
+//! byte.
 //!
 //! `step` is the explicit device clock advance: the register bank
 //! holds values only — no time-dependent dynamics — so stepping
 //! increments the logical tick that stamps written registers and
 //! nothing else. Nothing on the wire advances on a wall clock.
 //!
+//! `inject quality` is the fault-injection half of the register
+//! protocol — the analogue of `dcs-sim-net`'s `inject_fault` for the
+//! quality a register reports. It stamps the register's stored sample
+//! with the declared quality, leaving the stored value and tick
+//! untouched; every read and the register census then report that
+//! quality until `clear quality` restores `good` or a real write —
+//! which stores a `good` sample — overwrites it. Injection is
+//! development tooling, not field ownership: like reads it is never
+//! fenced by the writer claim, so a scripted rig or operator tool can
+//! fault a register while a controller pair owns the field.
+//!
 //! Response payloads:
 //!
 //! | tag | answer | rest of payload |
 //! |---|---|---|
-//! | `0x01` | sample | `u8 kind`, value bytes, `u64 tick` |
+//! | `0x01` | sample | `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x02` | written | `u64 tick` — the tick the write stamped |
-//! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick` |
+//! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x04` | stepped | `u64 tick` — the bank's new tick |
 //! | `0x05` | error | `u8 code`, code body |
-//! | `0x06` | done | none — a claim or release applied |
+//! | `0x06` | done | none — a claim, release, inject, or clear applied |
 //!
 //! Error codes: `0x01` unknown register (`u16 register`), `0x02` kind
 //! mismatch (`u16 register`, `u8 expected kind`, found value bytes),
@@ -74,9 +94,9 @@
 //! claim stands, `write_register` and `step` from an attachment not
 //! holding it answer the `fenced` error — surfaced through
 //! [`BusDriver`] as `IoError::Fenced` on the addressed point and
-//! [`LinkError::Fenced`] on a step — while reads and the register
-//! census stay open to every attachment. An unclaimed device stays
-//! open to all, the pre-claim behavior.
+//! [`LinkError::Fenced`] on a step — while reads, the register
+//! census, and quality injection stay open to every attachment. An
+//! unclaimed device stays open to all, the pre-claim behavior.
 //!
 //! The claim is bound to the attachments holding it: `release_writer`
 //! drops the requesting connection's hold — a no-op when it holds
@@ -101,8 +121,9 @@
 //! `sim-bus` device's registers for integration rigs, and the
 //! `dcs-sim-bus-ctl` binary is the protocol's development-tooling
 //! client — the register analogue of `dcs-sim-net`'s `dcs-plant-ctl` —
-//! listing, reading, writing, and stepping a running device server's
-//! registers. It is not part of the operator contract.
+//! listing, reading, writing, injecting quality into, and stepping a
+//! running device server's registers. It is not part of the operator
+//! contract.
 
 #![warn(missing_docs)]
 

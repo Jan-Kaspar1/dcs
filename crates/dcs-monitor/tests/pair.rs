@@ -243,6 +243,7 @@ fn commands_route_only_to_the_peer_reporting_active() {
             outcome: CommandOutcome::Accepted {
                 apply_tick: Tick(2)
             },
+            actor: None,
         }]
     );
     assert!(standby.client.receipts().unwrap().is_empty());

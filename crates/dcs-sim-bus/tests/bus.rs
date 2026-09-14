@@ -5,8 +5,8 @@
 //! register-mapped.
 
 use dcs_core::{
-    Direction, DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value,
-    ValueKind,
+    Direction, DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason,
+    Sample, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
@@ -515,6 +515,11 @@ fn protocol_contract_types_serde_roundtrip() {
         BusRequest::Step,
         BusRequest::ClaimWriter { owner: 42 },
         BusRequest::ReleaseWriter,
+        BusRequest::InjectQuality {
+            register: 4,
+            quality: Quality::Bad(QualityReason::DeviceFault),
+        },
+        BusRequest::ClearQuality { register: 4 },
     ];
     for request in requests {
         let json = serde_json::to_string(&request).unwrap();
@@ -640,6 +645,144 @@ fn release_writer_frees_the_field() {
             Err(IoError::Fenced(PointId(2)))
         );
     });
+}
+
+#[test]
+fn injected_quality_stamps_reads_until_cleared_or_overwritten() {
+    with_server(&fixture_decls(), |server, addr| {
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let driver: &dyn IoDriver = &bus;
+
+        // Point 1 maps register 4. The inject stamps the stored
+        // sample's declared quality, leaving value and tick untouched;
+        // reads through the IoDriver surface and the register census
+        // both report it.
+        bus.inject_quality(4, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        assert_eq!(
+            driver.read(PointId(1)).unwrap(),
+            Sample::new(
+                Value::Float(0.0),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick::ZERO,
+            )
+        );
+        assert_eq!(
+            server.bank().read(4).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+        assert!(
+            bus.list_registers()
+                .unwrap()
+                .iter()
+                .any(|info| info.register == 4
+                    && info.sample.quality == Quality::Bad(QualityReason::DeviceFault))
+        );
+
+        // A real write overwrites the injection with a Good sample.
+        driver.write(PointId(1), Value::Float(1.25)).unwrap();
+        assert_eq!(
+            driver.read(PointId(1)).unwrap(),
+            Sample::good(Value::Float(1.25), Tick::ZERO)
+        );
+
+        // Inject again, then clear: the read reports Good on the same
+        // stored value and tick.
+        bus.inject_quality(4, Quality::Uncertain(QualityReason::Stale))
+            .unwrap();
+        assert_eq!(
+            driver.read(PointId(1)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+        bus.clear_quality(4).unwrap();
+        assert_eq!(
+            driver.read(PointId(1)).unwrap(),
+            Sample::good(Value::Float(1.25), Tick::ZERO)
+        );
+
+        // Injecting an unserved register answers the named refusal; the
+        // link stays live.
+        assert!(matches!(
+            bus.inject_quality(12, Quality::Good),
+            Err(LinkError::InvalidRequest(_))
+        ));
+        assert_eq!(
+            bus.clear_quality(12),
+            Err(LinkError::InvalidRequest(
+                "UnknownRegister { register: 12 }".to_string()
+            ))
+        );
+        assert!(bus.connected());
+    });
+}
+
+#[test]
+fn injection_is_open_while_another_attachment_holds_the_writer_claim() {
+    with_server(&fixture_decls(), |_, addr| {
+        let holder = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let tool = BusDriver::connect(addr, &fixture_points()).unwrap();
+
+        // The holder owns the field: the tool's field-mutating requests
+        // are fenced, but injection — development tooling — is not.
+        holder.claim_writer(1).unwrap();
+        assert_eq!(
+            tool.write(PointId(2), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(tool.step(), Err(LinkError::Fenced));
+
+        tool.inject_quality(4, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        // Both attachments read the declared quality — the fault lands
+        // on the shared register the claim holder is serving.
+        assert_eq!(
+            holder.read(PointId(1)).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+        assert_eq!(
+            tool.read(PointId(1)).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+
+        // Arbitration is undisturbed: the holder still writes and
+        // steps, the tool is still fenced out of both.
+        holder.write(PointId(2), Value::Float(2.0)).unwrap();
+        assert_eq!(holder.step(), Ok(Tick(1)));
+        assert_eq!(
+            tool.write(PointId(2), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(tool.step(), Err(LinkError::Fenced));
+
+        tool.clear_quality(4).unwrap();
+        assert_eq!(
+            holder.read(PointId(1)).unwrap(),
+            Sample::good(Value::Float(0.0), Tick::ZERO)
+        );
+    });
+}
+
+#[test]
+fn identical_scripted_runs_with_injection_produce_identical_samples() {
+    let run = || {
+        with_server(&fixture_decls(), |_, addr| {
+            let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+            let mut trace = Vec::new();
+            trace.push(bus.read(PointId(1)).unwrap());
+            bus.inject_quality(4, Quality::Bad(QualityReason::CommunicationFault))
+                .unwrap();
+            trace.push(bus.read(PointId(1)).unwrap());
+            bus.step().unwrap();
+            bus.write(PointId(2), Value::Float(1.5)).unwrap();
+            // The injection stands across a step and an unrelated write.
+            trace.push(bus.read(PointId(1)).unwrap());
+            trace.push(bus.read(PointId(2)).unwrap());
+            bus.clear_quality(4).unwrap();
+            trace.push(bus.read(PointId(1)).unwrap());
+            trace
+        })
+    };
+    assert_eq!(run(), run());
 }
 
 #[test]
