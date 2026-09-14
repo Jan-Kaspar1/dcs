@@ -37,12 +37,16 @@
 //! a monotonically increasing `seq`, so a polling consumer detects an
 //! evicted stretch as a numbering gap instead of silently missing it.
 //!
-//! The page is the first slice of the monitoring and control UI consuming
+//! The page is the trend slice of the monitoring and control UI consuming
 //! the unified contract: a static, dependency-free HTML+JavaScript asset
 //! ([`PAGE`], no build toolchain) that fetches `/signals` once for point
-//! labels and units, polls `/snapshot` to refresh each point's value,
-//! quality, and tick, and submits `write_value` commands to `/command`
-//! through a form, displaying the returned receipt.
+//! labels and units, then polls `/snapshot`, `/history`, and `/journal` on
+//! one shared one-second cadence — the snapshot refreshes each point's
+//! value, quality, and tick; the history increments grow each point's
+//! inline-SVG trend through `since`-cursor polling; the journal pane
+//! lists quality transitions and settled command receipts in tick order —
+//! and submits `write_value` commands to `/command` through a form,
+//! displaying the returned receipt.
 //!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow

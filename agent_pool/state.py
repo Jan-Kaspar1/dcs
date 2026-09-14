@@ -119,6 +119,8 @@ class State:
             if cursor.rowcount:
                 merges = self.get('merges', 0) + 1
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('merges', json.dumps(merges)))
+                for key in ('recovery:' + str(issue), 'retry:' + str(issue)):
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, 'null'))
 
     def retry(self, issue):
         """Explicit operator retry. Keeps prior branch/clone recorded until replacement."""
