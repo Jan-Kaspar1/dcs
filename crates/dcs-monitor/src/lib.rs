@@ -334,6 +334,15 @@ impl<'d> Monitor<'d> {
         scan_and_record(&mut shared)
     }
 
+    /// Records one scan cycle that overran its wall-clock period — the
+    /// paced scan loop's feed for the snapshot's `io_health.scan_overruns`,
+    /// taken under the same lock that serializes scans. Wall-clock pacing
+    /// is the shell's business, so the loop detects the overrun and this
+    /// call only reports it into telemetry.
+    pub fn record_scan_overrun(&self) {
+        self.shared.lock().unwrap().peer.record_scan_overrun();
+    }
+
     /// The executor's current telemetry snapshot, taken under the lock.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         self.shared.lock().unwrap().peer.snapshot()

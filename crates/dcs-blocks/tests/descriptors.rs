@@ -5,7 +5,8 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
-    Interlock, Motor, OverrideSelect, Pid, PidConfig, RateLimiter, Scaling, Timer, Valve,
+    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
+    RateLimiter, Scaling, SignalFilter, Timer, Totalizer, Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -170,12 +171,71 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            LatchingAlarm::new(
+                "lal",
+                point(&mut specs, 160, Direction::In, ValueKind::Float),
+                point(&mut specs, 161, Direction::In, ValueKind::Bool),
+                point(&mut specs, 162, Direction::Out, ValueKind::Bool),
+                point(&mut specs, 163, Direction::Out, ValueKind::Bool),
+                AlarmLimits {
+                    low: 10.0,
+                    high: 90.0,
+                    hysteresis: 5.0,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            ManualStation::new(
+                "mas",
+                point(&mut specs, 140, Direction::In, ValueKind::Float),
+                point(&mut specs, 141, Direction::In, ValueKind::Float),
+                point(&mut specs, 142, Direction::In, ValueKind::Bool),
+                point(&mut specs, 143, Direction::Out, ValueKind::Float),
+                point(&mut specs, 144, Direction::Out, ValueKind::Bool),
+                5.0,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            SignalFilter::new(
+                "filt",
+                point(&mut specs, 150, Direction::In, ValueKind::Float),
+                point(&mut specs, 151, Direction::Out, ValueKind::Float),
+                0.5,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            MedianVoter::new(
+                "vot",
+                point(&mut specs, 170, Direction::In, ValueKind::Float),
+                point(&mut specs, 171, Direction::In, ValueKind::Float),
+                point(&mut specs, 172, Direction::In, ValueKind::Float),
+                point(&mut specs, 173, Direction::Out, ValueKind::Float),
+                point(&mut specs, 174, Direction::Out, ValueKind::Bool),
+                2.0,
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            Totalizer::new(
+                "tot",
+                point(&mut specs, 180, Direction::In, ValueKind::Float),
+                point(&mut specs, 181, Direction::In, ValueKind::Bool),
+                point(&mut specs, 182, Direction::Out, ValueKind::Float),
+                1.0,
+                0.0,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 13] = [
+const EXPECTED_KINDS: [&str; 18] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -189,6 +249,11 @@ const EXPECTED_KINDS: [&str; 13] = [
     Timer::KIND,
     Counter::KIND,
     RateLimiter::KIND,
+    LatchingAlarm::KIND,
+    ManualStation::KIND,
+    SignalFilter::KIND,
+    MedianVoter::KIND,
+    Totalizer::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {

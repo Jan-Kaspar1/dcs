@@ -1,0 +1,23 @@
+[package]
+name = "dcs-sim-bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-core = { path = "../dcs-core" }
+# The dcs-sim-bus-device binary loads the same plant model the
+# controller assembles, so the served register map and the driver's
+# mapping come from one declaration.
+dcs-model = { path = "../dcs-model" }
+serde = { version = "1.0.229", features = ["derive"] }
+# `float_roundtrip` is required, not optional: protocol contract types
+# must carry f64 point values bit-exactly under serde, matching the
+# plant protocol's guarantee.
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+signal-hook = "0.3.18"
+
+[dev-dependencies]
+dcs-runtime = { path = "../dcs-runtime" }
+dcs-sim = { path = "../dcs-sim" }

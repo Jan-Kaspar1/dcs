@@ -11,7 +11,7 @@
 //! on every reported sample, not to a wall clock.
 
 use crate::descriptor::ComponentDescriptor;
-use crate::io::Direction;
+use crate::io::{Direction, DriverDiagnostics, IoError};
 use crate::signal::{PointId, Sample, Tick};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +46,61 @@ pub struct ComponentDiagnostics {
     pub last_error: Option<String>,
 }
 
+/// One driver-boundary failure, recorded for the snapshot's I/O health
+/// section: the [`IoError`] with the tick, point, and scan boundary it
+/// hit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IoFault {
+    /// The scan tick the failure hit.
+    pub tick: Tick,
+    /// The point the failure was attributed to — the error's
+    /// [`IoError::point`], carried explicitly so a consumer reads the
+    /// attribution without decoding the error variant.
+    pub point: PointId,
+    /// The scan boundary that saw the failure: `In` for the input-read
+    /// phase, `Out` for the output-write phase.
+    pub direction: Direction,
+    /// The failure the driver reported.
+    pub error: IoError,
+}
+
+/// The snapshot's I/O-health section: the producer's driver-boundary
+/// counters plus whatever transport diagnostics the driver volunteers
+/// through [`IoDriver::diagnostics`](crate::IoDriver::diagnostics).
+///
+/// This is the "is the I/O subsystem healthy" answer, distinct from
+/// per-point quality: a failed read also marks its point's sample `Bad`,
+/// but the counters aggregate every boundary fault, and `driver` names
+/// link-level degradation no point owns. The counters describe the
+/// producing run's own driver experience — they are not checkpointed;
+/// a standby's health is its own driver's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct IoHealth {
+    /// Total input reads that failed at the scan's read boundary — each
+    /// also produced a `Bad` input sample.
+    pub failed_reads: u64,
+    /// Total output writes that failed at the scan's write boundary —
+    /// each also failed its scan with `ScanError`.
+    pub failed_writes: u64,
+    /// Driver-boundary operations that have failed in a row: every
+    /// failed read or write extends the count and every successful one
+    /// resets it to zero, so it reads as the failure streak ending at
+    /// [`last_error`](Self::last_error).
+    pub consecutive_failures: u64,
+    /// The most recent driver-boundary failure, with the tick and point
+    /// it hit; `None` when no scan has seen one.
+    pub last_error: Option<IoFault>,
+    /// Scan cycles the pacing shell reports as having overrun their
+    /// wall-clock period — fed through `Executor::record_scan_overrun`,
+    /// so the counter is wall-clock data entering from outside the
+    /// executor's tick domain: a report, never a scan input.
+    pub scan_overruns: u64,
+    /// The driver's own transport diagnostics, when it implements the
+    /// optional `diagnostics` hook; `None` for drivers with nothing
+    /// transport-level to report.
+    pub driver: Option<DriverDiagnostics>,
+}
+
 /// A point-in-time snapshot of a controller run for monitoring consumers.
 ///
 /// A snapshot reports state, not history: each point and each component
@@ -68,12 +123,17 @@ pub struct TelemetrySnapshot {
     /// surfaces each component's `describe()` result — the static
     /// metadata a UI renders faceplates from.
     pub descriptors: Vec<ComponentDescriptor>,
+    /// The I/O-health section: driver-boundary failure counters the
+    /// executor collects, the scan-overrun count the pacing shell feeds,
+    /// and the driver's volunteered transport diagnostics.
+    pub io_health: IoHealth,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::descriptor::{ParameterDescriptor, ParameterRange, PortDescriptor, PortRole};
+    use crate::io::LinkState;
     use crate::signal::{Quality, QualityReason, Value, ValueKind};
 
     #[test]
@@ -146,6 +206,22 @@ mod tests {
                     parameters: Vec::new(),
                 },
             ],
+            io_health: IoHealth {
+                failed_reads: 4,
+                failed_writes: 1,
+                consecutive_failures: 2,
+                last_error: Some(IoFault {
+                    tick: Tick(3),
+                    point: PointId(10),
+                    direction: Direction::In,
+                    error: IoError::Disconnected(PointId(10)),
+                }),
+                scan_overruns: 1,
+                driver: Some(DriverDiagnostics {
+                    link: LinkState::Disconnected,
+                    last_error: Some("no live connection to the plant server".to_string()),
+                }),
+            },
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(

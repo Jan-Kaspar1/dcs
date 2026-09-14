@@ -11,6 +11,7 @@ members = [
     "crates/dcs-plant",
     "crates/dcs-runtime",
     "crates/dcs-sim",
+    "crates/dcs-sim-bus",
     "crates/dcs-sim-net",
 ]
 resolver = "3"
