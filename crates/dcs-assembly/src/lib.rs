@@ -15,7 +15,8 @@
 //!   describe) before [`DriverPlan::build`] finishes the
 //!   [`FanoutDriver`] — the one [`IoDriver`](dcs_core::IoDriver) surface
 //!   that routes every point to its owning backend, so a model can mix
-//!   local `sim*` devices with remote [`SIM_TCP_KIND`] ones.
+//!   local `sim*` devices with remote [`SIM_TCP_KIND`] and scripted
+//!   [`SIM_SCRIPTED_KIND`] ones.
 //!   [`sim_channel_map`] and [`sim_driver`] remain the single-backend
 //!   convenience for all-local-`sim` models. A device kind no factory
 //!   serves is [`AssemblyError::UnknownDeviceKind`]; rejected
@@ -65,7 +66,13 @@ mod registry;
 pub use assembly::{SIM_DEVICE_PREFIX, assemble, sim_channel_map, sim_driver};
 pub use drivers::{
     DeviceBackend, DeviceDriver, DeviceError, DevicePoint, DeviceSpec, DriverPlan, DriverRegistry,
-    FanoutDriver, SIM_TCP_KIND, StepError, StepHook, resolve_drivers,
+    FanoutDriver, SIM_SCRIPTED_KIND, SIM_TCP_KIND, StepError, StepHook, resolve_drivers,
 };
 pub use error::{AssemblyError, BuildError, InternalPointError};
 pub use registry::{ComponentRegistry, ComponentSpec};
+
+/// The engineer-facing integration guide: adding component kinds and
+/// device kinds end to end. Included as crate documentation so its
+/// worked examples compile and run as doctests.
+#[doc = include_str!("../../../docs/integration-guide.md")]
+pub mod integration_guide {}

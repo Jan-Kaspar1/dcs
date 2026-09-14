@@ -20,7 +20,12 @@
 //! engineering. The history contract (`PointHistory`, `HistorySample`)
 //! and the journal contract (`JournalEntry`, `JournalEvent`) are the
 //! monitoring stream types: bounded per-point sample retention for trend
-//! views and the tick-stamped transition log for audit views.
+//! views and the tick-stamped transition log for audit views. The role
+//! contract (`Role`, `StandbySync`, `RoleReport`, `SwitchError`) is the
+//! redundancy contract: which instance of a controller pair owns field
+//! writes, the transition states between, and the named switchover
+//! refusals — so a monitoring UI treats the pair as one logical
+//! controller.
 
 #![warn(missing_docs)]
 
@@ -29,6 +34,7 @@ mod descriptor;
 mod history;
 mod io;
 mod journal;
+mod role;
 mod signal;
 mod state;
 mod telemetry;
@@ -40,6 +46,7 @@ pub use descriptor::{
 pub use history::{HistorySample, PointHistory};
 pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
 pub use journal::{JournalEntry, JournalEvent};
+pub use role::{Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };

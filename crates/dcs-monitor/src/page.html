@@ -333,7 +333,8 @@ function describeOutcome(outcome) {
 
 // A rejection reason serializes as {"unknown_point": {point}} |
 // {"type_mismatch": {point, expected, found}} |
-// {"driver_rejected": {point, error}} | the parameter-command reasons
+// {"driver_rejected": {point, error}} |
+// {"not_active": {point, role}} | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component.
@@ -350,6 +351,10 @@ function describeReason(reason) {
     const rejection = reason.driver_rejected;
     return "driver rejected " + pointName(rejection.point) + ": " +
       describeIoError(rejection.error);
+  }
+  if ("not_active" in reason) {
+    return "refused: instance reports role " + reason.not_active.role +
+      "; commands apply only on the active peer";
   }
   if ("unknown_component" in reason) {
     return "unknown component " + reason.unknown_component.component;

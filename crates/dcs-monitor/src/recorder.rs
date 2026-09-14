@@ -19,7 +19,7 @@
 
 use dcs_core::{
     CommandOutcome, CommandReceipt, HistorySample, JournalEntry, JournalEvent, PointHistory,
-    PointId, Quality, Sample, Tick,
+    PointId, Quality, Role, Sample, Tick,
 };
 use dcs_runtime::Executor;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -125,6 +125,19 @@ impl Recorder {
                 self.push(tick, JournalEvent::CommandSettled { receipt });
             }
         }
+    }
+
+    /// Journals a receipt that never entered the executor's log — a
+    /// command refused before it could queue, e.g. at the role boundary.
+    pub(super) fn note_settled(&mut self, receipt: CommandReceipt, tick: Tick) {
+        self.push(tick, JournalEvent::CommandSettled { receipt });
+    }
+
+    /// Journals a reported-role transition at `tick` — a promotion or
+    /// demotion applied at its boundary, or a transition settling on the
+    /// first scan under the new mode.
+    pub(super) fn note_role_change(&mut self, tick: Tick, from: Role, to: Role) {
+        self.push(tick, JournalEvent::RoleChanged { from, to });
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the

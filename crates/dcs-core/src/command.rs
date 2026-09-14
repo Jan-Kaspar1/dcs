@@ -22,6 +22,7 @@
 
 use crate::descriptor::ParameterRange;
 use crate::io::IoError;
+use crate::role::Role;
 use crate::signal::{PointId, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -79,8 +80,9 @@ impl Command {
 
 /// Why a [`Command`] was rejected. Point-command variants carry the
 /// offending [`PointId`]; parameter-command variants carry the offending
-/// component name. [`CommandError::point`] and [`CommandError::component`]
-/// retrieve each uniformly.
+/// component name; [`CommandError::NotActive`] carries the command's
+/// target point when it has one. [`CommandError::point`] and
+/// [`CommandError::component`] retrieve each uniformly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandError {
@@ -160,16 +162,29 @@ pub enum CommandError {
         /// Why the component refused the value.
         detail: String,
     },
+    /// The instance refused the command because of its reported role:
+    /// per the monitoring-under-redundancy decision only the peer
+    /// reporting [`Role::Active`] accepts commands — a standby or a
+    /// mid-transition instance cannot let the write reach the field.
+    /// `point` is the command's target, not a point at fault; a command
+    /// targeting a component rather than a point carries `None`.
+    NotActive {
+        /// The point the command targeted, when it targeted a point.
+        point: Option<PointId>,
+        /// The role the instance reported.
+        role: Role,
+    },
 }
 
 impl CommandError {
     /// The point the rejection is attributed to, when the rejection is
-    /// for a point command.
+    /// for a point command or names a point target.
     pub fn point(&self) -> Option<PointId> {
         match self {
             CommandError::UnknownPoint { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. } => Some(*point),
+            CommandError::NotActive { point, .. } => *point,
             _ => None,
         }
     }
@@ -249,6 +264,18 @@ impl fmt::Display for CommandError {
                 f,
                 "component {component:?} rejected parameter {parameter:?}: {detail}"
             ),
+            CommandError::NotActive { point, role } => match point {
+                Some(point) => write!(
+                    f,
+                    "command on I/O point {point:?} refused: instance reports role {role}; \
+                     commands apply only on the active peer"
+                ),
+                None => write!(
+                    f,
+                    "command refused: instance reports role {role}; \
+                     commands apply only on the active peer"
+                ),
+            },
         }
     }
 }
