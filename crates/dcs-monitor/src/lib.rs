@@ -160,6 +160,20 @@
 //! same pair view for in-process consumers — tests and tooling — and
 //! carries the testable half of the routing rules.
 //!
+//! ## The plant overview
+//!
+//! With one or more `?pair=<name>=<host:port>,<host:port>` URL
+//! parameters — each naming one pair's peers outright in the same
+//! `host:port` convention `?peer` uses, with an optional display name —
+//! the page switches to the plant-wide overview of the
+//! plant-wide-supervision decision: one summary card per configured
+//! pair carrying the active peer's identity, each peer's reported role
+//! and convergence, the unreachable-peer redundancy fault, and the
+//! I/O-health line, each card linking into that pair's own pair view.
+//! Aggregation stays page-side over the same JSON endpoints — the
+//! served contract is unchanged — and an unreachable pair degrades to a
+//! named card fault without interrupting the other cards.
+//!
 //! [`Monitor::serve`] runs the blocking accept loop; callers run it on a
 //! dedicated thread — a scoped thread suffices when the driver's borrow
 //! isn't `'static` — and [`Monitor::shutdown`] stops it.
