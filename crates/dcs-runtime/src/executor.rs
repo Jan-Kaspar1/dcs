@@ -6,6 +6,7 @@
 //! [`Executor::run`] then advance a virtual [`Tick`] and cycle read → step
 //! → write deterministically.
 
+use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
@@ -13,7 +14,7 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 /// How the controller may use one point the driver serves.
@@ -77,6 +78,14 @@ impl FromIterator<(PointId, Direction, ValueKind)> for PointMap {
 /// point.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WiringError {
+    /// Two components declare the same name. Names are each component's
+    /// identity within a run — diagnostics and the
+    /// [`Checkpoint`](crate::Checkpoint) component keys rely on them being
+    /// unique.
+    DuplicateComponent {
+        /// The repeated component name.
+        component: String,
+    },
     /// A component declares a point the map does not serve.
     UnknownPoint {
         /// The component declaring the point.
@@ -118,6 +127,12 @@ pub enum WiringError {
 impl fmt::Display for WiringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateComponent { component } => {
+                write!(
+                    f,
+                    "component name {component:?} is registered more than once"
+                )
+            }
             Self::UnknownPoint { component, point } => write!(
                 f,
                 "component {component:?} declares io point {} the driver map does not serve",
@@ -350,8 +365,14 @@ impl<'d> Executor<'d> {
         components: Vec<Box<dyn Component>>,
     ) -> Result<Self, WiringError> {
         let mut entries = Vec::with_capacity(components.len());
+        let mut names = HashSet::with_capacity(components.len());
         for component in components {
             let component_name = || component.name().to_string();
+            if !names.insert(component.name().to_string()) {
+                return Err(WiringError::DuplicateComponent {
+                    component: component_name(),
+                });
+            }
             let mut declared = HashMap::new();
             for requirement in component.io_requirements() {
                 let point = requirement.point;
@@ -529,6 +550,113 @@ impl<'d> Executor<'d> {
         self.step_components(tick);
         self.write_outputs()?;
         Ok(tick)
+    }
+
+    /// Captures the run's transferable state as a [`Checkpoint`].
+    ///
+    /// The checkpoint bundles the current tick, every component's
+    /// [`capture_state`](Component::capture_state) keyed by name (empty
+    /// for stateless components), the driver's captured state when it
+    /// implements the contract, and the scan image's `Out` samples — the
+    /// last written output values. It is serde-serializable, so an active
+    /// controller can ship it to a standby over the same JSON channel the
+    /// monitoring contract uses. See the [`Checkpoint`] docs for how this
+    /// maps to real redundancy.
+    pub fn checkpoint(&self) -> Checkpoint {
+        let image = self.image.borrow();
+        Checkpoint {
+            tick: self.tick,
+            components: self
+                .components
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.component.name().to_string(),
+                        entry.component.capture_state(),
+                    )
+                })
+                .collect(),
+            driver: self.driver.capture_state(),
+            outputs: self
+                .map
+                .iter()
+                .filter(|(_, spec)| spec.direction == Direction::Out)
+                .filter_map(|(point, _)| image.get(&point).map(|sample| (point, *sample)))
+                .collect(),
+        }
+    }
+
+    /// Rebuilds an executor equivalent to the one `checkpoint` captured.
+    ///
+    /// `driver`, `map`, and `components` are the same inputs
+    /// [`Executor::new`] takes — on a standby they are built from the same
+    /// plant model. Restore wires the components, checks that the
+    /// checkpoint's component set equals the registered set by name,
+    /// applies the driver state when the checkpoint carries one, restores
+    /// each component's state, then resumes the tick and the output image.
+    /// The result is an executor whose next [`scan`](Executor::scan)
+    /// produces outputs identical to the captured run's.
+    ///
+    /// Any incompatibility fails with a [`RestoreError`] naming the
+    /// element at fault: a [`WiringError`], a component-name mismatch, a
+    /// component's [`StateError`](dcs_core::StateError), or the driver's.
+    /// No partially restored executor is returned; the supplied driver is
+    /// asked to validate before applying its state section.
+    pub fn restore(
+        driver: &'d (dyn IoDriver + Sync),
+        map: PointMap,
+        components: Vec<Box<dyn Component>>,
+        checkpoint: &Checkpoint,
+    ) -> Result<Self, RestoreError> {
+        let mut executor = Self::new(driver, map, components)?;
+
+        // Component names are the run's component ids: the checkpoint's
+        // set must equal the registered set exactly.
+        for component in checkpoint.components.keys() {
+            if !executor
+                .components
+                .iter()
+                .any(|entry| entry.component.name() == component)
+            {
+                return Err(RestoreError::UnknownComponent {
+                    component: component.clone(),
+                });
+            }
+        }
+        for entry in &executor.components {
+            if !checkpoint.components.contains_key(entry.component.name()) {
+                return Err(RestoreError::MissingComponent {
+                    component: entry.component.name().to_string(),
+                });
+            }
+        }
+
+        // Driver state before component state: a driver that does not
+        // implement the contract rejects a captured section before any
+        // component is touched.
+        if let Some(state) = &checkpoint.driver {
+            driver.restore_state(state).map_err(RestoreError::Driver)?;
+        }
+
+        for entry in &mut executor.components {
+            let state = checkpoint
+                .components
+                .get(entry.component.name())
+                .expect("checked above");
+            entry
+                .component
+                .restore_state(state)
+                .map_err(RestoreError::Component)?;
+        }
+
+        executor.tick = checkpoint.tick;
+        executor.image.borrow_mut().extend(
+            checkpoint
+                .outputs
+                .iter()
+                .map(|(&point, &sample)| (point, sample)),
+        );
+        Ok(executor)
     }
 
     /// Validates `command` against the point map, returning the target
@@ -1557,6 +1685,337 @@ mod tests {
                 CommandOutcome::Applied { tick: Tick(1) },
                 CommandOutcome::Applied { tick: Tick(3) },
             ]
+        );
+    }
+
+    /// A stateful component: counts its scans into an `Int` output and
+    /// carries `count` across a checkpoint.
+    struct Counter {
+        name: &'static str,
+        output: PointId,
+        count: i64,
+    }
+
+    impl Component for Counter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![IoRequirement::output::<i64>("out", self.output)]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            self.count += 1;
+            io.write_typed(self.output, self.count)?;
+            Ok(())
+        }
+
+        fn capture_state(&self) -> dcs_core::StateMap {
+            let mut state = dcs_core::StateMap::new();
+            state.insert("count", Value::Int(self.count));
+            state
+        }
+
+        fn restore_state(
+            &mut self,
+            state: &dcs_core::StateMap,
+        ) -> Result<(), dcs_core::StateError> {
+            state.ensure_known_fields(self.name, &["count"])?;
+            self.count = state.require_i64(self.name, "count")?;
+            Ok(())
+        }
+    }
+
+    /// Rig for checkpoint tests: `Scale` (stateless) reads In 10 onto Out
+    /// 20 at gain 2; `Counter` (stateful) counts scans onto Out 30.
+    fn checkpoint_rig(driver: &StubDriver) -> Executor<'_> {
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::Out, ValueKind::Int),
+        ]
+        .into_iter()
+        .collect();
+        Executor::new(
+            driver,
+            map,
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn int(point: u64) -> (PointId, Value) {
+        (PointId(point), Value::Int(0))
+    }
+
+    #[test]
+    fn checkpoint_captures_tick_components_driver_and_outputs() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        let mut executor = checkpoint_rig(&driver);
+        executor.run(3).unwrap();
+
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.tick, Tick(3));
+        assert_eq!(checkpoint.components.len(), 2);
+        // Stateless components capture an empty map and stay unaffected.
+        assert!(checkpoint.components["a"].is_empty());
+        assert_eq!(
+            checkpoint.components["count"].get("count"),
+            Some(Value::Int(3))
+        );
+        // The stub driver does not implement the contract.
+        assert_eq!(checkpoint.driver, None);
+        // The last written outputs come from the scan image.
+        assert_eq!(
+            checkpoint.outputs[&PointId(20)],
+            Sample::good(Value::Float(10.0), Tick(3))
+        );
+        assert_eq!(
+            checkpoint.outputs[&PointId(30)],
+            Sample::good(Value::Int(3), Tick(3))
+        );
+    }
+
+    #[test]
+    fn restored_executor_continues_the_run_identically() {
+        let run = |checkpoint: Option<&Checkpoint>| {
+            let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+            driver.write(PointId(10), Value::Float(5.0)).unwrap();
+            let mut executor = match checkpoint {
+                Some(checkpoint) => Executor::restore(
+                    &driver,
+                    [
+                        (PointId(10), Direction::In, ValueKind::Float),
+                        (PointId(20), Direction::Out, ValueKind::Float),
+                        (PointId(30), Direction::Out, ValueKind::Int),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    vec![
+                        Box::new(Scale {
+                            name: "a",
+                            input: PointId(10),
+                            output: PointId(20),
+                            gain: 2.0,
+                        }),
+                        Box::new(Counter {
+                            name: "count",
+                            output: PointId(30),
+                            count: 0,
+                        }),
+                    ],
+                    checkpoint,
+                )
+                .unwrap(),
+                None => checkpoint_rig(&driver),
+            };
+            if checkpoint.is_none() {
+                executor.run(3).unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..2 {
+                executor.scan().unwrap();
+                samples.push((
+                    executor.sample(PointId(10)).unwrap(),
+                    executor.sample(PointId(20)).unwrap(),
+                    executor.sample(PointId(30)).unwrap(),
+                ));
+            }
+            (executor.tick(), samples)
+        };
+
+        // The reference run reaches tick 5 uninterrupted.
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        driver.write(PointId(10), Value::Float(5.0)).unwrap();
+        let mut original = checkpoint_rig(&driver);
+        original.run(3).unwrap();
+        let checkpoint = original.checkpoint();
+
+        // The standby driver observes the process itself — the same
+        // input value must be supplied to it, as on live hardware.
+        assert_eq!(run(Some(&checkpoint)), run(None));
+    }
+
+    #[test]
+    fn restore_rejects_a_mismatched_component_set() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+
+        // The checkpoint names a component the fresh executor lacks.
+        let error = Executor::restore(
+            &driver,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![Box::new(Scale {
+                name: "other",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &checkpoint,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RestoreError::UnknownComponent {
+                component: "a".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn restore_rejects_incompatible_component_state() {
+        let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let mut executor = checkpoint_rig(&driver);
+        executor.scan().unwrap();
+        let mut checkpoint = executor.checkpoint();
+        checkpoint
+            .components
+            .get_mut("count")
+            .unwrap()
+            .insert("count", Value::Float(1.0));
+
+        let error = Executor::restore(
+            &driver,
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::Out, ValueKind::Int),
+            ]
+            .into_iter()
+            .collect(),
+            vec![
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 2.0,
+                }),
+                Box::new(Counter {
+                    name: "count",
+                    output: PointId(30),
+                    count: 0,
+                }),
+            ],
+            &checkpoint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RestoreError::Component(dcs_core::StateError::IncompatibleField { .. })
+        ));
+    }
+
+    #[test]
+    fn restore_reports_driver_state_rejection() {
+        /// A driver implementing the contract, so the checkpoint carries
+        /// a driver section.
+        struct StatefulDriver(StubDriver);
+        impl IoDriver for StatefulDriver {
+            fn read(&self, point: PointId) -> Result<Sample, IoError> {
+                self.0.read(point)
+            }
+            fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+                self.0.write(point, value)
+            }
+            fn capture_state(&self) -> Option<dcs_core::StateMap> {
+                let mut state = dcs_core::StateMap::new();
+                state.insert("tick", Value::Int(1));
+                Some(state)
+            }
+        }
+
+        let active = StatefulDriver(StubDriver::new(&[float(10), float(20), int(30)], &[]));
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+            (PointId(30), Direction::Out, ValueKind::Int),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(
+            &active,
+            map.clone(),
+            vec![Box::new(Counter {
+                name: "count",
+                output: PointId(30),
+                count: 0,
+            })],
+        )
+        .unwrap();
+        executor.scan().unwrap();
+        let checkpoint = executor.checkpoint();
+        assert!(checkpoint.driver.is_some());
+
+        // The standby's driver does not implement the contract and
+        // rejects the captured section by name.
+        let standby = StubDriver::new(&[float(10), float(20), int(30)], &[]);
+        let error = Executor::restore(
+            &standby,
+            map,
+            vec![Box::new(Counter {
+                name: "count",
+                output: PointId(30),
+                count: 0,
+            })],
+            &checkpoint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RestoreError::Driver(dcs_core::StateError::UnknownField { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_component_names_are_rejected_at_wiring() {
+        let driver = StubDriver::new(&[float(50)], &[]);
+        let map: PointMap = [(PointId(50), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let error = Executor::new(
+            &driver,
+            map,
+            vec![
+                Box::new(Constant {
+                    name: "same",
+                    output: PointId(50),
+                    value: 1.0,
+                }),
+                Box::new(Constant {
+                    name: "same",
+                    output: PointId(50),
+                    value: 2.0,
+                }),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WiringError::DuplicateComponent {
+                component: "same".to_string()
+            }
         );
     }
 }

@@ -2,7 +2,7 @@
 //! integration anti-windup.
 
 use crate::params::{self, ParameterError, Parameters};
-use dcs_core::{PointId, Quality, QualityReason, Sample, Tick, Value};
+use dcs_core::{PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// Tuning and limit parameters for [`Pid`].
@@ -210,6 +210,30 @@ impl Component for Pid {
 
         self.last_output = output;
         io.write_typed(self.output, output)?;
+        Ok(())
+    }
+
+    /// Captures the integrator, the previous `pv` (when any step has run),
+    /// and the held last output — the state a standby needs to continue
+    /// the loop bumplessly.
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("integrator", Value::Float(self.integrator));
+        state.insert("last_output", Value::Float(self.last_output));
+        if let Some(previous) = self.previous_pv {
+            state.insert("previous_pv", Value::Float(previous));
+        }
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
+        state.ensure_known_fields(&self.name, &["integrator", "last_output", "previous_pv"])?;
+        let integrator = state.require_f64(&self.name, "integrator")?;
+        let last_output = state.require_f64(&self.name, "last_output")?;
+        let previous_pv = state.optional_f64(&self.name, "previous_pv")?;
+        self.integrator = integrator;
+        self.last_output = last_output;
+        self.previous_pv = previous_pv;
         Ok(())
     }
 }
