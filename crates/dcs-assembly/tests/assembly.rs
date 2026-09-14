@@ -7,7 +7,10 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, InternalPointError, assemble, sim_channel_map,
     sim_driver,
 };
-use dcs_blocks::{AnalogInput, AnalogOutput, Counter, DigitalOutput, Pid, RateLimiter, Timer};
+use dcs_blocks::{
+    AnalogInput, AnalogOutput, Counter, DigitalOutput, ManualStation, Pid, RateLimiter,
+    SignalFilter, Timer,
+};
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
 use dcs_runtime::{Component, ComponentIo, Executor, IoRequirement, StepError};
@@ -22,6 +25,9 @@ const M1_TANK_LEVEL: &str = include_str!("../../dcs-demo/fixtures/tank_level.jso
 const INTERNAL_POINTS: &str = include_str!("../fixtures/internal_points.json");
 /// The cyclic-vocabulary fixture: a timer, a counter, and a rate limiter.
 const CYCLIC: &str = include_str!("../fixtures/cyclic.json");
+/// The operator-vocabulary fixture: a manual/auto station and a signal
+/// filter.
+const OPERATOR: &str = include_str!("../fixtures/operator.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
@@ -45,6 +51,15 @@ const TIMED: PointId = PointId(20);
 const COUNT: PointId = PointId(21);
 const DONE: PointId = PointId(22);
 const LIMITED: PointId = PointId(23);
+
+// `operator.json`: the field-side points the fixture's components drive.
+const CV: PointId = PointId(10);
+const MANUAL: PointId = PointId(11);
+const MODE: PointId = PointId(12);
+const RAW: PointId = PointId(13);
+const DRIVE: PointId = PointId(20);
+const ACTIVE: PointId = PointId(21);
+const FILTERED: PointId = PointId(22);
 
 fn boxed<C, E>(result: Result<C, E>) -> Result<Box<dyn Component>, BuildError>
 where
@@ -135,6 +150,25 @@ fn registry() -> ComponentRegistry {
         })
         .with(RateLimiter::KIND, |spec| {
             boxed(RateLimiter::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(ManualStation::KIND, |spec| {
+            boxed(ManualStation::from_parameters(
+                spec.name.as_str(),
+                spec.require("control")?,
+                spec.require("manual")?,
+                spec.require("mode")?,
+                spec.require("out")?,
+                spec.require("manual_active")?,
+                spec.parameters,
+            ))
+        })
+        .with(SignalFilter::KIND, |spec| {
+            boxed(SignalFilter::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
@@ -314,6 +348,55 @@ fn cyclic_fixture_runs_timer_counter_and_limiter() {
     executor.scan().unwrap();
     assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(0));
     assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(false));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn operator_fixture_runs_station_and_filter() {
+    let model = model(OPERATOR);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // Auto mode: the station adopts the control value outright; the
+    // filter adopts its first `Good` input. `manual_active` reports
+    // the auto selection.
+    driver.write(CV, Value::Float(10.0)).unwrap();
+    driver.write(MANUAL, Value::Float(30.0)).unwrap();
+    driver.write(RAW, Value::Float(4.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(10.0));
+    assert_eq!(driver.read(ACTIVE).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(4.0));
+
+    // Switching to manual slews `drive` toward the manual value by
+    // exactly transfer_delta=5 per scan until it arrives; the status
+    // asserts on the switch scan.
+    driver.write(MODE, Value::Bool(true)).unwrap();
+    for expected in [15.0, 20.0, 25.0, 30.0] {
+        executor.scan().unwrap();
+        assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(expected));
+    }
+    assert_eq!(driver.read(ACTIVE).unwrap().value, Value::Bool(true));
+
+    // Arrived: the manual source passes through unbounded.
+    driver.write(MANUAL, Value::Float(33.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(33.0));
+
+    // The filter's documented recurrence out += alpha * (in - out)
+    // with alpha = 0.5 halves the gap per scan.
+    driver.write(RAW, Value::Float(12.0)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(8.0));
+    executor.scan().unwrap();
+    assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(10.0));
 
     assert!(
         executor
