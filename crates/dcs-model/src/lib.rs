@@ -9,13 +9,17 @@
 //! [`PlantModel::load`] parses a document, checks its version, and validates
 //! it; [`PlantModel::validate`] applies the same checks to a model built
 //! programmatically, returning structured [`ValidationError`]s that name the
-//! offending element.
+//! offending element. For monitoring consumers, [`PlantModel::signal_index`]
+//! derives a flat [`SignalIndex`] resolving every point to its signal
+//! metadata without walking the model graph.
 
 #![warn(missing_docs)]
 
+mod index;
 mod model;
 mod validate;
 
+pub use index::{PointSignal, SignalIndex};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
     Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Signal,

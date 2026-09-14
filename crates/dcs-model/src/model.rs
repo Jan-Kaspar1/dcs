@@ -108,6 +108,18 @@ pub struct Signal {
     pub name: String,
     /// The I/O point carrying this signal's value.
     pub source: PointId,
+    /// Engineering unit of the carried value, e.g. `"degC"`.
+    ///
+    /// `unit` and `description` extend the version-1 schema as optional
+    /// fields: documents written before they existed deserialize them as
+    /// `None`, so the format evolves without a version bump or migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Human-facing description of the signal.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// An instantiation of a reusable component kind.
