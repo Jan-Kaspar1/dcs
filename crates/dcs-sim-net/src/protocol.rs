@@ -76,6 +76,24 @@ pub enum PlantRequest {
     /// the census development tooling (`dcs-plant-ctl`) needs to show the
     /// shared plant's surface without a copy of its channel map.
     ListPoints,
+    /// Takes the plant's field-write ownership for `owner` — the
+    /// single-writer claim the failover decision fences a superseded
+    /// active out with.
+    ///
+    /// `owner` is an opaque token the caller picks, unique per field
+    /// owner — one controller's several attachments claim the same
+    /// token so all of them write, while a takeover claims a fresh one.
+    /// The grant is unconditional: the claim preempts whichever owner
+    /// held it, and it stands until another claim preempts it — never
+    /// released, so a dead owner's silence keeps the field fenced for
+    /// the claimed owner rather than reopening it. Once any owner is
+    /// claimed, `write` and `step` requests from a connection that has
+    /// not itself claimed the current owner are refused; reads, fault
+    /// injection, and `list_points` stay open to every attachment.
+    ClaimWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
 }
 
 /// The server's answer to one [`PlantRequest`].
@@ -106,7 +124,8 @@ pub enum PlantResponse {
         points: Vec<PointInfo>,
     },
     /// Answer to [`PlantRequest::Write`], [`PlantRequest::InjectFault`],
-    /// and [`PlantRequest::ClearFault`]: the request applied.
+    /// [`PlantRequest::ClearFault`], and [`PlantRequest::ClaimWriter`]:
+    /// the request applied.
     Done,
     /// The request failed; `error` says why.
     Error {
@@ -133,6 +152,15 @@ pub enum PlantError {
     /// negative or non-finite. `detail` is human-readable diagnostics,
     /// not a machine contract.
     InvalidRequest {
+        /// Why the request was refused.
+        detail: String,
+    },
+    /// The request mutates the shared field but the connection does not
+    /// hold the field's write-ownership claim — the fencing verdict of
+    /// the failover decision. A [`PlantRequest::Write`] instead answers
+    /// the point's [`IoError::Fenced`], so a driver's write path surfaces
+    /// the same named failure a local fenced driver would produce.
+    Fenced {
         /// Why the request was refused.
         detail: String,
     },
@@ -217,6 +245,7 @@ mod tests {
             },
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
+            PlantRequest::ClaimWriter { owner: 42 },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -244,6 +273,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ListPoints).unwrap(),
             r#"{"op":"list_points"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
+            r#"{"op":"claim_writer","owner":42}"#
         );
     }
 
@@ -289,6 +322,11 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::InvalidRequest {
                     detail: "bad dt".to_string(),
+                },
+            },
+            PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
                 },
             },
         ];

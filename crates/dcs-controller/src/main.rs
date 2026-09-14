@@ -5,7 +5,8 @@
 //! tracking an active peer's checkpoints.
 //!
 //! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]`
+//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]
+//!         [--auto-promote N]`
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -61,6 +62,17 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//!
+//! Automatic failover, per the failover decision: a standby armed with
+//! `--auto-promote N` treats the checkpoint pull as the heartbeat —
+//! `N` consecutive failed pulls is active loss, and the peer
+//! self-promotes at that scan boundary provided it still holds its
+//! convergence proof. Promotion — manual or automatic — first takes the
+//! shared plant's write-ownership claim on this instance's owner token,
+//! so a still-alive old peer's writes are refused by the field itself
+//! (`IoError::Fenced`), and a promoted standby continues writing. A
+//! model whose field-facing devices cannot arbitrate a single writer
+//! refuses `--auto-promote` at startup; manual promotion still works.
 //!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
@@ -129,6 +141,51 @@ impl Driver {
             (Self::Remote(_), false) => Ok(()),
         }
     }
+
+    /// Takes the shared field's write-ownership under `owner` — the
+    /// fencing claim every promotion runs before the gate lifts, so the
+    /// field itself refuses a superseded owner's writes. A purely local
+    /// simulated model has no shared field to claim and answers `Ok`.
+    fn claim_writer(&self, owner: u64) -> Result<(), String> {
+        match self {
+            Self::Remote(remote) => remote
+                .claim_writer(owner)
+                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+            Self::Local(fanout) => fanout
+                .claim_field_writer(owner)
+                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+        }
+    }
+
+    /// The field-facing devices that cannot arbitrate a single writer —
+    /// automatic failover is honest only when this is empty: a fenced
+    /// old peer's writes must actually stop at the field. A `--remote`
+    /// attachment always arbitrates through the plant server's claim.
+    fn unfenced_field_devices(&self) -> Vec<String> {
+        match self {
+            Self::Remote(_) => Vec::new(),
+            Self::Local(fanout) => fanout
+                .unfenced_field_devices()
+                .iter()
+                .map(|device| device.0.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// This process's field-ownership token — the identity its promotions
+/// claim the shared plant's single-writer arbitration under. One token
+/// per process: every attachment this instance owns claims it, so all
+/// its field connections keep writing, while a peer's takeover claims
+/// its own fresh token and fences this one out.
+fn owner_token() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(since.as_nanos());
+    }
+    hasher.finish()
 }
 
 /// Parsed command line.
@@ -155,12 +212,15 @@ struct Options {
     /// `--listen`; the deterministic mode a scripted redundant pair
     /// runs under.
     driven: bool,
+    /// The consecutive checkpoint-pull misses after which a tracking
+    /// standby self-promotes — `None` keeps promotion manual-only.
+    auto_promote: Option<u32>,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
                       [--listen ADDR] [--standby ADDR] [--remote ADDR]
-                      [--driven]
+                      [--driven] [--auto-promote N]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -185,6 +245,12 @@ controller scan.
                   tracking standby's checkpoint pull and the plant step a
                   field-owning run paces to its ticks; requires --listen
                   and excludes --scan-ms and --ticks
+  --auto-promote N
+                  arm automatic failover on a tracking standby: N
+                  consecutive failed checkpoint pulls self-promote the
+                  standby at that scan boundary. Requires the model's
+                  field-facing devices to arbitrate a single writer —
+                  sim-tcp does through the plant server's claim
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -202,6 +268,7 @@ impl Options {
         let mut standby = None;
         let mut remote = None;
         let mut driven = false;
+        let mut auto_promote = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -234,6 +301,13 @@ impl Options {
                 "--standby" => standby = Some(value("--standby")?),
                 "--remote" => remote = Some(value("--remote")?),
                 "--driven" => driven = true,
+                "--auto-promote" => {
+                    auto_promote = Some(
+                        value("--auto-promote")?
+                            .parse::<u32>()
+                            .map_err(|error| format!("invalid --auto-promote value: {error}"))?,
+                    );
+                }
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -258,6 +332,9 @@ impl Options {
             && (!dt.is_finite() || dt < 0.0)
         {
             return Err("--dt must be finite and non-negative".to_string());
+        }
+        if auto_promote == Some(0) {
+            return Err("--auto-promote must be at least one missed pull".to_string());
         }
         if driven {
             if listen.is_none() {
@@ -285,6 +362,7 @@ impl Options {
             standby,
             remote,
             driven,
+            auto_promote,
         })
     }
 }
@@ -378,12 +456,36 @@ fn main() -> ExitCode {
         Err(error) => return fail(error),
     };
 
+    // Automatic failover needs field devices that can fence a superseded
+    // owner — without single-writer arbitration a self-promoted standby
+    // could not keep exactly one writer, so the flag is refused up
+    // front. Manual promotion stays available either way.
+    if options.auto_promote.is_some() {
+        let unfenced = driver.unfenced_field_devices();
+        if !unfenced.is_empty() {
+            return fail(format!(
+                "--auto-promote requires every field-facing device to arbitrate a single \
+                 writer; these devices cannot: {}",
+                unfenced.join(", ")
+            ));
+        }
+    }
+
     // The role machine: a --standby instance tracks its active's
     // checkpoints gate-closed until promoted; anything else owns the
-    // field from the start.
+    // field from the start. Every promotion — manual or the
+    // `--auto-promote` failover — first takes the field's
+    // write-ownership claim under this instance's token, so the shared
+    // plant itself refuses a superseded peer's writes.
+    let owner = owner_token();
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
         None => Peer::active(executor, gate.as_ref()),
+    };
+    let peer = peer.with_field_claim(|| driver.claim_writer(owner));
+    let peer = match options.auto_promote {
+        Some(budget) => peer.with_failover(budget),
+        None => peer,
     };
 
     // The simulated process time per scan: explicit --dt, else the
@@ -464,6 +566,22 @@ fn main() -> ExitCode {
                                     eprintln!("standby: fetch from {active_addr} failed: {error}");
                                 }
                             }
+                            // The heartbeat miss reached the configured
+                            // budget: a still-converged standby promotes
+                            // itself at this boundary; a refusal leaves
+                            // the named convergence state reporting on
+                            // GET /role.
+                            if monitor.failover_due() {
+                                match monitor.self_promote() {
+                                    Ok(report) => eprintln!(
+                                        "standby: {active_addr} unreachable; self-promoted (role {})",
+                                        report.role
+                                    ),
+                                    Err(error) => eprintln!(
+                                        "standby: failover due but self-promotion refused: {error}"
+                                    ),
+                                }
+                            }
                         }
                         monitor.paced_scan()
                     },
@@ -473,32 +591,45 @@ fn main() -> ExitCode {
                 )
             }
             None => {
-                // Without a monitor nothing can promote this standby;
-                // the RefCell lets the two loop closures share the peer.
+                // Without a monitor nothing external can promote this
+                // standby — only the armed failover path can — and the
+                // RefCell lets the two loop closures share the peer.
                 let peer = std::cell::RefCell::new(peer);
-                let step = || driver.step(dt, false);
+                let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
-                        match client.checkpoint() {
-                            Ok(checkpoint) => {
-                                if let Err(error) = peer.apply(&checkpoint) {
-                                    eprintln!(
-                                        "standby: rejected checkpoint from {active_addr}: {error}"
-                                    );
+                        if !peer.owns_field() {
+                            match client.checkpoint() {
+                                Ok(checkpoint) => {
+                                    if let Err(error) = peer.apply(&checkpoint) {
+                                        eprintln!(
+                                            "standby: rejected checkpoint from {active_addr}: {error}"
+                                        );
+                                    }
+                                    for report in peer.take_divergences() {
+                                        eprintln!(
+                                            "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                            report.tick.0, report.mismatches
+                                        );
+                                    }
                                 }
-                                for report in peer.take_divergences() {
-                                    eprintln!(
-                                        "standby: staged outputs diverged from the field at tick {}: {:?}",
-                                        report.tick.0, report.mismatches
-                                    );
+                                Err(error) => {
+                                    peer.note_transfer_failed(format!(
+                                        "fetch from {active_addr}: {error}"
+                                    ));
+                                    eprintln!("standby: fetch from {active_addr} failed: {error}");
                                 }
                             }
-                            Err(error) => {
-                                peer.note_transfer_failed(format!(
-                                    "fetch from {active_addr}: {error}"
-                                ));
-                                eprintln!("standby: fetch from {active_addr} failed: {error}");
+                            if peer.failover_due() {
+                                match peer.self_promote() {
+                                    Ok(()) => eprintln!(
+                                        "standby: {active_addr} unreachable; self-promoted"
+                                    ),
+                                    Err(error) => eprintln!(
+                                        "standby: failover due but self-promotion refused: {error}"
+                                    ),
+                                }
                             }
                         }
                         peer.scan()

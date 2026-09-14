@@ -413,13 +413,20 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
   remote or real field kinds that advance themselves leave it `None`.
   (`RemoteDriver` supplies one because the remote plant is stepped explicitly
-  over its protocol.) `inspect` is an optional
+  over its protocol.) `claim` is an optional `ClaimHook`
+  (`Fn(u64) -> Result<(), dcs_assembly::StepError>`) taking the field's
+  write-ownership for an owner token — the single-writer arbitration a
+  promoted standby runs before its gate lifts: `sim-tcp` installs the
+  plant server's claim, and a field-facing kind that cannot arbitrate
+  leaves it `None`, which keeps automatic failover off for models built
+  on it (`FanoutDriver::unfenced_field_devices` names such devices).
+  `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
   installs the `ScriptedDriver` itself so `FanoutDriver::inspect::<T>(device)`
@@ -592,13 +599,15 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }
     // A self-contained backend; nothing to step — the device holds no
     // simulated dynamics — and nothing beyond the IoDriver surface to
-    // inspect. It is private to the instance, not field-facing.
+    // inspect. It is private to the instance, not field-facing, so no
+    // write-ownership claim applies.
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: Arc::new(MemoryDriver {
             samples: Mutex::new(samples),
             kinds,
         }),
         step: None,
+        claim: None,
         inspect: None,
         field_facing: false,
     }))

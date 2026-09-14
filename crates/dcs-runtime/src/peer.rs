@@ -32,6 +32,26 @@
 //! its scan boundary and tracks convergence like
 //! [`Standby`](crate::Standby) does.
 //!
+//! Automatic failover, per the failover decision: the checkpoint pull is
+//! also the heartbeat — a produced checkpoint is proof the active
+//! serves, so [`apply`](Peer::apply) resets the consecutive-miss count
+//! a failed pull (`note_transfer_failed`) increments. Armed with
+//! [`with_failover`](Peer::with_failover), the peer reports
+//! [`failover_due`](Peer::failover_due) when the misses reach the
+//! configured budget, and [`self_promote`](Peer::self_promote) then
+//! promotes at the scan boundary exactly like a manual request — but
+//! only while the convergence proof still stands: the last applied
+//! verdict was `Tracking` and the misses have not exceeded the budget.
+//! An unconverged or over-budget peer reports its named sync state
+//! instead of promoting.
+//!
+//! Promotion — manual or automatic — first runs the field-ownership
+//! claim installed by [`with_field_claim`](Peer::with_field_claim):
+//! the fencing arbitration that makes the shared field refuse a
+//! superseded owner's writes. A failed claim refuses the promotion
+//! with [`SwitchError::FieldClaimFailed`] — a peer that cannot take the
+//! field's single-writer arbitration does not take the field.
+//!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
 //! check of [`crate::divergence`]: each non-field-owning scan's staged
@@ -83,6 +103,38 @@ pub struct Peer<'d> {
     /// Divergence detections not yet consumed for journaling — one per
     /// transition into [`StandbyState::Diverged`].
     pending_divergences: Vec<DivergenceReport>,
+    /// Consecutive checkpoint pulls that produced no applied checkpoint
+    /// — the heartbeat miss count the failover budget compares against.
+    /// A produced checkpoint resets it, whether the apply lands or is
+    /// rejected: the active served, so it is alive.
+    misses: u32,
+    /// Whether the convergence proof a self-promotion relies on still
+    /// stands: the last applied verdict was `Tracking` (not diverged,
+    /// not rejected) and the miss count has not exceeded the failover
+    /// budget. Kept distinct from `sync`, which degrades on the first
+    /// miss — the documented rule is that a tracking peer may promote
+    /// itself *within* the budget.
+    converged: bool,
+    /// The consecutive-miss budget arming automatic failover — `None`
+    /// keeps the peer manual-promotion-only.
+    failover: Option<u32>,
+    /// The field-side write-ownership claim a promotion takes before
+    /// the gate lifts — the fencing arbitration of the failover
+    /// decision — when the driver surface can arbitrate single-writer.
+    claim: Option<Claim<'d>>,
+}
+
+/// The field-side write-ownership claim a promotion runs before the
+/// gate lifts: the fencing arbitration that makes the shared field
+/// refuse a superseded owner's writes. A failed claim refuses the
+/// promotion — a peer that cannot take the field's single-writer
+/// arbitration does not take the field.
+struct Claim<'d>(Box<dyn Fn() -> Result<(), String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Claim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field claim")
+    }
 }
 
 /// One reported-role transition, queued for the transition journal: the
@@ -149,7 +201,40 @@ impl<'d> Peer<'d> {
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
+            misses: 0,
+            converged: false,
+            failover: None,
+            claim: None,
         }
+    }
+
+    /// Arms the peer's fencing hook — the field-side write-ownership
+    /// claim every promotion runs after the convergence checks and
+    /// before the gate lifts. `claim` is the caller's arbitration
+    /// against the shared field — e.g. the plant server's single-writer
+    /// claim — so a peer built without it relies on the write gate
+    /// alone.
+    pub fn with_field_claim(
+        mut self,
+        claim: impl Fn() -> Result<(), String> + Send + Sync + 'd,
+    ) -> Self {
+        self.claim = Some(Claim(Box::new(claim)));
+        self
+    }
+
+    /// Arms automatic failover: `budget` consecutive failed checkpoint
+    /// pulls — one per scan cycle, the documented heartbeat cadence —
+    /// make [`failover_due`](Self::failover_due) report, and
+    /// [`self_promote`](Self::self_promote) take the field at that scan
+    /// boundary while the convergence proof stands. `budget` must be at
+    /// least one; the default is no automatic failover.
+    pub fn with_failover(mut self, budget: u32) -> Self {
+        assert!(
+            budget > 0,
+            "a failover budget must be at least one missed pull"
+        );
+        self.failover = Some(budget);
+        self
     }
 
     /// An instance tracking an active peer: role `standby`, its gate
@@ -167,6 +252,10 @@ impl<'d> Peer<'d> {
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
+            misses: 0,
+            converged: false,
+            failover: None,
+            claim: None,
         }
     }
 
@@ -238,11 +327,56 @@ impl<'d> Peer<'d> {
                 sync: self.sync_wire(),
             });
         }
-        if let Some(gate) = self.gate {
-            gate.open();
-        }
+        self.lift_gate()?;
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
+    }
+
+    /// The automatic-failover half of [`promote`](Self::promote): when
+    /// the checkpoint-pull heartbeat's consecutive misses have reached
+    /// the configured [`with_failover`](Self::with_failover) budget and
+    /// the convergence proof still stands — the last applied verdict
+    /// was `Tracking` and the misses have not exceeded the budget —
+    /// lifts the gate at this boundary exactly as a manual promotion
+    /// would, reporting `promoting`.
+    ///
+    /// Anything else is the named [`SwitchError::NotConverged`]
+    /// carrying the reported sync state: an unconverged standby reports
+    /// rather than promotes, a single transient miss has not reached
+    /// the budget, and an over-budget miss run has voided the
+    /// convergence the promotion would rely on. Callers check
+    /// [`failover_due`](Self::failover_due) once per scan cycle and
+    /// invoke this only then — the boundary at which a self-promotion
+    /// lands is the budget-th miss's scan.
+    pub fn self_promote(&mut self) -> Result<(), SwitchError> {
+        match self.role {
+            Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
+            Role::Standby | Role::Demoting => {}
+        }
+        if !(self.failover_due() && self.converged) {
+            return Err(SwitchError::NotConverged {
+                sync: self.sync_wire(),
+            });
+        }
+        self.lift_gate()?;
+        self.change(self.executor.tick(), Role::Promoting);
+        Ok(())
+    }
+
+    /// Whether the heartbeat's consecutive failed pulls have reached the
+    /// configured failover budget — the scan boundary at which a
+    /// still-converged standby may [`self_promote`](Self::self_promote).
+    /// `false` without a configured budget; misses beyond the budget do
+    /// not re-arm — the failover window closed with the convergence
+    /// proof.
+    pub fn failover_due(&self) -> bool {
+        self.failover.is_some_and(|budget| self.misses == budget)
+    }
+
+    /// Consecutive checkpoint pulls that produced no applied checkpoint
+    /// — the heartbeat miss count the failover budget compares against.
+    pub fn missed_transfers(&self) -> u32 {
+        self.misses
     }
 
     /// Demotes the instance to a tracking peer: closes the write gate at
@@ -265,6 +399,8 @@ impl<'d> Peer<'d> {
         self.sync = StandbyState::Unsynchronized;
         self.aligned = None;
         self.staged = None;
+        self.misses = 0;
+        self.converged = false;
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
     }
@@ -298,11 +434,16 @@ impl<'d> Peer<'d> {
         if self.owns_field() {
             return Err(ApplyError::OwnsField);
         }
+        // The pull produced a checkpoint — the active served, so it is
+        // alive: the heartbeat miss count resets whether the apply
+        // lands or is rejected.
+        self.misses = 0;
         match self.executor.apply(checkpoint) {
             Ok(()) => {
                 let was_diverged = matches!(self.sync, StandbyState::Diverged { .. });
                 self.sync = StandbyState::Tracking;
                 self.aligned = Some(checkpoint.tick);
+                self.converged = true;
                 if let Some((tick, staged)) = self.staged.take()
                     && tick == checkpoint.tick
                 {
@@ -315,6 +456,7 @@ impl<'d> Peer<'d> {
                             });
                         }
                         self.sync = StandbyState::Diverged { mismatches };
+                        self.converged = false;
                     }
                 }
                 Ok(())
@@ -323,6 +465,7 @@ impl<'d> Peer<'d> {
                 self.sync = StandbyState::Degraded {
                     detail: error.to_string(),
                 };
+                self.converged = false;
                 Err(ApplyError::Restore(error))
             }
         }
@@ -330,8 +473,15 @@ impl<'d> Peer<'d> {
 
     /// Marks the tracking peer [`Degraded`](StandbyState::Degraded)
     /// after a transfer failure that produced no checkpoint at all — an
-    /// unreachable active or a refused request.
+    /// unreachable active or a refused request — and counts the
+    /// heartbeat miss toward the failover budget. Misses beyond the
+    /// budget void the convergence proof a self-promotion would rely
+    /// on: the failover window closes with it.
     pub fn note_transfer_failed(&mut self, detail: impl fmt::Display) {
+        self.misses += 1;
+        if self.failover.is_some_and(|budget| self.misses > budget) {
+            self.converged = false;
+        }
         self.sync = StandbyState::Degraded {
             detail: detail.to_string(),
         };
@@ -420,6 +570,22 @@ impl<'d> Peer<'d> {
     /// Consumes the peer and returns the executor.
     pub fn into_executor(self) -> Executor<'d> {
         self.executor
+    }
+
+    /// Takes the field's write-ownership claim when one is installed —
+    /// the fencing arbitration a promotion relies on — then lifts the
+    /// gate. A failed claim refuses the promotion as
+    /// [`SwitchError::FieldClaimFailed`]: the peer that cannot take the
+    /// field's single-writer arbitration does not take the field, and
+    /// the gate stays closed.
+    fn lift_gate(&mut self) -> Result<(), SwitchError> {
+        if let Some(claim) = &self.claim {
+            claim.0().map_err(|detail| SwitchError::FieldClaimFailed { detail })?;
+        }
+        if let Some(gate) = self.gate {
+            gate.open();
+        }
+        Ok(())
     }
 
     /// The reported-role change bookkeeping: `from` is the previously
@@ -784,5 +950,144 @@ mod tests {
         assert_eq!(standby.sync_state(), &StandbyState::Tracking);
         standby.promote().unwrap();
         assert!(gate.is_open());
+    }
+
+    /// A converged standby with a failover budget of two: one transient
+    /// miss neither reports due nor promotes; the second does, taking
+    /// the claim and the gate at that scan boundary.
+    #[test]
+    fn failover_promotes_at_the_budget_boundary_only() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.sync_state(), &StandbyState::Tracking);
+
+        // One transient miss: the budget is not met and self-promotion
+        // is refused with the named degraded state — the peer reports
+        // rather than promotes.
+        peer.note_transfer_failed("connection refused");
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded {
+                    detail: "connection refused".into(),
+                },
+            })
+        );
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+
+        // A produced checkpoint resets the run — the active served.
+        source.run(1).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.missed_transfers(), 0);
+
+        // Two consecutive misses reach the budget: the scan boundary
+        // promotes, the claim runs before the gate lifts.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        assert!(peer.failover_due());
+        assert_eq!(peer.missed_transfers(), 2);
+        peer.self_promote().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        peer.scan().unwrap();
+        assert_eq!(peer.role(), Role::Active);
+    }
+
+    /// Self-promotion refuses while the convergence proof does not
+    /// stand: never-converged, diverged, or past the budget — each is
+    /// the named `NotConverged` carrying the reported state.
+    #[test]
+    fn self_promotion_requires_standing_convergence() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        // Never converged: misses or not, the named state reports — the
+        // failed pulls degrade it rather than promote it.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        assert!(peer.failover_due());
+        assert_eq!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { detail: "b".into() }
+            })
+        );
+
+        // Converge, then run past the budget: the failover window
+        // closed with the proof, and the peer reports `degraded`.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        peer.note_transfer_failed("c");
+        assert!(!peer.failover_due());
+        assert!(matches!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { .. }
+            })
+        ));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+    }
+
+    /// A failed field claim refuses the promotion — the gate stays
+    /// closed and the reported role does not move.
+    #[test]
+    fn a_failed_claim_refuses_promotion() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| Err("plant unreachable".to_string()));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::FieldClaimFailed {
+                detail: "plant unreachable".into()
+            })
+        );
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+    }
+
+    /// Without a failover budget the miss count still reports but never
+    /// arms — manual promotion carries the pair alone.
+    #[test]
+    fn without_a_budget_failover_never_arms() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut peer = Peer::standby(executor(&driver), None);
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        assert_eq!(peer.missed_transfers(), 2);
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { detail: "b".into() }
+            })
+        );
     }
 }

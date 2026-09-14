@@ -43,6 +43,11 @@ pub enum IoError {
         /// The value actually stored or supplied.
         found: Value,
     },
+    /// The field refused the write: another attachment holds the
+    /// field's write-ownership claim — the fencing verdict of the
+    /// single-writer arbitration a redundant pair relies on when a
+    /// promoted standby takes the field. Reads are never fenced.
+    Fenced(PointId),
 }
 
 impl IoError {
@@ -51,7 +56,8 @@ impl IoError {
         match *self {
             IoError::UnknownPoint(point)
             | IoError::Disconnected(point)
-            | IoError::Timeout(point) => point,
+            | IoError::Timeout(point)
+            | IoError::Fenced(point) => point,
             IoError::TypeMismatch { point, .. } => point,
         }
     }
@@ -63,6 +69,10 @@ impl fmt::Display for IoError {
             IoError::UnknownPoint(point) => write!(f, "unknown I/O point {point:?}"),
             IoError::Disconnected(point) => write!(f, "I/O point {point:?} disconnected"),
             IoError::Timeout(point) => write!(f, "I/O point {point:?} timed out"),
+            IoError::Fenced(point) => write!(
+                f,
+                "I/O point {point:?} write fenced: another attachment owns field writes"
+            ),
             IoError::TypeMismatch {
                 point,
                 expected,
@@ -553,6 +563,7 @@ mod tests {
                 expected: ValueKind::Float,
                 found: Value::Int(1),
             },
+            IoError::Fenced(PointId(5)),
         ] {
             let json = serde_json::to_string(&error).unwrap();
             assert_eq!(serde_json::from_str::<IoError>(&json).unwrap(), error);

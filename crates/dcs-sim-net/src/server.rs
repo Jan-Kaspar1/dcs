@@ -24,6 +24,13 @@ struct Shared {
     /// otherwise notice the server stopping.
     clients: Mutex<HashMap<u64, TcpStream>>,
     next_client: AtomicU64,
+    /// The field's write-ownership claim — the owner token the last
+    /// [`PlantRequest::ClaimWriter`] asserted, or `None` while the plant
+    /// has never been claimed and stays open to every attachment. Once
+    /// set it is never cleared: a dead owner's silence is exactly the
+    /// failure the claim exists to fence, so only a fresh claim moves
+    /// the ownership.
+    writer: Mutex<Option<u64>>,
 }
 
 impl Shared {
@@ -51,6 +58,9 @@ impl Shared {
 fn serve_connection(shared: &Shared, stream: TcpStream) {
     let _ = stream.set_nodelay(true);
     let mut reader = BufReader::new(stream);
+    // The owner token this connection's last `claim_writer` asserted —
+    // the identity the field's single-writer arbitration fences by.
+    let mut claimed = None;
     loop {
         if shared.stopped() {
             return;
@@ -62,7 +72,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
             Ok(None) | Err(_) => return,
         };
         let response = match serde_json::from_slice::<PlantRequest>(&line) {
-            Ok(request) => dispatch(&shared.driver, request),
+            Ok(request) => dispatch(shared, &mut claimed, request),
             Err(error) => PlantResponse::Error {
                 error: PlantError::InvalidRequest {
                     detail: error.to_string(),
@@ -79,13 +89,19 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
     }
 }
 
-/// Applies one parsed request to the shared driver.
+/// Applies one parsed request to the shared driver, fencing
+/// field-mutating requests by the caller's claimed owner.
 ///
 /// Every request produces exactly one response; a request the driver
 /// refuses comes back as [`PlantError::Io`] carrying the driver's
 /// [`IoError`](dcs_core::IoError) verbatim so the remote client surfaces
-/// the same failure a local one would.
-fn dispatch(driver: &SimDriver, request: PlantRequest) -> PlantResponse {
+/// the same failure a local one would. `Write` and `Step` are the
+/// field-mutating operations: while an owner is claimed, a connection
+/// that has not claimed the current owner sees its `write` refused with
+/// the point's [`IoError::Fenced`] and its `step` with
+/// [`PlantError::Fenced`] — the old owner's writes stop at the field,
+/// not merely at its own gate.
+fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -> PlantResponse {
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
         Err(error) => PlantResponse::Error {
@@ -93,13 +109,27 @@ fn dispatch(driver: &SimDriver, request: PlantRequest) -> PlantResponse {
         },
     };
     match request {
-        PlantRequest::Read { point } => match driver.read(point) {
+        PlantRequest::Read { point } => match shared.driver.read(point) {
             Ok(sample) => PlantResponse::Sample { sample },
             Err(error) => PlantResponse::Error {
                 error: PlantError::Io { error },
             },
         },
-        PlantRequest::Write { point, value } => applied(driver.write(point, value)),
+        // `Write` and `Step` mutate the shared field, so they fence on
+        // the claimed owner — and the writer lock stays held across the
+        // mutation itself, keeping a claim strictly ordered against a
+        // write already in flight on another connection.
+        PlantRequest::Write { point, value } => {
+            let writer = shared.writer.lock().unwrap();
+            if writer.is_some_and(|owner| *claimed != Some(owner)) {
+                return PlantResponse::Error {
+                    error: PlantError::Io {
+                        error: IoError::Fenced(point),
+                    },
+                };
+            }
+            applied(shared.driver.write(point, value))
+        }
         PlantRequest::Step { dt } => {
             // `SimDriver::step` panics on a non-finite or negative dt; the
             // protocol turns that contract violation into a named refusal.
@@ -110,15 +140,32 @@ fn dispatch(driver: &SimDriver, request: PlantRequest) -> PlantResponse {
                     },
                 };
             }
+            let writer = shared.writer.lock().unwrap();
+            if writer.is_some_and(|owner| *claimed != Some(owner)) {
+                return PlantResponse::Error {
+                    error: PlantError::Fenced {
+                        detail: "another attachment owns field writes".to_string(),
+                    },
+                };
+            }
             PlantResponse::Stepped {
-                tick: driver.step(dt),
+                tick: shared.driver.step(dt),
             }
         }
-        PlantRequest::InjectFault { point, fault } => applied(driver.inject_fault(point, fault)),
-        PlantRequest::ClearFault { point } => applied(driver.clear_fault(point)),
+        PlantRequest::InjectFault { point, fault } => {
+            applied(shared.driver.inject_fault(point, fault))
+        }
+        PlantRequest::ClearFault { point } => applied(shared.driver.clear_fault(point)),
         PlantRequest::ListPoints => PlantResponse::Points {
-            points: driver.points(),
+            points: shared.driver.points(),
         },
+        PlantRequest::ClaimWriter { owner } => {
+            // The grant preempts unconditionally: the promoted standby's
+            // claim must beat the old owner's, wherever it still lives.
+            *shared.writer.lock().unwrap() = Some(owner);
+            *claimed = Some(owner);
+            PlantResponse::Done
+        }
     }
 }
 
@@ -157,6 +204,7 @@ impl PlantServer {
                 stopped: AtomicBool::new(false),
                 clients: Mutex::new(HashMap::new()),
                 next_client: AtomicU64::new(0),
+                writer: Mutex::new(None),
             }),
             listener: TcpListener::bind(addr)?,
         })
