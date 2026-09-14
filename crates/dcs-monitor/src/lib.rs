@@ -66,12 +66,19 @@
 //! ungrouped points filed under the documented `"ungrouped"` default —
 //! then polls `/snapshot`, `/history`, and `/journal` on one shared
 //! one-second cadence — the snapshot refreshes each point's value,
-//! quality, and tick and badges each point in its force set; the history
-//! increments grow each point's
+//! quality, and tick, and badges each point in its force set; the
+//! history increments grow each point's
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
 //! — and submits `write_value` commands to `/command`, displaying the
-//! returned receipt.
+//! returned receipt. The snapshot's `io_health` section renders as the
+//! I/O-health pane: the executor's boundary counters (failed reads,
+//! failed writes, consecutive failures) with the last fault's tick and
+//! point attribution, the driver's volunteered transport diagnostics as
+//! named link degradation distinct from per-point quality, and the
+//! pacing shell's scan-overrun count — placed beside the pair view's
+//! role and convergence reporting so operator-facing health reads as
+//! one surface.
 //!
 //! Each snapshot's `descriptors` render one faceplate per component
 //! instance, generically — no per-kind page code: a port's
