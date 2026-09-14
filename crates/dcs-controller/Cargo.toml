@@ -1,0 +1,13 @@
+[package]
+name = "dcs-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-assembly = { path = "../dcs-assembly" }
+dcs-blocks = { path = "../dcs-blocks" }
+dcs-model = { path = "../dcs-model" }
+dcs-runtime = { path = "../dcs-runtime" }
+serde_json = "1.0.151"

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "sp": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "sp" }
+    },
+    {
+      "id": 11,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "out" }
+    }
+  ],
+  "signals": [],
+  "components": [
+    {
+      "id": 1,
+      "kind": "flux-capacitor",
+      "parameters": {},
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    { "from": { "point": 10 }, "to": { "port": { "component": 1, "name": "in" } } },
+    { "from": { "port": { "component": 1, "name": "out" } }, "to": { "point": 11 } }
+  ]
+}

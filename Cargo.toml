@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "crates/dcs-assembly",
     "crates/dcs-blocks",
+    "crates/dcs-controller",
     "crates/dcs-core",
     "crates/dcs-model",
     "crates/dcs-runtime",

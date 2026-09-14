@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "dcs-assembly"
+version = "0.1.0"
+dependencies = [
+ "dcs-blocks",
+ "dcs-core",
+ "dcs-model",
+ "dcs-runtime",
+ "dcs-sim",
+ "serde_json",
+]
+
+[[package]]
 name = "dcs-blocks"
 version = "0.1.0"
 dependencies = [
@@ -10,6 +22,17 @@ dependencies = [
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+]
+
+[[package]]
+name = "dcs-controller"
+version = "0.1.0"
+dependencies = [
+ "dcs-assembly",
+ "dcs-blocks",
+ "dcs-model",
+ "dcs-runtime",
+ "serde_json",
 ]
 
 [[package]]
