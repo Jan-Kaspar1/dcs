@@ -13,6 +13,7 @@ Adding a new device should follow the same model. Once its device integration an
 
 ## Agent workflow
 
+- For product direction, market requirements, library scope, or roadmap work, read `docs/product-strategy.md`, then the applicable file under `docs/requirements/` and its linked evidence under `docs/research/`. Water and wastewater is the first market; batch control is a later expansion.
 - Implement only the assigned issue and its acceptance criteria. Read `docs/architecture.md` and `docs/plan.md` before making design decisions; planners maintain those documents through reviewed CI-gated changes.
 - Develop software against simulated I/O. Physical equipment access and live infrastructure deployment are outside this autonomous workflow.
 - Run `python3 scripts/verify.py` before reporting completion. Route heavy Rust builds through this command so shared build limits apply.
