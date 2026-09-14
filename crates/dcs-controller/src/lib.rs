@@ -371,3 +371,22 @@ fn count_by_kind<'k>(kinds: impl Iterator<Item = &'k str>) -> BTreeMap<String, u
     }
     counts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry-side pin of the spec-coverage guard: the standard
+    /// registry registers exactly the kinds `dcs-blocks` ships — the
+    /// checked-in [`dcs_blocks::KINDS`] list that
+    /// `dcs-blocks/tests/spec_drift.rs` pins the `dcs-build` spec table
+    /// against. A kind registered here without the list entry — or one
+    /// dropped from here while still listed — fails this test.
+    #[test]
+    fn registry_registers_exactly_the_shipped_kinds() {
+        let registry = registry();
+        let registered: std::collections::BTreeSet<&str> = registry.kinds().collect();
+        let shipped: std::collections::BTreeSet<&str> = dcs_blocks::KINDS.iter().copied().collect();
+        assert_eq!(registered, shipped);
+    }
+}
