@@ -25,10 +25,12 @@
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
   tr.source td { font-weight: bold; }
+  #health { display: flex; flex-wrap: wrap; gap: 1rem 3rem; align-items: flex-start; }
+  #health > section { flex: 1 1 24rem; }
   .forced { background: #a60; color: #fff; font-size: 0.75rem;
           padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
-  #pair-summary.good, #io-health.good { color: #060; }
-  #pair-summary.bad, #io-health.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health-summary.good { color: #060; }
+  #pair-summary.bad, #io-health-summary.bad { color: #b00; font-weight: bold; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -58,8 +60,8 @@
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
-<p id="io-health" hidden></p>
 
+<div id="health">
 <section id="pair" hidden>
 <h2>Controller pair</h2>
 <p id="pair-summary"></p>
@@ -70,6 +72,15 @@
   <tbody id="pair-peers"></tbody>
 </table>
 </section>
+
+<section id="io-health" hidden>
+<h2>I/O health</h2>
+<p id="io-health-summary"></p>
+<table>
+  <tbody id="io-health-rows"></tbody>
+</table>
+</section>
+</div>
 
 <h2>Components</h2>
 <div id="faceplates"></div>
@@ -139,7 +150,12 @@
 // logical controller — and the other peer contributes pair health only.
 // Commands submit only to the settled-active peer; a "not_active"
 // rejection means the command landed mid-transition, so roles are
-// re-polled and the command retried once.
+// re-polled and the command retried once. Beside the pair's role and
+// convergence reporting the I/O-health pane renders the snapshot's
+// io_health section — the executor's boundary counters and attributed
+// last fault, the driver's volunteered link diagnostics, and the pacing
+// shell's scan-overrun count — so operator-facing health reads as one
+// surface.
 const peers = [{ base: "", name: location.host }];
 for (const raw of new URLSearchParams(location.search).getAll("peer")) {
   const base = /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "")
@@ -413,12 +429,15 @@ async function refresh() {
   }
 }
 
-// The snapshot's I/O health section, rendered as its own line so link
-// degradation reads as link health — visibly separate from the
-// per-point quality column below. IoFault serializes as
-// {tick, point, direction, error} and an IoError as
+// The snapshot's I/O health section, rendered as its own pane beside
+// the pair view's role and convergence reporting — one surface for
+// operator-facing health. The driver's volunteered diagnostics get rows
+// of their own: a dead transport names link degradation there, visibly
+// separate from the per-point quality column below. IoFault serializes
+// as {tick, point, direction, error}, an IoError as
 // {"Disconnected": id} | {"Timeout": id} | {"UnknownPoint": id} |
-// {"TypeMismatch": {point, expected, found}}.
+// {"TypeMismatch": {point, expected, found}}, a LinkState as
+// "connected" | "disconnected", and a Direction as "in" | "out".
 function describeIoError(error) {
   const [variant, detail] = Object.entries(error)[0];
   const name = variant.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
@@ -429,36 +448,47 @@ function describeIoError(error) {
   return name + " on point " + detail;
 }
 
+function healthRow(label, value) {
+  return "<tr><th>" + esc(label) + "</th><td>" + esc(value) + "</td></tr>";
+}
+
 function renderIoHealth(health) {
-  const el = document.getElementById("io-health");
-  if (!health) { el.hidden = true; return; }
-  const parts = [];
+  const pane = document.getElementById("io-health");
+  if (!health) { pane.hidden = true; return; }
+  const rows = [];
   let troubled = false;
   if (health.driver) {
-    parts.push("link " + health.driver.link);
+    // Link health is transport health, not point health: a dead plant
+    // server names "disconnected" here while the same event only marks
+    // individual points' samples Bad below.
+    rows.push(healthRow("link", health.driver.link));
     if (health.driver.link !== "connected") troubled = true;
     if (health.driver.last_error) {
-      parts.push("last link failure: " + health.driver.last_error);
+      rows.push(healthRow("last link failure", health.driver.last_error));
     }
   }
-  if (health.failed_reads || health.failed_writes) {
-    troubled = true;
-    parts.push("failed reads " + health.failed_reads +
-      ", failed writes " + health.failed_writes +
-      ", " + health.consecutive_failures + " in a row");
-  }
+  rows.push(healthRow("failed reads", health.failed_reads));
+  rows.push(healthRow("failed writes", health.failed_writes));
+  rows.push(healthRow("consecutive failures", health.consecutive_failures));
+  if (health.failed_reads || health.failed_writes) troubled = true;
   if (health.last_error) {
     const fault = health.last_error;
-    parts.push("last I/O fault " + describeIoError(fault.error) +
-      " (" + fault.direction + ", tick " + fault.tick + ")");
+    rows.push(healthRow("last I/O fault",
+      describeIoError(fault.error) + " — " +
+      (fault.direction === "in" ? "read" : "write") + " boundary, " +
+      pointName(fault.point) + ", tick " + fault.tick));
+    troubled = true;
   }
+  // The pacing shell's overrun count, displayed when nonzero.
   if (health.scan_overruns) {
-    parts.push("scan overruns " + health.scan_overruns);
+    rows.push(healthRow("scan overruns", health.scan_overruns));
+    troubled = true;
   }
-  if (parts.length === 0) { el.hidden = true; return; }
-  el.hidden = false;
-  el.textContent = "I/O health: " + parts.join(" — ");
-  el.className = troubled ? "bad" : "good";
+  document.getElementById("io-health-rows").innerHTML = rows.join("");
+  const summary = document.getElementById("io-health-summary");
+  summary.textContent = troubled ? "I/O degraded" : "I/O healthy";
+  summary.className = troubled ? "bad" : "good";
+  pane.hidden = false;
 }
 
 // One point's row in the listing table. A forced point — one in the
