@@ -10,11 +10,11 @@ Use Ubuntu WSL, Python 3, Git, and rustup. The repository pins its Rust toolchai
 python3 scripts/verify.py
 ```
 
-The verification command shares two build slots across worker clones, limits Cargo to four build threads, and keeps build artifacts in each clone. CI independently checks Rust formatting, Clippy, Rust tests, and Python supervisor tests.
+The verification command shares four build slots across worker clones, limits Cargo to four build threads, and keeps build artifacts in each clone. CI independently checks Rust formatting, Clippy, Rust tests, and Python supervisor tests.
 
 ## Packaging
 
-The root `Dockerfile` builds the `dcs-controller` binary into a minimal container image. See [docs/packaging.md](docs/packaging.md) for the image build and run commands.
+The root `Dockerfile` builds the `dcs-controller` binary into a minimal container image, and `Dockerfile.plant` does the same for `dcs-plant-server` — one plant container plus a redundant controller pair is the demonstration rig. See [docs/packaging.md](docs/packaging.md) for the image build and run commands.
 
 ## Local agent pool
 

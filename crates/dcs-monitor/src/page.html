@@ -11,6 +11,7 @@
   td.value { font-variant-numeric: tabular-nums; }
   .good { color: #060; }
   .uncertain { color: #a60; }
+  .substituted { color: #70a; font-weight: bold; }
   .bad { color: #b00; font-weight: bold; }
   .nosample { color: #888; font-style: italic; }
   #status { color: #666; }
@@ -22,6 +23,7 @@
   .trend polyline { fill: none; stroke: #146; stroke-width: 1.5; }
   .trend .limit { fill: #888; font-size: 9px; }
   .trend circle.uncertain { fill: #a60; }
+  .trend circle.substituted { fill: #70a; }
   .trend circle.bad { fill: #b00; }
   tr.point-group th { background: #e4e4e4; text-align: left; }
   tr.source td { font-weight: bold; }
@@ -49,6 +51,8 @@
   .faceplate .diag .errors { color: #b00; font-weight: bold; }
   .command input { width: 6rem; }
   .command button { margin-left: 0.3rem; }
+  button.force { color: #70a; }
+  button.unforce { margin-left: 0.3rem; color: #70a; font-weight: bold; }
   .faceplate .param-value { width: 6.5rem; }
   .faceplate select.param-value { width: auto; }
   .faceplate button.tune { margin-left: 0.3rem; }
@@ -89,7 +93,7 @@
   <thead>
     <tr>
       <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
-      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
+      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th><th></th>
     </tr>
   </thead>
   <tbody id="points"></tbody>
@@ -111,6 +115,7 @@
   <label>Signal <select id="command-point" required></select></label>
   <label>Value <input id="command-value" required></label>
   <button type="submit">Write value</button>
+  <button type="button" id="command-force">Force</button>
 </form>
 <pre id="receipt"></pre>
 
@@ -140,6 +145,18 @@
 // role hints and no parameters — a kind that shipped no custom
 // describe — degrades to a generic
 // name-plus-diagnostics-plus-wired-points view, never an error.
+//
+// Operator forcing (the input-forcing decision's UI slice): the
+// snapshot's force set marks each forced point — a badge beside its
+// value in the point listing and on every faceplate element bound to
+// it, and its Substituted quality drawing distinctly from ordinary
+// Uncertain wherever quality is displayed. A forced point carries a
+// release affordance issuing unforce_point, and every model-declared
+// writable In point — the force contract's only legal target — carries
+// a force affordance issuing force_point, both through the same
+// receipted, active-peer-routed command path as a write. A rejected
+// force or release surfaces its named reason in the receipt pane and
+// the journal like every other rejection.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
 // configured with both peers' monitor addresses — the serving origin is
@@ -259,6 +276,11 @@ function isGood(quality) {
 }
 
 function qualityClass(quality) {
+  // A force stamps Uncertain(Substituted); it draws distinctly from an
+  // ordinary uncertain value wherever a quality class colors a display.
+  if (typeof quality !== "string" && quality.Uncertain === "Substituted") {
+    return "substituted";
+  }
   const severity = typeof quality === "string" ? quality : Object.keys(quality)[0];
   return esc(severity.toLowerCase());
 }
@@ -410,17 +432,33 @@ async function refresh() {
       new Date().toLocaleTimeString();
     renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
-    // The snapshot's force set badges the point's row; ForcedPoint
-    // serializes as {point, value}.
-    const forced = new Set((snapshot.forces || []).map(f => f.point));
-    renderFaceplates(snapshot, telemetry);
+    // The snapshot's force set marks the page's forced points;
+    // ForcedPoint serializes as {point, value} — the map keys the badge
+    // and the release affordance, the pinned value titles the badge.
+    const forced = new Map((snapshot.forces || []).map(f => [f.point, f.value]));
+    renderFaceplates(snapshot, telemetry, forced);
+    // A value an operator is mid-edit on — and its focus — survives the
+    // re-render, keyed by point, the same rule the faceplate
+    // affordances follow.
+    const pendingPoints = new Map();
+    let focusedPoint = null;
+    for (const input of document.querySelectorAll("#points input.command-value")) {
+      pendingPoints.set(input.dataset.point, input.value);
+      if (input === document.activeElement) focusedPoint = input.dataset.point;
+    }
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
-      rows.push("<tr class=\"point-group\"><th colspan=\"8\">" + esc(group) +
+      rows.push("<tr class=\"point-group\"><th colspan=\"9\">" + esc(group) +
         "</th></tr>");
       for (const meta of metas) rows.push(pointRow(meta, telemetry, forced));
     }
     document.getElementById("points").innerHTML = rows.join("");
+    for (const input of document.querySelectorAll("#points input.command-value")) {
+      if (pendingPoints.has(input.dataset.point)) {
+        input.value = pendingPoints.get(input.dataset.point);
+      }
+      if (input.dataset.point === focusedPoint) input.focus();
+    }
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
@@ -491,21 +529,52 @@ function renderIoHealth(health) {
   pane.hidden = false;
 }
 
+// The forced badge, rendered beside the point's value wherever the
+// value shows — the point-list row and each faceplate element bound to
+// the point. `forced` maps point → pinned value from the snapshot's
+// force set; the title names what the substitution pinned.
+function forcedBadge(point, forced) {
+  if (point == null || !forced.has(point)) return "";
+  return " <span class=\"forced\" title=\"forced to " +
+    esc(formatValue(forced.get(point))) + "\">forced</span>";
+}
+
+// The point-list row's force affordances. A model-declared writable In
+// point — the force contract's only legal target — gets an entry and a
+// force button; a forced point gets the release beside it. Both submit
+// through the receipted command path, so a rejection the page could not
+// pre-empt still surfaces its named reason.
+function pointAffordance(meta, sample, forced) {
+  const parts = [];
+  if (meta.writable && meta.direction === "in") {
+    parts.push("<span class=\"command\"><input class=\"command-value\"" +
+      " data-point=\"" + meta.point + "\" size=\"9\"" +
+      (sample ? " placeholder=\"" + esc(formatValue(sample.value)) + "\"" : "") +
+      "><button type=\"button\" class=\"force\" data-point=\"" + meta.point +
+      "\">force</button></span>");
+  }
+  if (forced.has(meta.point)) {
+    parts.push("<button type=\"button\" class=\"unforce\" data-point=\"" +
+      meta.point + "\">release</button>");
+  }
+  return parts.join("");
+}
+
 // One point's row in the listing table. A forced point — one in the
-// snapshot's force set — carries a badge beside its name; its Substituted
-// quality already shows in the quality column.
+// snapshot's force set — carries the badge beside its value; its
+// Substituted quality already draws distinctly in the quality column.
 function pointRow(meta, telemetry, forced) {
   const sample = (telemetry.get(meta.point) || {}).sample;
   const quality = sample ? formatQuality(sample.quality) : "no sample";
   const cls = sample ? qualityClass(sample.quality) : "nosample";
-  const badge = forced.has(meta.point)
-    ? " <span class=\"forced\">forced</span>" : "";
-  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + badge +
+  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) +
     "</td><td>" +
     meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
-    (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
+    (sample ? formatValue(sample.value) : "") + forcedBadge(meta.point, forced) +
+    "</td><td class=\"" + cls + "\">" +
     esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
-    (sample ? sample.tick : "") + "</td></tr>";
+    (sample ? sample.tick : "") + "</td><td>" +
+    pointAffordance(meta, sample, forced) + "</td></tr>";
 }
 
 // ---- Faceplates ----
@@ -541,15 +610,29 @@ function portMeta(port) {
 
 // A write affordance is offered only on a point the model marks
 // writable: an unbound port, an unmarked point, or a point with no
-// metadata is display-only — never silently commandable.
-function commandAffordance(port, sample) {
+// metadata is display-only — never silently commandable. The force
+// affordance shares that surface, narrowed to `In` points — the force
+// contract's only legal target — and a forced bound point carries the
+// release, even where the metadata gate hides the write.
+function commandAffordance(port, sample, forced) {
   const meta = portMeta(port);
-  if (!meta || !meta.writable) return "";
+  const release = forced.has(port.point)
+    ? "<button type=\"button\" class=\"unforce\" data-point=\"" + port.point +
+      "\">release</button>"
+    : "";
+  if (!meta || !meta.writable) {
+    return release === "" ? "" : "<span class=\"command\">" + release + "</span>";
+  }
   return "<span class=\"command\"><input class=\"command-value\"" +
     " data-point=\"" + port.point + "\" size=\"9\"" +
     (sample ? " placeholder=\"" + esc(formatValue(sample.value)) + "\"" : "") +
     "><button type=\"button\" class=\"write\" data-point=\"" + port.point +
-    "\">write</button></span>";
+    "\">write</button>" +
+    (meta.direction === "in"
+      ? "<button type=\"button\" class=\"force\" data-point=\"" + port.point +
+        "\">force</button>"
+      : "") +
+    release + "</span>";
 }
 
 // The conventional element a role hint picks. Every element shows the
@@ -557,7 +640,7 @@ function commandAffordance(port, sample) {
 // command affordance follows the bound point's writable mark, not the
 // role.
 const ROLE_ORDER = { process_value: 0, setpoint: 1, output: 2, status: 3 };
-function roleElement(port, telemetry) {
+function roleElement(port, telemetry, forced) {
   const sample = portSample(port, telemetry);
   const meta = portMeta(port);
   const label = esc(port.name) + (meta ? " · " + esc(meta.name) : "");
@@ -573,17 +656,19 @@ function roleElement(port, telemetry) {
       : port.name;
     return "<span class=\"flag" + (on ? " on" : "") + "\" title=\"" +
       esc(port.name) + (sample ? " — " + esc(formatQuality(sample.quality)) : "") +
-      "\">" + esc(text) + "</span>" + commandAffordance(port, sample);
+      "\">" + esc(text) + "</span>" + forcedBadge(port.point, forced) +
+      commandAffordance(port, sample, forced);
   }
   return "<div class=\"role role-" + esc(port.role) + "\">" +
     "<span class=\"caption\">" + label + "</span>" +
     "<span class=\"value " + cls + "\">" + value + unit + "</span>" +
-    commandAffordance(port, sample) + "</div>";
+    forcedBadge(port.point, forced) +
+    commandAffordance(port, sample, forced) + "</div>";
 }
 
 // The generic per-port rows: unhinted ports inside a custom faceplate,
 // or every port of a fallback faceplate.
-function portTable(ports, telemetry) {
+function portTable(ports, telemetry, forced) {
   if (ports.length === 0) return "";
   return "<table class=\"ports\"><thead><tr>" +
     "<th>Port</th><th>Dir</th><th>Point</th><th>Value</th><th>Quality</th><th></th>" +
@@ -596,9 +681,10 @@ function portTable(ports, telemetry) {
           : "point " + port.point + (meta ? " · " + esc(meta.name) : "")) +
         "</td><td class=\"value\">" + (sample ? esc(formatValue(sample.value)) : "") +
         (meta && meta.unit ? " " + esc(meta.unit) : "") +
+        forcedBadge(port.point, forced) +
         "</td><td class=\"" + (sample ? qualityClass(sample.quality) : "nosample") +
         "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
-        "</td><td>" + commandAffordance(port, sample) + "</td></tr>";
+        "</td><td>" + commandAffordance(port, sample, forced) + "</td></tr>";
     }).join("") + "</tbody></table>";
 }
 
@@ -732,7 +818,7 @@ function isGeneric(descriptor) {
     !descriptor.ports.some(port => port.role != null);
 }
 
-function faceplateMarkup(descriptor, diag, telemetry) {
+function faceplateMarkup(descriptor, diag, telemetry, forced) {
   const generic = isGeneric(descriptor);
   const parts = [
     "<section class=\"faceplate" + (generic ? " generic" : "") + "\">",
@@ -740,14 +826,14 @@ function faceplateMarkup(descriptor, diag, telemetry) {
       " <span class=\"kind\">" + esc(descriptor.kind) + "</span></h3>",
   ];
   if (generic) {
-    parts.push(portTable(descriptor.ports, telemetry));
+    parts.push(portTable(descriptor.ports, telemetry, forced));
   } else {
     const hinted = descriptor.ports
       .filter(port => port.role != null)
       .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role]);
-    parts.push(hinted.map(port => roleElement(port, telemetry)).join(""));
+    parts.push(hinted.map(port => roleElement(port, telemetry, forced)).join(""));
     const unhinted = descriptor.ports.filter(port => port.role == null);
-    if (unhinted.length > 0) parts.push(portTable(unhinted, telemetry));
+    if (unhinted.length > 0) parts.push(portTable(unhinted, telemetry, forced));
   }
   if (descriptor.parameters.length > 0) {
     parts.push(parameterTable(descriptor));
@@ -761,7 +847,7 @@ function faceplateMarkup(descriptor, diag, telemetry) {
 // operator is mid-edit on — and an input's focus — survive the
 // re-render, keyed by bound point for the write affordances and by
 // component-plus-parameter for the tuning controls.
-function renderFaceplates(snapshot, telemetry) {
+function renderFaceplates(snapshot, telemetry, forced) {
   const pending = new Map();
   let focused = null;
   for (const input of document.querySelectorAll("#faceplates input.command-value")) {
@@ -779,7 +865,8 @@ function renderFaceplates(snapshot, telemetry) {
   }
   const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
   document.getElementById("faceplates").innerHTML = snapshot.descriptors
-    .map(descriptor => faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry))
+    .map(descriptor =>
+      faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry, forced))
     .join("");
   for (const input of document.querySelectorAll("#faceplates input.command-value")) {
     if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
@@ -1151,6 +1238,51 @@ async function submitParameter(button) {
   });
 }
 
+// A force submission from any of the page's affordances: the bound
+// point's metadata supplies the kind, the sibling input supplies the
+// value, and {force_point: {point, kind, value}} takes the same
+// receipted, active-peer-routed path as a write — a rejected force
+// surfaces its named reason in the receipt pane and the journal. The
+// writable-In gate mirrors the renderer's, so the button never offers
+// what the contract would refuse.
+async function submitForce(button) {
+  const meta = metaByPoint.get(Number(button.dataset.point));
+  const input = button.parentElement.querySelector("input.command-value");
+  if (!meta || !meta.writable || meta.direction !== "in" || !input) return;
+  const text = input.value.trim();
+  if (text === "") {
+    document.getElementById("receipt").textContent =
+      "enter a value to force " + meta.name + " to";
+    return;
+  }
+  const command = { force_point: {
+    point: meta.point,
+    kind: meta.value_type,
+    value: commandValue(meta.value_type, text),
+  } };
+  try {
+    await submitCommand(command);
+    input.value = "";
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+  }
+  refresh();
+}
+
+// A release submission: {unforce_point: {point}} through the same
+// receipted path. The release is idempotent on the controller, so no
+// force-set check gates it — the badge clears on the next snapshot once
+// the release applies at its scan boundary.
+async function submitUnforce(button) {
+  const command = { unforce_point: { point: Number(button.dataset.point) } };
+  try {
+    await submitCommand(command);
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+  }
+  refresh();
+}
+
 async function init() {
   index = await (await fetch("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
@@ -1162,18 +1294,29 @@ async function init() {
     "<option value=\"" + p.point + "\">" + esc(p.name) +
     " (point " + p.point + ")</option>").join("");
   buildTrends();
-  // Faceplate command affordances: one delegated listener — the
-  // affordances themselves re-render on every poll. The writable gate
-  // is the same metadata check the renderer applied: a point the model
-  // did not mark writable is never commanded from the page. A tune
-  // button submits its parameter's edit through submitParameter — the
-  // same receipted path.
+  // Command affordances: delegated listeners — the affordances
+  // themselves re-render on every poll. The writable gate is the same
+  // metadata check the renderer applied: a point the model did not
+  // mark writable is never commanded from the page. A tune button
+  // submits its parameter's edit through submitParameter, a force or
+  // release button through submitForce/submitUnforce — the same
+  // receipted path.
   const faceplates = document.getElementById("faceplates");
   faceplates.addEventListener("click", async event => {
     const tune = event.target.closest("button.tune");
     if (tune) {
       await submitParameter(tune);
       refresh();
+      return;
+    }
+    const force = event.target.closest("button.force");
+    if (force) {
+      await submitForce(force);
+      return;
+    }
+    const unforce = event.target.closest("button.unforce");
+    if (unforce) {
+      await submitUnforce(unforce);
       return;
     }
     const button = event.target.closest("button.write");
@@ -1199,6 +1342,18 @@ async function init() {
     }
     refresh();
   });
+  // The point listing's force and release affordances take the same
+  // delegated shape — the rows re-render on every poll.
+  const points = document.getElementById("points");
+  points.addEventListener("click", async event => {
+    const force = event.target.closest("button.force");
+    if (force) {
+      await submitForce(force);
+      return;
+    }
+    const unforce = event.target.closest("button.unforce");
+    if (unforce) await submitUnforce(unforce);
+  });
   // Enter inside an affordance input submits like its button.
   faceplates.addEventListener("keydown", event => {
     if (event.key !== "Enter") return;
@@ -1213,6 +1368,13 @@ async function init() {
     const tune = control.parentElement.querySelector("button.tune");
     if (tune) tune.click();
   });
+  points.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    const input = event.target.closest("input.command-value");
+    if (!input) return;
+    const force = input.parentElement.querySelector("button.force");
+    if (force) force.click();
+  });
   document.getElementById("command-form").addEventListener("submit", async event => {
     event.preventDefault();
     const point = Number(select.value);
@@ -1222,6 +1384,31 @@ async function init() {
       point: point,
       kind: meta.value_type,
       value: commandValue(meta.value_type, document.getElementById("command-value").value),
+    } };
+    try {
+      await submitCommand(command);
+    } catch (error) {
+      document.getElementById("receipt").textContent = "command failed: " + error;
+    }
+    refresh();
+  });
+  // The form's force affordance: the select already offers only
+  // model-declared writable points — In points, the force contract's
+  // only legal target — and the value entry supplies the pin.
+  document.getElementById("command-force").addEventListener("click", async () => {
+    const point = Number(select.value);
+    const meta = index.points.find(p => p.point === point);
+    if (!meta) return;
+    const text = document.getElementById("command-value").value.trim();
+    if (text === "") {
+      document.getElementById("receipt").textContent =
+        "enter a value to force " + meta.name + " to";
+      return;
+    }
+    const command = { force_point: {
+      point: point,
+      kind: meta.value_type,
+      value: commandValue(meta.value_type, text),
     } };
     try {
       await submitCommand(command);
