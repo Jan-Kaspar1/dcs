@@ -4,7 +4,7 @@ use crate::protocol::{
     MAX_MESSAGE, PlantError, PlantRequest, PlantResponse, encode_message, read_message,
 };
 use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value};
-use dcs_sim::Fault;
+use dcs_sim::{Fault, PointInfo};
 use std::fmt;
 use std::io::{BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -211,6 +211,19 @@ impl RemoteDriver {
     pub fn inject_fault(&self, point: PointId, fault: Fault) -> Result<(), RemoteError> {
         match self.request(&PlantRequest::InjectFault { point, fault })? {
             PlantResponse::Done => Ok(()),
+            PlantResponse::Error { error } => Err(error.into()),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Lists every point the shared plant serves — `SimDriver::points`
+    /// on the server — ordered by [`PointId`]. Each entry reports the
+    /// binding's direction, the sample readers observe, and the active
+    /// fault, so a client can survey the shared field without holding a
+    /// copy of its channel map.
+    pub fn list_points(&self) -> Result<Vec<PointInfo>, RemoteError> {
+        match self.request(&PlantRequest::ListPoints)? {
+            PlantResponse::Points { points } => Ok(points),
             PlantResponse::Error { error } => Err(error.into()),
             _ => Err(self.protocol_violation()),
         }

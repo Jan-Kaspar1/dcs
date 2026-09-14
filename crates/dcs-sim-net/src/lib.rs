@@ -39,6 +39,15 @@
 //!   `SimDriver::inject_fault`; answers `done`.
 //! - `{"op":"clear_fault","point":3}` — `SimDriver::clear_fault`;
 //!   answers `done`.
+//! - `{"op":"list_points"}` — `SimDriver::points`; answers
+//!   `{"result":"points","points":[…]}` with every bound point's
+//!   direction, observed sample, and active fault, ordered by point id.
+//!
+//! The `dcs-plant-ctl` binary in this crate is the protocol's
+//! development-tooling client: it lists, reads, and writes points and
+//! drives stepping and fault injection on a running plant server, so a
+//! live demonstration can be perturbed without recompiling fixtures. It
+//! is not part of the operator contract.
 //!
 //! Failures answer `{"result":"error","error":…}` with a
 //! [`PlantError`]: `{"kind":"io","error":…}` carries the driver's

@@ -37,7 +37,7 @@
 mod driver;
 mod map;
 
-pub use driver::{Fault, SimDriver};
+pub use driver::{Fault, PointInfo, SimDriver};
 pub use map::{
     ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, Integrator, Loopback,
     PointBinding, ProcessElement,
