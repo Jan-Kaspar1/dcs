@@ -12,10 +12,10 @@ use dcs_assembly::{
     StepError, assemble, resolve_drivers, sim_driver,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{IoDriver, IoError, PointId, Quality, QualityReason, Value};
+use dcs_core::{IoDriver, IoError, PointId, Quality, QualityReason, Value, ValueKind};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
-use dcs_sim_bus::{BusDriver, BusServer, RegisterBank, RegisterDecl};
+use dcs_sim_bus::{BusDriver, BusServer, PointRegister, RegisterBank, RegisterDecl};
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
 
@@ -189,6 +189,43 @@ fn mixed_sim_and_bus_kinds_assemble_scan_and_route() {
                 .iter()
                 .all(|component| component.step_errors == 0)
         );
+    });
+}
+
+#[test]
+fn the_bus_backend_arbitrates_the_single_writer_claim() {
+    with_server(device_bank(), |_, addr| {
+        let model = mixed_model(addr);
+        let driver = build_driver(&model);
+
+        // The register-mapped kind arbitrates through the device
+        // server's claim: no unfenceable field-facing device remains,
+        // so a model built on it may arm automatic failover — while the
+        // manual promotion path, which runs the same claim before the
+        // gate lifts, is unaffected.
+        assert!(driver.is_field_point(LEVEL_RAW));
+        assert!(driver.unfenced_field_devices().is_empty());
+
+        // The promotion path's claim lands on the device server: the
+        // claimed fan-out keeps writing while a second attachment's
+        // register writes are refused with the named fenced error.
+        driver.claim_field_writer(7).unwrap();
+        driver.write(LEVEL_RAW, Value::Float(8.5)).unwrap();
+        let fenced = BusDriver::connect(
+            addr,
+            &[PointRegister {
+                point: PointId(11),
+                register: LEVEL_REGISTER,
+                kind: ValueKind::Float,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fenced.write(PointId(11), Value::Float(0.0)),
+            Err(IoError::Fenced(PointId(11)))
+        );
+        // Reads stay open to the fenced attachment.
+        assert_eq!(fenced.read(PointId(11)).unwrap().value, Value::Float(8.5));
     });
 }
 
