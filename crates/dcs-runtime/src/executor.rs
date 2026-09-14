@@ -1,0 +1,1059 @@
+//! The cyclic executor: wiring verification, the scan image, and the
+//! virtual tick.
+//!
+//! [`Executor::new`] checks every component's declared I/O against the
+//! driver's [`PointMap`] before anything runs; [`Executor::scan`] and
+//! [`Executor::run`] then advance a virtual [`Tick`] and cycle read → step
+//! → write deterministically.
+
+use crate::component::{Component, ComponentIo, IoRequirement};
+use dcs_core::{
+    Direction, IoDriver, IoError, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+
+/// How the controller may use one point the driver serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointSpec {
+    /// `In` points are read into the scan image; `Out` points are written
+    /// from the image to the driver.
+    pub direction: Direction,
+    /// The point's declared value kind.
+    pub kind: ValueKind,
+}
+
+/// The driver's point map: which logical points the driver serves and how
+/// the controller may use them.
+///
+/// The map is the resolved, driver-side form of the plant model's I/O
+/// mapping — the caller that built the driver supplies it, and the executor
+/// treats it as the authority every component's declared I/O is checked
+/// against at wiring time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PointMap {
+    points: BTreeMap<PointId, PointSpec>,
+}
+
+impl PointMap {
+    /// An empty map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `point` with the given direction and value kind; a repeated id
+    /// replaces the earlier spec.
+    pub fn with_point(mut self, point: PointId, direction: Direction, kind: ValueKind) -> Self {
+        self.points.insert(point, PointSpec { direction, kind });
+        self
+    }
+
+    /// The spec for `point`, or `None` when the map does not serve it.
+    pub fn get(&self, point: PointId) -> Option<PointSpec> {
+        self.points.get(&point).copied()
+    }
+
+    /// Iterates the mapped points in ascending id order.
+    pub fn iter(&self) -> impl Iterator<Item = (PointId, PointSpec)> + '_ {
+        self.points.iter().map(|(&point, &spec)| (point, spec))
+    }
+}
+
+impl FromIterator<(PointId, Direction, ValueKind)> for PointMap {
+    fn from_iter<I: IntoIterator<Item = (PointId, Direction, ValueKind)>>(iter: I) -> Self {
+        let mut map = Self::new();
+        for (point, direction, kind) in iter {
+            map = map.with_point(point, direction, kind);
+        }
+        map
+    }
+}
+
+/// Why an executor refuses to run: a component's declared I/O does not
+/// match the driver's point map. Every variant names the component and the
+/// point.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WiringError {
+    /// A component declares a point the map does not serve.
+    UnknownPoint {
+        /// The component declaring the point.
+        component: String,
+        /// The point the map does not serve.
+        point: PointId,
+    },
+    /// A component declares one point more than once.
+    DuplicateDeclaration {
+        /// The component with the repeated declaration.
+        component: String,
+        /// The point declared more than once.
+        point: PointId,
+    },
+    /// A component's declared direction differs from the map's.
+    DirectionMismatch {
+        /// The component declaring the point.
+        component: String,
+        /// The mismatched point.
+        point: PointId,
+        /// The direction the component declared.
+        declared: Direction,
+        /// The direction the map declares.
+        mapped: Direction,
+    },
+    /// A component's declared value kind differs from the map's.
+    TypeMismatch {
+        /// The component declaring the point.
+        component: String,
+        /// The mismatched point.
+        point: PointId,
+        /// The value kind the component declared.
+        declared: ValueKind,
+        /// The value kind the map declares.
+        mapped: ValueKind,
+    },
+}
+
+impl fmt::Display for WiringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPoint { component, point } => write!(
+                f,
+                "component {component:?} declares io point {} the driver map does not serve",
+                point.0
+            ),
+            Self::DuplicateDeclaration { component, point } => write!(
+                f,
+                "component {component:?} declares io point {} more than once",
+                point.0
+            ),
+            Self::DirectionMismatch {
+                component,
+                point,
+                declared,
+                mapped,
+            } => write!(
+                f,
+                "component {component:?} declares io point {} as {declared} but the driver map has {mapped}",
+                point.0
+            ),
+            Self::TypeMismatch {
+                component,
+                point,
+                declared,
+                mapped,
+            } => write!(
+                f,
+                "component {component:?} declares io point {} as {declared:?} but the driver map has {mapped:?}",
+                point.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WiringError {}
+
+/// Why a scan failed after the step phase.
+///
+/// Component `step` errors never fail a scan — they are counted per
+/// component in [`Executor::component_statuses`]. `ScanError` covers the
+/// driver boundary: the output image could not be delivered to the field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScanError {
+    /// Writing the output image to the driver failed.
+    Io(IoError),
+}
+
+impl fmt::Display for ScanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "output write failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ScanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+        }
+    }
+}
+
+impl From<IoError> for ScanError {
+    fn from(error: IoError) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Runtime diagnostics for one registered component.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentStatus {
+    /// The component's [`name`](Component::name).
+    pub name: String,
+    /// The last tick the component stepped without error, if any.
+    pub last_tick: Option<Tick>,
+    /// How many `step` calls have failed.
+    pub step_errors: u64,
+    /// The most recent `step` error's message, if any.
+    pub last_error: Option<String>,
+}
+
+/// A registered component plus its verified declaration set and
+/// diagnostics.
+struct Entry {
+    component: Box<dyn Component>,
+    /// Declared requirements indexed by point; the step's scoped I/O view
+    /// checks every access against this set.
+    declared: HashMap<PointId, IoRequirement>,
+    last_tick: Option<Tick>,
+    step_errors: u64,
+    last_error: Option<String>,
+}
+
+/// The scoped [`ComponentIo`] a component sees during `step`: the scan
+/// image restricted to the component's declared points and directions.
+struct ScopedIo<'a> {
+    image: &'a RefCell<HashMap<PointId, Sample>>,
+    declared: &'a HashMap<PointId, IoRequirement>,
+    tick: Tick,
+}
+
+impl ScopedIo<'_> {
+    /// Resolves `point` when the component declared it with `direction`;
+    /// undeclared or wrong-direction access is `UnknownPoint`.
+    fn requirement(&self, point: PointId, direction: Direction) -> Result<(), IoError> {
+        match self.declared.get(&point) {
+            Some(requirement) if requirement.direction == direction => Ok(()),
+            _ => Err(IoError::UnknownPoint(point)),
+        }
+    }
+}
+
+impl IoDriver for ScopedIo<'_> {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        self.requirement(point, Direction::In)?;
+        // Wiring guarantees the point is an `In` point of the map, so the
+        // input-read phase always leaves an image entry.
+        self.image
+            .borrow()
+            .get(&point)
+            .copied()
+            .ok_or(IoError::UnknownPoint(point))
+    }
+
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        self.write_sample(point, Sample::good(value, self.tick))
+    }
+}
+
+impl ComponentIo for ScopedIo<'_> {
+    fn write_sample(&self, point: PointId, sample: Sample) -> Result<(), IoError> {
+        self.requirement(point, Direction::Out)?;
+        let kind = self.declared[&point].kind;
+        if sample.value.kind() != kind {
+            return Err(IoError::TypeMismatch {
+                point,
+                expected: kind,
+                found: sample.value,
+            });
+        }
+        self.image.borrow_mut().insert(
+            point,
+            Sample {
+                tick: self.tick,
+                ..sample
+            },
+        );
+        Ok(())
+    }
+}
+
+/// The value stored for a point whose first read already failed.
+fn neutral(kind: ValueKind) -> Value {
+    match kind {
+        ValueKind::Bool => Value::Bool(false),
+        ValueKind::Int => Value::Int(0),
+        ValueKind::Float => Value::Float(0.0),
+    }
+}
+
+/// The quality stamped on a sample whose input read failed: field-side
+/// faults degrade control inputs to `Bad` — they never abort the scan.
+fn failure_quality(error: IoError) -> Quality {
+    match error {
+        IoError::Disconnected(_) | IoError::Timeout(_) => {
+            Quality::Bad(QualityReason::CommunicationFault)
+        }
+        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } => {
+            Quality::Bad(QualityReason::ConfigurationFault)
+        }
+    }
+}
+
+/// A deterministic fixed-step executor over registered components.
+///
+/// The scan order is the order `components` were registered in — explicit
+/// and configured by the caller. Each [`scan`](Executor::scan):
+///
+/// 1. advances the virtual tick by one — the executor's tick is the only
+///    timestamp authority;
+/// 2. reads every `In` point in the map into the scan image, stamping the
+///    new tick — a failed read keeps the last known value marked
+///    [`Quality::Bad`] rather than aborting the scan;
+/// 3. steps the components in scan order, each seeing a [`ComponentIo`]
+///    scoped to its declared points — a failing step is recorded and the
+///    scan continues;
+/// 4. writes the image's `Out` points to the driver — points a component
+///    never wrote keep their last output, so a failed step holds outputs.
+///
+/// Nothing reads a wall clock: identical driver behavior over identical
+/// scans produces identical samples on every host.
+pub struct Executor<'d> {
+    driver: &'d dyn IoDriver,
+    map: PointMap,
+    components: Vec<Entry>,
+    image: RefCell<HashMap<PointId, Sample>>,
+    tick: Tick,
+}
+
+impl<'d> Executor<'d> {
+    /// Wires `components` against `map` and returns a runnable executor.
+    ///
+    /// Every [`IoRequirement`] of every component must resolve against the
+    /// map: the point must be served and the declared direction and value
+    /// kind must match exactly. The first violation stops wiring with a
+    /// [`WiringError`] naming the component and point; nothing runs.
+    /// Components step in `components` order — the configured scan order.
+    pub fn new(
+        driver: &'d dyn IoDriver,
+        map: PointMap,
+        components: Vec<Box<dyn Component>>,
+    ) -> Result<Self, WiringError> {
+        let mut entries = Vec::with_capacity(components.len());
+        for component in components {
+            let component_name = || component.name().to_string();
+            let mut declared = HashMap::new();
+            for requirement in component.io_requirements() {
+                let point = requirement.point;
+                if declared.contains_key(&point) {
+                    return Err(WiringError::DuplicateDeclaration {
+                        component: component_name(),
+                        point,
+                    });
+                }
+                let spec = map.get(point).ok_or(WiringError::UnknownPoint {
+                    component: component_name(),
+                    point,
+                })?;
+                if requirement.direction != spec.direction {
+                    return Err(WiringError::DirectionMismatch {
+                        component: component_name(),
+                        point,
+                        declared: requirement.direction,
+                        mapped: spec.direction,
+                    });
+                }
+                if requirement.kind != spec.kind {
+                    return Err(WiringError::TypeMismatch {
+                        component: component_name(),
+                        point,
+                        declared: requirement.kind,
+                        mapped: spec.kind,
+                    });
+                }
+                declared.insert(point, requirement);
+            }
+            entries.push(Entry {
+                component,
+                declared,
+                last_tick: None,
+                step_errors: 0,
+                last_error: None,
+            });
+        }
+        Ok(Self {
+            driver,
+            map,
+            components: entries,
+            image: RefCell::new(HashMap::new()),
+            tick: Tick::ZERO,
+        })
+    }
+
+    /// The executor's current virtual tick: [`Tick::ZERO`] before the first
+    /// scan, thereafter the tick the last scan ran at.
+    pub fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    /// Diagnostics for each registered component, in scan order.
+    pub fn component_statuses(&self) -> Vec<ComponentStatus> {
+        self.components
+            .iter()
+            .map(|entry| ComponentStatus {
+                name: entry.component.name().to_string(),
+                last_tick: entry.last_tick,
+                step_errors: entry.step_errors,
+                last_error: entry.last_error.clone(),
+            })
+            .collect()
+    }
+
+    /// The image's latest sample for `point`, if the scan has produced one.
+    ///
+    /// Components see the same image through `step`; this exposes it for
+    /// monitoring and tests.
+    pub fn sample(&self, point: PointId) -> Option<Sample> {
+        self.image.borrow().get(&point).copied()
+    }
+
+    /// Runs `scans` scans and returns the tick the last one ran at.
+    ///
+    /// `run(0)` is a no-op returning the current tick. A [`ScanError`]
+    /// aborts the run partway; the tick reports how far it got.
+    pub fn run(&mut self, scans: u64) -> Result<Tick, ScanError> {
+        for _ in 0..scans {
+            self.scan()?;
+        }
+        Ok(self.tick)
+    }
+
+    /// Executes one scan — read inputs, step components, write outputs —
+    /// and returns the tick it ran at. See the type docs for the phase
+    /// order.
+    pub fn scan(&mut self) -> Result<Tick, ScanError> {
+        self.tick = Tick(self.tick.0 + 1);
+        let tick = self.tick;
+
+        self.read_inputs(tick);
+        self.step_components(tick);
+        self.write_outputs()?;
+        Ok(tick)
+    }
+
+    /// Reads every `In` point in the map into the image, stamping `tick`.
+    /// A failed read keeps the last known value — a neutral one if none —
+    /// marked `Bad`, so a field fault degrades inputs instead of stopping
+    /// the controller.
+    fn read_inputs(&mut self, tick: Tick) {
+        let mut image = self.image.borrow_mut();
+        for (point, spec) in self.map.iter() {
+            if spec.direction != Direction::In {
+                continue;
+            }
+            let sample = match self.driver.read(point) {
+                Ok(sample) => Sample { tick, ..sample },
+                Err(error) => Sample::new(
+                    image
+                        .get(&point)
+                        .map_or(neutral(spec.kind), |last| last.value),
+                    failure_quality(error),
+                    tick,
+                ),
+            };
+            image.insert(point, sample);
+        }
+    }
+
+    /// Steps each component in scan order over an image view scoped to its
+    /// declared points. A failing step is recorded and the scan continues.
+    fn step_components(&mut self, tick: Tick) {
+        let image = &self.image;
+        for entry in &mut self.components {
+            let io = ScopedIo {
+                image,
+                declared: &entry.declared,
+                tick,
+            };
+            match entry.component.step(&io, tick) {
+                Ok(()) => entry.last_tick = Some(tick),
+                Err(error) => {
+                    entry.step_errors += 1;
+                    entry.last_error = Some(error.to_string());
+                }
+            }
+        }
+    }
+
+    /// Writes every `Out` point the image holds to the driver. Points a
+    /// component never wrote keep no image entry and are left untouched.
+    fn write_outputs(&mut self) -> Result<(), ScanError> {
+        let image = self.image.borrow();
+        for (point, spec) in self.map.iter() {
+            if spec.direction != Direction::Out {
+                continue;
+            }
+            let Some(sample) = image.get(&point) else {
+                continue;
+            };
+            self.driver.write(point, sample.value)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Executor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Executor")
+            .field("tick", &self.tick)
+            .field(
+                "components",
+                &self
+                    .components
+                    .iter()
+                    .map(|entry| entry.component.name())
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ComponentIoExt, StepError};
+    use dcs_core::{Input, Output};
+    use std::cell::Cell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    /// In-memory driver stub with deferred `Out`→`In` routing: writes land
+    /// immediately, and `advance` copies each loopback's output sample onto
+    /// its input — the same scan-boundary semantics `dcs-sim` gives its
+    /// `Loopback`s. Samples carry the stub's own tick counter; the executor
+    /// re-stamps them into its domain on read.
+    struct StubDriver {
+        points: RefCell<HashMap<PointId, Sample>>,
+        loopbacks: Vec<(PointId, PointId)>,
+        faults: RefCell<HashSet<PointId>>,
+        tick: Cell<u64>,
+    }
+
+    impl StubDriver {
+        fn new(points: &[(PointId, Value)], loopbacks: &[(PointId, PointId)]) -> Self {
+            Self {
+                points: RefCell::new(
+                    points
+                        .iter()
+                        .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
+                        .collect(),
+                ),
+                loopbacks: loopbacks.to_vec(),
+                faults: RefCell::new(HashSet::new()),
+                tick: Cell::new(0),
+            }
+        }
+
+        /// Routes pending loopbacks and advances the driver's own tick.
+        fn advance(&self) {
+            self.tick.set(self.tick.get() + 1);
+            let tick = Tick(self.tick.get());
+            let mut points = self.points.borrow_mut();
+            for &(output, input) in &self.loopbacks {
+                let sample = points[&output];
+                points.insert(input, Sample { tick, ..sample });
+            }
+        }
+    }
+
+    impl IoDriver for StubDriver {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            if self.faults.borrow().contains(&point) {
+                return Err(IoError::Disconnected(point));
+            }
+            self.points
+                .borrow()
+                .get(&point)
+                .copied()
+                .ok_or(IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            if self.faults.borrow().contains(&point) {
+                return Err(IoError::Disconnected(point));
+            }
+            let mut points = self.points.borrow_mut();
+            let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
+            if value.kind() != sample.value.kind() {
+                return Err(IoError::TypeMismatch {
+                    point,
+                    expected: sample.value.kind(),
+                    found: value,
+                });
+            }
+            *sample = Sample::good(value, Tick(self.tick.get()));
+            Ok(())
+        }
+    }
+
+    /// Reads a `Float` input and writes it scaled by `gain` to a `Float`
+    /// output.
+    struct Scale {
+        name: &'static str,
+        input: PointId,
+        output: PointId,
+        gain: f64,
+    }
+
+    impl Component for Scale {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![
+                IoRequirement::input::<f64>("in", self.input),
+                IoRequirement::output::<f64>("out", self.output),
+            ]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            let sample = io.read_typed::<f64>(self.input)?;
+            io.write_typed(self.output, sample.value * self.gain)?;
+            Ok(())
+        }
+    }
+
+    /// Writes `value` to a `Float` output every scan; used to show the last
+    /// writer in scan order wins.
+    struct Constant {
+        name: &'static str,
+        output: PointId,
+        value: f64,
+    }
+
+    impl Component for Constant {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![IoRequirement::output::<f64>("out", self.output)]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            io.write_typed(self.output, self.value)?;
+            Ok(())
+        }
+    }
+
+    /// A component with a fixed declaration list and a `step` that does
+    /// nothing; used to exercise wiring-time checks.
+    struct Declared {
+        name: &'static str,
+        requirements: Vec<IoRequirement>,
+    }
+
+    impl Component for Declared {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            self.requirements.clone()
+        }
+
+        fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            Ok(())
+        }
+    }
+
+    fn float(point: u64) -> (PointId, Value) {
+        (PointId(point), Value::Float(0.0))
+    }
+
+    /// Reads the executor's current sample for `point` off the driver.
+    fn driver_value(driver: &StubDriver, point: u64) -> Value {
+        driver.read(PointId(point)).unwrap().value
+    }
+
+    #[test]
+    fn chained_components_propagate_across_consecutive_scans() {
+        // Field input 10 -> A(x2) -> out 20 --loopback--> in 30 -> B(+1) ->
+        // out 40. The loopback routes at the driver's step boundary, so the
+        // chain advances one stage per scan.
+        let run = || {
+            let driver = StubDriver::new(
+                &[float(10), float(20), float(30), float(40)],
+                &[(PointId(20), PointId(30))],
+            );
+            let map: PointMap = [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+                (PointId(30), Direction::In, ValueKind::Float),
+                (PointId(40), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect();
+            let mut executor = Executor::new(
+                &driver,
+                map,
+                vec![
+                    Box::new(Scale {
+                        name: "a",
+                        input: PointId(10),
+                        output: PointId(20),
+                        gain: 2.0,
+                    }),
+                    Box::new(Scale {
+                        name: "b",
+                        input: PointId(30),
+                        output: PointId(40),
+                        gain: 3.0,
+                    }),
+                ],
+            )
+            .unwrap();
+
+            driver.write(PointId(10), Value::Float(5.0)).unwrap();
+            executor.scan().unwrap();
+            // After one scan the chain has only reached point 20.
+            assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+            assert_eq!(driver_value(&driver, 40), Value::Float(0.0));
+
+            driver.advance();
+            executor.scan().unwrap();
+            // The second scan carries the value through component b.
+            assert_eq!(driver_value(&driver, 40), Value::Float(30.0));
+            (driver_value(&driver, 20), driver_value(&driver, 40))
+        };
+
+        // Identical inputs and scans replay identically.
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn scan_order_is_explicit_and_last_writer_wins() {
+        let driver = StubDriver::new(&[float(50)], &[]);
+        let map: PointMap = [(PointId(50), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let ordered = |first: f64, second: f64| {
+            Executor::new(
+                &driver,
+                map.clone(),
+                vec![
+                    Box::new(Constant {
+                        name: "first",
+                        output: PointId(50),
+                        value: first,
+                    }),
+                    Box::new(Constant {
+                        name: "second",
+                        output: PointId(50),
+                        value: second,
+                    }),
+                ],
+            )
+            .unwrap()
+        };
+
+        ordered(1.0, 2.0).scan().unwrap();
+        assert_eq!(driver_value(&driver, 50), Value::Float(2.0));
+        ordered(2.0, 1.0).scan().unwrap();
+        assert_eq!(driver_value(&driver, 50), Value::Float(1.0));
+    }
+
+    #[test]
+    fn wiring_rejects_type_and_direction_mismatch() {
+        let driver = StubDriver::new(&[float(1), float(2)], &[]);
+        let map: PointMap = [
+            (PointId(1), Direction::In, ValueKind::Float),
+            (PointId(2), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+
+        // Declared Int against a Float map point.
+        let error = Executor::new(
+            &driver,
+            map.clone(),
+            vec![Box::new(Declared {
+                name: "typed",
+                requirements: vec![IoRequirement::input::<i64>("in", PointId(1))],
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WiringError::TypeMismatch {
+                component: "typed".to_string(),
+                point: PointId(1),
+                declared: ValueKind::Int,
+                mapped: ValueKind::Float,
+            }
+        );
+        let message = error.to_string();
+        assert!(message.contains("\"typed\""), "{message}");
+        assert!(message.contains("io point 1"), "{message}");
+
+        // Declared Out against an In map point.
+        let error = Executor::new(
+            &driver,
+            map.clone(),
+            vec![Box::new(Declared {
+                name: "backwards",
+                requirements: vec![IoRequirement::output::<f64>("out", PointId(1))],
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WiringError::DirectionMismatch {
+                component: "backwards".to_string(),
+                point: PointId(1),
+                declared: Direction::Out,
+                mapped: Direction::In,
+            }
+        );
+        let message = error.to_string();
+        assert!(message.contains("\"backwards\""), "{message}");
+        assert!(message.contains("io point 1"), "{message}");
+
+        // A point the map does not serve at all.
+        let error = Executor::new(
+            &driver,
+            map.clone(),
+            vec![Box::new(Declared {
+                name: "stray",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(9))],
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WiringError::UnknownPoint {
+                component: "stray".to_string(),
+                point: PointId(9),
+            }
+        );
+
+        // One component declaring a point twice.
+        let error = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "twice",
+                requirements: vec![
+                    IoRequirement::input::<f64>("a", PointId(1)),
+                    IoRequirement::input::<f64>("b", PointId(1)),
+                ],
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            WiringError::DuplicateDeclaration {
+                component: "twice".to_string(),
+                point: PointId(1),
+            }
+        );
+    }
+
+    #[test]
+    fn scans_produce_tick_numbered_timestamps() {
+        // Records (step tick, input sample tick) each scan.
+        struct Recorder {
+            input: PointId,
+            seen: Rc<RefCell<Vec<(Tick, Tick)>>>,
+        }
+        impl Component for Recorder {
+            fn name(&self) -> &str {
+                "recorder"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![
+                    IoRequirement::input::<f64>("in", self.input),
+                    IoRequirement::output::<f64>("out", PointId(20)),
+                ]
+            }
+            fn step(&mut self, io: &dyn ComponentIo, tick: Tick) -> Result<(), StepError> {
+                // The typed `Input`/`Output` handles work over `ComponentIo`.
+                let sample = Input::<f64, _>::new(io, self.input).read()?;
+                self.seen.borrow_mut().push((tick, sample.tick));
+                Output::<f64, _>::new(io, PointId(20)).write(1.0)?;
+                Ok(())
+            }
+        }
+
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Recorder {
+                input: PointId(10),
+                seen: Rc::clone(&seen),
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(executor.tick(), Tick::ZERO);
+        assert_eq!(executor.run(0).unwrap(), Tick::ZERO);
+        executor.run(3).unwrap();
+        assert_eq!(executor.tick(), Tick(3));
+
+        // The step tick and the stamped input sample agree per scan.
+        let expected: Vec<(Tick, Tick)> =
+            [1, 2, 3].into_iter().map(|n| (Tick(n), Tick(n))).collect();
+        assert_eq!(*seen.borrow(), expected);
+        assert_eq!(executor.component_statuses()[0].last_tick, Some(Tick(3)));
+        // The image keeps the scan's tick-numbered samples.
+        assert_eq!(executor.sample(PointId(10)).unwrap().tick, Tick(3));
+        assert_eq!(executor.sample(PointId(20)).unwrap().tick, Tick(3));
+    }
+
+    #[test]
+    fn failed_input_read_degrades_to_bad_quality() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        driver.write(PointId(10), Value::Float(7.0)).unwrap();
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().value,
+            Value::Float(7.0)
+        );
+
+        driver.faults.borrow_mut().insert(PointId(10));
+        executor.scan().unwrap();
+        let sample = executor.sample(PointId(10)).unwrap();
+        // The last known value is held and marked bad; the scan continues.
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(
+            sample.quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        assert_eq!(sample.tick, Tick(2));
+    }
+
+    #[test]
+    fn failing_step_is_counted_and_scan_continues() {
+        struct Fragile;
+        impl Component for Fragile {
+            fn name(&self) -> &str {
+                "fragile"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![IoRequirement::output::<f64>("out", PointId(20))]
+            }
+            fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+                Err("computation failed".into())
+            }
+        }
+
+        let driver = StubDriver::new(&[float(20)], &[]);
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, vec![Box::new(Fragile)]).unwrap();
+
+        executor.run(2).unwrap();
+        let status = &executor.component_statuses()[0];
+        assert_eq!(status.name, "fragile");
+        assert_eq!(status.step_errors, 2);
+        assert_eq!(status.last_tick, None);
+        assert_eq!(status.last_error.as_deref(), Some("computation failed"));
+        // No output was ever written, so nothing was flushed.
+        assert_eq!(executor.tick(), Tick(2));
+    }
+
+    #[test]
+    fn write_sample_propagates_quality_to_output_image() {
+        /// Copies its input through with its quality intact.
+        struct Passthrough;
+        impl Component for Passthrough {
+            fn name(&self) -> &str {
+                "passthrough"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![
+                    IoRequirement::input::<f64>("in", PointId(10)),
+                    IoRequirement::output::<f64>("out", PointId(20)),
+                ]
+            }
+            fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+                let sample = io.read(PointId(10))?;
+                io.write_sample(PointId(20), sample)?;
+                Ok(())
+            }
+        }
+
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(&driver, map, vec![Box::new(Passthrough)]).unwrap();
+
+        driver.faults.borrow_mut().insert(PointId(10));
+        executor.scan().unwrap();
+        let output = executor.sample(PointId(20)).unwrap();
+        assert_eq!(
+            output.quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+    }
+
+    #[test]
+    fn undeclared_and_wrong_direction_access_is_rejected() {
+        /// Reaches for points it did not declare, or in the wrong direction.
+        struct Grabby;
+        impl Component for Grabby {
+            fn name(&self) -> &str {
+                "grabby"
+            }
+            fn io_requirements(&self) -> Vec<IoRequirement> {
+                vec![
+                    IoRequirement::input::<f64>("in", PointId(10)),
+                    IoRequirement::output::<f64>("out", PointId(20)),
+                ]
+            }
+            fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+                assert_eq!(
+                    io.read(PointId(20)),
+                    Err(IoError::UnknownPoint(PointId(20)))
+                );
+                assert_eq!(
+                    io.write(PointId(10), Value::Float(1.0)),
+                    Err(IoError::UnknownPoint(PointId(10)))
+                );
+                assert_eq!(
+                    io.read(PointId(99)),
+                    Err(IoError::UnknownPoint(PointId(99)))
+                );
+                Ok(())
+            }
+        }
+
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut executor = Executor::new(&driver, map, vec![Box::new(Grabby)]).unwrap();
+        executor.scan().unwrap();
+        assert_eq!(executor.component_statuses()[0].step_errors, 0);
+    }
+}

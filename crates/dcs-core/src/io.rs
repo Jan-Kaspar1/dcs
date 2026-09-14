@@ -76,6 +76,31 @@ impl fmt::Display for IoError {
 
 impl std::error::Error for IoError {}
 
+/// Data-flow direction of a logical I/O point.
+///
+/// `In` carries a value from the field into the controller — components
+/// read such points. `Out` carries one from the controller to the field —
+/// components write them. The same vocabulary names direction in component
+/// I/O declarations, the driver's point map, and the plant model's I/O
+/// mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Field-to-controller; the controller reads the point.
+    In,
+    /// Controller-to-field; the controller writes the point.
+    Out,
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Direction::In => "in",
+            Direction::Out => "out",
+        })
+    }
+}
+
 /// The driver-facing contract: untyped access to logical I/O points.
 ///
 /// A driver serves the [`PointId`]s the plant model maps onto its physical

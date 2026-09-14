@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dcs-core", "crates/dcs-model"]
+members = ["crates/dcs-core", "crates/dcs-model", "crates/dcs-runtime"]
 resolver = "3"
 
 [workspace.package]

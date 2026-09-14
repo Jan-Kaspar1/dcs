@@ -1,0 +1,25 @@
+//! The cyclic component executor: a deterministic fixed-step scan over
+//! reusable control components.
+//!
+//! A [`Component`] is a unit of control logic that declares its logical I/O
+//! up front — point ids, value kinds, and directions — and steps once per
+//! scan through a scoped [`ComponentIo`] view. It never names a device or
+//! bus; per the I/O abstraction decision, binding points to physical
+//! channels is the plant model's and the driver's business.
+//!
+//! [`Executor`] owns the scan. Wiring it checks every component's declared
+//! I/O against the driver's [`PointMap`] and refuses to run on a type or
+//! direction mismatch. Each scan reads every `In` point into a scan image,
+//! steps the components in their configured order, then writes the image's
+//! `Out` points back to the driver. Time is a virtual [`Tick`] counter
+//! advanced by the executor and stamped onto every sample the scan
+//! produces — nothing here or in component code reads a wall clock, so a
+//! run of `N` scans is exactly reproducible.
+
+#![warn(missing_docs)]
+
+mod component;
+mod executor;
+
+pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
+pub use executor::{ComponentStatus, Executor, PointMap, PointSpec, ScanError, WiringError};

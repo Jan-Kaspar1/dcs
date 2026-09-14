@@ -12,7 +12,7 @@
 mod io;
 mod signal;
 
-pub use io::{Input, IoDriver, IoError, Output, PointType, TypedSample};
+pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
