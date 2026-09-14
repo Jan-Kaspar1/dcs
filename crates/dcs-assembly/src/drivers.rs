@@ -22,8 +22,8 @@
 use crate::assembly::{neutral, resolve, sim_direction};
 use crate::error::AssemblyError;
 use dcs_core::{
-    IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
-    ValueKind,
+    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
+    StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
@@ -1037,5 +1037,35 @@ impl IoDriver for FanoutDriver {
             backend.io.restore_state(&section)?;
         }
         Ok(())
+    }
+
+    /// The aggregate link health over the backends: `None` when none
+    /// reports — the all-local-simulated case has no transport to
+    /// diagnose — otherwise `disconnected` when any reporting backend's
+    /// link is down, with each backend's last protocol failure named by
+    /// the device it serves.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        let mut link = LinkState::Connected;
+        let mut errors = Vec::new();
+        let mut reported = false;
+        for backend in &self.backends {
+            let Some(diagnostics) = backend.io.diagnostics() else {
+                continue;
+            };
+            reported = true;
+            if diagnostics.link == LinkState::Disconnected {
+                link = LinkState::Disconnected;
+            }
+            if let Some(error) = diagnostics.last_error {
+                let name = backend
+                    .device
+                    .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
+                errors.push(format!("{name}: {error}"));
+            }
+        }
+        reported.then_some(DriverDiagnostics {
+            link,
+            last_error: (!errors.is_empty()).then(|| errors.join("; ")),
+        })
     }
 }

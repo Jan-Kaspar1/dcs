@@ -113,7 +113,7 @@ Ticket breakdown:
 
 - #89 — this decision record and plan refresh. **Done with this change.**
 - #82 — `set_parameter` commands tuning component parameters at the scan boundary, descriptor-driven range enforcement, and the checkpoint-carryover obligation for tuned parameters (decision 20). **Done.**
-- #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Open** — issue filed under M4.
+- #83 — I/O-health counters, the optional `IoDriver::diagnostics` hook, and the paced-loop overrun feed in the telemetry snapshot (decision 22). **Done** — issue filed under M4.
 - #84 — persistent forcing of writable field `In` points at `Uncertain(Substituted)` quality, released at the scan boundary, listed and journaled (decision 21; depends on #49). **Open** — issue filed under M4.
 - #86 — `Signal.group` carried through `SignalIndex` into page grouping (decision 23). **Done** — issue filed under M4.
 - #85 — timer, counter, and rate-limiter kinds in `dcs-blocks`, each shipping `KIND`/`from_parameters`/`describe` per the established convention. **Done.**
@@ -123,13 +123,13 @@ Done when:
 
 - an operator tunes a declared parameter through a receipted `set_parameter` command — applied at the scan boundary, with named rejections for unknown component, unknown parameter, type mismatch, and out-of-range — and the tuned value restores through a checkpoint into a fresh executor (#82) — **done**;
 - a writable field `In` point can be forced across scans at substituted quality, released at the scan boundary, badged in the snapshot, journaled, and preserved across a checkpoint (#84, with #49) — **open**;
-- the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83) — **open**;
+- the telemetry snapshot reports executor-collected I/O-health counters, per-kind driver diagnostics where the driver implements the optional hook, and paced scan overruns fed by the controller shell (#83) — **done**;
 - the monitoring page organizes its signal list by the model's declared `group` field, with ungrouped signals under a documented default (#86) — **done**;
 - `dcs-blocks` ships the timer, counter, and rate-limiter kinds with descriptors and checkpoint coverage like every existing kind (#85) — **done**;
 - plant-side dynamics load from a declared document beside the model for the shared plant server and test rigs, leaving `PlantModel` schema untouched (decision 24; #81) — **done**.
 
 ## Next planning pass
 
-Inspect current main, open issues, and PRs before updating this plan. M2 closed with #49: #62's command affordances and #84's forcing now build on its writable-point contract. M3 is complete — #32, #46, #47, and #81 landed the pair mechanics and #64 proved the swap end-to-end between two controller processes over the shared simulated plant; automatic failure detection stays deliberately post-M3 as #65 under M5. M5's lifecycle tickets are now startable: #65 and #66 build directly on the shipped checkpoint-pull and promotion machinery, while #87 waits on #66 and #88's #64 dependency is now satisfied; #67 and #71 already landed. M6's remaining ergonomics tickets — #83, #84 — are independently startable against the existing executor, monitor, and model. Keep between six and twenty ready issues only when that much independent work exists.
+Inspect current main, open issues, and PRs before updating this plan. M2 closed with #49: #62's command affordances and #84's forcing now build on its writable-point contract. M3 is complete — #32, #46, #47, and #81 landed the pair mechanics and #64 proved the swap end-to-end between two controller processes over the shared simulated plant; automatic failure detection stays deliberately post-M3 as #65 under M5. M5's lifecycle tickets are now startable: #65 and #66 build directly on the shipped checkpoint-pull and promotion machinery, while #87 waits on #66 and #88's #64 dependency is now satisfied; #67 and #71 already landed. M6's remaining ergonomics ticket — #84 — is independently startable against the existing executor, monitor, and model; #83 landed the I/O-health and overrun surface. Keep between six and twenty ready issues only when that much independent work exists.
 
 Update this document when milestones change or complete. Reference actual issue and PR numbers once created; mark blocked dependencies and distinguish completed work from planned work.

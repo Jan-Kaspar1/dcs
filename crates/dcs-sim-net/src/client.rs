@@ -3,7 +3,7 @@
 use crate::protocol::{
     MAX_MESSAGE, PlantError, PlantRequest, PlantResponse, encode_message, read_message,
 };
-use dcs_core::{IoDriver, IoError, PointId, Sample, Tick, Value};
+use dcs_core::{DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value};
 use dcs_sim::{Fault, PointInfo};
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -86,9 +86,15 @@ impl From<PlantError> for RemoteError {
 }
 
 /// The connection behind [`RemoteDriver`]'s lock: `Some` while the link
-/// is live, `None` after the first failed exchange.
+/// is live, `None` after the first failed exchange, plus the link-level
+/// failure history [`IoDriver::diagnostics`] reports.
 struct Connection {
     stream: Option<BufReader<TcpStream>>,
+    /// The most recent transport- or protocol-level failure's
+    /// description. The failure that severed the link stays recorded —
+    /// the `Disconnected`s every later access reports are its
+    /// consequence, not new failures.
+    last_error: Option<String>,
 }
 
 /// Writes the request line and reads the response line on `stream`,
@@ -143,6 +149,15 @@ fn exchange(
 /// pair with a later request, so the driver never reuses a suspect link.
 /// `RemoteDriver` is [`Sync`] through its internal lock, like the driver
 /// contract expects.
+///
+/// Diagnostics: [`IoDriver::diagnostics`] reports the link as
+/// [`LinkState::Disconnected`] once the connection is dropped — the
+/// named link degradation a dead plant server produces — with the last
+/// transport- or protocol-level failure's description. That surface is
+/// link health, distinct from the per-point [`IoError`]s `read`/`write`
+/// return: every point's read failing with `Disconnected` and the link
+/// reporting `disconnected` are the same event told at the two levels
+/// the telemetry contract keeps separate.
 pub struct RemoteDriver {
     connection: Mutex<Connection>,
 }
@@ -179,6 +194,7 @@ impl RemoteDriver {
         Ok(Self {
             connection: Mutex::new(Connection {
                 stream: Some(BufReader::new(stream)),
+                last_error: None,
             }),
         })
     }
@@ -200,7 +216,7 @@ impl RemoteDriver {
     pub fn step(&self, dt: f64) -> Result<Tick, RemoteError> {
         match self.request(&PlantRequest::Step { dt })? {
             PlantResponse::Stepped { tick } => Ok(tick),
-            PlantResponse::Error { error } => Err(error.into()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -211,7 +227,7 @@ impl RemoteDriver {
     pub fn inject_fault(&self, point: PointId, fault: Fault) -> Result<(), RemoteError> {
         match self.request(&PlantRequest::InjectFault { point, fault })? {
             PlantResponse::Done => Ok(()),
-            PlantResponse::Error { error } => Err(error.into()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -224,7 +240,7 @@ impl RemoteDriver {
     pub fn list_points(&self) -> Result<Vec<PointInfo>, RemoteError> {
         match self.request(&PlantRequest::ListPoints)? {
             PlantResponse::Points { points } => Ok(points),
-            PlantResponse::Error { error } => Err(error.into()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -234,7 +250,7 @@ impl RemoteDriver {
     pub fn clear_fault(&self, point: PointId) -> Result<(), RemoteError> {
         match self.request(&PlantRequest::ClearFault { point })? {
             PlantResponse::Done => Ok(()),
-            PlantResponse::Error { error } => Err(error.into()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -254,6 +270,7 @@ impl RemoteDriver {
             Ok(response) => Ok(response),
             Err(error) => {
                 connection.stream = None;
+                connection.last_error = Some(error.to_string());
                 Err(error)
             }
         }
@@ -263,8 +280,22 @@ impl RemoteDriver {
     /// parses but does not correspond to the request means the peer is
     /// not a plant server, and the link can no longer be trusted.
     fn protocol_violation(&self) -> RemoteError {
-        self.connection.lock().unwrap().stream = None;
+        let mut connection = self.connection.lock().unwrap();
+        connection.stream = None;
+        connection.last_error =
+            Some("response did not match the request — the peer is not a plant server".to_string());
         RemoteError::Disconnected
+    }
+
+    /// Records a non-point failure — a request the server refused — as
+    /// the link's last protocol failure, then returns it for the caller
+    /// to propagate. A protocol-carried [`IoError`] is a point fault,
+    /// not link trouble, so it is not recorded here.
+    fn fail(&self, error: RemoteError) -> RemoteError {
+        if !matches!(error, RemoteError::Io(_)) {
+            self.connection.lock().unwrap().last_error = Some(error.to_string());
+        }
+        error
     }
 }
 
@@ -299,5 +330,21 @@ impl IoDriver for RemoteDriver {
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }
+    }
+
+    /// The link's transport-level health for the snapshot's I/O-health
+    /// section: `disconnected` once a failed exchange severed the
+    /// connection — permanently, since the driver never reconnects —
+    /// plus the last transport- or protocol-level failure's description.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        let connection = self.connection.lock().unwrap();
+        Some(DriverDiagnostics {
+            link: if connection.stream.is_some() {
+                LinkState::Connected
+            } else {
+                LinkState::Disconnected
+            },
+            last_error: connection.last_error.clone(),
+        })
     }
 }
