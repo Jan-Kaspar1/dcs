@@ -125,12 +125,16 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
     let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
     let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
     let client = MonitorClient::new(monitor.local_addr());
-    thread::scope(|scope| {
+    let result = thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
-        let result = body(&driver, &client);
+        // A failing assertion must not deadlock the scope join: catch the
+        // panic so the server is always shut down before it propagates.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&driver, &client)));
         monitor.shutdown();
         result
-    })
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 fn point_value(snapshot: &dcs_core::TelemetrySnapshot, point: u64) -> Option<Value> {
