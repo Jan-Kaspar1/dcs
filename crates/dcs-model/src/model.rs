@@ -6,7 +6,7 @@
 //! parsing and validation.
 
 use crate::validate::ValidationError;
-use dcs_core::{PointId, SignalId, Value, ValueKind};
+use dcs_core::{ModelFingerprint, PointId, SignalId, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -342,6 +342,25 @@ impl PlantModel {
             Err(LoadError::Invalid(errors))
         }
     }
+
+    /// The model's [`ModelFingerprint`]: a deterministic hash over the
+    /// canonical document.
+    ///
+    /// The canonical document is this value's own serialization —
+    /// reserializing the parsed model, not hashing the source text, is
+    /// what makes the fingerprint stable across inessential document
+    /// differences: struct fields serialize in declaration order and
+    /// every map is ordered, so two documents that parse to the same
+    /// model fingerprint identically regardless of their key order or
+    /// whitespace, while any semantic difference — including one the
+    /// component set does not see, like a renamed signal — fingerprints
+    /// differently. The assembling layer stamps it into checkpoints so a
+    /// standby can verify it tracks a run of the same model.
+    pub fn fingerprint(&self) -> ModelFingerprint {
+        ModelFingerprint::of(
+            &serde_json::to_vec(self).expect("serializing a parsed model cannot fail"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -463,5 +482,66 @@ mod tests {
             PlantModel::load("{}"),
             Err(LoadError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_serialization_ordering() {
+        let model = PlantModel::load(MINIMAL).unwrap();
+        let fingerprint = model.fingerprint();
+
+        // The same model round-tripped through differently ordered or
+        // laid-out text fingerprints identically: the hash covers the
+        // canonical reserialization, not the source bytes.
+        let pretty = serde_json::to_string_pretty(&model).unwrap();
+        let compact = serde_json::to_string(&model).unwrap();
+        assert_ne!(pretty, compact);
+        assert_eq!(
+            PlantModel::load(&pretty).unwrap().fingerprint(),
+            fingerprint
+        );
+
+        // Reordered object keys — top-level and nested — parse to the
+        // same model and so carry the same fingerprint.
+        let reordered: serde_json::Value = serde_json::from_str::<serde_json::Value>(MINIMAL)
+            .map(|mut document| {
+                let object = document.as_object_mut().unwrap();
+                let mut reversed = serde_json::Map::new();
+                for (key, value) in object.iter().rev() {
+                    reversed.insert(key.clone(), value.clone());
+                }
+                *object = reversed;
+                for device in document["devices"].as_array_mut().unwrap() {
+                    let channels = device["channels"].as_object().unwrap().clone();
+                    let mut swapped = serde_json::Map::new();
+                    swapped.insert("channels".to_string(), channels.into());
+                    swapped.insert("kind".to_string(), device["kind"].clone());
+                    swapped.insert("id".to_string(), device["id"].clone());
+                    *device.as_object_mut().unwrap() = swapped;
+                }
+                document
+            })
+            .unwrap();
+        let reparsed = PlantModel::load(&reordered.to_string()).unwrap();
+        assert_eq!(reparsed, model);
+        assert_eq!(reparsed.fingerprint(), fingerprint);
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_models_sharing_a_component_set() {
+        // Two models differing only where the component set does not
+        // look — a renamed signal — still fingerprint differently: the
+        // hash covers the whole canonical document, so a standby
+        // rejects a checkpoint from the other model rather than
+        // converging on a structurally matching component set.
+        let mut other = PlantModel::load(MINIMAL).unwrap();
+        other.signals[0].name = "renamed".to_string();
+        assert_eq!(
+            other.components,
+            PlantModel::load(MINIMAL).unwrap().components
+        );
+        assert_ne!(
+            other.fingerprint(),
+            PlantModel::load(MINIMAL).unwrap().fingerprint()
+        );
     }
 }

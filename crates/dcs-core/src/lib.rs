@@ -31,6 +31,7 @@
 
 mod command;
 mod descriptor;
+mod fingerprint;
 mod history;
 mod io;
 mod journal;
@@ -43,6 +44,7 @@ pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
 };
+pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
 pub use io::{
     Direction, DriverDiagnostics, Input, IoDriver, IoError, LinkState, Output, PointType,
