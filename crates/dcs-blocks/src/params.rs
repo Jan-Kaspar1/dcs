@@ -126,6 +126,30 @@ pub(crate) fn optional_f64(
     }
 }
 
+/// Reads an optional `u64` parameter; `None` when absent. Non-negative
+/// `Int` values and finite, integral, non-negative `Float` values are
+/// accepted; anything else is `Invalid`.
+pub(crate) fn optional_u64(
+    component: &str,
+    parameters: &Parameters,
+    name: &str,
+) -> Result<Option<u64>, ParameterError> {
+    match parameters.get(name) {
+        None => Ok(None),
+        Some(&Value::Int(v)) if v >= 0 => Ok(Some(v as u64)),
+        Some(&Value::Float(v))
+            if v.is_finite() && v.fract() == 0.0 && v >= 0.0 && v <= u64::MAX as f64 =>
+        {
+            Ok(Some(v as u64))
+        }
+        Some(value) => Err(invalid(
+            component,
+            name,
+            format!("expected a non-negative Int or integral Float, found {value:?}"),
+        )),
+    }
+}
+
 /// Reads an optional `bool` parameter; `None` when absent. `Bool` and the
 /// `Int` values `0`/`1` are accepted; anything else is `Invalid`.
 pub(crate) fn optional_bool(
