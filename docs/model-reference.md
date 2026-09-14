@@ -405,19 +405,30 @@ object whose single key is the snake_case element name:
 | `second_order_lag` | `input`, `output`, `time_constant`, `damping_ratio`, `initial` | `τ²y″ + 2ζτy′ + y = u` with `time_constant` = τ and `damping_ratio` = ζ — ζ < 1 underdamped (overshoots), ζ = 1 critical, ζ > 1 overdamped; the output starts at `initial` at rest. Stepped by the exact zero-order-hold discretization. |
 | `integrator` | `input`, `output`, `initial` | `dy/dt = u`. |
 | `dead_time` | `input`, `output`, `delay`, `initial` | `y(t) = u(t − delay)`; the realized delay rounds up to whole steps and the output holds `initial` until the delay line has filled. |
+| `noise` | `input`, `output`, `amplitude`, `seed`, `initial` | `y = u + amplitude·(2x − 1)`, `x` drawn once per step from a splitmix64 generator seeded by `seed` — the output stays within `u ± amplitude` and identical seeds replay identical deviation sequences. |
+| `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a Bool-gated flow source answering an actuator's run command. `input` is the one non-Float element end: a `Bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
+| `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `Float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
 point it drives):
 
-- `input` and `output` are io_point ids (`PointId`s) naming points the
-  served map binds — channel-bound io_points on `sim*` devices;
-  channel-less internal points are image-carried and unreachable for
-  elements (`ConfigError::UnknownPoint`);
-- both ends must be `Float` points (`ElementPointKind`);
+- `input`/`inputs` and `output` are io_point ids (`PointId`s) naming
+  points the served map binds — channel-bound io_points on `sim*`
+  devices; channel-less internal points are image-carried and
+  unreachable for elements (`ConfigError::UnknownPoint`);
+- element ends must be `Float` points (`ElementPointKind`) — except a
+  `bool_flow`'s gate `input`, which must be a `Bool` point
+  (`ElementGateKind`);
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
-  and `initial` finite (`NonFiniteInitial`);
+  `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
+  `off_rate`, and `bias` finite (`InvalidRate`, `NonFiniteBias` — rates
+  are signed flows, so a negative draw is legal), and `initial` finite
+  (`NonFiniteInitial`);
+- a non-`Good` input freezes the element's state and propagates its
+  quality to the output sample — a `flow_sum` propagating the worst of
+  its inputs' qualities;
 - no point may be driven by more than one loopback or element
   (`ConflictingDriver`);
 - elements step in declaration order, after loopback routing, so an
@@ -442,7 +453,10 @@ command:
 
 `crates/dcs-plant/fixtures/tank_loop_second_order_dynamics.json` shows
 `second_order_lag`; `crates/dcs-demo/fixtures/showcase_dynamics.json` is
-the showcase plant's.
+the showcase plant's; `crates/dcs-sim/fixtures/pump_station_dynamics.json`
+is the station loop `bool_flow` and `flow_sum` exist for — two Bool-gated
+pump draws and a declared inflow summed into an integrator driving the
+well level.
 
 ## Which layer checks what
 
