@@ -143,6 +143,24 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(s.state.job(1)['status'],'pr-open')
         self.assertEqual(s.state.job(1)['repairs'],0)
 
+    def test_wrong_branch_publish_error_repairs_without_wedging(self):
+        s=self.supervisor
+        self.github.items=[issue(1,group='g1'),issue(2,group='g2')]
+        s.dispatch(self.github.items)
+        clones={j['issue']:j['clone'] for j in s.state.jobs(('working',))}
+        def inspect(cwd,branch):
+            if str(cwd)==clones[1]:
+                raise ValueError('Worker changed the assigned branch')
+            return {'clean':True,'changed':True}
+        self.runtime.inspect_result.side_effect=inspect
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        self.assertEqual(s.state.job(1)['repairs'],1)
+        self.assertIn('Worker changed the assigned branch',self.runtime.spawn.call_args.args[2])
+        self.assertEqual(s.state.job(2)['status'],'pr-open')
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['repairs'],2)
+
     def test_priority_and_group_serialization(self):
         self.github.items=[issue(1,3),issue(2,0)]
         self.supervisor.dispatch(self.github.items)
