@@ -12,18 +12,26 @@
 //! driver.
 //!
 //! The built-in registry [`DriverRegistry::standard`] serves the
-//! `sim*` prefix (local simulated devices) and [`SIM_TCP_KIND`]
-//! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`). New device
-//! integrations register their own kind against the same
-//! [`DeviceSpec`] contract — registering a device integration is what
-//! "adding a new device" means.
+//! `sim*` prefix (local simulated devices), [`SIM_TCP_KIND`]
+//! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`), and
+//! [`SIM_SCRIPTED_KIND`] (`sim-scripted`, the tick-indexed playback
+//! driver of `dcs-sim`). New device integrations register their own
+//! kind against the same [`DeviceSpec`] contract — registering a device
+//! integration is what "adding a new device" means.
 
 use crate::assembly::{neutral, resolve, sim_direction};
 use crate::error::AssemblyError;
-use dcs_core::{IoDriver, IoError, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
+use dcs_core::{
+    IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
+    ValueKind,
+};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
-use dcs_sim::{ChannelId, ChannelMap, Loopback, PointBinding, SimDriver};
+use dcs_sim::{
+    ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
+    SimDriver,
+};
 use dcs_sim_net::RemoteDriver;
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::net::ToSocketAddrs;
@@ -46,6 +54,30 @@ use std::time::Duration;
 /// unreachable endpoint or a server that does not serve a declared
 /// point is an assembly failure, not a mid-scan surprise.
 pub const SIM_TCP_KIND: &str = "sim-tcp";
+
+/// The scripted simulated device kind: a [`ScriptedDriver`] whose `In`
+/// channels replay a tick-indexed script and whose `Out` channels record
+/// every write for inspection through [`FanoutDriver::inspect`].
+///
+/// The kind is registered exactly — like [`SIM_TCP_KIND`] it outranks the
+/// `sim` prefix, which would otherwise read it as a local simulated
+/// device. Its device `parameters` carry exactly one entry:
+///
+/// - `"script"` (required object): channel name → array of entries, each
+///   `{"tick": <non-negative integer>, "value": <matching the channel's
+///   value kind>, "quality": "good" | "uncertain" | "bad", "reason":
+///   <a `snake_case` [`QualityReason`] name, optional>}` in strictly
+///   increasing tick order. Only `in` channels may be scripted, and only
+///   channels an `io_point` binds; an unscripted `in` channel holds its
+///   neutral `Good` value. `reason` is meaningful only on a
+///   non-`"good"` entry and defaults to `"unspecified"`.
+///
+/// A script problem — an unparseable entry, a value whose kind does not
+/// match its channel, non-increasing ticks, or a script naming an `out`,
+/// undeclared, or unbound channel — is [`DeviceError::Parameters`],
+/// surfacing as [`AssemblyError::InvalidDeviceParameters`] naming the
+/// device.
+pub const SIM_SCRIPTED_KIND: &str = "sim-scripted";
 
 /// One `io_point` bound to a channel on the device under construction.
 #[derive(Debug, Clone)]
@@ -169,6 +201,11 @@ pub struct DeviceBackend {
     /// Steps the backend's simulated plant one `dt`; `None` for
     /// field-observing backends.
     pub step: Option<StepHook>,
+    /// The backend's concrete driver, for typed inspection through
+    /// [`FanoutDriver::inspect`] — e.g. a scripted device's
+    /// recorded-write log. `None` when the backend exposes nothing
+    /// beyond the [`IoDriver`] surface.
+    pub inspect: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// What a registered device-kind factory contributes for its device.
@@ -212,11 +249,13 @@ impl DriverRegistry {
     }
 
     /// The built-in registry: the `sim*` prefix served by local
-    /// simulated devices, and [`SIM_TCP_KIND`] (`sim-tcp`) served by the
-    /// remote simulated driver.
+    /// simulated devices, [`SIM_TCP_KIND`] (`sim-tcp`) served by the
+    /// remote simulated driver, and [`SIM_SCRIPTED_KIND`]
+    /// (`sim-scripted`) served by the scripted playback driver.
     pub fn standard() -> Self {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
+            .with(SIM_SCRIPTED_KIND, scripted_device)
             .with_prefix(crate::SIM_DEVICE_PREFIX, sim_device)
     }
 
@@ -377,6 +416,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
+    let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: remote,
@@ -386,6 +426,201 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
+        inspect: Some(inspect),
+    }))
+}
+
+/// A `snake_case` [`QualityReason`] name, as a script entry's `"reason"`.
+fn script_reason(name: &str) -> Option<QualityReason> {
+    Some(match name {
+        "unspecified" => QualityReason::Unspecified,
+        "substituted" => QualityReason::Substituted,
+        "stale" => QualityReason::Stale,
+        "out_of_range" => QualityReason::OutOfRange,
+        "communication_fault" => QualityReason::CommunicationFault,
+        "device_fault" => QualityReason::DeviceFault,
+        "configuration_fault" => QualityReason::ConfigurationFault,
+        _ => return None,
+    })
+}
+
+/// One `"script"` entry: `{"tick", "value", "quality"?, "reason"?}` —
+/// the parse half of the [`SIM_SCRIPTED_KIND`] contract; ordering and
+/// kind rules are [`ScriptedDriver::new`]'s to enforce.
+fn scripted_entry(
+    channel: &str,
+    kind: ValueKind,
+    index: usize,
+    entry: &serde_json::Value,
+) -> Result<ScriptEntry, DeviceError> {
+    let invalid = |detail: String| {
+        DeviceError::parameters(format!(
+            "script channel {channel:?} entry {index}: {detail}"
+        ))
+    };
+    let Some(object) = entry.as_object() else {
+        return Err(invalid(format!("must be an object, found {entry}")));
+    };
+    for key in object.keys() {
+        if !matches!(key.as_str(), "tick" | "value" | "quality" | "reason") {
+            return Err(invalid(format!("unknown key {key:?}")));
+        }
+    }
+    let Some(tick) = object.get("tick") else {
+        return Err(invalid("missing \"tick\"".to_string()));
+    };
+    let Some(tick) = tick.as_u64() else {
+        return Err(invalid(format!(
+            "\"tick\" must be a non-negative integer, found {tick}"
+        )));
+    };
+    let Some(json_value) = object.get("value") else {
+        return Err(invalid("missing \"value\"".to_string()));
+    };
+    let value = match kind {
+        ValueKind::Bool => json_value.as_bool().map(Value::Bool),
+        ValueKind::Int => json_value.as_i64().map(Value::Int),
+        ValueKind::Float => json_value
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(Value::Float),
+    };
+    let Some(value) = value else {
+        return Err(invalid(format!(
+            "\"value\" must match the channel's {kind:?} kind, found {json_value}"
+        )));
+    };
+    let quality = match object.get("quality") {
+        None => "good",
+        Some(quality) => match quality.as_str() {
+            Some(name @ ("good" | "uncertain" | "bad")) => name,
+            _ => {
+                return Err(invalid(format!(
+                    "\"quality\" must be \"good\", \"uncertain\", or \"bad\", found {quality}"
+                )));
+            }
+        },
+    };
+    let reason = match object.get("reason") {
+        None => None,
+        Some(reason) => match reason.as_str().and_then(script_reason) {
+            Some(reason) => Some(reason),
+            None => {
+                return Err(invalid(format!(
+                    "\"reason\" must name a QualityReason in snake_case, found {reason}"
+                )));
+            }
+        },
+    };
+    let quality = match (quality, reason) {
+        ("good", None) => Quality::Good,
+        ("good", Some(_)) => {
+            return Err(invalid(
+                "\"reason\" is meaningful only on a non-\"good\" entry".to_string(),
+            ));
+        }
+        ("uncertain", reason) => Quality::Uncertain(reason.unwrap_or(QualityReason::Unspecified)),
+        ("bad", reason) => Quality::Bad(reason.unwrap_or(QualityReason::Unspecified)),
+        _ => unreachable!("quality is one of the three names above"),
+    };
+    Ok(ScriptEntry {
+        tick: Tick(tick),
+        value,
+        quality,
+    })
+}
+
+/// The [`SIM_SCRIPTED_KIND`] factory: parses the device's `"script"`
+/// parameter into per-point [`ScriptEntry`] lists and builds the
+/// [`ScriptedDriver`] serving every bound point. The driver goes in as a
+/// self-contained [`DeviceBackend`] — the `inspect` handle is the
+/// scripted driver itself, so [`FanoutDriver::inspect`] reaches its
+/// recorded-write log.
+fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    for name in spec.parameters.keys() {
+        if name != "script" {
+            return Err(DeviceError::parameters(format!(
+                "unknown parameter {name:?}; {SIM_SCRIPTED_KIND:?} takes \"script\""
+            )));
+        }
+    }
+    let Some(script) = spec.parameters.get("script") else {
+        return Err(DeviceError::parameters("parameter \"script\" is required"));
+    };
+    let Some(script) = script.as_object() else {
+        return Err(DeviceError::parameters(format!(
+            "parameter \"script\" must be an object mapping channel names to entry lists, found {script}"
+        )));
+    };
+
+    // Scripts key channels, the driver keys points: resolve each scripted
+    // channel to the point bound to it.
+    let bound: HashMap<&str, &DevicePoint> = spec
+        .points
+        .iter()
+        .map(|point| (point.channel.as_str(), point))
+        .collect();
+    let mut scripts: BTreeMap<PointId, Vec<ScriptEntry>> = BTreeMap::new();
+    for (channel, entries) in script {
+        let Some(declared) = spec.channels.get(channel) else {
+            return Err(DeviceError::parameters(format!(
+                "script names channel {channel:?} the device does not declare"
+            )));
+        };
+        if declared.direction != Direction::In {
+            return Err(DeviceError::parameters(format!(
+                "script names {channel:?}, an {:?} channel; scripts drive in channels",
+                declared.direction
+            )));
+        }
+        let Some(point) = bound.get(channel.as_str()) else {
+            return Err(DeviceError::parameters(format!(
+                "script names channel {channel:?} no io_point binds"
+            )));
+        };
+        let Some(entries) = entries.as_array() else {
+            return Err(DeviceError::parameters(format!(
+                "script channel {channel:?} must be an array of entries, found {entries}"
+            )));
+        };
+        let parsed = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| scripted_entry(channel, point.kind, index, entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        scripts.insert(point.point, parsed);
+    }
+
+    let points = spec
+        .points
+        .iter()
+        .map(|point| PointBinding {
+            point: point.point,
+            channel: ChannelId {
+                device: spec.id.0,
+                name: point.channel.clone(),
+            },
+            direction: sim_direction(point.direction),
+            initial: neutral(point.kind),
+        })
+        .collect();
+    let driver = Arc::new(
+        ScriptedDriver::new(points, scripts).map_err(|error| match error {
+            // Script content problems are parameter problems; structural
+            // ones — the duplicate bindings a validated model can still
+            // carry — mean the backend could not be built.
+            ScriptError::DuplicatePoint(_) | ScriptError::DuplicateChannel(_) => {
+                DeviceError::backend(error.to_string())
+            }
+            _ => DeviceError::parameters(error.to_string()),
+        })?,
+    );
+    let stepping = Arc::clone(&driver);
+    let inspect: Arc<dyn Any + Send + Sync> = driver.clone();
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: driver,
+        step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
+        inspect: Some(inspect),
     }))
 }
 
@@ -396,6 +631,8 @@ struct Backend {
     device: Option<DeviceId>,
     io: Arc<dyn IoDriver + Send + Sync>,
     step: Option<StepHook>,
+    /// The factory-installed typed inspection handle, if any.
+    inspect: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// A device backend a [`DriverPlan`] builds: the contributed driver and
@@ -457,6 +694,7 @@ impl DriverPlan {
                 device: None,
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
+                inspect: None,
             });
             sim = Some(driver);
         }
@@ -469,6 +707,7 @@ impl DriverPlan {
                 device: Some(planned.device),
                 io: planned.backend.io,
                 step: planned.backend.step,
+                inspect: planned.backend.inspect,
             });
         }
         Ok(FanoutDriver {
@@ -656,6 +895,22 @@ impl FanoutDriver {
             .iter()
             .find(|backend| backend.device == Some(device))
             .map(|backend| &*backend.io)
+    }
+
+    /// The typed inspection handle the device's factory installed,
+    /// downcast to `T` — e.g. `driver.inspect::<ScriptedDriver>(id)`
+    /// reaches a scripted device's recorded-write log, or
+    /// `driver.inspect::<RemoteDriver>(id)` the remote driver's
+    /// fault-injection API. `None` when no device-built backend serves
+    /// `device`, when the factory installed no handle, or when the
+    /// handle is of another type. The shared local simulated backend is
+    /// reached through [`sim`](Self::sim) instead.
+    pub fn inspect<T: Send + Sync + 'static>(&self, device: DeviceId) -> Option<&T> {
+        self.backends
+            .iter()
+            .find(|backend| backend.device == Some(device))
+            .and_then(|backend| backend.inspect.as_ref())
+            .and_then(|handle| handle.downcast_ref::<T>())
     }
 
     /// Advances the assembled plant one step of `dt`: applies every

@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "setpoint": { "direction": "in", "value_type": "Float" },
+        "pump-enable": { "direction": "in", "value_type": "Bool" },
+        "valve": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "level-raw": [
+            { "tick": 0, "value": 4.0 },
+            { "tick": 5, "value": 12.0 },
+            { "tick": 8, "value": 14.0, "quality": "uncertain", "reason": "stale" },
+            { "tick": 10, "value": 0.0, "quality": "bad", "reason": "device_fault" },
+            { "tick": 12, "value": 8.0 }
+          ],
+          "run-hours": [
+            { "tick": 2, "value": 100 },
+            { "tick": 6, "value": 200, "quality": "uncertain", "reason": "substituted" }
+          ]
+        }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "Float" },
+        "run-hours": { "direction": "in", "value_type": "Int" },
+        "pump-cmd": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "setpoint" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "level-raw" }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "valve" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Int",
+      "channel": { "device": 2, "name": "run-hours" }
+    },
+    {
+      "id": 14,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 2, "name": "pump-cmd" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "pump-enable" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "level-setpoint",
+      "source": 10,
+      "unit": "m",
+      "description": "Tank level setpoint"
+    },
+    {
+      "id": 101,
+      "name": "tank-level-raw",
+      "source": 11,
+      "unit": "mA",
+      "description": "Tank level raw measurement, replayed by the scripted device"
+    },
+    {
+      "id": 102,
+      "name": "valve-command",
+      "source": 12,
+      "unit": "%",
+      "description": "Inlet valve command"
+    },
+    {
+      "id": 103,
+      "name": "pump-run-hours",
+      "source": 13,
+      "unit": "h",
+      "description": "Pump run-hours counter, replayed by the scripted device"
+    },
+    {
+      "id": 104,
+      "name": "pump-command",
+      "source": 14,
+      "description": "Pump run command the scripted device records"
+    },
+    {
+      "id": 105,
+      "name": "pump-enable",
+      "source": 15,
+      "description": "Pump enable input"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "Float": 4.0 },
+        "raw_max": { "Float": 20.0 },
+        "eng_min": { "Float": 0.0 },
+        "eng_max": { "Float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "pid",
+      "parameters": {
+        "kp": { "Float": 0.1 },
+        "ki": { "Float": 0.1 },
+        "kd": { "Float": 0.0 },
+        "dt": { "Float": 0.1 },
+        "out_min": { "Float": 4.0 },
+        "out_max": { "Float": 20.0 }
+      },
+      "ports": {
+        "sp": { "direction": "in", "value_type": "Float" },
+        "pv": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "digital-output",
+      "parameters": {},
+      "ports": {
+        "in": { "direction": "in", "value_type": "Bool" },
+        "out": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "sp" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "raw" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "port": { "component": 2, "name": "pv" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 12 }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 14 }
+    }
+  ]
+}

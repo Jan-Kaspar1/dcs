@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "setpoint": { "direction": "in", "value_type": "Float" },
+        "valve": { "direction": "out", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "level-raw": [
+            { "tick": 0, "value": 4.0 },
+            { "tick": 7, "value": 9.0 },
+            { "tick": 3, "value": 11.0 }
+          ]
+        }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "setpoint" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "level-raw" }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "valve" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "tank-level-raw",
+      "source": 11,
+      "unit": "mA",
+      "description": "Tank level raw measurement, replayed by the scripted device"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "Float": 4.0 },
+        "raw_max": { "Float": 20.0 },
+        "eng_min": { "Float": 0.0 },
+        "eng_max": { "Float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "raw" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 12 }
+    }
+  ]
+}
