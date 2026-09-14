@@ -692,6 +692,13 @@ impl<'d> Peer<'d> {
         self.executor.submit_command(command)
     }
 
+    /// The attributed variant of [`submit_command`](Self::submit_command):
+    /// the receipt — and the journaled `CommandSettled` echoing it —
+    /// carries the submitter's declared actor identity.
+    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+        self.executor.submit_command_as(command, actor)
+    }
+
     /// The wrapped executor, e.g. for snapshots, receipts, and
     /// checkpoints.
     pub fn executor(&self) -> &Executor<'d> {
