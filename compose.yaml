@@ -1,0 +1,105 @@
+# The checked-in rig definition for the hot-swap demonstration — the
+# artifact the two Dockerfiles presuppose (decision 49 in
+# docs/architecture.md). It declares as data the same topology
+# docs/packaging.md documents as commands: one dcs-plant-server
+# container and a redundant dcs-controller pair attaching to its
+# listener, the checked-in model and dynamics documents mounted
+# read-only (decision 46 — deployment-supplied paths, never content
+# over the wire), and the standby wired to the active's monitor.
+#
+# `docker compose config` statically checks the file;
+# `docker compose build` produces the same dcs-controller and
+# dcs-plant-server tags the documented `docker build` commands do;
+# `docker compose up -d` starts the rig. Like the Dockerfiles, this is
+# a checked-in packaging artifact: a single-host orchestration
+# declaration that defines no deployment. The two-machine shape is the
+# same declaration spread across hosts with published addresses in
+# place of network names, as docs/packaging.md records.
+
+name: dcs-rig
+
+services:
+  dcs-plant:
+    image: dcs-plant-server
+    build:
+      context: .
+      dockerfile: Dockerfile.plant
+    container_name: dcs-plant
+    networks:
+      - dcs-rig
+    volumes:
+      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
+      - ./crates/dcs-plant/fixtures/tank_loop_dynamics.json:/model/dynamics.json:ro
+    command:
+      - /model/plant.json
+      - --dynamics
+      - /model/dynamics.json
+      - --listen
+      - 0.0.0.0:9001
+    healthcheck:
+      # The controllers' --remote attach connects once at startup and
+      # exits if the listener is not yet bound, so the pair orders on
+      # the plant actually serving. The probe opens and closes a TCP
+      # connection; the plant's per-connection handler reads a line,
+      # sees the close, and exits.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9001"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+
+  ctrl-a:
+    image: dcs-controller
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ctrl-a
+    depends_on:
+      dcs-plant:
+        condition: service_healthy
+    networks:
+      - dcs-rig
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
+    command:
+      - /model/plant.json
+      - --remote
+      - dcs-plant:9001
+      - --scan-ms
+      - "100"
+      - --listen
+      - 0.0.0.0:8080
+
+  ctrl-b:
+    image: dcs-controller
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ctrl-b
+    depends_on:
+      dcs-plant:
+        condition: service_healthy
+      ctrl-a:
+        condition: service_started
+    networks:
+      - dcs-rig
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
+    command:
+      - /model/plant.json
+      - --remote
+      - dcs-plant:9001
+      - --standby
+      - ctrl-a:8080
+      - --scan-ms
+      - "100"
+      - --listen
+      - 0.0.0.0:8081
+
+networks:
+  dcs-rig:
+    name: dcs-rig
