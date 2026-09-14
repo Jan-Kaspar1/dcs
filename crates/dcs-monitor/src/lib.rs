@@ -107,6 +107,12 @@
 //! every endpoint — snapshot, receipts, history, journal — tracks the
 //! paced run.
 //!
+//! An externally paced run that still needs the loop's per-scan wiring —
+//! a tracking standby's checkpoint pull, and the plant step a
+//! field-owning run paces to its ticks — installs it as [`Driven`]
+//! through [`Monitor::driven`], and each requested scan runs it inside
+//! the request's boundary.
+//!
 //! [`MonitorClient`] is the matching lightweight in-process client used by
 //! tests and simple tooling; it speaks plain HTTP/1.0-style requests over a
 //! `TcpStream` and needs no extra dependencies.
@@ -145,6 +151,33 @@ pub const PAGE: &str = include_str!("page.html");
 const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock time by this \
      controller; externally requested scans would inject ticks outside the schedule";
 
+/// Runs once after each completed requested scan, receiving the peer's
+/// field ownership at that moment — the plant step the driving request
+/// paces the run to. A failure fails the request like a scan failure.
+pub type AfterScan<'d> = Box<dyn Fn(bool) -> Result<(), String> + Send + Sync + 'd>;
+
+/// The wiring an unpaced [`Monitor`]'s `POST /scan` runs around each
+/// requested scan — see [`Monitor::driven`].
+///
+/// A process serving an externally paced run — a scripted test or
+/// operator driving ticks through `POST /scan` rather than a wall-clock
+/// schedule — still owes the run the two steps a paced scan loop wraps
+/// around each scan: a tracking standby's checkpoint pull (the
+/// peer-transport decision) and the plant step a field-owning run paces
+/// to its ticks. `Driven` carries both so the request keeps them.
+#[derive(Default)]
+pub struct Driven<'d> {
+    /// The tracking source: while the peer does not own the field, each
+    /// requested scan first pulls `GET /checkpoint` from the active's
+    /// monitor at this address and applies it — the pull-per-scan-cycle
+    /// resync a paced standby's loop performs. A field-owning peer skips
+    /// the pull: a promoted standby continues its own run.
+    pub track: Option<SocketAddr>,
+    /// The [`AfterScan`] hook — typically the plant step a field-owning
+    /// run paces to its ticks.
+    pub after_scan: Option<AfterScan<'d>>,
+}
+
 /// A monitoring server sharing one executor over HTTP+JSON.
 ///
 /// See the crate docs for the endpoint contract and the single-lock
@@ -157,6 +190,9 @@ pub struct Monitor<'d> {
     /// paces scans itself through [`paced_scan`](Self::paced_scan) and
     /// `POST /scan` is refused: the wall clock owns the scan schedule.
     paced: bool,
+    /// The per-requested-scan wiring [`driven`](Self::driven) installed —
+    /// consulted only on an unpaced monitor, where `POST /scan` runs.
+    driven: Driven<'d>,
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
@@ -246,7 +282,16 @@ impl<'d> Monitor<'d> {
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
+            driven: Driven::default(),
         })
+    }
+
+    /// Arms `POST /scan` with `driven` wiring and returns the monitor —
+    /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
+    /// one refuses `POST /scan`, so the wiring never runs.
+    pub fn driven(mut self, driven: Driven<'d>) -> Self {
+        self.driven = driven;
+        self
     }
 
     /// The address the listener is bound to.
@@ -396,16 +441,36 @@ impl<'d> Monitor<'d> {
                     let mut shared = self.shared.lock().unwrap();
                     let mut failure = None;
                     for _ in 0..body.scans {
-                        match scan_and_record(&mut shared) {
-                            Ok(_) => {}
-                            Err(error) => {
-                                failure = Some(error);
-                                break;
+                        // A tracking standby resynchronizes once per scan
+                        // cycle — the pull a paced standby's loop runs
+                        // before its scan. A rejected checkpoint degrades
+                        // the peer but the scan still runs on its
+                        // last-known state.
+                        if let Some(active) = self.driven.track
+                            && !shared.peer.owns_field()
+                        {
+                            match MonitorClient::new(active).checkpoint() {
+                                Ok(checkpoint) => {
+                                    let _ = shared.peer.apply(&checkpoint);
+                                }
+                                Err(error) => shared
+                                    .peer
+                                    .note_transfer_failed(format!("fetch from {active}: {error}")),
                             }
+                        }
+                        if let Err(error) = scan_and_record(&mut shared) {
+                            failure = Some(error.to_string());
+                            break;
+                        }
+                        if let Some(after_scan) = &self.driven.after_scan
+                            && let Err(error) = after_scan(shared.peer.owns_field())
+                        {
+                            failure = Some(error);
+                            break;
                         }
                     }
                     match failure {
-                        Some(error) => json(500, &error.to_string()),
+                        Some(error) => json(500, &error),
                         None => json(200, &shared.peer.snapshot()),
                     }
                 }

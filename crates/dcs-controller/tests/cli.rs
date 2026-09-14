@@ -66,3 +66,23 @@ fn missing_model_file_is_a_usage_error() {
     let output = run(&[]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn driven_requires_listen_and_excludes_pacing() {
+    // --driven needs the monitor the requests arrive through.
+    let output = run(&[TANK_LOOP, "--driven"]);
+    assert_eq!(output.status.code(), Some(2));
+
+    // It replaces pacing, so --ticks and --scan-ms do not apply.
+    for pacing in ["--ticks", "--scan-ms"] {
+        let output = run(&[
+            TANK_LOOP,
+            "--driven",
+            "--listen",
+            "127.0.0.1:0",
+            pacing,
+            "5",
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+    }
+}
