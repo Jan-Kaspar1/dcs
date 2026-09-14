@@ -128,6 +128,19 @@
 //! generic name-plus-diagnostics-plus-wired-points faceplate, never an
 //! error.
 //!
+//! The alarm pane applies the same descriptor-to-point join to the
+//! two-flag alarm surface: every status-role `Out` port whose live
+//! sample asserts lists with its component, value, quality, and the
+//! tick the value last changed in the point's retained history — a
+//! non-good quality draws the row degraded rather than as a clean
+//! assertion — and the journal entries touching the alarm-bound points
+//! and their components list in tick order beside it. Where the
+//! component declares an `ack` input wired to a model-declared writable
+//! point the pane offers an acknowledge button issuing an ordinary
+//! receipted `write_value` — no alarm-specific protocol — pulsed back
+//! to `false` once a scan has observed it, because the kind's `ack` is
+//! level-observed.
+//!
 //! ## The pair view
 //!
 //! Under redundancy — the monitoring-under-redundancy decision — the page
