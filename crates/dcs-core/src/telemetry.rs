@@ -181,12 +181,14 @@ mod tests {
                             direction: Direction::In,
                             kind: ValueKind::Float,
                             role: Some(PortRole::ProcessValue),
+                            point: Some(PointId(10)),
                         },
                         PortDescriptor {
                             name: "out".to_string(),
                             direction: Direction::Out,
                             kind: ValueKind::Float,
                             role: Some(PortRole::Output),
+                            point: Some(PointId(20)),
                         },
                     ],
                     parameters: vec![ParameterDescriptor {

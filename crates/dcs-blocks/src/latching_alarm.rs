@@ -683,24 +683,28 @@ mod tests {
                     direction: Direction::In,
                     kind: ValueKind::Float,
                     role: Some(PortRole::ProcessValue),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "ack".to_string(),
                     direction: Direction::In,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "alarm".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
                 PortDescriptor {
                     name: "unacknowledged".to_string(),
                     direction: Direction::Out,
                     kind: ValueKind::Bool,
                     role: Some(PortRole::Status),
+                    point: None,
                 },
             ]
         );

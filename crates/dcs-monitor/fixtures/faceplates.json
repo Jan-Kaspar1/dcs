@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "temperature": { "direction": "in", "value_type": "Float" },
+        "feed": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-ao",
+      "channels": {
+        "drive": { "direction": "out", "value_type": "Float" },
+        "alarm": { "direction": "out", "value_type": "Bool" },
+        "debug": { "direction": "out", "value_type": "Float" },
+        "spare": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "temperature" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "initial": { "Float": 50.0 },
+      "writable": true
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "drive" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 2, "name": "alarm" }
+    },
+    {
+      "id": 30,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "debug" }
+    },
+    {
+      "id": 31,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "spare" }
+    },
+    {
+      "id": 40,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "feed" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "reactor-temperature",
+      "source": 10,
+      "unit": "degC",
+      "description": "Reactor temperature measurement"
+    },
+    {
+      "id": 101,
+      "name": "level-setpoint",
+      "source": 11,
+      "unit": "%",
+      "description": "Operator level setpoint"
+    },
+    {
+      "id": 102,
+      "name": "valve-command",
+      "source": 20,
+      "unit": "%"
+    },
+    {
+      "id": 103,
+      "name": "high-alarm",
+      "source": 21
+    },
+    {
+      "id": 104,
+      "name": "feed-rate",
+      "source": 40,
+      "unit": "kg/h"
+    }
+  ],
+  "components": [],
+  "connections": []
+}
