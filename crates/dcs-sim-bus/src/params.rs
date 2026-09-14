@@ -151,13 +151,14 @@ fn parse_register_entry(
     kind: ValueKind,
     entry: &serde_json::Value,
 ) -> Result<ChannelRegister, String> {
-    let invalid = |detail: String| {
-        format!("register declaration for channel {channel:?}: {detail}")
-    };
+    let invalid =
+        |detail: String| format!("register declaration for channel {channel:?}: {detail}");
     // The shorthand form: `"level-raw": 4`.
     if let Some(register) = entry.as_u64() {
         let register = u16::try_from(register).map_err(|_| {
-            invalid(format!("register address must fit in 0..=65535, found {register}"))
+            invalid(format!(
+                "register address must fit in 0..=65535, found {register}"
+            ))
         })?;
         return Ok(ChannelRegister {
             register,
@@ -190,9 +191,8 @@ fn parse_register_entry(
     let initial = match object.get("initial") {
         None => None,
         Some(json) => {
-            let value: Value = serde_json::from_value(json.clone()).map_err(|error| {
-                invalid(format!("\"initial\" is not a signal value: {error}"))
-            })?;
+            let value: Value = serde_json::from_value(json.clone())
+                .map_err(|error| invalid(format!("\"initial\" is not a signal value: {error}")))?;
             if value.kind() != kind {
                 return Err(invalid(format!(
                     "\"initial\" must match the channel's {kind:?} kind, found {json}"

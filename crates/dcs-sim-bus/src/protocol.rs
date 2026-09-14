@@ -361,13 +361,13 @@ fn truncated(what: &str) -> String {
 pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
     let mut reader = Reader::new(body);
     let short = || truncated("request frame");
-    let request = match reader.u8().ok_or_else(|| short())? {
+    let request = match reader.u8().ok_or_else(short)? {
         OP_READ_REGISTER => BusRequest::ReadRegister {
-            register: reader.u16().ok_or_else(|| short())?,
+            register: reader.u16().ok_or_else(short)?,
         },
         OP_WRITE_REGISTER => BusRequest::WriteRegister {
-            register: reader.u16().ok_or_else(|| short())?,
-            value: reader.value().ok_or_else(|| short())?,
+            register: reader.u16().ok_or_else(short)?,
+            value: reader.value().ok_or_else(short)?,
         },
         OP_LIST_REGISTERS => BusRequest::ListRegisters,
         OP_STEP => BusRequest::Step,
@@ -385,45 +385,45 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
 pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
     let mut reader = Reader::new(body);
     let short = || truncated("response frame");
-    let response = match reader.u8().ok_or_else(|| short())? {
+    let response = match reader.u8().ok_or_else(short)? {
         RESP_SAMPLE => BusResponse::Sample {
             sample: Sample::good(
-                reader.value().ok_or_else(|| short())?,
-                Tick(reader.u64().ok_or_else(|| short())?),
+                reader.value().ok_or_else(short)?,
+                Tick(reader.u64().ok_or_else(short)?),
             ),
         },
         RESP_WRITTEN => BusResponse::Written {
-            tick: Tick(reader.u64().ok_or_else(|| short())?),
+            tick: Tick(reader.u64().ok_or_else(short)?),
         },
         RESP_REGISTERS => {
-            let count = reader.u16().ok_or_else(|| short())?;
+            let count = reader.u16().ok_or_else(short)?;
             let mut registers = Vec::with_capacity(count as usize);
             for _ in 0..count {
                 registers.push(RegisterInfo {
-                    register: reader.u16().ok_or_else(|| short())?,
+                    register: reader.u16().ok_or_else(short)?,
                     sample: Sample::good(
-                        reader.value().ok_or_else(|| short())?,
-                        Tick(reader.u64().ok_or_else(|| short())?),
+                        reader.value().ok_or_else(short)?,
+                        Tick(reader.u64().ok_or_else(short)?),
                     ),
                 });
             }
             BusResponse::Registers { registers }
         }
         RESP_STEPPED => BusResponse::Stepped {
-            tick: Tick(reader.u64().ok_or_else(|| short())?),
+            tick: Tick(reader.u64().ok_or_else(short)?),
         },
         RESP_ERROR => {
-            let error = match reader.u8().ok_or_else(|| short())? {
+            let error = match reader.u8().ok_or_else(short)? {
                 ERR_UNKNOWN_REGISTER => BusError::UnknownRegister {
-                    register: reader.u16().ok_or_else(|| short())?,
+                    register: reader.u16().ok_or_else(short)?,
                 },
                 ERR_KIND_MISMATCH => BusError::KindMismatch {
-                    register: reader.u16().ok_or_else(|| short())?,
-                    expected: reader.kind().ok_or_else(|| short())?,
-                    found: reader.value().ok_or_else(|| short())?,
+                    register: reader.u16().ok_or_else(short)?,
+                    expected: reader.kind().ok_or_else(short)?,
+                    found: reader.value().ok_or_else(short)?,
                 },
                 ERR_INVALID_REQUEST => BusError::InvalidRequest {
-                    detail: reader.text().ok_or_else(|| short())?,
+                    detail: reader.text().ok_or_else(short)?,
                 },
                 code => return Err(format!("unknown error code {code:#04x}")),
             };
@@ -500,11 +500,7 @@ mod tests {
     fn response_and_error_serde_roundtrip_and_shape() {
         let responses = [
             BusResponse::Sample {
-                sample: Sample::new(
-                    Value::Int(-3),
-                    Quality::Uncertain(QualityReason::Substituted),
-                    Tick(9),
-                ),
+                sample: Sample::good(Value::Int(-3), Tick(9)),
             },
             BusResponse::Written { tick: Tick(7) },
             BusResponse::Stepped { tick: Tick(8) },
@@ -555,6 +551,28 @@ mod tests {
             .unwrap(),
             r#"{"result":"error","error":{"kind":"unknown_register","register":4}}"#
         );
+        // The serde contract carries a full `Sample`, quality included;
+        // the wire form does not — a register holds a value, and a
+        // decoded sample is always Good.
+        let degraded = BusResponse::Sample {
+            sample: Sample::new(
+                Value::Int(-3),
+                Quality::Uncertain(QualityReason::Substituted),
+                Tick(9),
+            ),
+        };
+        let json = serde_json::to_string(&degraded).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BusResponse>(&json).unwrap(),
+            degraded
+        );
+        let wire = encode_response(&degraded);
+        assert_eq!(
+            decode_response(&wire[2..]).unwrap(),
+            BusResponse::Sample {
+                sample: Sample::good(Value::Int(-3), Tick(9)),
+            }
+        );
     }
 
     #[test]
@@ -564,20 +582,20 @@ mod tests {
         // client drops the link; neither panics.
         for body in [
             &[][..],
-            &[0x01][..],                 // read register, missing address
-            &[0x02, 0, 1][..],           // write, missing value
-            &[0x02, 0, 1, 0x09][..],     // write, unknown kind tag
-            &[0x03, 0][..],              // trailing byte after list
-            &[0xff][..],                 // unknown request tag
-            &[0x01, 0][..],              // read, truncated address
+            &[0x01][..],             // read register, missing address
+            &[0x02, 0, 1][..],       // write, missing value
+            &[0x02, 0, 1, 0x09][..], // write, unknown kind tag
+            &[0x03, 0][..],          // trailing byte after list
+            &[0xff][..],             // unknown request tag
+            &[0x01, 0][..],          // read, truncated address
         ] {
             assert!(decode_request(body).is_err(), "{body:02x?}");
         }
         for body in [
             &[][..],
-            &[0x01, 0x03][..],           // sample, truncated value
-            &[0x05, 0x09][..],           // unknown error code
-            &[0x04, 0][..],              // stepped, truncated tick
+            &[0x01, 0x03][..], // sample, truncated value
+            &[0x05, 0x09][..], // unknown error code
+            &[0x04, 0][..],    // stepped, truncated tick
         ] {
             assert!(decode_response(body).is_err(), "{body:02x?}");
         }

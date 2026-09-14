@@ -482,8 +482,8 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         .iter()
         .map(|(name, channel)| (name.clone(), channel.value_type))
         .collect();
-    let parameters = DeviceParameters::parse(spec.parameters, &channels)
-        .map_err(DeviceError::parameters)?;
+    let parameters =
+        DeviceParameters::parse(spec.parameters, &channels).map_err(DeviceError::parameters)?;
     let address = parameters.address.as_str();
     let addresses: Vec<_> = address
         .to_socket_addrs()

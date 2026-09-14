@@ -187,26 +187,35 @@ mod tests {
     #[test]
     fn write_then_read_stamps_the_current_tick() {
         let bank = bank();
-        assert_eq!(bank.read(0).unwrap(), Sample::good(Value::Float(1.5), Tick(0)));
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(0))
+        );
 
         let tick = bank.write(0, Value::Float(2.5)).unwrap();
         assert_eq!(tick, Tick(0));
-        assert_eq!(bank.read(0).unwrap(), Sample::good(Value::Float(2.5), Tick(0)));
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(2.5), Tick(0))
+        );
 
         assert_eq!(bank.step(), Tick(1));
         assert_eq!(bank.write(0, Value::Float(3.5)).unwrap(), Tick(1));
-        assert_eq!(bank.read(0).unwrap(), Sample::good(Value::Float(3.5), Tick(1)));
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(3.5), Tick(1))
+        );
         // A register untouched by the step keeps its stamped tick.
-        assert_eq!(bank.read(4).unwrap(), Sample::good(Value::Bool(false), Tick(0)));
+        assert_eq!(
+            bank.read(4).unwrap(),
+            Sample::good(Value::Bool(false), Tick(0))
+        );
     }
 
     #[test]
     fn errors_are_named() {
         let bank = bank();
-        assert_eq!(
-            bank.read(9),
-            Err(BusError::UnknownRegister { register: 9 })
-        );
+        assert_eq!(bank.read(9), Err(BusError::UnknownRegister { register: 9 }));
         assert_eq!(
             bank.write(0, Value::Bool(true)),
             Err(BusError::KindMismatch {
@@ -232,7 +241,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            RegisterBank::new(decls),
+            RegisterBank::new(decls).map(|_| ()),
             Err(BankError::DuplicateRegister(0))
         );
     }

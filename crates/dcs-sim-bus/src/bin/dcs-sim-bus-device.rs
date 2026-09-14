@@ -19,7 +19,7 @@
 //! loop and closes client connections before the process exits.
 
 use dcs_model::{DeviceId, PlantModel};
-use dcs_sim_bus::{BusServer, DeviceParameters, DEVICE_KIND, RegisterBank, RegisterDecl};
+use dcs_sim_bus::{BusServer, DEVICE_KIND, DeviceParameters, RegisterBank, RegisterDecl};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::BTreeMap;
@@ -127,19 +127,23 @@ fn build(options: &Options) -> Result<(BusServer, String), String> {
         .collect();
     let parameters = DeviceParameters::parse(&device.parameters, &channels)
         .map_err(|error| format!("device {} has invalid parameters: {error}", id.0))?;
-    let decls = parameters.registers.iter().map(|(name, declaration)| {
-        RegisterDecl {
+    let decls = parameters
+        .registers
+        .iter()
+        .map(|(name, declaration)| RegisterDecl {
             register: declaration.register,
             initial: declaration
                 .initial
                 .unwrap_or_else(|| neutral(channels[name.as_str()])),
-        }
-    });
+        });
     let bank = RegisterBank::new(decls).map_err(|error| error.to_string())?;
-    let listen = options.listen.clone().unwrap_or_else(|| parameters.address.clone());
-    BusServer::bind(listen.as_str(), bank)
-        .map(|server| (server, listen))
-        .map_err(|error| format!("cannot bind {listen}: {error}"))
+    let listen = options
+        .listen
+        .clone()
+        .unwrap_or_else(|| parameters.address.clone());
+    let server = BusServer::bind(listen.as_str(), bank)
+        .map_err(|error| format!("cannot bind {listen}: {error}"))?;
+    Ok((server, listen))
 }
 
 /// A channel's value before the first write: the neutral value of its
@@ -167,7 +171,10 @@ fn main() -> ExitCode {
     // With a port of 0 the bound address is learnable only here; stderr
     // keeps the protocol's only output on the wire.
     match server.local_addr() {
-        Ok(addr) => eprintln!("serving device {} on {addr} (declared {listen})", options.device),
+        Ok(addr) => eprintln!(
+            "serving device {} on {addr} (declared {listen})",
+            options.device
+        ),
         Err(error) => return fail(format!("cannot report the bound address: {error}")),
     }
     let mut signals = match Signals::new([SIGINT, SIGTERM]) {
