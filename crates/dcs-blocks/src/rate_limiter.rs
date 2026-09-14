@@ -171,15 +171,23 @@ impl Component for RateLimiter {
         Ok(())
     }
 
+    /// Reports the declared `max_delta` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("max_delta", Value::Float(self.max_delta));
+        parameters
+    }
+
     /// Captures the value `out` is slewing from — absent before the
     /// first finite input — plus the tuned `max_delta`, so a
     /// checkpointed limiter continues mid-slew under the same bound.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         if let Some(current) = self.current {
             state.insert("current", Value::Float(current));
         }
-        state.insert("max_delta", Value::Float(self.max_delta));
         state
     }
 

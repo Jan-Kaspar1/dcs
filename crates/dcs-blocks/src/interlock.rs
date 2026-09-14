@@ -214,13 +214,20 @@ impl Component for Interlock {
         Ok(())
     }
 
+    /// Reports the declared `safe_value` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("safe_value", Value::Float(self.safe_value));
+        parameters
+    }
+
     /// Captures the tuned `safe_value` — the interlock is otherwise
     /// stateless, but runtime tuning is run state a standby must
     /// inherit.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
-        state.insert("safe_value", Value::Float(self.safe_value));
-        state
+        self.report_parameters()
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {

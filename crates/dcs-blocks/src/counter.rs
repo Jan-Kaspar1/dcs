@@ -172,14 +172,22 @@ impl Component for Counter {
         Ok(())
     }
 
+    /// Reports the declared `preset` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("preset", Value::Int(self.preset as i64));
+        parameters
+    }
+
     /// Captures the accumulated count, the previous `in` reading — the
     /// state a standby needs to continue mid-count without recounting a
     /// held-high input's edge — and the tuned `preset`.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("count", Value::Int(self.count as i64));
         state.insert("previous", Value::Bool(self.previous));
-        state.insert("preset", Value::Int(self.preset as i64));
         state
     }
 

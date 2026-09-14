@@ -11,9 +11,10 @@ use crate::checkpoint::{
 };
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry,
-    Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics,
+    ComponentParameters, Direction, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
+    ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
+    TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -816,9 +817,59 @@ impl<'d> Executor<'d> {
     /// port's live value without re-resolving the model's wiring.
     /// The `forces` section lists the active force set — each forced
     /// point with the value the image substitutes — so a monitoring
-    /// consumer can badge forced points.
+    /// consumer can badge forced points. The `parameters` section
+    /// reports each component's current parameter values — its
+    /// [`report_parameters`](Component::report_parameters) result
+    /// filtered to the names its descriptor declares, so only declared
+    /// names appear even when a kind's internal state holds more — in
+    /// the same scan order as `components` and `descriptors`.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
+        let descriptors: Vec<_> = self
+            .components
+            .iter()
+            .map(|entry| {
+                let mut descriptor = entry.component.describe();
+                // Serving-layer annotation: a port's `point` is the
+                // bound point of its same-named declared I/O
+                // requirement; a port naming no declared requirement
+                // is unwired and reports `None`.
+                let bound: HashMap<String, PointId> = entry
+                    .component
+                    .io_requirements()
+                    .into_iter()
+                    .map(|requirement| (requirement.name, requirement.point))
+                    .collect();
+                for port in &mut descriptor.ports {
+                    port.point = bound.get(&port.name).copied();
+                }
+                descriptor
+            })
+            .collect();
+        // The parameter section reports each component's
+        // `report_parameters` filtered to the names its descriptor
+        // declares — only declared names appear even when a kind's
+        // internal state holds more.
+        let parameters = self
+            .components
+            .iter()
+            .zip(&descriptors)
+            .map(|(entry, descriptor)| ComponentParameters {
+                name: entry.component.name().to_string(),
+                values: entry
+                    .component
+                    .report_parameters()
+                    .iter()
+                    .filter(|(name, _)| {
+                        descriptor
+                            .parameters
+                            .iter()
+                            .any(|parameter| parameter.name == *name)
+                    })
+                    .map(|(name, value)| (name.to_string(), value))
+                    .collect(),
+            })
+            .collect();
         TelemetrySnapshot {
             tick: self.tick,
             points: self
@@ -840,27 +891,8 @@ impl<'d> Executor<'d> {
                     last_error: entry.last_error.clone(),
                 })
                 .collect(),
-            descriptors: self
-                .components
-                .iter()
-                .map(|entry| {
-                    let mut descriptor = entry.component.describe();
-                    // Serving-layer annotation: a port's `point` is the
-                    // bound point of its same-named declared I/O
-                    // requirement; a port naming no declared requirement
-                    // is unwired and reports `None`.
-                    let bound: HashMap<String, PointId> = entry
-                        .component
-                        .io_requirements()
-                        .into_iter()
-                        .map(|requirement| (requirement.name, requirement.point))
-                        .collect();
-                    for port in &mut descriptor.ports {
-                        port.point = bound.get(&port.name).copied();
-                    }
-                    descriptor
-                })
-                .collect(),
+            descriptors,
+            parameters,
             io_health: IoHealth {
                 driver: self.driver.diagnostics(),
                 ..self.io_health.clone()
@@ -3459,6 +3491,13 @@ mod tests {
             Ok(())
         }
 
+        fn report_parameters(&self) -> StateMap {
+            let mut parameters = StateMap::new();
+            parameters.insert("gain", Value::Float(self.gain));
+            parameters.insert("limit", Value::Float(self.limit));
+            parameters
+        }
+
         fn capture_state(&self) -> StateMap {
             let mut state = StateMap::new();
             state.insert("gain", Value::Float(self.gain));
@@ -3749,6 +3788,155 @@ mod tests {
         .unwrap();
         restored.scan().unwrap();
         assert_eq!(driver_value(&standby, 20), Value::Float(4.0));
+
+        // A checkpoint/restore mid-tune reports identically from the
+        // fresh executor: the restored run's parameter section matches
+        // the captured one's exactly.
+        assert_eq!(
+            restored.snapshot().parameters,
+            executor.snapshot().parameters
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_current_parameter_values() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+        executor.scan().unwrap();
+
+        // The section aligns 1:1 with the diagnostics and descriptors in
+        // scan order and carries each declared parameter's standing
+        // value.
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.parameters.len(), snapshot.components.len());
+        assert_eq!(snapshot.parameters.len(), snapshot.descriptors.len());
+        let looped = &snapshot.parameters[0];
+        assert_eq!(looped.name, "loop");
+        assert_eq!(
+            looped.values,
+            [
+                ("gain".to_string(), Value::Float(2.0)),
+                ("limit".to_string(), Value::Float(10.0)),
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        // The reported values are what the same scan's checkpoint
+        // persists for the component — one vocabulary.
+        let captured = &executor.checkpoint().components["loop"];
+        for (name, value) in &looped.values {
+            assert_eq!(captured.get(name), Some(*value), "parameter {name}");
+        }
+
+        // A receipted tune reports its new value in the next snapshot.
+        executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().parameters[0].values["gain"],
+            Value::Float(4.0)
+        );
+    }
+
+    #[test]
+    fn parameterless_component_reports_an_empty_section() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        driver.write(PointId(10), Value::Float(1.0)).unwrap();
+        let mut executor = tuning_rig(&driver);
+        executor.scan().unwrap();
+
+        // `Scale` declares no parameters and never overrides the hook:
+        // its entry is present with an empty value set, and the rest of
+        // its telemetry is unchanged.
+        let scale = &executor.snapshot().parameters[1];
+        assert_eq!(scale.name, "a");
+        assert!(scale.values.is_empty());
+    }
+
+    /// A component whose `report_parameters` reports beyond the
+    /// declared set — the snapshot must keep only the descriptor's
+    /// declared names.
+    struct OverReporting {
+        name: &'static str,
+        output: PointId,
+    }
+
+    impl Component for OverReporting {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![IoRequirement::output::<f64>("out", self.output)]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            io.write_typed(self.output, 1.0)?;
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "over-reporting".to_string(),
+                label: self.name.to_string(),
+                ports: Vec::new(),
+                parameters: vec![ParameterDescriptor {
+                    name: "declared".to_string(),
+                    kind: ValueKind::Float,
+                    range: None,
+                }],
+            }
+        }
+
+        fn report_parameters(&self) -> StateMap {
+            let mut parameters = StateMap::new();
+            parameters.insert("declared", Value::Float(1.0));
+            // Internal state that is no declared parameter must not leak
+            // into the snapshot's parameter section.
+            parameters.insert("internal", Value::Float(2.0));
+            parameters
+        }
+    }
+
+    #[test]
+    fn undeclared_reported_names_never_reach_the_snapshot() {
+        let driver = StubDriver::new(&[float(20)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            [(PointId(20), Direction::Out, ValueKind::Float)]
+                .into_iter()
+                .collect(),
+            vec![Box::new(OverReporting {
+                name: "over",
+                output: PointId(20),
+            })],
+        )
+        .unwrap();
+        executor.scan().unwrap();
+
+        let reported = &executor.snapshot().parameters[0];
+        assert_eq!(reported.name, "over");
+        assert_eq!(
+            reported.values,
+            [("declared".to_string(), Value::Float(1.0))]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn parameter_sections_match_across_identical_runs() {
+        let run = || {
+            let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+            driver.write(PointId(10), Value::Float(1.0)).unwrap();
+            let mut executor = tuning_rig(&driver);
+            executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
+            executor.run(3).unwrap();
+            executor.snapshot().parameters
+        };
+        assert_eq!(run(), run());
     }
 
     /// A stateful component: counts its scans into an `Int` output and

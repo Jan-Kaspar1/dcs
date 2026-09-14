@@ -109,11 +109,18 @@ impl Component for DigitalOutput {
         Ok(())
     }
 
+    /// Reports the declared `invert` — the same field
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        parameters.insert("invert", Value::Bool(self.invert));
+        parameters
+    }
+
     /// Captures the tuned `invert` — the block's only run state.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
-        state.insert("invert", Value::Bool(self.invert));
-        state
+        self.report_parameters()
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
