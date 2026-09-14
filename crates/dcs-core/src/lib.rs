@@ -56,4 +56,6 @@ pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
 pub use state::{StateError, StateMap};
-pub use telemetry::{ComponentDiagnostics, IoFault, IoHealth, PointTelemetry, TelemetrySnapshot};
+pub use telemetry::{
+    ComponentDiagnostics, ForcedPoint, IoFault, IoHealth, PointTelemetry, TelemetrySnapshot,
+};

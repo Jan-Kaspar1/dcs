@@ -12,8 +12,25 @@
 
 use crate::descriptor::ComponentDescriptor;
 use crate::io::{Direction, DriverDiagnostics, IoError};
-use crate::signal::{PointId, Sample, Tick};
+use crate::signal::{PointId, Sample, Tick, Value};
 use serde::{Deserialize, Serialize};
+
+/// One point's active operator force: the point and the value the scan
+/// image substitutes for its input read while the force stands.
+///
+/// A force is applied by [`Command::ForcePoint`](crate::Command::ForcePoint)
+/// and released by [`Command::UnforcePoint`](crate::Command::UnforcePoint);
+/// while it stands the point's [`PointTelemetry::sample`] reports the
+/// forced value stamped
+/// [`Quality::Uncertain`](crate::Quality::Uncertain)`(`[`QualityReason::Substituted`](crate::QualityReason::Substituted)`)`,
+/// so this list is what a monitoring UI badges from.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ForcedPoint {
+    /// The forced point.
+    pub point: PointId,
+    /// The value the force substitutes.
+    pub value: Value,
+}
 
 /// One known point's latest observed sample.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -127,6 +144,12 @@ pub struct TelemetrySnapshot {
     /// executor collects, the scan-overrun count the pacing shell feeds,
     /// and the driver's volunteered transport diagnostics.
     pub io_health: IoHealth,
+    /// The active force set — every point currently pinned to an
+    /// operator-forced value — ordered by ascending point id, so equal
+    /// runs serialize identically. Empty when nothing is forced;
+    /// absent from snapshots serialized before forces existed.
+    #[serde(default)]
+    pub forces: Vec<ForcedPoint>,
 }
 
 #[cfg(test)]
@@ -222,11 +245,22 @@ mod tests {
                     last_error: Some("no live connection to the plant server".to_string()),
                 }),
             },
+            forces: vec![ForcedPoint {
+                point: PointId(10),
+                value: Value::Float(7.0),
+            }],
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
             serde_json::from_str::<TelemetrySnapshot>(&json).unwrap(),
             snapshot
         );
+
+        // A snapshot serialized before forces existed carries no field
+        // and reads back with an empty force set.
+        let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        document.as_object_mut().unwrap().remove("forces");
+        let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
+        assert_eq!(legacy.forces, Vec::new());
     }
 }

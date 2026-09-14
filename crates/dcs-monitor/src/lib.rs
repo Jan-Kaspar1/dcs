@@ -65,7 +65,8 @@
 //! under the model-declared groups, with ungrouped points filed under the
 //! documented `"ungrouped"` default — then polls `/snapshot`, `/history`,
 //! and `/journal` on one shared one-second cadence — the snapshot
-//! refreshes each point's value, quality, and tick; the history
+//! refreshes each point's value, quality, and tick and badges each
+//! point in its force set; the history
 //! increments grow each point's inline-SVG trend through `since`-cursor
 //! polling; the journal pane lists quality transitions and settled
 //! command receipts in tick order — and submits `write_value` commands to
