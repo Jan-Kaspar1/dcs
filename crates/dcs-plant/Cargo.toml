@@ -1,0 +1,24 @@
+[package]
+name = "dcs-plant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dcs-plant-server"
+path = "src/main.rs"
+
+[dependencies]
+dcs-assembly = { path = "../dcs-assembly" }
+dcs-model = { path = "../dcs-model" }
+dcs-sim = { path = "../dcs-sim" }
+dcs-sim-net = { path = "../dcs-sim-net" }
+# `float_roundtrip` keeps f64 element parameters bit-exact across the
+# dynamics document, matching the wire protocol's guarantee.
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+signal-hook = "0.3.18"
+
+[dev-dependencies]
+dcs-core = { path = "../dcs-core" }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }

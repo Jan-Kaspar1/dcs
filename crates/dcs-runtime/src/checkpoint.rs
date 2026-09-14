@@ -23,7 +23,7 @@
 //! `driver` empty and the restore skips it.
 
 use crate::executor::WiringError;
-use dcs_core::{PointId, Sample, StateError, StateMap, Tick};
+use dcs_core::{PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -91,6 +91,41 @@ pub enum RestoreError {
     Component(StateError),
     /// The driver rejected its captured state.
     Driver(StateError),
+    /// The checkpoint's output image names a point the executor's map
+    /// does not serve as `Out` — a checkpoint from a different I/O
+    /// mapping.
+    UnknownOutput {
+        /// The unserved or misdirected point.
+        point: PointId,
+    },
+    /// A checkpointed output's value kind differs from the kind the
+    /// point map declares for it — again a different mapping's artifact.
+    IncompatibleOutput {
+        /// The mismatched point.
+        point: PointId,
+        /// The kind the point map declares.
+        expected: ValueKind,
+        /// The kind the checkpoint carries.
+        found: Value,
+    },
+    /// The checkpoint's internal section names a point the executor's
+    /// map does not serve as an internal `In` — a checkpoint from a
+    /// different I/O mapping.
+    UnknownInternal {
+        /// The unserved or misdirected point.
+        point: PointId,
+    },
+    /// A checkpointed internal sample's value kind differs from the kind
+    /// the point map declares for it — again a different mapping's
+    /// artifact.
+    IncompatibleInternal {
+        /// The mismatched point.
+        point: PointId,
+        /// The kind the point map declares.
+        expected: ValueKind,
+        /// The kind the checkpoint carries.
+        found: Value,
+    },
 }
 
 impl fmt::Display for RestoreError {
@@ -106,6 +141,34 @@ impl fmt::Display for RestoreError {
             }
             Self::Component(error) => write!(f, "component state restore failed: {error}"),
             Self::Driver(error) => write!(f, "driver state restore failed: {error}"),
+            Self::UnknownOutput { point } => write!(
+                f,
+                "checkpoint carries output point {} the point map does not serve as out",
+                point.0
+            ),
+            Self::IncompatibleOutput {
+                point,
+                expected,
+                found,
+            } => write!(
+                f,
+                "checkpoint output point {} expects {expected:?}, found {found:?}",
+                point.0
+            ),
+            Self::UnknownInternal { point } => write!(
+                f,
+                "checkpoint carries internal point {} the point map does not serve as an internal in point",
+                point.0
+            ),
+            Self::IncompatibleInternal {
+                point,
+                expected,
+                found,
+            } => write!(
+                f,
+                "checkpoint internal point {} expects {expected:?}, found {found:?}",
+                point.0
+            ),
         }
     }
 }

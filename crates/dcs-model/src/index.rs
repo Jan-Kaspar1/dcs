@@ -3,17 +3,17 @@
 //! [`SignalIndex`] is a derived view of a [`PlantModel`]: one [`PointSignal`]
 //! entry per declared [`IoPoint`](crate::IoPoint), ordered by [`PointId`],
 //! carrying the metadata a monitoring UI needs — signal name, engineering
-//! unit, description, direction, and value type — so consumers never walk
-//! the device/channel/signal graph themselves. [`PlantModel::signal_index`]
-//! builds it.
+//! unit, description, display group, direction, and value type — so
+//! consumers never walk the device/channel/signal graph themselves.
+//! [`PlantModel::signal_index`] builds it.
 //!
 //! Resolution rules:
 //!
 //! - A point sourced by a [`Signal`](crate::Signal) copies the signal's
-//!   `name`, `unit`, and `description`; `direction` and `value_type` always
-//!   come from the point itself.
+//!   `name`, `unit`, `description`, and `group`; `direction` and
+//!   `value_type` always come from the point itself.
 //! - A point no signal sources gets a default entry: `signal` is `None`,
-//!   `name` is `"point-<id>"`, and `unit`/`description` are `None`.
+//!   `name` is `"point-<id>"`, and `unit`/`description`/`group` are `None`.
 //! - When several signals source one point, the lowest [`SignalId`] wins, so
 //!   the index does not depend on document order.
 //! - A signal whose `source` is not a declared point cannot occur in a
@@ -43,6 +43,10 @@ pub struct PointSignal {
     pub unit: Option<String>,
     /// Human-facing description declared by the signal, if any.
     pub description: Option<String>,
+    /// Display group declared by the signal, if any. `None` means the
+    /// point is ungrouped; the monitoring UI files such points under its
+    /// documented default group.
+    pub group: Option<String>,
 }
 
 /// A derived view resolving every declared I/O point to its monitoring
@@ -96,6 +100,7 @@ impl PlantModel {
                     value_type: point.value_type,
                     unit: signal.unit.clone(),
                     description: signal.description.clone(),
+                    group: signal.group.clone(),
                 },
                 None => PointSignal {
                     point: point.id,
@@ -105,6 +110,7 @@ impl PlantModel {
                     value_type: point.value_type,
                     unit: None,
                     description: None,
+                    group: None,
                 },
             })
             .collect();
@@ -118,6 +124,7 @@ mod tests {
 
     const MINIMAL: &str = include_str!("../fixtures/minimal.json");
     const SIGNAL_INDEX: &str = include_str!("../fixtures/signal_index.json");
+    const SIGNAL_GROUPS: &str = include_str!("../fixtures/signal_groups.json");
     const EXPECTED_INDEX: &str = include_str!("../fixtures/signal_index.index.json");
 
     #[test]
@@ -147,6 +154,35 @@ mod tests {
             output.description.as_deref(),
             Some("Control valve position command")
         );
+
+        // The fixture predates the optional group field: every entry is
+        // ungrouped, including the signal-less point 11.
+        for entry in &index.points {
+            assert_eq!(entry.group, None, "{}", entry.name);
+        }
+    }
+
+    #[test]
+    fn index_carries_each_signals_display_group() {
+        let model = PlantModel::load(SIGNAL_GROUPS).unwrap();
+        let index = model.signal_index();
+        assert_eq!(index.points.len(), 4);
+
+        // Grouped signals pass their group through to their point's entry.
+        assert_eq!(
+            index.get(PointId(10)).unwrap().group.as_deref(),
+            Some("reactor")
+        );
+        assert_eq!(
+            index.get(PointId(11)).unwrap().group.as_deref(),
+            Some("reactor")
+        );
+        assert_eq!(
+            index.get(PointId(13)).unwrap().group.as_deref(),
+            Some("utilities")
+        );
+        // An ungrouped signal leaves its point's entry ungrouped.
+        assert_eq!(index.get(PointId(12)).unwrap().group, None);
     }
 
     #[test]
@@ -175,6 +211,7 @@ mod tests {
             assert_eq!(entry.name, format!("point-{}", entry.point.0));
             assert_eq!(entry.unit, None);
             assert_eq!(entry.description, None);
+            assert_eq!(entry.group, None);
         }
         // Direction and value type still come from the point.
         let entry = index.get(PointId(11)).unwrap();
@@ -191,11 +228,13 @@ mod tests {
             source: PointId(10),
             unit: None,
             description: None,
+            group: Some("aliases".to_string()),
         });
         let index = model.signal_index();
         let entry = index.get(PointId(10)).unwrap();
         assert_eq!(entry.signal, Some(SignalId(50)));
         assert_eq!(entry.name, "alias");
+        assert_eq!(entry.group.as_deref(), Some("aliases"));
     }
 
     #[test]

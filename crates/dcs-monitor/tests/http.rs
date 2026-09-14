@@ -303,17 +303,21 @@ fn signals_endpoint_serves_the_models_metadata() {
         );
         assert_eq!(input.direction, dcs_model::Direction::In);
         assert_eq!(input.value_type, ValueKind::Float);
+        // The signal's display group rides the metadata endpoint.
+        assert_eq!(input.group.as_deref(), Some("reactor"));
 
         let output = index.get(PointId(20)).unwrap();
         assert_eq!(output.name, "heater-command");
         assert_eq!(output.unit.as_deref(), Some("%"));
         assert_eq!(output.direction, dcs_model::Direction::Out);
+        assert_eq!(output.group, None);
 
         // A point no signal sources still gets a default entry.
         let spare = index.get(PointId(30)).unwrap();
         assert_eq!(spare.signal, None);
         assert_eq!(spare.name, "point-30");
         assert_eq!(spare.unit, None);
+        assert_eq!(spare.group, None);
     });
 }
 
@@ -394,6 +398,36 @@ fn page_serves_trend_and_journal_markup() {
         }
         // The page stays a single dependency-free asset.
         assert!(!page.contains("src="), "page references external assets");
+    });
+}
+
+#[test]
+fn page_groups_its_listing_by_the_models_signal_groups() {
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        // The listing is organized client-side from the model's declared
+        // display groups: a per-group header row and the bucketing logic.
+        for needle in [
+            "point-group",
+            "function groupedPoints()",
+            "function pointGroup(meta)",
+        ] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        // The client-side default: a point whose entry carries no group —
+        // like the served index's ungrouped and signal-less points — is
+        // filed under the documented "ungrouped" group.
+        assert!(
+            page.contains("const DEFAULT_GROUP = \"ungrouped\""),
+            "page lacks the documented default group"
+        );
+        assert!(
+            page.contains("meta.group || DEFAULT_GROUP"),
+            "page lacks the ungrouped fallback"
+        );
+        let index = client.signals().unwrap();
+        assert_eq!(index.get(PointId(20)).unwrap().group, None);
+        assert_eq!(index.get(PointId(30)).unwrap().group, None);
     });
 }
 
@@ -489,6 +523,73 @@ fn trend_and_journal_feeds_track_the_run() {
                 },
             }
         );
+    });
+}
+
+#[test]
+fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
+    // The paced binding a controller uses: the hosting loop drives
+    // paced_scan, so POST /scan is refused — the wall clock owns the
+    // schedule and an endpoint-driven tick would break it.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let map: PointMap = [
+        (PointId(10), Direction::In, ValueKind::Float),
+        (PointId(20), Direction::Out, ValueKind::Float),
+        (PointId(30), Direction::Out, ValueKind::Float),
+    ]
+    .into_iter()
+    .collect();
+    let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
+    let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+
+        // The paced loop's entry point: the scan runs through the shared
+        // lock and is recorded like an endpoint-driven one.
+        assert_eq!(monitor.paced_scan(), Ok(Tick(1)));
+        assert_eq!(monitor.tick(), Tick(1));
+        assert_eq!(client.snapshot().unwrap().tick, Tick(1));
+        assert_eq!(
+            point_value(&monitor.snapshot(), 20),
+            Some(Value::Float(6.0))
+        );
+        let history = client.history(&[PointId(10)], 0).unwrap();
+        assert_eq!(history[0].samples.len(), 1);
+
+        // Externally requested scans are refused under pacing.
+        let (status, body) = client
+            .request("POST", "/scan", Some(r#"{"scans":1}"#))
+            .unwrap();
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("paced"), "{body}");
+        assert_eq!(monitor.tick(), Tick(1));
+
+        // Commands still queue for the paced boundary and settle there.
+        let receipt = client
+            .command(&write_value(10, ValueKind::Float, Value::Float(7.0)))
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+        monitor.paced_scan().unwrap();
+        assert_eq!(
+            client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            point_value(&client.snapshot().unwrap(), 20),
+            Some(Value::Float(14.0))
+        );
+
+        monitor.shutdown();
     });
 }
 

@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-8ai",
+      "channels": {
+        "ch0": { "direction": "in", "value_type": "Float" },
+        "ch1": { "direction": "in", "value_type": "Bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-4ao",
+      "channels": {
+        "ch0": { "direction": "out", "value_type": "Float" },
+        "ch1": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "ch0" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Bool",
+      "channel": { "device": 1, "name": "ch1" }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "ch0" }
+    },
+    {
+      "id": 13,
+      "direction": "out",
+      "value_type": "Float",
+      "channel": { "device": 2, "name": "ch1" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "reactor-temperature",
+      "source": 10,
+      "unit": "degC",
+      "description": "Reactor core temperature",
+      "group": "reactor"
+    },
+    {
+      "id": 101,
+      "name": "reactor-level-switch",
+      "source": 11,
+      "description": "Reactor high level switch",
+      "group": "reactor"
+    },
+    {
+      "id": 102,
+      "name": "valve-command",
+      "source": 12,
+      "unit": "%",
+      "description": "Control valve position command"
+    },
+    {
+      "id": 103,
+      "name": "utility-pump-command",
+      "source": 13,
+      "unit": "%",
+      "group": "utilities"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "gain",
+      "parameters": { "k": { "Float": 2.0 } },
+      "ports": {
+        "in": { "direction": "in", "value_type": "Float" },
+        "out": { "direction": "out", "value_type": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 12 }
+    }
+  ]
+}

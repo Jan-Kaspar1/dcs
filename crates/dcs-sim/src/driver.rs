@@ -1,7 +1,7 @@
 //! The [`SimDriver`] backend: point storage, loopback routing, process
 //! element stepping, and fault injection behind the [`IoDriver`] boundary.
 
-use crate::map::{ChannelMap, ConfigError, Loopback, ProcessElement};
+use crate::map::{ChannelMap, ConfigError, Direction, Loopback, ProcessElement};
 use dcs_core::{
     IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
     ValueKind,
@@ -40,10 +40,32 @@ impl Fault {
     }
 }
 
+/// One bound point's description, as [`SimDriver::points`] reports it.
+///
+/// The listing a plant server answers point-census requests with: the
+/// binding's direction, the sample readers currently observe — the stored
+/// value plus any injected quality fault — and the active [`Fault`], if
+/// any. A point carrying an error fault still reports its stored sample
+/// here; `fault` says why [`IoDriver`] accesses fail instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PointInfo {
+    /// The bound point.
+    pub point: PointId,
+    /// Whether the controller reads (`In`) or writes (`Out`) the point.
+    pub direction: Direction,
+    /// The sample readers currently observe.
+    pub sample: Sample,
+    /// The fault injected on the point, if any.
+    pub fault: Option<Fault>,
+}
+
 /// One bound point's runtime state.
 struct PointState {
     /// The point's declared kind, taken from the binding's initial value.
     kind: ValueKind,
+    /// The binding's direction: whether the controller reads or writes
+    /// the point.
+    direction: Direction,
     /// The stored sample: the last write, loopback, or element update.
     sample: Sample,
     /// The active injected fault, if any.
@@ -239,6 +261,7 @@ impl SimDriver {
                 binding.point,
                 PointState {
                     kind: binding.kind(),
+                    direction: binding.direction,
                     sample: Sample::good(binding.initial, Tick::ZERO),
                     fault: None,
                 },
@@ -328,6 +351,28 @@ impl SimDriver {
             }
         }
         tick
+    }
+
+    /// Every bound point's current description, ordered by [`PointId`].
+    ///
+    /// The driver's point census — what a server sharing this plant
+    /// answers a point-listing request with. Each entry reports the
+    /// binding's direction, the sample readers currently observe
+    /// (injected quality faults included), and the active [`Fault`].
+    pub fn points(&self) -> Vec<PointInfo> {
+        let state = self.state.lock().unwrap();
+        let mut points: Vec<PointInfo> = state
+            .points
+            .iter()
+            .map(|(&point, point_state)| PointInfo {
+                point,
+                direction: point_state.direction,
+                sample: point_state.effective_sample(),
+                fault: point_state.fault,
+            })
+            .collect();
+        points.sort_by_key(|info| info.point);
+        points
     }
 
     /// Injects `fault` on `point`, replacing any fault already active.
@@ -853,6 +898,58 @@ mod tests {
         .unwrap();
         sim.write(PointId(5), Value::Bool(true)).unwrap();
         assert_eq!(sim.read(PointId(5)).unwrap().value, Value::Bool(true));
+    }
+
+    #[test]
+    fn points_lists_every_binding_with_sample_direction_and_fault() {
+        let map = ChannelMap::new()
+            .with_point(float_point(20, Direction::Out))
+            .with_point(float_point(10, Direction::In))
+            .with_point(binding(5, Direction::In, Value::Bool(false)))
+            .with_loopback(Loopback {
+                output: PointId(20),
+                input: PointId(10),
+            });
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(20), Value::Float(3.5)).unwrap();
+        sim.step(0.1);
+        sim.inject_fault(PointId(5), Fault::Timeout).unwrap();
+        sim.inject_fault(
+            PointId(10),
+            Fault::Quality(Quality::Uncertain(QualityReason::Stale)),
+        )
+        .unwrap();
+
+        let points = sim.points();
+        // Ordered by point id regardless of binding order.
+        assert_eq!(
+            points.iter().map(|info| info.point).collect::<Vec<_>>(),
+            vec![PointId(5), PointId(10), PointId(20)]
+        );
+
+        let bool_in = &points[0];
+        assert_eq!(bool_in.direction, Direction::In);
+        assert_eq!(bool_in.fault, Some(Fault::Timeout));
+        // An error-faulted point still lists its stored sample.
+        assert_eq!(bool_in.sample.value, Value::Bool(false));
+
+        let looped = &points[1];
+        assert_eq!(looped.direction, Direction::In);
+        assert_eq!(looped.sample.value, Value::Float(3.5));
+        // The quality fault is reflected in the listed sample.
+        assert_eq!(
+            looped.sample.quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+        assert_eq!(
+            looped.fault,
+            Some(Fault::Quality(Quality::Uncertain(QualityReason::Stale)))
+        );
+
+        let out = &points[2];
+        assert_eq!(out.direction, Direction::Out);
+        assert_eq!(out.sample.value, Value::Float(3.5));
+        assert_eq!(out.fault, None);
     }
 
     #[test]

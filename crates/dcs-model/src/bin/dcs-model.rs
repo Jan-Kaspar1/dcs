@@ -6,7 +6,8 @@
 //! - `dcs-model validate <file>` parses and validates a model document,
 //!   printing every validation error and exiting nonzero on failure.
 //! - `dcs-model summary <file>` prints counts of devices, io_points,
-//!   signals, components, and connections.
+//!   signals, components, and connections, plus the number of distinct
+//!   signal display groups declared.
 //! - `dcs-model signal-index <file>` emits the point-to-signal
 //!   [`SignalIndex`](dcs_model::SignalIndex) as JSON.
 //!
@@ -15,6 +16,7 @@
 //! a nonzero exit, never a panic.
 
 use dcs_model::{LoadError, PlantModel};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
@@ -77,16 +79,25 @@ fn validate(path: &str) -> Result<String, String> {
 
 fn summary(path: &str) -> Result<String, String> {
     let model = load(path)?;
+    // Signal groups are display metadata: report how many distinct groups
+    // the model declares; ungrouped signals do not add to the count.
+    let groups: BTreeSet<&str> = model
+        .signals
+        .iter()
+        .filter_map(|signal| signal.group.as_deref())
+        .collect();
     Ok(format!(
         "\
 devices: {}\n\
 io_points: {}\n\
 signals: {}\n\
+signal_groups: {}\n\
 components: {}\n\
 connections: {}",
         model.devices.len(),
         model.io_points.len(),
         model.signals.len(),
+        groups.len(),
         model.components.len(),
         model.connections.len()
     ))

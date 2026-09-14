@@ -10,8 +10,8 @@ use crate::checkpoint::{Checkpoint, RestoreError};
 use crate::component::{Component, ComponentIo, IoRequirement};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDiagnostics, Direction,
-    IoDriver, IoError, PointId, PointTelemetry, Quality, QualityReason, Sample, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    IoDriver, IoError, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
+    TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -788,27 +788,7 @@ impl<'d> Executor<'d> {
         checkpoint: &Checkpoint,
     ) -> Result<Self, RestoreError> {
         let mut executor = Self::new(driver, map, components)?;
-
-        // Component names are the run's component ids: the checkpoint's
-        // set must equal the registered set exactly.
-        for component in checkpoint.components.keys() {
-            if !executor
-                .components
-                .iter()
-                .any(|entry| entry.component.name() == component)
-            {
-                return Err(RestoreError::UnknownComponent {
-                    component: component.clone(),
-                });
-            }
-        }
-        for entry in &executor.components {
-            if !checkpoint.components.contains_key(entry.component.name()) {
-                return Err(RestoreError::MissingComponent {
-                    component: entry.component.name().to_string(),
-                });
-            }
-        }
+        executor.check_checkpoint(checkpoint)?;
 
         // Driver state before component state: a driver that does not
         // implement the contract rejects a captured section before any
@@ -837,6 +817,148 @@ impl<'d> Executor<'d> {
                 .map(|(&point, &sample)| (point, sample)),
         );
         Ok(executor)
+    }
+
+    /// Applies `checkpoint` to this executor in place — the running
+    /// standby's half of the redundancy contract.
+    ///
+    /// Where [`restore`](Executor::restore) builds a fresh equivalent
+    /// executor, `apply` realigns one that is already assembled and may
+    /// be mid-run: the same compatibility checks hold — the checkpoint's
+    /// component set must equal the registered set, its outputs must be
+    /// points the map serves as `Out` with the declared kinds, and its
+    /// internal section must name image-carried `In` points — then the
+    /// driver and each component restore their captured state, the tick
+    /// resumes from `checkpoint.tick`, and the output image becomes
+    /// exactly the checkpoint's while its internal `In` samples overlay
+    /// the image's held values. The next [`scan`](Executor::scan) then
+    /// continues the run the checkpoint captured.
+    ///
+    /// Like `restore`, a rejected apply changes nothing the run
+    /// observes: the executor captures its own state first and rolls
+    /// back to it when any element refuses its section, so a mismatched
+    /// checkpoint leaves a standby on its last-good alignment rather
+    /// than half-applied.
+    pub fn apply(&mut self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
+        self.check_checkpoint(checkpoint)?;
+
+        // Capture the current state for rollback: a map an element
+        // captured from itself always restores cleanly.
+        let driver_backup = self.driver.capture_state();
+        let component_backups: Vec<StateMap> = self
+            .components
+            .iter()
+            .map(|entry| entry.component.capture_state())
+            .collect();
+
+        // Driver before components, as in `restore`: the contract
+        // validates the whole map before applying, so a rejection here
+        // leaves the driver untouched.
+        if let Some(state) = &checkpoint.driver {
+            self.driver
+                .restore_state(state)
+                .map_err(RestoreError::Driver)?;
+        }
+        for (index, entry) in self.components.iter_mut().enumerate() {
+            let state = checkpoint
+                .components
+                .get(entry.component.name())
+                .expect("checked above");
+            if let Err(error) = entry.component.restore_state(state) {
+                for (restored, backup) in
+                    self.components[..index].iter_mut().zip(&component_backups)
+                {
+                    let _ = restored.component.restore_state(backup);
+                }
+                if checkpoint.driver.is_some()
+                    && let Some(backup) = &driver_backup
+                {
+                    let _ = self.driver.restore_state(backup);
+                }
+                return Err(RestoreError::Component(error));
+            }
+        }
+
+        self.tick = checkpoint.tick;
+        let mut image = self.image.borrow_mut();
+        // The output image becomes exactly the checkpoint's: drop stale
+        // `Out` samples so a value from the standby's own earlier scans
+        // cannot linger where the captured run never wrote. Internal `In`
+        // samples overlay rather than replace: a checkpoint carrying an
+        // `internal` section converges the standby's held values to the
+        // active's — a commanded setpoint included — while one without it
+        // (written before internal points existed) leaves the standby's
+        // last-known values standing.
+        image.retain(|point, _| {
+            self.map
+                .get(*point)
+                .is_none_or(|spec| spec.direction != Direction::Out)
+        });
+        image.extend(
+            checkpoint
+                .outputs
+                .iter()
+                .chain(checkpoint.internal.iter())
+                .map(|(&point, &sample)| (point, sample)),
+        );
+        Ok(())
+    }
+
+    /// The compatibility half of checkpoint restore and apply: the
+    /// checkpoint's component set must equal the registered set exactly,
+    /// every captured output must name a point the map serves as `Out`
+    /// with the declared value kind, and every captured internal sample
+    /// must name an image-carried `In` point with the declared kind.
+    fn check_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), RestoreError> {
+        // Component names are the run's component ids: the checkpoint's
+        // set must equal the registered set exactly.
+        for component in checkpoint.components.keys() {
+            if !self
+                .components
+                .iter()
+                .any(|entry| entry.component.name() == component)
+            {
+                return Err(RestoreError::UnknownComponent {
+                    component: component.clone(),
+                });
+            }
+        }
+        for entry in &self.components {
+            if !checkpoint.components.contains_key(entry.component.name()) {
+                return Err(RestoreError::MissingComponent {
+                    component: entry.component.name().to_string(),
+                });
+            }
+        }
+        for (&point, &sample) in &checkpoint.outputs {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::Out => {
+                    if spec.kind != sample.value.kind() {
+                        return Err(RestoreError::IncompatibleOutput {
+                            point,
+                            expected: spec.kind,
+                            found: sample.value,
+                        });
+                    }
+                }
+                _ => return Err(RestoreError::UnknownOutput { point }),
+            }
+        }
+        for (&point, &sample) in &checkpoint.internal {
+            match self.map.get(point) {
+                Some(spec) if spec.direction == Direction::In && spec.internal.is_some() => {
+                    if spec.kind != sample.value.kind() {
+                        return Err(RestoreError::IncompatibleInternal {
+                            point,
+                            expected: spec.kind,
+                            found: sample.value,
+                        });
+                    }
+                }
+                _ => return Err(RestoreError::UnknownInternal { point }),
+            }
+        }
+        Ok(())
     }
 
     /// Validates `command` against the point map, returning the target
@@ -2706,6 +2828,60 @@ mod tests {
         .unwrap();
         assert_eq!(
             restored.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+    }
+
+    #[test]
+    fn apply_converges_internal_in_samples() {
+        // The standby half of the transfer: an already-running executor
+        // realigns its held operator values to the checkpoint's, the same
+        // convergence `restore` gives a fresh one.
+        let driver = StubDriver::new(&[], &[]);
+        let mut standby = internal_rig(&driver);
+
+        let driver = StubDriver::new(&[], &[]);
+        let mut active = internal_rig(&driver);
+        active.submit_command(Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        active.scan().unwrap();
+        let checkpoint = active.checkpoint();
+
+        standby.apply(&checkpoint).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+
+        // A checkpoint's internal entries must name image-carried `In`
+        // points of the declared kind — a mismatched mapping is a named
+        // rejection, not a silent write.
+        let mut foreign = checkpoint.clone();
+        foreign
+            .internal
+            .insert(PointId(20), Sample::good(Value::Float(1.0), Tick(1)));
+        assert_eq!(
+            standby.apply(&foreign).unwrap_err(),
+            RestoreError::UnknownInternal { point: PointId(20) }
+        );
+        let mut foreign = checkpoint;
+        foreign
+            .internal
+            .insert(PointId(10), Sample::good(Value::Int(7), Tick(1)));
+        assert_eq!(
+            standby.apply(&foreign).unwrap_err(),
+            RestoreError::IncompatibleInternal {
+                point: PointId(10),
+                expected: ValueKind::Float,
+                found: Value::Int(7),
+            }
+        );
+        // A rejected apply changes nothing the run observes.
+        assert_eq!(
+            standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
         );
     }
