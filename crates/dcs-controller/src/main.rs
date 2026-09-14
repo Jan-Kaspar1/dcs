@@ -5,7 +5,8 @@
 //! tracking an active peer's checkpoints.
 //!
 //! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]`
+//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]
+//!         [--state-file PATH]`
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -37,6 +38,24 @@
 //! `dcs-sim-net`'s `PlantServer` instead of resolving the model's devices
 //! through the registry — the field-observing driver mode of the
 //! standby-field-observation decision.
+//!
+//! `--state-file PATH` persists the run for restart recovery — the
+//! no-peer half of the checkpoint machinery: the serde `Checkpoint`
+//! `GET /checkpoint` serves — versioned and fingerprinted per the
+//! checkpoint-versioning decision — is written to `PATH` at the end of
+//! every completed scan cycle, after the scan and the plant step, by
+//! write-then-rename so a crash mid-write cannot leave a torn file. When
+//! `PATH` exists at startup the run resumes from it: the checkpoint is
+//! applied to the freshly assembled executor before pacing begins, so
+//! the next scan continues the interrupted run tick-for-tick. Resume is
+//! all-or-nothing, the checkpoint-restore rule — an unreadable or
+//! unparseable file, an unsupported format version, or a fingerprint or
+//! structural mismatch (a state file captured under a different model)
+//! exits nonzero naming the reason rather than silently starting fresh;
+//! a missing file is a cold start. The standby path is unchanged — where
+//! a redundant peer exists it remains the preferred recovery story, its
+//! checkpoint stream converging a standby continuously rather than at
+//! the last persisted cycle.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -80,10 +99,10 @@ use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{Driven, Monitor, MonitorClient};
-use dcs_runtime::{Peer, ScanError, WriteGate};
+use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, WriteGate};
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -155,12 +174,16 @@ struct Options {
     /// `--listen`; the deterministic mode a scripted redundant pair
     /// runs under.
     driven: bool,
+    /// Persist the run's checkpoint to this file at the end of every
+    /// scan cycle, and resume from it at startup when it exists — the
+    /// restart-recovery path for a controller with no redundant peer.
+    state_file: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
                       [--listen ADDR] [--standby ADDR] [--remote ADDR]
-                      [--driven]
+                      [--driven] [--state-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -185,6 +208,14 @@ controller scan.
                   tracking standby's checkpoint pull and the plant step a
                   field-owning run paces to its ticks; requires --listen
                   and excludes --scan-ms and --ticks
+  --state-file PATH
+                  persist the run's checkpoint to PATH at the end of
+                  every scan cycle — atomically, by write-then-rename —
+                  and resume from it at startup when it exists: a file
+                  that cannot be resumed (unreadable, unparseable, an
+                  unsupported format version, or a fingerprint/structural
+                  mismatch with the loaded model) exits nonzero naming
+                  the reason; a missing file is a cold start
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -202,6 +233,7 @@ impl Options {
         let mut standby = None;
         let mut remote = None;
         let mut driven = false;
+        let mut state_file = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -234,6 +266,7 @@ impl Options {
                 "--standby" => standby = Some(value("--standby")?),
                 "--remote" => remote = Some(value("--remote")?),
                 "--driven" => driven = true,
+                "--state-file" => state_file = Some(PathBuf::from(value("--state-file")?)),
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -285,6 +318,7 @@ impl Options {
             standby,
             remote,
             driven,
+            state_file,
         })
     }
 }
@@ -302,6 +336,53 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .map_err(|error| format!("cannot resolve {addr:?}: {error}"))?
         .next()
         .ok_or_else(|| format!("{addr:?} resolves to no address"))
+}
+
+/// The `--state-file` resume half: when `path` names an existing file it
+/// must hold a [`Checkpoint`] this run can take over — applied in place
+/// to the freshly assembled `executor` before the first scan, so the run
+/// continues at the checkpointed tick. A missing file is a cold start
+/// (`Ok(false)`); anything else that cannot resume — an unreadable file,
+/// contents that are not a checkpoint, or a [`RestoreError`] naming the
+/// version, fingerprint, or structural mismatch — fails the start, per
+/// the checkpoint-restore decision's all-or-nothing rule: never
+/// silently fresh over a state file that exists but cannot be resumed.
+fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, String> {
+    let body = match std::fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "cannot read state file {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let checkpoint: Checkpoint = serde_json::from_slice(&body).map_err(|error| {
+        format!(
+            "state file {} does not hold a checkpoint: {error}",
+            path.display()
+        )
+    })?;
+    executor
+        .apply(&checkpoint)
+        .map_err(|error| format!("cannot resume from state file {}: {error}", path.display()))?;
+    Ok(true)
+}
+
+/// Persists `checkpoint` as `path`'s new contents: write to a sibling
+/// temporary file, then rename over `path` — atomic on one filesystem,
+/// so a crash mid-write never leaves a torn file the next resume would
+/// have to reject.
+fn write_state_file(path: &Path, checkpoint: &Checkpoint) -> Result<(), String> {
+    let body = serde_json::to_vec(checkpoint)
+        .map_err(|error| format!("cannot serialize checkpoint: {error}"))?;
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, body)
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|error| format!("cannot write state file {}: {error}", path.display()))
 }
 
 fn main() -> ExitCode {
@@ -373,10 +454,26 @@ fn main() -> ExitCode {
         Some(gate) => gate,
         None => driver.io(),
     };
-    let executor = match assemble(&model, &registry(), io) {
+    let mut executor = match assemble(&model, &registry(), io) {
         Ok(executor) => executor,
         Err(error) => return fail(error),
     };
+
+    // The --state-file resume half: an existing file holds the run's
+    // last persisted checkpoint, applied to the fresh executor before
+    // the first scan — the restarted process then continues the
+    // interrupted run at the checkpointed tick.
+    if let Some(path) = &options.state_file {
+        match resume_state_file(path, &mut executor) {
+            Ok(true) => eprintln!(
+                "resumed from state file {} at tick {}",
+                path.display(),
+                executor.tick().0
+            ),
+            Ok(false) => {}
+            Err(error) => return fail(error),
+        }
+    }
 
     // The role machine: a --standby instance tracks its active's
     // checkpoints gate-closed until promoted; anything else owns the
@@ -417,7 +514,16 @@ fn main() -> ExitCode {
         };
         let monitor = monitor.driven(Driven {
             track,
-            after_scan: Some(Box::new(|owns_field| driver.step(dt, owns_field))),
+            after_scan: Some(Box::new(|peer: &Peer<'_>| {
+                // The scan cycle's plant step, then the state-file
+                // write at the same end-of-cycle boundary the paced
+                // loop persists at.
+                driver.step(dt, peer.owns_field())?;
+                if let Some(path) = &options.state_file {
+                    write_state_file(path, &peer.checkpoint())?;
+                }
+                Ok(())
+            })),
         });
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
@@ -504,6 +610,7 @@ fn main() -> ExitCode {
                         peer.scan()
                     },
                     || peer.borrow().snapshot(),
+                    || peer.borrow().checkpoint(),
                     step,
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
@@ -545,6 +652,7 @@ fn main() -> ExitCode {
                 scan_loop(
                     || peer.borrow_mut().scan(),
                     || peer.borrow().snapshot(),
+                    || peer.borrow().checkpoint(),
                     || driver.step(dt, true),
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
@@ -576,6 +684,7 @@ fn run_monitored(
         let result = scan_loop(
             scan,
             || monitor.snapshot(),
+            || monitor.checkpoint(),
             step,
             || monitor.record_scan_overrun(),
             options,
@@ -593,6 +702,13 @@ fn run_monitored(
 /// `--ticks` bound, the snapshot reporting, and the wall-clock pacing
 /// are identical either way.
 ///
+/// `checkpoint` feeds `--state-file`: the run's transferable state is
+/// persisted at the end of every completed scan cycle — after the scan
+/// and the plant step, so a resumed run re-enters the loop at exactly
+/// this point — and a write failure fails the run like a scan or step
+/// failure does: a controller that cannot persist its recovery state
+/// exits naming the file rather than running on without it.
+///
 /// `overrun` is the paced loop's feed for the snapshot's
 /// `io_health.scan_overruns`: a cycle whose wall-clock elapsed reaches
 /// its period is reported through it once. The counter itself lives in
@@ -603,6 +719,7 @@ fn run_monitored(
 fn scan_loop(
     mut scan: impl FnMut() -> Result<Tick, ScanError>,
     snapshot: impl Fn() -> TelemetrySnapshot,
+    checkpoint: impl Fn() -> Checkpoint,
     step: impl Fn() -> Result<(), String>,
     mut overrun: impl FnMut(),
     options: &Options,
@@ -615,6 +732,11 @@ fn scan_loop(
             return fail(format!("scan {} failed: {error}", snapshot().tick.0));
         }
         if let Err(error) = step() {
+            return fail(error);
+        }
+        if let Some(path) = &options.state_file
+            && let Err(error) = write_state_file(path, &checkpoint())
+        {
             return fail(error);
         }
         scanned += 1;

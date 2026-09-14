@@ -1,0 +1,11 @@
+[
+  {
+    "second_order_lag": {
+      "input": 20,
+      "output": 10,
+      "time_constant": 1.0,
+      "damping_ratio": 0.25,
+      "initial": 4.0
+    }
+  }
+]
