@@ -154,6 +154,36 @@ pub struct DeadTime {
     pub initial: f64,
 }
 
+/// A noise process element: `y = u + deviation`, where the deviation is
+/// drawn from a seeded pseudo-random generator.
+///
+/// Each [`SimDriver::step`](crate::SimDriver::step) with a `Good` input
+/// draws once from a splitmix64 generator — `state += golden`, then the
+/// standard mix — seeded by `seed` and carried as element state, and
+/// outputs `u + amplitude · (2x − 1)` for the draw `x ∈ [0, 1)`, so the
+/// output stays within `u ± amplitude`. The draw is one per step and does
+/// not scale with `dt`. The generator is a pure function of its carried
+/// `u64` state — never a wall clock or OS entropy — so identical seeded
+/// runs produce identical deviation sequences and distinct seeds produce
+/// distinct ones; state capture and restore continue a run's sequence
+/// exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Noise {
+    /// The point read as input `u`; must be a `Float` point.
+    pub input: PointId,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// The deviation bound: the output stays within `u ± amplitude`.
+    /// Must be finite and non-negative; zero passes the input through
+    /// unchanged.
+    pub amplitude: f64,
+    /// The generator's initial state. Every `u64` is a legal seed;
+    /// distinct seeds produce distinct deviation sequences.
+    pub seed: u64,
+    /// The output value before the first step. Must be finite.
+    pub initial: f64,
+}
+
 /// A simulated process element advancing one point's value from another's.
 ///
 /// Elements are stepped in declaration order by
@@ -170,6 +200,8 @@ pub enum ProcessElement {
     Integrator(Integrator),
     /// A [`DeadTime`].
     DeadTime(DeadTime),
+    /// A [`Noise`].
+    Noise(Noise),
 }
 
 impl ProcessElement {
@@ -180,6 +212,7 @@ impl ProcessElement {
             Self::SecondOrderLag(element) => element.input,
             Self::Integrator(element) => element.input,
             Self::DeadTime(element) => element.input,
+            Self::Noise(element) => element.input,
         }
     }
 
@@ -190,6 +223,7 @@ impl ProcessElement {
             Self::SecondOrderLag(element) => element.output,
             Self::Integrator(element) => element.output,
             Self::DeadTime(element) => element.output,
+            Self::Noise(element) => element.output,
         }
     }
 
@@ -200,6 +234,7 @@ impl ProcessElement {
             Self::SecondOrderLag(element) => element.initial,
             Self::Integrator(element) => element.initial,
             Self::DeadTime(element) => element.initial,
+            Self::Noise(element) => element.initial,
         }
     }
 }
@@ -262,8 +297,8 @@ impl ChannelMap {
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
     /// - element ends are `Float` points, `time_constant`, `delay`, and
-    ///   `damping_ratio` are finite and positive, and `initial` is
-    ///   finite;
+    ///   `damping_ratio` are finite and positive, `amplitude` is finite
+    ///   and non-negative, and `initial` is finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -353,6 +388,14 @@ impl ChannelMap {
                     value: dead_time.delay,
                 });
             }
+            if let ProcessElement::Noise(noise) = element
+                && (!noise.amplitude.is_finite() || noise.amplitude < 0.0)
+            {
+                return Err(ConfigError::InvalidAmplitude {
+                    point: noise.output,
+                    value: noise.amplitude,
+                });
+            }
             if !element.initial().is_finite() {
                 return Err(ConfigError::NonFiniteInitial {
                     point: element.output(),
@@ -428,6 +471,13 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A noise element's `amplitude` is negative or not finite.
+    InvalidAmplitude {
+        /// The element's output point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// An element's `initial` is not finite.
     NonFiniteInitial {
         /// The element's output point.
@@ -494,6 +544,11 @@ impl fmt::Display for ConfigError {
             Self::InvalidDelay { point, value } => write!(
                 f,
                 "dead-time element driving point {} has non-positive or non-finite delay {value}",
+                point.0
+            ),
+            Self::InvalidAmplitude { point, value } => write!(
+                f,
+                "noise element driving point {} has negative or non-finite amplitude {value}",
                 point.0
             ),
             Self::NonFiniteInitial { point, value } => write!(
