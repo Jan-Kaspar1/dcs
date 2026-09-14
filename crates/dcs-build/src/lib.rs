@@ -104,8 +104,9 @@
 //! keeping them honest: a spec declares the same kind string, the same
 //! ports in `io_requirements` order, and the same parameters in
 //! `describe` order — and `dcs-blocks/tests/spec_drift.rs` compares each
-//! spec against its kind's `describe()` output, so a spec that drifts
-//! fails CI beside the kind it mirrors.
+//! spec against its kind's `describe()` output and pins the spec table
+//! against the registered-kind list, so a spec that drifts or a
+//! registered kind with no spec fails CI beside the kind it mirrors.
 
 #![warn(missing_docs)]
 
@@ -117,8 +118,8 @@ pub mod specs;
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};
 pub use endpoint::{Dynamic, InPoint, OutPoint, Sink, Source};
 pub use spec::{
-    DynamicInstance, DynamicSpec, FINITE_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64,
-    ParamDecl, Parameters, PortDecl, Spec, optional, parameters, port, required,
+    DynamicInstance, DynamicSpec, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
+    POSITIVE_F64, ParamDecl, Parameters, PortDecl, Spec, optional, parameters, port, required,
 };
 
 // The contract vocabulary a composition speaks: re-exported so a

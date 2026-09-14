@@ -105,6 +105,38 @@ pub use timer::Timer;
 pub use totalizer::Totalizer;
 pub use valve::Valve;
 
+/// Every component kind the library ships — the set `dcs-controller`'s
+/// standard registry registers.
+///
+/// This is the checked-in kind list the spec-coverage guard is recorded
+/// against: `dcs-blocks/tests/spec_drift.rs` asserts the `dcs-build`
+/// spec table covers exactly these kinds, and `dcs-controller`'s
+/// registry test asserts the standard registry registers exactly these.
+/// Adding a kind means adding its `KIND` here, its registry entry, and
+/// its `dcs-build` spec — the two tests keep the three in step, so a
+/// registered kind without a spec fails.
+pub const KINDS: &[&str] = &[
+    AnalogInput::<f64>::KIND,
+    AnalogOutput::<f64>::KIND,
+    Pid::KIND,
+    DigitalInput::KIND,
+    DigitalOutput::KIND,
+    AlarmMonitor::KIND,
+    LatchingAlarm::KIND,
+    Interlock::KIND,
+    OverrideSelect::KIND,
+    Valve::KIND,
+    Motor::KIND,
+    Timer::KIND,
+    Counter::KIND,
+    RateLimiter::KIND,
+    ManualStation::KIND,
+    SignalFilter::KIND,
+    MedianVoter::KIND,
+    Totalizer::KIND,
+    Sequencer::KIND,
+];
+
 #[cfg(test)]
 pub(crate) mod testutil {
     //! A minimal [`ComponentIo`] for stepping components directly: an

@@ -13,8 +13,10 @@
 //! sync: a spec's ports are listed in the kind's `io_requirements` order
 //! and its parameters in `describe` order, and
 //! `dcs-blocks/tests/spec_drift.rs` compares every spec against the
-//! registered kind's `describe()` output — a kind whose spec and
-//! descriptor disagree fails that test, so both are updated together.
+//! registered kind's `describe()` output and pins the spec table
+//! against the registered-kind list — a kind whose spec and descriptor
+//! disagree, or a registered kind with no spec, fails that test, so
+//! both are updated together.
 
 use crate::endpoint::{Dynamic, Sink, Source};
 use dcs_core::{Direction, ParameterRange, Value, ValueKind};
@@ -140,6 +142,16 @@ pub const NONNEGATIVE_F64: ParameterRange = ParameterRange {
 pub const NONNEGATIVE_INT: ParameterRange = ParameterRange {
     min: Value::Int(0),
     max: Value::Int(i64::MAX),
+};
+
+/// The inclusive bound a `Float` parameter in `(0, 1]` accepts — a
+/// positive fraction such as a per-tick smoothing constant. The lower
+/// bound is the smallest positive normal double — the tightest
+/// inclusive bound on `x > 0` the type can express. Mirrors
+/// `dcs-blocks`' `describe::FRACTION_F64`.
+pub const FRACTION_F64: ParameterRange = ParameterRange {
+    min: Value::Float(f64::MIN_POSITIVE),
+    max: Value::Float(1.0),
 };
 
 /// A component kind's declared interface, supplied to

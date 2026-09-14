@@ -7,7 +7,8 @@
 //! and whether the parameter is required. `dcs-build` cannot depend on
 //! `dcs-blocks`, so these are data mirrors kept honest by the
 //! convention: a kind's spec lists exactly what its descriptor reports,
-//! and `dcs-blocks/tests/spec_drift.rs` fails when the two drift apart.
+//! and `dcs-blocks/tests/spec_drift.rs` fails when the two drift apart
+//! or when a registered kind has no spec.
 //!
 //! [`PlantBuilder::add`](crate::PlantBuilder::add) takes a spec and
 //! returns the matching `*Instance` struct: typed [`Source`] /
@@ -16,8 +17,8 @@
 
 use crate::endpoint::{Sink, Source};
 use crate::spec::{
-    FINITE_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64, ParamDecl, Parameters, PortDecl,
-    Spec, optional, port, required,
+    FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64, ParamDecl,
+    Parameters, PortDecl, Spec, optional, port, required,
 };
 use dcs_core::{Direction, PointType, ValueKind};
 use dcs_model::ComponentId;
@@ -996,6 +997,482 @@ impl Spec for RateLimiterSpec {
             id,
             input: Sink::port(id, "in"),
             out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `latching-alarm` kind: high/low limit checking with
+/// hysteresis plus an operator-acknowledgment latch.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`), `ack` (`In`,
+/// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
+/// Parameters — shared with `alarm-monitor`: `low_limit`, `high_limit`
+/// required finite `Float`s; `hysteresis` optional non-negative
+/// `Float`.
+pub struct LatchingAlarmSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `latching-alarm` instance.
+pub struct LatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the monitored analog value.
+    pub input: Sink<f64>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// `alarm` port (`Out`, `Bool`): the limit-violation state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// trip-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl LatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "latching-alarm";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("low_limit", ValueKind::Float, Some(FINITE_F64)),
+        required("high_limit", ValueKind::Float, Some(FINITE_F64)),
+        optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for LatchingAlarmSpec {
+    type Instance = LatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("ack", Direction::In, ValueKind::Bool),
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        LatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
+/// Spec for the `manual-station` kind: operator-selectable source on an
+/// analog output with a slew-bounded bumpless transfer.
+///
+/// Ports mirror the descriptor: `control` (`In`, `Float`), `manual`
+/// (`In`, `Float`), `mode` (`In`, `Bool`), `out` (`Out`, `Float`),
+/// `manual_active` (`Out`, `Bool`). Parameter: `transfer_delta`
+/// (required positive `Float`).
+pub struct ManualStationSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `manual-station` instance.
+pub struct ManualStationInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `control` port (`In`, `Float`): the process-side value.
+    pub control: Sink<f64>,
+    /// `manual` port (`In`, `Float`): the operator's entered value.
+    pub manual: Sink<f64>,
+    /// `mode` port (`In`, `Bool`): which source `out` follows.
+    pub mode: Sink<bool>,
+    /// `out` port (`Out`, `Float`): the driven value.
+    pub out: Source<f64>,
+    /// `manual_active` port (`Out`, `Bool`): the reported selection.
+    pub manual_active: Source<bool>,
+}
+
+impl ManualStationSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "manual-station";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[required(
+        "transfer_delta",
+        ValueKind::Float,
+        Some(POSITIVE_F64),
+    )];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for ManualStationSpec {
+    type Instance = ManualStationInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("control", Direction::In, ValueKind::Float),
+            port("manual", Direction::In, ValueKind::Float),
+            port("mode", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Float),
+            port("manual_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ManualStationInstance {
+            id,
+            control: Sink::port(id, "control"),
+            manual: Sink::port(id, "manual"),
+            mode: Sink::port(id, "mode"),
+            out: Source::port(id, "out"),
+            manual_active: Source::port(id, "manual_active"),
+        }
+    }
+}
+
+/// Spec for the `signal-filter` kind: a first-order per-tick smoothing
+/// of an analog signal.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`), `out` (`Out`,
+/// `Float`). Parameter: `alpha` (required `Float` in `(0, 1]`).
+pub struct SignalFilterSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `signal-filter` instance.
+pub struct SignalFilterInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the value to smooth.
+    pub input: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the filtered estimate.
+    pub out: Source<f64>,
+}
+
+impl SignalFilterSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "signal-filter";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] =
+        &[required("alpha", ValueKind::Float, Some(FRACTION_F64))];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for SignalFilterSpec {
+    type Instance = SignalFilterInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        SignalFilterInstance {
+            id,
+            input: Sink::port(id, "in"),
+            out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `median-voter` kind: 2oo3 median voting over three
+/// redundant analog inputs with a spread discrepancy diagnostic.
+///
+/// Ports mirror the descriptor: `in_1`, `in_2`, `in_3` (`In`, `Float`),
+/// `out` (`Out`, `Float`), `discrepancy` (`Out`, `Bool`). Parameter:
+/// `tolerance` (required non-negative `Float`).
+pub struct MedianVoterSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `median-voter` instance.
+pub struct MedianVoterInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in_1` port (`In`, `Float`): the first redundant measurement.
+    pub in_1: Sink<f64>,
+    /// `in_2` port (`In`, `Float`): the second redundant measurement.
+    pub in_2: Sink<f64>,
+    /// `in_3` port (`In`, `Float`): the third redundant measurement.
+    pub in_3: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the voted value.
+    pub out: Source<f64>,
+    /// `discrepancy` port (`Out`, `Bool`): the spread-exceeded flag.
+    pub discrepancy: Source<bool>,
+}
+
+impl MedianVoterSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "median-voter";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[required(
+        "tolerance",
+        ValueKind::Float,
+        Some(NONNEGATIVE_F64),
+    )];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for MedianVoterSpec {
+    type Instance = MedianVoterInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in_1", Direction::In, ValueKind::Float),
+            port("in_2", Direction::In, ValueKind::Float),
+            port("in_3", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("discrepancy", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        MedianVoterInstance {
+            id,
+            in_1: Sink::port(id, "in_1"),
+            in_2: Sink::port(id, "in_2"),
+            in_3: Sink::port(id, "in_3"),
+            out: Source::port(id, "out"),
+            discrepancy: Source::port(id, "discrepancy"),
+        }
+    }
+}
+
+/// Spec for the `totalizer` kind: a rate input accumulated into a
+/// running total, with a reset input and a configurable rollover.
+///
+/// Ports mirror the descriptor: `rate` (`In`, `Float`), `reset` (`In`,
+/// `Bool`), `total` (`Out`, `Float`). Parameters: `rate_unit`
+/// (optional positive `Float`), `rollover` (optional non-negative
+/// `Float`).
+pub struct TotalizerSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `totalizer` instance.
+pub struct TotalizerInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `rate` port (`In`, `Float`): the rate being accumulated.
+    pub rate: Sink<f64>,
+    /// `reset` port (`In`, `Bool`): clears the total.
+    pub reset: Sink<bool>,
+    /// `total` port (`Out`, `Float`): the running total.
+    pub total: Source<f64>,
+}
+
+impl TotalizerSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "totalizer";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        optional("rate_unit", ValueKind::Float, Some(POSITIVE_F64)),
+        optional("rollover", ValueKind::Float, Some(NONNEGATIVE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for TotalizerSpec {
+    type Instance = TotalizerInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("rate", Direction::In, ValueKind::Float),
+            port("reset", Direction::In, ValueKind::Bool),
+            port("total", Direction::Out, ValueKind::Float),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        TotalizerInstance {
+            id,
+            rate: Sink::port(id, "rate"),
+            reset: Sink::port(id, "reset"),
+            total: Source::port(id, "total"),
+        }
+    }
+}
+
+/// Spec for the `sequencer` kind: stepping through a declared ordered
+/// table of steps, each driving `out` for a configured tick count.
+///
+/// Ports mirror the descriptor: `run` (`In`, `Bool`), `reset` (`In`,
+/// `Bool`), `out` (`Out`, `Float`), `step` (`Out`, `Int`), `done`
+/// (`Out`, `Bool`).
+///
+/// The parameter set is *not statically enumerable*: `step_count`
+/// declares the table length `N` and each step `n` in `1..=N` adds
+/// `step_<n>_ticks` (required non-negative `Int`) and `step_<n>_out`
+/// (required finite `Float`) — a different key set per instance. The
+/// chosen treatment is [`declared_parameters`](Spec::declared_parameters)
+/// `None`: the instance's parameter map goes unchecked at
+/// [`build`](crate::PlantBuilder::build), and the kind's
+/// `from_parameters` remains the authority, reporting a named
+/// `ParameterError` for a missing or mistyped `step_count` or
+/// `step_<n>_*` entry when the emitted document assembles.
+pub struct SequencerSpec {
+    /// The instance's parameter map: `step_count` plus the per-step
+    /// `step_<n>_ticks`/`step_<n>_out` entries.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `sequencer` instance.
+pub struct SequencerInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `run` port (`In`, `Bool`): the signal stepping the table.
+    pub run: Sink<bool>,
+    /// `reset` port (`In`, `Bool`): the return-to-start condition.
+    pub reset: Sink<bool>,
+    /// `out` port (`Out`, `Float`): the active step's driven value.
+    pub out: Source<f64>,
+    /// `step` port (`Out`, `Int`): the active step's 1-based index.
+    pub step: Source<i64>,
+    /// `done` port (`Out`, `Bool`): the table-run-to-end flag.
+    pub done: Source<bool>,
+}
+
+impl SequencerSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "sequencer";
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    ///
+    /// The map must carry `step_count` (`Int`, at least 1) plus
+    /// `step_<n>_ticks` (`Int`) and `step_<n>_out` (`Float`) for every
+    /// `n` in `1..=step_count` — checked by the kind's
+    /// `from_parameters` at assembly, not by
+    /// [`build`](crate::PlantBuilder::build).
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for SequencerSpec {
+    type Instance = SequencerInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("run", Direction::In, ValueKind::Bool),
+            port("reset", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Float),
+            port("step", Direction::Out, ValueKind::Int),
+            port("done", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        // The step-table keys are indexed by the instance's
+        // `step_count`: no static set exists, so the map goes
+        // unchecked at `build` (the recorded treatment for this kind).
+        None
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        SequencerInstance {
+            id,
+            run: Sink::port(id, "run"),
+            reset: Sink::port(id, "reset"),
+            out: Source::port(id, "out"),
+            step: Source::port(id, "step"),
+            done: Source::port(id, "done"),
         }
     }
 }
