@@ -94,6 +94,25 @@ class SupervisorTests(unittest.TestCase):
         s.dispatch(self.github.items)
         self.assertEqual(self.github.created,1)
 
+    def test_supervisor_commits_completed_edits(self):
+        self.supervisor.dispatch(self.github.items)
+        self.runtime.inspect_result.side_effect = [{'clean':False,'changed':False}, {'clean':True,'changed':True}]
+        self.supervisor.reconcile_workers(self.github.items)
+        self.assertEqual(self.supervisor.state.job(1)['status'], 'pr-open')
+        self.assertTrue(any(call.args[1:3] == ('add','--all') for call in self.runtime.run_git.call_args_list))
+
+    def test_zero_exit_permission_denial_blocks_without_repair(self):
+        self.supervisor.dispatch(self.github.items)
+        log = Path(self.tmp.name) / 'denied.log'
+        log.write_text('warning: rejected a tool call that requires confirmation')
+        record = self.supervisor.state.get('process:1')
+        record['log'] = str(log)
+        self.supervisor.state.set('process:1', record)
+        self.supervisor.reconcile_workers(self.github.items)
+        self.assertEqual(self.supervisor.state.job(1)['status'], 'blocked')
+        self.assertEqual(self.supervisor.state.job(1)['repairs'], 0)
+        self.assertEqual(self.github.created, 0)
+
     def test_restart_reconciles_success_receipt(self):
         self.supervisor.dispatch(self.github.items)
         self.supervisor.state.close()
