@@ -1,0 +1,7 @@
+# Keep build artifacts and agent state out of the image build context.
+/target/
+/.git/
+/.dcs-agent/
+/.venv/
+**/__pycache__/
+*.py[cod]

@@ -116,6 +116,9 @@ fn dispatch(driver: &SimDriver, request: PlantRequest) -> PlantResponse {
         }
         PlantRequest::InjectFault { point, fault } => applied(driver.inject_fault(point, fault)),
         PlantRequest::ClearFault { point } => applied(driver.clear_fault(point)),
+        PlantRequest::ListPoints => PlantResponse::Points {
+            points: driver.points(),
+        },
     }
 }
 
