@@ -6,7 +6,7 @@
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, Counter, DigitalInput, DigitalOutput,
     Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
-    RateLimiter, Scaling, SignalFilter, Timer, Totalizer, Valve,
+    RateLimiter, Scaling, Sequencer, SequencerStep, SignalFilter, Timer, Totalizer, Valve,
 };
 use dcs_core::{Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -230,12 +230,33 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            Sequencer::new(
+                "seq",
+                point(&mut specs, 190, Direction::In, ValueKind::Bool),
+                point(&mut specs, 191, Direction::In, ValueKind::Bool),
+                point(&mut specs, 192, Direction::Out, ValueKind::Float),
+                point(&mut specs, 193, Direction::Out, ValueKind::Int),
+                point(&mut specs, 194, Direction::Out, ValueKind::Bool),
+                vec![
+                    SequencerStep {
+                        ticks: 2,
+                        value: 10.0,
+                    },
+                    SequencerStep {
+                        ticks: 1,
+                        value: 20.0,
+                    },
+                ],
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 18] = [
+const EXPECTED_KINDS: [&str; 19] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -254,6 +275,7 @@ const EXPECTED_KINDS: [&str; 18] = [
     SignalFilter::KIND,
     MedianVoter::KIND,
     Totalizer::KIND,
+    Sequencer::KIND,
 ];
 
 fn snapshot() -> TelemetrySnapshot {

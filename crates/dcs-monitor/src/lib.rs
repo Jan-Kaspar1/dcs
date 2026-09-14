@@ -66,7 +66,8 @@
 //! ungrouped points filed under the documented `"ungrouped"` default —
 //! then polls `/snapshot`, `/history`, and `/journal` on one shared
 //! one-second cadence — the snapshot refreshes each point's value,
-//! quality, and tick; the history increments grow each point's
+//! quality, and tick and badges each point in its force set; the history
+//! increments grow each point's
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
 //! — and submits `write_value` commands to `/command`, displaying the
@@ -76,17 +77,29 @@
 //! instance, generically — no per-kind page code: a port's
 //! [`PortRole`](dcs_core::PortRole) hint picks the conventional element
 //! (process-value display, setpoint field, driven output, status flag),
-//! parameters list with their kinds and declared ranges, and the
-//! instance's diagnostics join by name. The executor annotates every
-//! served `PortDescriptor` with the `point` its port is bound to, so a
-//! port's live value comes straight from the snapshot's point telemetry
-//! and its signal metadata from the index — including the `writable`
-//! mark that gates every command affordance: only a model-declared
-//! writable point is ever offered a write, and a rejection is visible
-//! in the receipt pane and the journal. A descriptor carrying no role
-//! hints and no parameters — a kind with no custom `describe` —
-//! degrades to a generic name-plus-diagnostics-plus-wired-points
-//! faceplate, never an error.
+//! and the instance's diagnostics join by name. The executor annotates
+//! every served `PortDescriptor` with the `point` its port is bound to,
+//! so a port's live value comes straight from the snapshot's point
+//! telemetry and its signal metadata from the index — including the
+//! `writable` mark that gates every command affordance: only a
+//! model-declared writable point is ever offered a write, and a
+//! rejection is visible in the receipt pane and the journal.
+//!
+//! Declared parameters are the faceplate's other editable surface: each
+//! [`ParameterDescriptor`](dcs_core::ParameterDescriptor) renders an
+//! edit control typed to its declared [`ValueKind`](dcs_core::ValueKind)
+//! and labeled with its declared
+//! [`ParameterRange`](dcs_core::ParameterRange) where present, and
+//! submitting issues a `set_parameter` command addressed to the
+//! instance through the same receipted path — an out-of-range or
+//! mistyped entry is warned client-side against the declared range but
+//! still sent, the receipted path staying the authority, and the
+//! receipt's applied tick or named rejection lands on the parameter's
+//! row and in the journal. A kind declaring no parameters renders no
+//! edit affordance. A descriptor carrying no role hints and no
+//! parameters — a kind with no custom `describe` — degrades to a
+//! generic name-plus-diagnostics-plus-wired-points faceplate, never an
+//! error.
 //!
 //! ## The pair view
 //!

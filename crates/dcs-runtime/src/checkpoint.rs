@@ -114,6 +114,13 @@ pub struct Checkpoint {
     /// empty.
     #[serde(default)]
     pub internal: BTreeMap<PointId, Sample>,
+    /// The operator force set at capture: each forced point and the
+    /// value the scan image substitutes for its input read. Restoring
+    /// them means a standby keeps forcing the same points through a
+    /// switchover instead of reverting to live reads. Absent from
+    /// checkpoints written before forces existed; defaults to empty.
+    #[serde(default)]
+    pub forces: BTreeMap<PointId, Value>,
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.
@@ -197,6 +204,24 @@ pub enum RestoreError {
         /// The kind the checkpoint carries.
         found: Value,
     },
+    /// The checkpoint's force section names a point the executor's map
+    /// does not serve as a writable `In` point — a checkpoint from a
+    /// different I/O mapping.
+    UnknownForce {
+        /// The unserved or unforceable point.
+        point: PointId,
+    },
+    /// A checkpointed force's value kind differs from the kind the
+    /// point map declares for it — again a different mapping's
+    /// artifact.
+    IncompatibleForce {
+        /// The mismatched point.
+        point: PointId,
+        /// The kind the point map declares.
+        expected: ValueKind,
+        /// The kind the checkpoint carries.
+        found: Value,
+    },
 }
 
 impl fmt::Display for RestoreError {
@@ -252,6 +277,20 @@ impl fmt::Display for RestoreError {
             } => write!(
                 f,
                 "checkpoint internal point {} expects {expected:?}, found {found:?}",
+                point.0
+            ),
+            Self::UnknownForce { point } => write!(
+                f,
+                "checkpoint carries forced point {} the point map does not serve as a writable in point",
+                point.0
+            ),
+            Self::IncompatibleForce {
+                point,
+                expected,
+                found,
+            } => write!(
+                f,
+                "checkpoint forced point {} expects {expected:?}, found {found:?}",
                 point.0
             ),
         }

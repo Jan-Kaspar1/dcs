@@ -8,7 +8,8 @@
 use dcs_assembly::{ComponentRegistry, assemble, sim_driver};
 use dcs_blocks::RateLimiter;
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, PointId, Sample, Tick, Value,
+    Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, PointId, Quality,
+    QualityReason, Sample, Tick, Value,
 };
 use dcs_model::PlantModel;
 use dcs_runtime::Component;
@@ -164,6 +165,83 @@ fn writable_internal_point_updates_the_image_at_the_boundary() {
         executor.sample(INTERNAL_WRITABLE).unwrap().value,
         Value::Float(9.0)
     );
+}
+
+#[test]
+fn forced_field_input_holds_across_scans_until_released() {
+    let model = PlantModel::load(WRITABLE_POINTS).unwrap();
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+    executor.scan().unwrap();
+
+    let receipt = executor.submit_command(Command::ForcePoint {
+        point: FIELD_WRITABLE,
+        kind: dcs_core::ValueKind::Float,
+        value: Value::Float(9.0),
+    });
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(2)
+        }
+    );
+
+    // The field reasserting a different value changes nothing: every
+    // scan's image reports the forced value at Substituted quality, and
+    // the limiter slews its valve output toward the forced input.
+    driver.write(FIELD_WRITABLE, Value::Float(0.5)).unwrap();
+    for tick in 2..=3u64 {
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(FIELD_WRITABLE),
+            Some(Sample::new(
+                Value::Float(9.0),
+                Quality::Uncertain(QualityReason::Substituted),
+                Tick(tick),
+            )),
+            "tick {tick}"
+        );
+    }
+    assert_eq!(
+        executor.snapshot().forces,
+        vec![dcs_core::ForcedPoint {
+            point: FIELD_WRITABLE,
+            value: Value::Float(9.0),
+        }]
+    );
+
+    // Release resumes the live read at the next scan boundary.
+    executor.submit_command(Command::UnforcePoint {
+        point: FIELD_WRITABLE,
+    });
+    executor.scan().unwrap();
+    assert_eq!(
+        executor.sample(FIELD_WRITABLE),
+        Some(Sample::good(Value::Float(0.5), Tick(4)))
+    );
+    assert!(executor.snapshot().forces.is_empty());
+}
+
+#[test]
+fn forcing_unmarked_or_out_points_rejects_with_not_writable() {
+    let model = PlantModel::load(WRITABLE_POINTS).unwrap();
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    for point in [FIELD_UNMARKED, INTERNAL_UNMARKED, FIELD_OUT, INTERNAL_OUT] {
+        let receipt = executor.submit_command(Command::ForcePoint {
+            point,
+            kind: dcs_core::ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point }
+            },
+            "{point:?}"
+        );
+    }
 }
 
 #[test]
