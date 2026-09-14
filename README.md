@@ -12,6 +12,10 @@ python3 scripts/verify.py
 
 The verification command shares two build slots across worker clones, limits Cargo to four build threads, and keeps build artifacts in each clone. CI independently checks Rust formatting, Clippy, Rust tests, and Python supervisor tests.
 
+## Packaging
+
+The root `Dockerfile` builds the `dcs-controller` binary into a minimal container image. See [docs/packaging.md](docs/packaging.md) for the image build and run commands.
+
 ## Local agent pool
 
 The supervisor coordinates local Devin CLI sessions using `swe-2-high`, independent clones, SQLite reservations, and GitHub issues and PRs. Workers implement software against simulated I/O. CI success gates supervisor merges; this local policy cannot prevent unrelated direct pushes.
