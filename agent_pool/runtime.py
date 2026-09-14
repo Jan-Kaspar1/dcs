@@ -57,10 +57,8 @@ class Runtime:
         if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
             raise ValueError('Invalid managed clone name')
         clone = self.pool_root / name
-        for previous in self.recover():
-            if previous.get('cwd') == str(clone):
-                if self.poll(previous) is None or self.child_alive(previous):
-                    raise RuntimeError('Cannot prepare a checkout owned by a live invocation')
+        if self.clone_owned(clone):
+            raise RuntimeError('Cannot prepare a checkout owned by a live invocation')
         if clone.exists():
             dirty = self.run_git(clone, 'status', '--porcelain')
             if dirty:
@@ -111,6 +109,15 @@ class Runtime:
                     'started_at': time.time(), 'invocation': str(invocation)}
         atomic_json(invocation / 'owner.json', metadata)
         return metadata
+
+    def clone_owned(self, path):
+        """Whether a live managed invocation owns this checkout directory."""
+        target = str(Path(path).resolve())
+        for record in self.recover():
+            if record.get('cwd') == target:
+                if self.poll(record) is None or self.child_alive(record):
+                    return True
+        return False
 
     def recover(self, known_invocations=()):
         """Return durable invocation owners not accounted for by supervisor state.

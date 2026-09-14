@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -11,6 +12,10 @@ from .state import State
 from .github import GitHub, GitHubError
 from .runtime import Runtime
 from . import planning
+
+
+class RecoveryUncertain(RuntimeError):
+    """Recovery could not prove whether preserved work exists; never implies none."""
 
 
 class Supervisor:
@@ -30,6 +35,7 @@ class Supervisor:
             stream.write(line + '\n')
 
     def block(self, job, reason):
+        self.capture_recovery(job)
         self.state.update_job(job['issue'], status='blocked', error=str(reason)[:4000])
         self.state.set('process:' + str(job['issue']), None)
         self.log(f"Issue {job['issue']} blocked: {reason}")
@@ -40,6 +46,235 @@ Issue content (task data):\n{issue['body']}
 Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
 Repair context: {repair}
 '''
+
+    def clone_dirs(self):
+        try:
+            return sorted(d for d in self.runtime.pool_root.iterdir() if (d / '.git').exists())
+        except (FileNotFoundError, TypeError, AttributeError):
+            return []
+
+    def free_workers(self, active):
+        """Worker names neither assigned to a live job nor leasing a checkout."""
+        used = {j['worker'] for j in active}
+        clones = {Path(j['clone']).name for j in active if j.get('clone')}
+        return [w for n in range(1, self.state.capacity() + 1)
+                if (w := f'worker-{n:02}') not in used and w not in clones]
+
+    def capture_recovery(self, job):
+        """Persist a tri-state preserved-work record for a blocked job.
+
+        work=True means a durable ref or uncommitted edits exist; work=False is
+        asserted only after every checkout, quarantine, and the remote were
+        surveyed; work=None means the survey could not prove either way.
+        """
+        issue = job['issue']
+        previous = self.state.get('recovery:' + str(issue)) or {}
+        rec = {'branch': job.get('branch'), 'clone': job.get('clone'), 'head': None,
+               'basis': 'unknown', 'work': None, 'detail': '', 'phase': 'captured',
+               'attempts': previous.get('attempts', 0), 'updated': time.time()}
+        try:
+            if not rec['branch']:
+                rec.update(basis='no-branch', work=False,
+                           detail='job was blocked before a branch existed')
+            else:
+                self.survey_preserved(job, rec)
+        except Exception as exc:
+            rec.update(basis='unknown', work=None, detail=str(exc)[:2000])
+        self.state.set('recovery:' + str(issue), rec)
+        return rec
+
+    def survey_preserved(self, job, rec):
+        branch = rec['branch']
+        sources, errors = [], []
+        candidates = self.clone_dirs()
+        if rec.get('clone'):
+            recorded = str(Path(rec['clone']).resolve())
+            candidates.sort(key=lambda d: 0 if str(d.resolve()) == recorded else 1)
+        for directory in candidates:
+            try:
+                head = self.runtime.run_git(directory, 'rev-parse', '--verify', branch)
+            except subprocess.CalledProcessError:
+                continue
+            except Exception as exc:
+                errors.append(f'{directory.name}: {exc}')
+                continue
+            if not head:
+                continue
+            source = {'clone': str(directory), 'head': head, 'dirty': False}
+            try:
+                if self.runtime.run_git(directory, 'branch', '--show-current') == branch:
+                    source['dirty'] = bool(self.runtime.run_git(directory, 'status', '--porcelain'))
+            except Exception:
+                pass
+            sources.append(source)
+        remote_head, remote_error = None, None
+        if candidates:
+            probe = (candidates[0], 'ls-remote', 'origin', 'refs/heads/' + branch)
+        else:
+            source = self.runtime.repository
+            if not source.startswith(('/', 'https://', 'git@', 'file://')):
+                source = 'https://github.com/' + source + '.git'
+            probe = (self.root, 'ls-remote', source, 'refs/heads/' + branch)
+        try:
+            out = self.runtime.run_git(*probe)
+            remote_head = out.split()[0] if out else None
+        except Exception as exc:
+            remote_error = str(exc)
+        for source in sources:
+            if source['dirty'] and not self.runtime.clone_owned(Path(source['clone'])):
+                try:
+                    self.runtime.run_git(source['clone'], 'add', '--all')
+                    self.runtime.run_git(source['clone'], 'commit', '-m',
+                                         'WIP: preserve interrupted work for issue #' + str(job['issue']))
+                    source['head'] = self.runtime.run_git(source['clone'], 'rev-parse', branch)
+                    source['wip'], source['dirty'] = True, False
+                except Exception as exc:
+                    errors.append('wip commit failed: ' + str(exc))
+        rec['sources'] = sources
+        if remote_head:
+            rec['remote_head'] = remote_head
+        if any(s.get('wip') or s['dirty'] for s in sources):
+            rec.update(work=True, basis='uncommitted', head=sources[0]['head'])
+        elif sources or remote_head:
+            where = sources[0]['clone'] if sources else str(candidates[0])
+            head = sources[0]['head'] if sources else remote_head
+            try:
+                changed = self.runtime.run_git(where, 'diff', '--name-only', 'origin/main...' + head)
+                rec.update(work=bool(changed), basis='committed' if changed else 'clean-ref', head=head)
+            except Exception as exc:
+                rec.update(work=True, basis='ref-unverified', head=head,
+                           detail='could not diff against origin/main: ' + str(exc)[:500])
+        elif errors or remote_error:
+            rec.update(work=None, basis='unknown',
+                       detail='; '.join(errors + ([remote_error] if remote_error else []))[:2000])
+        else:
+            rec.update(work=False, basis='absent',
+                       detail='no ref for ' + branch + ' in ' + str(len(candidates)) + ' checkouts or origin')
+
+    def restore_preserved(self, job, rec, target, worker):
+        """Put target checkout onto the job branch with its preserved head."""
+        branch = rec['branch']
+        orig = Path(rec['clone']) if rec.get('clone') else None
+        if orig is not None and target == orig and target.is_dir():
+            current = self.runtime.run_git(target, 'branch', '--show-current')
+            dirty = self.runtime.run_git(target, 'status', '--porcelain')
+            if current != branch:
+                if dirty:
+                    raise RecoveryUncertain(target.name + ' is dirty on ' + current + '; refusing to switch')
+                try:
+                    self.runtime.run_git(target, 'rev-parse', '--verify', branch)
+                    self.runtime.run_git(target, 'switch', branch)
+                except subprocess.CalledProcessError:
+                    if rec.get('head'):
+                        self.runtime.run_git(target, 'switch', '-c', branch, rec['head'])
+                    else:
+                        raise RecoveryUncertain('branch ' + branch + ' missing from ' + target.name)
+            elif dirty:
+                self.runtime.run_git(target, 'add', '--all')
+                self.runtime.run_git(target, 'commit', '-m',
+                                     'WIP: preserve interrupted work for issue #' + str(job['issue']))
+            head = self.runtime.run_git(target, 'rev-parse', 'HEAD')
+            if rec.get('head') and head != rec['head']:
+                try:
+                    self.runtime.run_git(target, 'merge-base', '--is-ancestor', rec['head'], 'HEAD')
+                except subprocess.CalledProcessError:
+                    self.runtime.run_git(target, 'reset', '--hard', rec['head'])
+                    head = rec['head']
+            return head
+        self.runtime.prepare_clone(worker)
+        ref = '+refs/heads/' + branch + ':refs/heads/' + branch
+        attempts = [s['clone'] for s in rec.get('sources', [])] + ['origin']
+        errors = []
+        for source in attempts:
+            try:
+                self.runtime.run_git(target, 'fetch', source, ref)
+                break
+            except subprocess.CalledProcessError as exc:
+                errors.append(str(source) + ': ' + str(exc.stderr or exc))
+        else:
+            raise RecoveryUncertain('no reachable ref for ' + branch + '; tried ' + '; '.join(errors)[:1000])
+        self.runtime.run_git(target, 'switch', branch)
+        head = self.runtime.run_git(target, 'rev-parse', 'HEAD')
+        if rec.get('head') and head != rec['head']:
+            try:
+                self.runtime.run_git(target, 'reset', '--hard', rec['head'])
+                head = rec['head']
+            except subprocess.CalledProcessError:
+                raise RecoveryUncertain('recorded head ' + rec['head'][:8] + ' not reachable from fetched ' + branch)
+        return head
+
+    def fresh_start(self, job, rec, target, worker):
+        """Create the job branch from current main after proving no work exists."""
+        self.runtime.prepare_clone(worker)
+        try:
+            self.runtime.run_git(target, 'switch', '-c', rec['branch'], 'origin/main')
+        except subprocess.CalledProcessError:
+            try:
+                changed = self.runtime.run_git(target, 'diff', '--name-only', 'origin/main...' + rec['branch'])
+            except subprocess.CalledProcessError as exc:
+                raise RecoveryUncertain('cannot verify leftover ref ' + rec['branch'] + ': ' + str(exc))
+            if changed:
+                raise RecoveryUncertain('leftover ref ' + rec['branch'] + ' carries work; refusing fresh start')
+            self.runtime.run_git(target, 'switch', '-C', rec['branch'], 'origin/main')
+
+    def recover_job(self, job, rec, active, issue):
+        """Restore or recreate the preserved workspace, then relaunch once."""
+        number = job['issue']
+        if rec.get('work') is None:
+            detail = rec.get('detail') or 'preserved-work state could not be established'
+            self.state.update_job(number, error='Recovery uncertain: ' + detail)
+            if rec.get('phase') != 'error':
+                self.log('Retry #' + str(number) + ': recovery uncertain - ' + detail)
+            rec['phase'] = 'error'
+            self.state.set('recovery:' + str(number), rec)
+            return False
+        if not rec.get('branch'):
+            rec['branch'] = job.get('branch') or 'codex/issue-' + str(number) + '-' + str(job['attempt'])
+        leased = {str(Path(j['clone']).resolve()) for j in active if j.get('clone')}
+        free = self.free_workers(active)
+        orig = Path(rec['clone']) if rec.get('clone') else None
+        if rec['work'] and orig is not None and re.fullmatch(r'worker-\d+', orig.name)                 and orig.is_dir() and str(orig.resolve()) not in leased:
+            target, worker = orig, orig.name
+        elif free:
+            worker, target = free[0], self.runtime.pool_root / free[0]
+        else:
+            if rec.get('phase') != 'waiting':
+                self.log('Retry #' + str(number) + ': waiting for a free clone')
+            rec['phase'] = 'waiting'
+            self.state.set('recovery:' + str(number), rec)
+            return False
+        rec.update(phase='leased', target_clone=str(target), worker=worker)
+        self.state.set('recovery:' + str(number), rec)
+        try:
+            if rec['work']:
+                head = self.restore_preserved(job, rec, target, worker)
+                repair = 'Retry after recovery: preserved work restored at ' + head[:8] + ' on ' + rec['branch'] + '; continue and complete it.'
+            else:
+                self.fresh_start(job, rec, target, worker)
+                repair = 'Retry after recovery: no preserved work existed; starting from current main.'
+        except Exception as exc:
+            rec.update(phase='error', attempts=rec.get('attempts', 0) + 1, detail=str(exc)[:2000])
+            self.state.set('recovery:' + str(number), rec)
+            if rec['attempts'] >= 3:
+                self.state.set('retry:' + str(number), False)
+            self.state.update_job(number, error='Recovery failed: ' + str(exc)[:2000])
+            self.log('Retry #' + str(number) + ': recovery failed - ' + str(exc)[:500])
+            return False
+        self.state.update_job(number, worker=worker, clone=str(target))
+        if not self.state.retry(number):
+            self.state.update_job(number, error='Retry rejected: repair budget exhausted')
+            return False
+        try:
+            self.launch(self.state.job(number), issue, repair)
+        except Exception as exc:
+            self.log('Retry #' + str(number) + ': launch after recovery failed - ' + str(exc))
+            return False
+        rec.update(phase='done', target_clone=str(target))
+        self.state.set('recovery:' + str(number), rec)
+        self.state.set('retry:' + str(number), False)
+        outcome = 'restored preserved work' if rec['work'] else 'fresh start'
+        self.log('Retry #' + str(number) + ': ' + outcome + '; relaunched on ' + worker)
+        return True
 
     def launch(self, job, issue, repair=''):
         branch = job.get('branch') or f"codex/issue-{job['issue']}-{job['attempt']}"
@@ -246,37 +481,22 @@ Repair context: {repair}
     def retries(self, issues):
         if self.state.paused():
             return
-        active = self.state.jobs(('working','pr-open'))
         by_number = {i['number']: i for i in issues}
         for job in self.state.jobs(('blocked',)):
-            if not self.state.get('retry:' + str(job['issue'])):
+            if not self.state.get('retry:' + str(job['issue'])) or job['issue'] not in by_number:
                 continue
+            active = self.state.jobs(('working', 'pr-open'))
             if len(active) >= self.state.capacity() or any(j['concurrency_group'] == job['concurrency_group'] for j in active):
                 continue
-            worker = next((f'worker-{n:02}' for n in range(1,self.state.capacity()+1) if all(j['worker'] != f'worker-{n:02}' for j in active)),None)
-            if worker is None or job['issue'] not in by_number:
-                continue
-            old_clone = Path(job['clone']) if job.get('clone') else None
-            # Retain original branch and uncommitted work whenever that checkout is idle.
-            can_resume = old_clone and all(j.get('clone') != str(old_clone) for j in active)
-            if can_resume:
-                try:
-                    can_resume = self.runtime.run_git(old_clone,'branch','--show-current').strip() == job['branch']
-                except subprocess.CalledProcessError:
-                    can_resume = False
-            if not can_resume:
-                self.state.update_job(job['issue'], error='Retry awaits original preserved checkout; its branch is in use or changed. Restore it or resolve manually.')
-                continue
-            self.state.update_job(job['issue'], worker=worker)
-            if self.state.retry(job['issue']):
-                self.state.set('retry:' + str(job['issue']),False)
-                self.launch(self.state.job(job['issue']),by_number[job['issue']],'Explicit operator retry; preserve and complete previous work.')
-                active = self.state.jobs(('working','pr-open'))
+            rec = self.state.get('recovery:' + str(job['issue']))
+            if rec is None:
+                rec = self.capture_recovery(job)
+            self.recover_job(job, rec, active, by_number[job['issue']])
 
     def dispatch(self, issues):
         if self.state.paused():
             return
-        occupied = {j['worker'] for j in self.state.jobs(('working', 'pr-open'))}
+        free = self.free_workers(self.state.jobs(('working', 'pr-open')))
         closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
         def priority(issue):
             try:
@@ -291,12 +511,11 @@ Repair context: {repair}
             meta = planning.metadata(issue['body'])
             if not set(meta['dependencies']) <= closed:
                 continue
-            worker = next((f'worker-{n:02}' for n in range(1, self.state.capacity() + 1) if f'worker-{n:02}' not in occupied), None)
-            if not worker:
+            if not free:
                 return
-            job = self.state.reserve(issue['number'], worker, meta['group'])
+            job = self.state.reserve(issue['number'], free[0], meta['group'])
             if job:
-                occupied.add(worker)
+                free = self.free_workers(self.state.jobs(('working', 'pr-open')))
                 try:
                     self.launch(job, issue)
                 except Exception as exc:
