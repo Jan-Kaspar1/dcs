@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "well_level": { "direction": "in", "value_type": "Float" },
+        "well_inflow": { "direction": "in", "value_type": "Float" },
+        "p101_draw": { "direction": "in", "value_type": "Float" },
+        "p102_draw": { "direction": "in", "value_type": "Float" },
+        "net_flow": { "direction": "in", "value_type": "Float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-do",
+      "channels": {
+        "p101_cmd": { "direction": "out", "value_type": "Bool" },
+        "p102_cmd": { "direction": "out", "value_type": "Bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "well_level" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "well_inflow" },
+      "writable": true
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "p101_draw" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "p102_draw" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "Float",
+      "channel": { "device": 1, "name": "net_flow" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 2, "name": "p101_cmd" }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "Bool",
+      "channel": { "device": 2, "name": "p102_cmd" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "well-level",
+      "source": 10,
+      "unit": "m",
+      "description": "Wet-well level measurement"
+    },
+    {
+      "id": 101,
+      "name": "well-inflow",
+      "source": 11,
+      "unit": "m3/h",
+      "description": "Inflow into the wet well"
+    },
+    {
+      "id": 102,
+      "name": "p101-command",
+      "source": 20,
+      "description": "P-101 run command"
+    },
+    {
+      "id": 103,
+      "name": "p102-command",
+      "source": 21,
+      "description": "P-102 run command"
+    }
+  ],
+  "components": [],
+  "connections": []
+}
