@@ -31,14 +31,28 @@
 //! non-owning one — standby or mid-demotion — applies each checkpoint at
 //! its scan boundary and tracks convergence like
 //! [`Standby`](crate::Standby) does.
+//!
+//! Convergence alone does not prove the standby would write the field the
+//! active writes, so a tracking peer also runs the standby-divergence
+//! check of [`crate::divergence`]: each non-field-owning scan's staged
+//! field `Out` image — the writes it would have issued — is stashed, and
+//! each applied checkpoint whose tick matches that image compares it
+//! against the peer's own reads of the same points. A mismatch moves the
+//! peer to [`StandbyState::Diverged`], which promotion refuses like any
+//! non-tracking state; the next clean transfer whose comparison matches
+//! returns the peer to `Tracking`. A diverged peer's gate stays closed
+//! throughout — the check observes, it never writes.
 
 use crate::checkpoint::{Checkpoint, RestoreError};
+use crate::divergence::{DivergenceReport, compare_staged};
 use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
 use crate::standby::StandbyState;
 use dcs_core::{
-    Command, CommandReceipt, Role, RoleReport, StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync, SwitchError,
+    TelemetrySnapshot, Tick,
 };
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A controller instance in a redundant pair: an [`Executor`] plus the
@@ -62,6 +76,13 @@ pub struct Peer<'d> {
     aligned: Option<Tick>,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
+    /// The last non-field-owning scan's staged field `Out` image and its
+    /// tick — the divergence check's "would have written" evidence,
+    /// compared against the field when a checkpoint lands at that tick.
+    staged: Option<(Tick, BTreeMap<PointId, Sample>)>,
+    /// Divergence detections not yet consumed for journaling — one per
+    /// transition into [`StandbyState::Diverged`].
+    pending_divergences: Vec<DivergenceReport>,
 }
 
 /// One reported-role transition, queued for the transition journal: the
@@ -126,6 +147,8 @@ impl<'d> Peer<'d> {
             sync: StandbyState::Unsynchronized,
             aligned: None,
             pending_changes: Vec::new(),
+            staged: None,
+            pending_divergences: Vec::new(),
         }
     }
 
@@ -142,6 +165,8 @@ impl<'d> Peer<'d> {
             sync: StandbyState::Unsynchronized,
             aligned: None,
             pending_changes: Vec::new(),
+            staged: None,
+            pending_divergences: Vec::new(),
         }
     }
 
@@ -194,12 +219,15 @@ impl<'d> Peer<'d> {
     /// `active` when the first scan under the lifted gate completes.
     ///
     /// Only a converged peer may promote: [`StandbyState::Tracking`]
-    /// means a checkpoint has applied cleanly, so the next scan writes
-    /// what the run would have — bumpless by determinism. A standby that
-    /// has not converged is refused with
-    /// [`SwitchError::NotConverged`]; a field-owning instance —
-    /// including a still-settling promotion — with
-    /// [`SwitchError::AlreadyActive`].
+    /// means a checkpoint has applied cleanly and the staged-output
+    /// divergence check has found the run matching the field, so the
+    /// next scan writes what the run would have — bumpless by
+    /// determinism. A standby that has not converged — or that reports
+    /// [`StandbyState::Diverged`] — is refused with
+    /// [`SwitchError::NotConverged`] carrying the named state; a
+    /// field-owning instance — including a still-settling promotion —
+    /// with [`SwitchError::AlreadyActive`]. A refused promotion touches
+    /// nothing: the gate stays as it was.
     pub fn promote(&mut self) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
@@ -236,6 +264,7 @@ impl<'d> Peer<'d> {
         }
         self.sync = StandbyState::Unsynchronized;
         self.aligned = None;
+        self.staged = None;
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
     }
@@ -251,14 +280,43 @@ impl<'d> Peer<'d> {
     /// pre-apply state, and the peer reports
     /// [`StandbyState::Degraded`] — recoverable by the next good
     /// transfer.
+    ///
+    /// A successful apply also runs the standby-divergence check when
+    /// the checkpoint's tick equals the stashed staged image's tick —
+    /// under the documented pull-per-scan cadence that pairing lands one
+    /// transfer after the staged scan, the stated detection bound: the
+    /// field then holds the active's write for the tick the staged image
+    /// describes. Mismatches move the peer to
+    /// [`StandbyState::Diverged`] and queue a
+    /// [`DivergenceReport`] for the journal — one per transition, not
+    /// per transfer — while a matching comparison on a diverged peer is
+    /// the resync that returns it to [`StandbyState::Tracking`]. A
+    /// staged image the checkpoint stream has not caught up to — or has
+    /// overtaken — is discarded: only a same-tick comparison is honest
+    /// evidence.
     pub fn apply(&mut self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         if self.owns_field() {
             return Err(ApplyError::OwnsField);
         }
         match self.executor.apply(checkpoint) {
             Ok(()) => {
+                let was_diverged = matches!(self.sync, StandbyState::Diverged { .. });
                 self.sync = StandbyState::Tracking;
                 self.aligned = Some(checkpoint.tick);
+                if let Some((tick, staged)) = self.staged.take()
+                    && tick == checkpoint.tick
+                {
+                    let mismatches = compare_staged(self.executor.driver(), &staged);
+                    if !mismatches.is_empty() {
+                        if !was_diverged {
+                            self.pending_divergences.push(DivergenceReport {
+                                tick,
+                                mismatches: mismatches.clone(),
+                            });
+                        }
+                        self.sync = StandbyState::Diverged { mismatches };
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
@@ -284,12 +342,22 @@ impl<'d> Peer<'d> {
     /// transition (`promoting` → `active`, `demoting` → `standby`).
     /// Because the gate moved at the request's boundary, this scan
     /// already runs under the new field-write mode.
+    ///
+    /// While the peer does not own the field the scan's staged field
+    /// `Out` image is stashed for the divergence check
+    /// [`apply`](Self::apply) runs; a field-owning peer stages nothing —
+    /// its writes are the field's truth.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
         let tick = self.executor.scan()?;
         match self.role {
             Role::Promoting => self.change(tick, Role::Active),
             Role::Demoting => self.change(tick, Role::Standby),
             _ => {}
+        }
+        if self.owns_field() {
+            self.staged = None;
+        } else {
+            self.staged = Some((tick, self.executor.staged_field_outputs()));
         }
         Ok(tick)
     }
@@ -298,6 +366,15 @@ impl<'d> Peer<'d> {
     /// the transition journal the monitoring layer records them into.
     pub fn take_role_changes(&mut self) -> Vec<RoleChange> {
         std::mem::take(&mut self.pending_changes)
+    }
+
+    /// Drains divergence detections queued since the last call — one
+    /// [`DivergenceReport`] per transition into
+    /// [`StandbyState::Diverged`], each carrying the tick the staged
+    /// image belonged to — for the transition journal the monitoring
+    /// layer records them into.
+    pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
+        std::mem::take(&mut self.pending_divergences)
     }
 
     /// Queues `command` for application at the next scan boundary —
@@ -355,6 +432,9 @@ impl<'d> Peer<'d> {
             StandbyState::Degraded { detail } => StandbySync::Degraded {
                 detail: detail.clone(),
             },
+            StandbyState::Diverged { mismatches } => StandbySync::Diverged {
+                mismatches: mismatches.clone(),
+            },
         }
     }
 }
@@ -362,9 +442,11 @@ impl<'d> Peer<'d> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dcs_core::{IoDriver, IoError, PointId, Sample, Value};
+    use crate::{Component, ComponentIo, ComponentIoExt, IoRequirement, PointMap, StepError};
+    use dcs_core::{Direction, Divergence, IoDriver, IoError, PointId, Sample, Value, ValueKind};
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Minimal in-memory driver for role-machine tests: points, reads,
     /// writes — the gate semantics under test live in `WriteGate`.
@@ -374,8 +456,18 @@ mod tests {
 
     impl StubDriver {
         fn new(point: PointId, value: Value) -> Self {
+            Self::field(&[(point, value)])
+        }
+
+        /// A multi-point field for divergence tests.
+        fn field(points: &[(PointId, Value)]) -> Self {
             Self {
-                points: Mutex::new(HashMap::from([(point, Sample::good(value, Tick::ZERO))])),
+                points: Mutex::new(
+                    points
+                        .iter()
+                        .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
+                        .collect(),
+                ),
             }
         }
 
@@ -524,5 +616,166 @@ mod tests {
 
         // Demoting a non-owner is a named error.
         assert_eq!(peer.demote(), Err(SwitchError::NotActive));
+    }
+
+    /// A read-biasing driver wrapper: adds `offset` to `Float` reads of
+    /// `point` while `armed` — the skewed view of the field a diverging
+    /// standby computes from.
+    struct BiasedDriver<'d> {
+        inner: &'d (dyn IoDriver + Sync),
+        point: PointId,
+        offset: f64,
+        armed: AtomicBool,
+    }
+
+    impl IoDriver for BiasedDriver<'_> {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            let mut sample = self.inner.read(point)?;
+            if point == self.point
+                && self.armed.load(Ordering::Relaxed)
+                && let Value::Float(value) = sample.value
+            {
+                sample.value = Value::Float(value + self.offset);
+            }
+            Ok(sample)
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            self.inner.write(point, value)
+        }
+    }
+
+    /// Copies its input to its output each scan — the minimal staged
+    /// field output a skewed input read can bend.
+    struct PassThrough;
+
+    impl Component for PassThrough {
+        fn name(&self) -> &str {
+            "pass"
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![
+                IoRequirement::input::<f64>("in", INPUT),
+                IoRequirement::output::<f64>("out", OUTPUT),
+            ]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            let input = io.read_typed::<f64>(INPUT)?;
+            io.write_typed(OUTPUT, input.value)?;
+            Ok(())
+        }
+    }
+
+    const INPUT: PointId = PointId(10);
+    const OUTPUT: PointId = PointId(20);
+
+    /// The point map both peers' executors share.
+    fn loop_map() -> PointMap {
+        PointMap::new()
+            .with_point(INPUT, Direction::In, ValueKind::Float)
+            .with_point(OUTPUT, Direction::Out, ValueKind::Float)
+    }
+
+    /// One transfer-and-scan cycle of the shared-field pair: the active
+    /// scans — the field then carries its `Out` write for that tick —
+    /// the standby applies the checkpoint, which runs the divergence
+    /// check on the staged image of the matching tick, then scans.
+    fn cycle(active: &mut Peer<'_>, standby: &mut Peer<'_>) {
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+    }
+
+    #[test]
+    fn diverged_standby_is_refused_promotion_until_resync() {
+        // The shared field: the active's writes land; the quiesced
+        // standby's do not.
+        let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
+        let biased = BiasedDriver {
+            inner: &field,
+            point: INPUT,
+            offset: 5.0,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&biased);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        let mut active = Peer::active(
+            Executor::new(&field, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+
+        // Converge: the first transfer aligns ticks; tracking cycles
+        // keep the staged image and the field's values equal.
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        for _ in 0..3 {
+            cycle(&mut active, &mut standby);
+        }
+        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        assert_eq!(standby.take_divergences(), vec![]);
+        assert!(matches!(
+            standby.report().sync,
+            Some(StandbySync::Tracking { .. })
+        ));
+
+        // Skew the standby's view of the field: its staged output bends
+        // away from the field's. The check pairs the skewed staged image
+        // with the first checkpoint of its tick — the detection bound of
+        // one transfer after the staged scan.
+        biased.armed.store(true, Ordering::Relaxed);
+        cycle(&mut active, &mut standby);
+        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        cycle(&mut active, &mut standby);
+
+        let diverged = StandbySync::Diverged {
+            mismatches: vec![Divergence {
+                point: OUTPUT,
+                staged: Value::Float(7.0),
+                field: Value::Float(2.0),
+            }],
+        };
+        assert_eq!(standby.report().sync, Some(diverged.clone()));
+        assert_eq!(
+            standby.take_divergences(),
+            vec![DivergenceReport {
+                tick: Tick(6),
+                mismatches: vec![Divergence {
+                    point: OUTPUT,
+                    staged: Value::Float(7.0),
+                    field: Value::Float(2.0),
+                }],
+            }]
+        );
+
+        // The diverged standby cannot promote: the named refusal carries
+        // the named state, the gate never lifted, and its writes stayed
+        // quiesced throughout.
+        assert_eq!(
+            standby.promote(),
+            Err(SwitchError::NotConverged { sync: diverged })
+        );
+        assert!(!gate.is_open());
+        assert_eq!(field.value(OUTPUT), Value::Float(2.0));
+
+        // Relieved of the skew, a same-tick comparison that matches
+        // resynchronizes the peer — promotion is accepted again. The
+        // staged image of the still-skewed scan keeps it diverged one
+        // more cycle.
+        biased.armed.store(false, Ordering::Relaxed);
+        cycle(&mut active, &mut standby);
+        assert!(matches!(
+            standby.sync_state(),
+            StandbyState::Diverged { .. }
+        ));
+        cycle(&mut active, &mut standby);
+        assert_eq!(standby.sync_state(), &StandbyState::Tracking);
+        standby.promote().unwrap();
+        assert!(gate.is_open());
     }
 }

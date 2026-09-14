@@ -46,7 +46,7 @@ pub use descriptor::{
 pub use history::{HistorySample, PointHistory};
 pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
 pub use journal::{JournalEntry, JournalEvent};
-pub use role::{Role, RoleReport, StandbySync, SwitchError};
+pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };

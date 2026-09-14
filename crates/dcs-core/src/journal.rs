@@ -12,7 +12,7 @@
 //! a numbering gap rather than silent loss.
 
 use crate::command::CommandReceipt;
-use crate::role::Role;
+use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick};
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,16 @@ pub enum JournalEvent {
         from: Role,
         /// The newly reported role.
         to: Role,
+    },
+    /// A tracking peer's staged field outputs were found to mismatch the
+    /// field's actual values at the tick this entry is attributed to —
+    /// the transition into [`StandbySync::Diverged`](crate::StandbySync),
+    /// which blocks promotion until a fresh checkpoint resynchronizes
+    /// the peer. `mismatches` carries the diverging points with the
+    /// staged and field values side by side.
+    DivergenceDetected {
+        /// The mismatched field `Out` points.
+        mismatches: Vec<Divergence>,
     },
 }
 
@@ -135,6 +145,17 @@ mod tests {
                     to: Role::Promoting,
                 },
             },
+            JournalEntry {
+                seq: 6,
+                tick: Tick(9),
+                event: JournalEvent::DivergenceDetected {
+                    mismatches: vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(4.5),
+                        field: Value::Float(6.0),
+                    }],
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -146,5 +167,6 @@ mod tests {
         assert!(json.contains("\"command_settled\""), "{json}");
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");
+        assert!(json.contains("\"divergence_detected\""), "{json}");
     }
 }

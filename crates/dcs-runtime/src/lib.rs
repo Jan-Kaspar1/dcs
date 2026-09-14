@@ -54,6 +54,7 @@
 
 mod checkpoint;
 mod component;
+mod divergence;
 mod executor;
 mod gate;
 mod peer;
@@ -61,6 +62,7 @@ mod standby;
 
 pub use checkpoint::{Checkpoint, RestoreError};
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
+pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
 pub use executor::{
     ComponentStatus, Executor, LinkError, PointMap, PointSpec, ScanError, WiringError,
 };

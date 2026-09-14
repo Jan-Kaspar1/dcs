@@ -697,6 +697,34 @@ impl<'d> Executor<'d> {
         self.image.borrow().get(&point).copied()
     }
 
+    /// The driver the executor's scans read and write through — the
+    /// write gate when the run was assembled behind one. Exposed for the
+    /// redundancy machinery's field comparisons, which read `Out` points
+    /// back through this same surface.
+    pub fn driver(&self) -> &'d (dyn IoDriver + Sync) {
+        self.driver
+    }
+
+    /// The staged field-`Out` image: the samples the last scan's write
+    /// phase issued toward the driver, keyed by point — what a quiesced
+    /// standby would have written had its gate been open. Internal `Out`
+    /// points are image-carried and never reach a driver, so like
+    /// [`write_outputs`](Self::write_outputs) the map excludes them;
+    /// a field `Out` point no component has written yet reports no
+    /// sample, matching the write phase's own leave-untouched rule.
+    ///
+    /// The redundancy machinery stashes one per scan while the peer does
+    /// not own the field and compares it, at checkpoint-transfer time,
+    /// against the field's actual values — the standby-divergence check.
+    pub fn staged_field_outputs(&self) -> BTreeMap<PointId, Sample> {
+        let image = self.image.borrow();
+        self.map
+            .iter()
+            .filter(|(_, spec)| spec.direction == Direction::Out && spec.internal.is_none())
+            .filter_map(|(point, _)| image.get(&point).map(|&sample| (point, sample)))
+            .collect()
+    }
+
     /// A monitoring snapshot of the run: the executor's tick, the latest
     /// image sample of every mapped point, and per-component diagnostics.
     ///

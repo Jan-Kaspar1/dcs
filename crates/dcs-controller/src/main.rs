@@ -487,6 +487,12 @@ fn main() -> ExitCode {
                                         "standby: rejected checkpoint from {active_addr}: {error}"
                                     );
                                 }
+                                for report in peer.take_divergences() {
+                                    eprintln!(
+                                        "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                        report.tick.0, report.mismatches
+                                    );
+                                }
                             }
                             Err(error) => {
                                 peer.note_transfer_failed(format!(
