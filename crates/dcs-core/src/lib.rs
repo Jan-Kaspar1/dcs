@@ -17,13 +17,18 @@
 //! (`ComponentDescriptor`) is the UI-facing self-description: each
 //! component's kind, label, named I/O ports, and tunable parameters —
 //! enough for a monitoring UI to render a faceplate without per-kind
-//! engineering.
+//! engineering. The history contract (`PointHistory`, `HistorySample`)
+//! and the journal contract (`JournalEntry`, `JournalEvent`) are the
+//! monitoring stream types: bounded per-point sample retention for trend
+//! views and the tick-stamped transition log for audit views.
 
 #![warn(missing_docs)]
 
 mod command;
 mod descriptor;
+mod history;
 mod io;
+mod journal;
 mod signal;
 mod state;
 mod telemetry;
@@ -32,7 +37,9 @@ pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
 };
+pub use history::{HistorySample, PointHistory};
 pub use io::{Direction, Input, IoDriver, IoError, Output, PointType, TypedSample};
+pub use journal::{JournalEntry, JournalEvent};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };

@@ -15,12 +15,27 @@
 //!   description, direction, and value type
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
 //!   receipt log, retrievable alongside the snapshot
+//! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
+//!   point's retained samples in tick order; `?point=<id>` (repeatable)
+//!   selects points and `?since=<seq>` returns only samples newer than
+//!   the caller's last seen sequence
+//! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
+//!   journal in scan order; `?since=<seq>` filters likewise
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`
 //! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
 //!   page described below
+//!
+//! The monitor records bounded run history server-side, at one documented
+//! point: after each completed scan it journals the command receipts the
+//! scan boundary settled, appends each point's fresh image sample to that
+//! point's history ring, and journals quality transitions and step
+//! failures — in the scan's own phase order. Both streams are bounded by
+//! [`MonitorConfig`] with oldest-first eviction, and every entry carries
+//! a monotonically increasing `seq`, so a polling consumer detects an
+//! evicted stretch as a numbering gap instead of silently missing it.
 //!
 //! The page is the first slice of the monitoring and control UI consuming
 //! the unified contract: a static, dependency-free HTML+JavaScript asset
@@ -39,7 +54,11 @@
 
 #![warn(missing_docs)]
 
-use dcs_core::{Command, CommandReceipt, TelemetrySnapshot};
+mod recorder;
+
+pub use recorder::MonitorConfig;
+
+use dcs_core::{Command, CommandReceipt, JournalEntry, PointHistory, PointId, TelemetrySnapshot};
 use dcs_model::SignalIndex;
 use dcs_runtime::Executor;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -63,9 +82,16 @@ pub const PAGE: &str = include_str!("page.html");
 /// See the crate docs for the endpoint contract and the single-lock
 /// concurrency model.
 pub struct Monitor<'d> {
-    executor: Mutex<Executor<'d>>,
+    shared: Mutex<Shared<'d>>,
     signals: SignalIndex,
     server: Server,
+}
+
+/// The executor plus the history recorder, behind one lock so a request
+/// never observes a half-recorded scan.
+struct Shared<'d> {
+    executor: Executor<'d>,
+    recorder: recorder::Recorder,
 }
 
 impl<'d> Monitor<'d> {
@@ -76,13 +102,27 @@ impl<'d> Monitor<'d> {
     ///
     /// `("127.0.0.1", 0)` binds an ephemeral port;
     /// [`local_addr`](Self::local_addr) reports the bound address.
+    /// History and journal retention follow [`MonitorConfig::default`].
     pub fn bind<A: ToSocketAddrs>(
         addr: A,
         executor: Executor<'d>,
         signals: SignalIndex,
     ) -> io::Result<Self> {
+        Self::bind_with(addr, executor, signals, MonitorConfig::default())
+    }
+
+    /// As [`bind`](Self::bind) with explicit `config` retention bounds.
+    pub fn bind_with<A: ToSocketAddrs>(
+        addr: A,
+        executor: Executor<'d>,
+        signals: SignalIndex,
+        config: MonitorConfig,
+    ) -> io::Result<Self> {
         Ok(Self {
-            executor: Mutex::new(executor),
+            shared: Mutex::new(Shared {
+                executor,
+                recorder: recorder::Recorder::new(config),
+            }),
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
         })
@@ -114,27 +154,58 @@ impl<'d> Monitor<'d> {
 
     fn handle(&self, mut request: Request) {
         let method = request.method().clone();
-        let path = request
-            .url()
-            .split('?')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        let response = match (method, path.as_str()) {
+        let url = request.url().to_string();
+        let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+        let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
-            (Method::Get, "/snapshot") => json(200, &self.executor.lock().unwrap().snapshot()),
-            (Method::Get, "/receipts") => json(200, self.executor.lock().unwrap().receipts()),
+            (Method::Get, "/snapshot") => {
+                json(200, &self.shared.lock().unwrap().executor.snapshot())
+            }
+            (Method::Get, "/receipts") => {
+                json(200, self.shared.lock().unwrap().executor.receipts())
+            }
+            (Method::Get, "/history") => match history_query(query) {
+                Ok((points, since)) => {
+                    let shared = self.shared.lock().unwrap();
+                    let Shared { executor, recorder } = &*shared;
+                    json(200, &recorder.history(executor, &points, since))
+                }
+                Err(message) => json(400, &message),
+            },
+            (Method::Get, "/journal") => match journal_query(query) {
+                Ok(since) => json(200, &self.shared.lock().unwrap().recorder.journal(since)),
+                Err(message) => json(400, &message),
+            },
             (Method::Post, "/command") => match read_json::<Command>(&mut request) {
-                Ok(command) => json(200, &self.executor.lock().unwrap().submit_command(command)),
+                Ok(command) => {
+                    let mut shared = self.shared.lock().unwrap();
+                    let Shared { executor, recorder } = &mut *shared;
+                    let receipt = executor.submit_command(command);
+                    let index = executor.receipts().len() - 1;
+                    let tick = executor.tick();
+                    recorder.note_command(index, receipt, tick);
+                    json(200, &receipt)
+                }
                 Err(response) => response,
             },
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
                 Ok(body) => {
-                    let mut executor = self.executor.lock().unwrap();
-                    match executor.run(body.scans) {
-                        Ok(_) => json(200, &executor.snapshot()),
-                        Err(error) => json(500, &error.to_string()),
+                    let mut shared = self.shared.lock().unwrap();
+                    let Shared { executor, recorder } = &mut *shared;
+                    let mut failure = None;
+                    for _ in 0..body.scans {
+                        match executor.scan() {
+                            Ok(tick) => recorder.record_scan(executor, tick),
+                            Err(error) => {
+                                failure = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    match failure {
+                        Some(error) => json(500, &error.to_string()),
+                        None => json(200, &executor.snapshot()),
                     }
                 }
                 Err(response) => response,
@@ -145,6 +216,52 @@ impl<'d> Monitor<'d> {
         // already handled, so the error is ignored.
         let _ = request.respond(response);
     }
+}
+
+/// Splits a URL query into `key=value` pairs. The monitoring endpoints
+/// take only numeric values, so no percent-decoding is applied.
+fn query_pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+}
+
+/// The `/history` query: `point` (repeatable) selects points — empty
+/// selects all — and `since` keeps only samples with a higher `seq`.
+/// Unknown keys are ignored so the endpoint stays forward-compatible.
+fn history_query(query: &str) -> Result<(Vec<PointId>, u64), String> {
+    let mut points = Vec::new();
+    let mut since = 0;
+    for (key, value) in query_pairs(query) {
+        match key {
+            "point" => points.push(PointId(
+                value
+                    .parse()
+                    .map_err(|_| format!("invalid point id {value:?}"))?,
+            )),
+            "since" => {
+                since = value
+                    .parse()
+                    .map_err(|_| format!("invalid since cursor {value:?}"))?;
+            }
+            _ => {}
+        }
+    }
+    Ok((points, since))
+}
+
+/// The `/journal` query: `since` keeps only entries with a higher `seq`.
+fn journal_query(query: &str) -> Result<u64, String> {
+    let mut since = 0;
+    for (key, value) in query_pairs(query) {
+        if key == "since" {
+            since = value
+                .parse()
+                .map_err(|_| format!("invalid since cursor {value:?}"))?;
+        }
+    }
+    Ok(since)
 }
 
 /// Reads and parses a JSON request body; parse failures produce the `400`
@@ -216,6 +333,23 @@ impl MonitorClient {
     /// `GET /receipts`: the executor's full receipt log.
     pub fn receipts(&self) -> io::Result<Vec<CommandReceipt>> {
         self.get_json("/receipts")
+    }
+
+    /// `GET /history`: the retained samples of `points` — or of every
+    /// mapped point when empty — keeping only samples with a `seq` above
+    /// `since` (`0` fetches everything retained).
+    pub fn history(&self, points: &[PointId], since: u64) -> io::Result<Vec<PointHistory>> {
+        let mut path = format!("/history?since={since}");
+        for point in points {
+            path.push_str(&format!("&point={}", point.0));
+        }
+        self.get_json(&path)
+    }
+
+    /// `GET /journal`: the retained transition-journal entries with a
+    /// `seq` above `since` (`0` fetches everything retained).
+    pub fn journal(&self, since: u64) -> io::Result<Vec<JournalEntry>> {
+        self.get_json(&format!("/journal?since={since}"))
     }
 
     /// `POST /command`: submits `command`, returning its receipt —
@@ -370,5 +504,24 @@ mod tests {
             serde_json::to_string(&ScanRequest { scans: 2 }).unwrap(),
             "{\"scans\":2}"
         );
+    }
+
+    #[test]
+    fn history_query_parses_points_and_since() {
+        assert_eq!(
+            history_query("point=10&point=20&since=5"),
+            Ok((vec![PointId(10), PointId(20)], 5))
+        );
+        assert_eq!(history_query(""), Ok((Vec::new(), 0)));
+        assert_eq!(history_query("unknown=ignored"), Ok((Vec::new(), 0)));
+        assert!(history_query("point=abc").is_err());
+        assert!(history_query("since=-1").is_err());
+    }
+
+    #[test]
+    fn journal_query_parses_since() {
+        assert_eq!(journal_query("since=7"), Ok(7));
+        assert_eq!(journal_query(""), Ok(0));
+        assert!(journal_query("since=soon").is_err());
     }
 }
