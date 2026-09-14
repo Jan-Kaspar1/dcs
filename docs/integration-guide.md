@@ -339,11 +339,15 @@ assert_eq!(executor.snapshot().components[0].step_errors, 0);
 
 ## Adding a device kind
 
-The checked-in references are the two factories in
+The checked-in references are the three factories in
 `crates/dcs-assembly/src/drivers.rs` that `DriverRegistry::standard()`
 installs: `sim_device` serving the `sim*` prefix by contributing to the shared
-local simulated map, and `sim_tcp_device` serving the exact `SIM_TCP_KIND`
-(`"sim-tcp"`) by connecting a `dcs_sim_net::RemoteDriver` over TCP.
+local simulated map, `sim_tcp_device` serving the exact `SIM_TCP_KIND`
+(`"sim-tcp"`) by connecting a `dcs_sim_net::RemoteDriver` over TCP, and
+`scripted_device` serving the exact `SIM_SCRIPTED_KIND` (`"sim-scripted"`) by
+building a `dcs_sim::ScriptedDriver` that replays a tick-indexed `"script"`
+parameter — the checked-in `Backend` contribution that also installs an
+`inspect` handle.
 
 ### 1. Implement `IoDriver`
 
@@ -409,17 +413,23 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step })` — a self-contained
-  backend. `io` is the point-facing driver; `step` is an optional
-  `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`) advancing
-  the backend's simulated plant one `dt` per `FanoutDriver::step` — remote
-  or real field kinds that advance themselves leave it `None`. (`RemoteDriver`
-  supplies one because the remote plant is stepped explicitly over its
-  protocol.)
+- `DeviceDriver::Backend(DeviceBackend { io, step, inspect })` — a
+  self-contained backend. `io` is the point-facing driver; `step` is an
+  optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
+  advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
+  remote or real field kinds that advance themselves leave it `None`.
+  (`RemoteDriver` supplies one because the remote plant is stepped explicitly
+  over its protocol.) `inspect` is an optional
+  `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
+  the backend exposes more than the `IoDriver` surface — `sim-scripted`
+  installs the `ScriptedDriver` itself so `FanoutDriver::inspect::<T>(device)`
+  reaches its recorded-write log; leave it `None` when the backend has
+  nothing to inspect.
 
 Point-to-point connections whose ends live on different backends become
 `FanoutDriver` routes applied at each `step`; both-sim wires stay inside the
-local `SimDriver` as `Loopback`s.
+local `SimDriver` as `Loopback`s, and wires between internal points become
+links inside the executor's scan image.
 
 ### 4. Register the kind
 
@@ -427,12 +437,12 @@ local `SimDriver` as `Loopback`s.
 `with_prefix`/`register_prefix` bind every kind starting with a prefix, for
 families like `sim` whose members (`sim-ai`, `sim-ao`, …) share one
 integration. Exact registrations always win over prefix matches — that is how
-`sim-tcp` routes remotely while every other `sim*` kind stays local.
-`DriverRegistry::standard()` installs the built-in pair; a deployment adds
-its integrations onto it (or starts from `DriverRegistry::new()`), then
-`resolve_drivers(&model, &registry)` produces the `DriverPlan` whose
-`build()` yields the `FanoutDriver`. An unregistered kind fails as
-`AssemblyError::UnknownDeviceKind` before any backend is built.
+`sim-tcp` and `sim-scripted` route to their own backends while every other
+`sim*` kind stays local. `DriverRegistry::standard()` installs the built-in
+three; a deployment adds its integrations onto it (or starts from
+`DriverRegistry::new()`), then `resolve_drivers(&model, &registry)` produces
+the `DriverPlan` whose `build()` yields the `FanoutDriver`. An unregistered
+kind fails as `AssemblyError::UnknownDeviceKind` before any backend is built.
 
 ### 5. Declare the device in a model
 
@@ -440,10 +450,15 @@ A `devices` entry declares `id`, `kind`, `channels` (each named channel's
 `direction` and `value_type`), and optional `parameters`; `io_points` bind
 logical points to `{device, name}` channel references. Model validation
 requires the channel to exist and to agree with the point's direction and
-value type. The checked-in `crates/dcs-assembly/fixtures/mixed_kinds.json`
-shows a model splitting one loop across a local `sim` device and a remote
-`sim-tcp` device carrying `{"address": "…"}` parameters; its tests in
-`crates/dcs-assembly/tests/drivers.rs` exercise the whole registry path.
+value type. An `io_point` may instead omit `channel` and carry an `initial`
+value — a *channel-less internal point* held by the controller's scan image
+rather than field I/O; internal points reach no device factory, so they never
+appear in a `DeviceSpec`. The checked-in
+`crates/dcs-assembly/fixtures/mixed_kinds.json` shows a model splitting one
+loop across a local `sim` device and a remote `sim-tcp` device carrying
+`{"address": "…"}` parameters, `scripted_kinds.json` declares a
+`sim-scripted` device, and `internal_points.json` declares internal points;
+their tests in `crates/dcs-assembly/tests/` exercise the whole registry path.
 
 ### Worked example: a new device kind, end to end
 
@@ -571,13 +586,15 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         samples.insert(point.point, Sample::good(initial, Tick::ZERO));
     }
     // A self-contained backend; nothing to step — the device holds no
-    // simulated dynamics.
+    // simulated dynamics — and nothing beyond the IoDriver surface to
+    // inspect.
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: Arc::new(MemoryDriver {
             samples: Mutex::new(samples),
             kinds,
         }),
         step: None,
+        inspect: None,
     }))
 }
 
@@ -661,18 +678,21 @@ a monitored run is platform machinery. The split:
 | Per-component diagnostics (`step_errors`, `last_error`, `last_tick`) and point samples in `TelemetrySnapshot`, served by `dcs-monitor`'s HTTP+JSON endpoints | `capture_state`/`restore_state` field coverage for every value carried between scans |
 | Descriptor publication in `TelemetrySnapshot.descriptors`, so the UI renders any registered kind generically | The registration call in the deployed `ComponentRegistry` |
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
-| The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, and `FanoutDriver::step(dt)` invoking each backend's `StepHook` | Parameter validation (`DeviceError::parameters`) and eager backend probing (`DeviceError::backend`) |
+| The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook`, and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |
 
 ## Where errors surface
 
 Model load reports `LoadError` (`Malformed`, `UnsupportedVersion`, or
-`Invalid` listing every `ValidationError`). Assembly reports `AssemblyError`;
-the variants an integration can trigger are `UnknownComponentKind`,
-`UnboundPort`, `Component` (constructor failures via `BuildError::other`),
-`UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`, `UnknownDeviceKind`,
-`InvalidDeviceParameters`, `DeviceBackend`, and `Wiring` for the executor's
-own check. Runtime failures land in per-component `ComponentDiagnostics` and
+`Invalid` listing every `ValidationError`, including `MissingInitial` and
+`InitialKindMismatch` for malformed internal points). Assembly reports
+`AssemblyError`; the variants an integration can trigger are
+`UnknownComponentKind`, `UnboundPort`, `Component` (constructor failures via
+`BuildError::other`), `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`,
+`UnknownDeviceKind`, `InvalidDeviceParameters`, `DeviceBackend`, and `Wiring`
+for the executor's own check — plus `InvalidInternalPoint` and
+`MixedPointLink` for malformed channel-less points, which a validated model
+reports earlier as `ValidationError`s. Runtime failures land in per-component `ComponentDiagnostics` and
 driver `IoError`s rather than panics. See
 `crates/dcs-assembly/tests/drivers.rs` and
 `crates/dcs-assembly/tests/assembly.rs` for tests exercising each named
