@@ -30,7 +30,7 @@
 //! | `0x01` | read register | `u16 register` |
 //! | `0x02` | write register | `u16 register`, `u8 kind`, value bytes |
 //! | `0x03` | list registers | none |
-//! | `0x04` | step | none |
+//! | `0x04` | step | `f64 dt` |
 //! | `0x05` | claim writer | `u64 owner` |
 //! | `0x06` | release writer | none |
 //! | `0x07` | inject quality | `u16 register`, quality bytes |
@@ -47,10 +47,33 @@
 //! device_fault, `0x07` configuration_fault. `good` carries no reason
 //! byte.
 //!
-//! `step` is the explicit device clock advance: the register bank
-//! holds values only — no time-dependent dynamics — so stepping
-//! increments the logical tick that stamps written registers and
-//! nothing else. Nothing on the wire advances on a wall clock.
+//! `step` is the explicit device clock advance: it increments the
+//! logical tick that stamps written registers and steps any declared
+//! dynamics by the request's `dt` — the same caller-supplied time base
+//! the plant protocol's `step` carries, so a controller's step request
+//! advances the simulated process in lockstep. `dt` must be finite and
+//! non-negative; a step carrying one that is not is refused with an
+//! `invalid_request` error. Nothing on the wire advances on a wall
+//! clock.
+//!
+//! ## Declared dynamics over registers
+//!
+//! The `dcs-sim-bus-device` binary accepts `--dynamics FILE`: a JSON
+//! list of `ProcessElement` declarations — the same serde vocabulary
+//! `dcs-plant-server --dynamics` merges (`first_order_lag`,
+//! `second_order_lag`, `integrator`, `dead_time`, `noise`,
+//! `bool_flow`, `flow_sum`). The recorded binding encoding: an
+//! element's point-valued fields carry register addresses — a
+//! document's `"input": 20` reads register 20. Elements follow the
+//! driver's own conventions, evaluated by the `SimDriver` the bank is
+//! built on: each `step` advances them by the caller-supplied `dt` in
+//! declaration order, a `Good` input advances the element and stamps
+//! its output register `Good`, and a non-`Good` input — a register
+//! stamped by `inject quality` — freezes the element and propagates
+//! its quality to the output register (`flow_sum` propagating the
+//! worst of its inputs'). Element state lives in the bank for the
+//! bank's lifetime: like the `dcs-sim-net` plant, the field is shared
+//! state, not checkpointed controller state.
 //!
 //! `inject quality` is the fault-injection half of the register
 //! protocol — the analogue of `dcs-sim-net`'s `inject_fault` for the
@@ -133,8 +156,14 @@ mod params;
 mod protocol;
 mod server;
 
-pub use bank::{BankError, RegisterBank, RegisterDecl};
+pub use bank::{BankError, DynamicsError, RegisterBank, RegisterDecl};
 pub use client::{BusDriver, LinkError, PointRegister};
 pub use params::{ChannelRegister, DEVICE_KIND, DeviceParameters};
 pub use protocol::{BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo};
 pub use server::BusServer;
+// The declared-dynamics vocabulary a `--dynamics` document carries,
+// re-exported so the device binary and test rigs need no `dcs-sim`
+// dependency of their own.
+pub use dcs_sim::{
+    BoolFlow, DeadTime, FirstOrderLag, FlowSum, Integrator, Noise, ProcessElement, SecondOrderLag,
+};
