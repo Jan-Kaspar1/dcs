@@ -353,7 +353,10 @@ Repair context: {repair}
             except GitHubError:
                 # Preserve successful receipt so publishing is retried after API recovery.
                 raise
-            except (RuntimeError, subprocess.CalledProcessError) as exc:
+            except Exception as exc:
+                # Any other publish-path failure (wrong branch, unclean result,
+                # git or state error) belongs to this job alone; repair or block
+                # it so the same pass still reaches the remaining jobs.
                 self.repair(job, issue, str(exc))
 
     def recover_processes(self):
