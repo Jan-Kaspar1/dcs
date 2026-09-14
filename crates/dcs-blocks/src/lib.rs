@@ -28,7 +28,11 @@
 //! - [`Interlock`] — analog pass-through gated by Bool trip inputs and a
 //!   permissive, driving a configured safe value while tripped;
 //! - [`OverrideSelect`] — deterministic selection between a control and
-//!   an operator value with worst-of quality propagation.
+//!   an operator value with worst-of quality propagation;
+//! - [`Valve`] — analog actuator with a position-feedback discrepancy
+//!   diagnostic;
+//! - [`Motor`] — discrete actuator with a run-feedback fault diagnostic
+//!   covering failure to start and failure to stop.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -42,9 +46,11 @@ mod analog_output;
 mod digital_input;
 mod digital_output;
 mod interlock;
+mod motor;
 mod override_select;
 mod params;
 mod pid;
+mod valve;
 
 pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
@@ -52,9 +58,11 @@ pub use analog_output::{AnalogOutput, RawOutput};
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use interlock::Interlock;
+pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
 pub use pid::{Pid, PidConfig};
+pub use valve::Valve;
 
 #[cfg(test)]
 pub(crate) mod testutil {
