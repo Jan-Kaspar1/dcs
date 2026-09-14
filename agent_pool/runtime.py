@@ -77,7 +77,7 @@ class Runtime:
             self.run_git(clone, 'switch', '--detach', 'origin/main')
         return clone
 
-    def spawn(self, key, cwd, prompt, resume_session=None):
+    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]+', key):
             raise ValueError('Invalid invocation key')
         cwd = Path(cwd).resolve()
@@ -96,7 +96,7 @@ class Runtime:
                    str(prompt_path), '--export', str(invocation / 'conversation.json')]
         if resume_session:
             command.extend(['--resume', resume_session])
-        spec = {'key': key, 'command': command, 'cwd': str(cwd), 'timeout': self.timeout_seconds,
+        spec = {'key': key, 'command': command, 'cwd': str(cwd), 'timeout': timeout or self.timeout_seconds,
                 'receipt': str(invocation / 'receipt.json'), 'log': str(invocation / 'output.log'),
                 'metadata': str(invocation / 'process.json')}
         atomic_json(invocation / 'spec.json', spec)

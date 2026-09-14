@@ -7,11 +7,13 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 
 from .state import State
 from .github import GitHub, GitHubError
 from .runtime import Runtime
 from . import planning
+from . import review as review_lane
 
 
 class RecoveryUncertain(RuntimeError):
@@ -361,8 +363,16 @@ Repair context: {repair}
         planner = self.state.get('planner')
         if planner:
             known.append(planner['process'])
+        reviewer = self.state.get('reviewer')
+        if reviewer:
+            known.append(reviewer['process'])
         paths = [m['invocation'] for m in known if m]
         for record in self.runtime.recover(paths):
+            launch = self.state.get('reviewer:launch')
+            if launch and record.get('key') == launch['key'] and not self.state.get('reviewer'):
+                self.state.set('reviewer', {**launch, 'process': record})
+                self.log('Recovered interrupted review launch ' + launch['run_id'])
+                continue
             matches = [j for j in jobs if self.state.get('launch:' + str(j['issue'])) == record.get('key')
                        and not self.state.get('process:' + str(j['issue']))]
             if len(matches) == 1:
@@ -409,6 +419,304 @@ Repair context: {repair}
                 self.repair(job, by_number[job['issue']], 'CI failed. Inspect gh pr checks and gh run view --log-failed as read-only diagnostics. ' + json.dumps(failed))
                 return
 
+    def review_stage(self, cfg=None):
+        """Rollout stage: report -> pilot -> full, per config or persisted state."""
+        cfg = cfg or review_lane.settings(self.config)
+        if cfg['mode'] == 'full' or self.state.get('review:stage') == 'full':
+            return 'full'
+        if cfg['mode'] == 'pilot' or self.state.get('review:stage') == 'pilot':
+            return 'pilot'
+        return 'report'
+
+    def slots_used(self, active=None):
+        """Reserved agent slots: live jobs plus a running reviewer invocation."""
+        if active is None:
+            active = self.state.jobs(('working', 'pr-open'))
+        return len(active) + (1 if self.state.get('reviewer') else 0)
+
+    def new_failure_evidence(self):
+        last = self.state.get('review:last_finished_at', 0)
+        return any(j['status'] == 'blocked' and (j.get('updated') or 0) > last for j in self.state.jobs())
+
+    def review_context(self, clone, sha, issues, prs, cfg):
+        cursor = self.state.get('review:cursor', 0)
+        try:
+            commits = self.runtime.run_git(clone, 'log', '--oneline', '-30', sha).splitlines()
+        except subprocess.CalledProcessError:
+            commits = []
+        open_issues = [{'number': i['number'], 'title': i['title'],
+                        'labels': [l['name'] for l in i.get('labels', [])],
+                        'body': (i.get('body') or '')[:1500]}
+                       for i in issues if i.get('state') == 'OPEN'][:100]
+        closed = sorted((i for i in issues if i.get('state') == 'CLOSED'),
+                        key=lambda i: i['number'], reverse=True)[:30]
+        missing = [p for p in ('AGENTS.md', 'CONTEXT.md', 'docs/architecture.md', 'docs/plan.md')
+                   if not (clone / p).exists()]
+        return {
+            'base_sha': sha,
+            'previous_reviewed_sha': self.state.last_completed_sha(),
+            'coverage_focus': review_lane.AREAS[cursor % len(review_lane.AREAS)],
+            'recent_commits': commits,
+            'open_issues': open_issues,
+            'open_prs': prs[:100],
+            'recently_closed_issues': [{'number': i['number'], 'title': i['title']} for i in closed],
+            'prior_dispositions': [{'key': c['key'], 'disposition': c['disposition'],
+                                    'reason': c['reason'], 'revisit': c['revisit']}
+                                   for c in self.state.candidates() if c['disposition'] != 'pending'][:50],
+            'pending_candidates': [json.loads(c['payload']) for c in self.state.candidates('pending')],
+            'pending_assessments': [{'key': c['key'], 'title': c['title'],
+                                     'issues': self.state.improvement_issues(c['key']),
+                                     'proposal': json.loads(c['payload'])}
+                                    for c in self.state.pending_assessments()],
+            'failure_evidence': [{'issue': j['issue'], 'error': (j.get('error') or '')[:1000]}
+                                 for j in self.state.jobs(('blocked',))],
+            'missing_context': missing,
+            'issue_inventory_size': len(issues),
+        }
+
+    def launch_review(self, cfg, slot, issues, prs, manual=False, attempt=1):
+        sha = self.github.main_sha()
+        run_id = time.strftime('r%Y%m%d', time.gmtime()) + '-' + uuid.uuid4().hex[:8]
+        self.state.begin_review(run_id, slot, sha, attempt)
+        self.state.set('review:last_slot', slot)
+        self.state.set('review:last_sha', sha)
+        self.state.set('review:manual', False)
+        if not manual and attempt == 1 and sha == self.state.last_completed_sha() and not self.new_failure_evidence():
+            self.state.finish_review(run_id, 'skipped', report='base revision unchanged')
+            self.log(f'Review {run_id} skipped: base {sha[:12]} unchanged')
+            return
+        try:
+            clone = self.runtime.prepare_clone('reviewer')
+            self.runtime.run_git(clone, 'fetch', 'origin')
+            self.runtime.run_git(clone, 'switch', '--detach', sha)
+            report_dir = self.root / 'reviews' / run_id
+            report_dir.mkdir(parents=True, exist_ok=True)
+            resource_dir = report_dir / 'resources'
+            hashes = review_lane.stage_resources(resource_dir)
+            template = (resource_dir / 'prompt.md').read_text()
+        except (ValueError, RuntimeError, KeyError, OSError, subprocess.CalledProcessError) as exc:
+            self.finish_review_run(run_id, slot, attempt, 'inconclusive',
+                                   'Preflight failed: ' + str(exc)[:2000])
+            self.state.set('last_error', 'Review preflight failed: ' + str(exc)[:500])
+            return
+        context = self.review_context(clone, sha, issues, prs, cfg)
+        text = review_lane.prompt(template, run_id, sha, context['previous_reviewed_sha'],
+                                  report_dir, resource_dir, context, cfg)
+        key = 'review-' + run_id
+        intent = {'key': key, 'run_id': run_id, 'slot': slot, 'base_sha': sha,
+                  'report_dir': str(report_dir), 'clone': str(clone),
+                  'attempt': attempt, 'hashes': hashes}
+        self.state.set('reviewer:launch', intent)
+        process = self.runtime.spawn(key, clone, text, timeout=cfg['timeout_seconds'])
+        self.state.set('reviewer', {**intent, 'process': process})
+        self.log(f'Review {run_id} launched at {sha[:12]} (attempt {attempt})')
+
+    def finish_review_run(self, run_id, slot, attempt, status, error=None, report=None):
+        self.state.finish_review(run_id, status, error=error, report=report)
+        if status == 'inconclusive' and attempt == 1:
+            self.state.set('review:retry_pending', slot)
+        self.log(f'Review {run_id} {status}' + (f': {error}' if error else ''))
+
+    def ingest_review(self, current, receipt, cfg, issues):
+        run_id, slot, attempt = current['run_id'], current['slot'], current['attempt']
+        report, error = None, None
+        code = receipt.get('returncode', receipt.get('exit_code', -1))
+        if receipt.get('status', 'completed') != 'completed' or code != 0:
+            error = 'Reviewer invocation failed: ' + json.dumps(receipt)[:2000]
+        else:
+            path = Path(current['report_dir']) / 'report.json'
+            if not path.is_file():
+                error = 'Reviewer produced no report.json'
+            else:
+                try:
+                    report = review_lane.validate_report(
+                        path.read_text(errors='replace'), current['clone'], run_id,
+                        current['base_sha'], known_issues={i['number'] for i in issues},
+                        max_candidates=cfg['max_candidates'],
+                        expected_hashes=current['hashes'])
+                except ValueError as exc:
+                    error = 'Invalid report: ' + str(exc)[:2000]
+        if report is None:
+            self.finish_review_run(run_id, slot, attempt, 'inconclusive', error)
+            return
+        status = report['status']
+        skipped = {}
+        # Only a completed review publishes candidates and assessments; an
+        # inconclusive or skipped report is retained as evidence, never as
+        # accepted review output.
+        if status == 'completed':
+            skipped = self.state.record_candidates(run_id, report['candidates'])
+            for assessment in report['assessments']:
+                cand = self.state.candidate(assessment['key'])
+                if not cand or cand['disposition'] != 'accepted' or cand['assessed']:
+                    continue
+                self.state.record_assessment(assessment['key'], assessment)
+                if assessment['outcome'] == 'rejected':
+                    self.state.set('review:stage', 'report')
+                    self.state.set('review:rollout_failure', assessment['observed'][:500])
+                if assessment['outcome'] == 'confirmed' and self.review_stage(cfg) == 'pilot':
+                    self.state.set('review:stage', 'full')
+                    self.log('Review rollout: pilot improvement passed assessment; '
+                             'daily operation enabled')
+                if assessment['outcome'] == 'followup' and assessment.get('followup_candidate'):
+                    self.state.record_candidates(run_id, [assessment['followup_candidate']])
+        summary = json.dumps({'hashes': current.get('hashes'),
+                              'candidates': [c['key'] for c in report['candidates']],
+                              'suppressed': skipped,
+                              'assessments': len(report['assessments'])})
+        self.state.finish_review(run_id, status,
+                                 completed_sha=current['base_sha'] if status != 'inconclusive' else None,
+                                 report=summary)
+        if status == 'inconclusive':
+            if attempt == 1:
+                self.state.set('review:retry_pending', slot)
+            self.state.set('last_error', f'Review {run_id} reported inconclusive')
+            self.log(f'Review {run_id} reported inconclusive')
+            return
+        self.state.set('review:cursor', self.state.get('review:cursor', 0) + 1)
+        if (self.review_stage(cfg) == 'report' and cfg['auto_promote']
+                and not self.state.get('review:rollout_failure')):
+            self.state.set('review:stage', 'pilot')
+            self.log('Review rollout: first completed report; pilot planner ingestion enabled')
+        review_lane.prune_reports(self.root, time.time(), cfg['retention_days'],
+                                  protected={run_id})
+        self.log(f'Review {run_id} {status}: {summary}')
+
+    def review(self, issues, prs):
+        """Drive the daily architecture review lane."""
+        cfg = review_lane.settings(self.config)
+        current = self.state.get('reviewer')
+        if current and not cfg['enabled']:
+            self.runtime.terminate(current['process'])
+            self.state.set('reviewer', None)
+            self.finish_review_run(current['run_id'], current['slot'], current['attempt'],
+                                   'inconclusive', 'Lane disabled during run')
+            current = None
+        if current:
+            receipt = self.runtime.poll(current['process'])
+            if receipt is None:
+                return
+            self.state.set('reviewer', None)
+            self.ingest_review(current, receipt, cfg, issues)
+        if self.state.get('reviewer'):
+            return
+        stale = self.state.running_review()
+        if stale:
+            self.state.finish_review(stale['run_id'], 'inconclusive',
+                                     error='Review launch interrupted before invocation record')
+        if not cfg['enabled'] or self.state.paused():
+            return
+        if self.slots_used() >= self.state.capacity():
+            return
+        slot = review_lane.current_slot(time.time(), cfg)
+        if self.state.get('review:manual'):
+            self.launch_review(cfg, slot, issues, prs, manual=True)
+            return
+        if self.state.get('review:last_slot') == slot:
+            if self.state.get('review:retry_pending') == slot:
+                self.state.set('review:retry_pending', None)
+                self.launch_review(cfg, slot, issues, prs, attempt=2)
+            return
+        self.launch_review(cfg, slot, issues, prs)
+
+    def refresh_improvements(self, issues):
+        """Release the active-improvement slot when it can make no more progress.
+
+        An improvement resolves once every mapped issue finished (done or
+        blocked), closed, or can never be dispatched because a prerequisite
+        ended blocked — a stalled dependency strand must not hold the slot
+        forever.
+        """
+        active = self.state.get('review:active_improvement')
+        if not active:
+            return
+        numbers = self.state.improvement_issues(active)
+        statuses = {j['issue']: j['status'] for j in self.state.jobs()}
+        by_number = {i['number']: i for i in issues}
+        closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
+
+        def stalled(number, chain=()):
+            """True when `number` can never dispatch: a prerequisite failed."""
+            status = statuses.get(number)
+            if status in ('working', 'pr-open') or number in closed:
+                return False
+            if status in ('done', 'blocked'):
+                return status == 'blocked'
+            issue = by_number.get(number)
+            if issue is None or issue.get('state') != 'OPEN' or number in chain:
+                return True
+            try:
+                deps = planning.metadata(issue.get('body') or '')['dependencies']
+            except (ValueError, KeyError):
+                return False
+            return any(d not in closed and stalled(d, chain + (number,))
+                       for d in deps)
+
+        resolved = all(statuses.get(n) in ('done', 'blocked') or n in closed
+                       or stalled(n) for n in numbers)
+        if not numbers or resolved:
+            self.state.set('review:active_improvement', None)
+            self.log(f'Improvement {active} resolved; slot released')
+
+    def apply_dispositions(self, dispositions, items, issues, created):
+        """Apply planner accept/defer/reject decisions to review candidates."""
+        for entry in dispositions:
+            cand = self.state.candidate(entry['key'])
+            if not cand or cand['disposition'] not in ('pending', 'accepted'):
+                continue
+            if entry['decision'] != 'accept':
+                # Accepted work can still be deferred or rejected when it can
+                # no longer proceed; its dispatched issues are not cancelled.
+                self.state.disposition_candidate(entry['key'],
+                    'deferred' if entry['decision'] == 'defer' else 'rejected',
+                    entry['reason'], entry.get('revisit'),
+                    sources=('pending', 'accepted'))
+                self.log(f"Candidate {entry['key']} {entry['decision']}: {entry['reason'][:200]}")
+                continue
+            prefix = 'arch-' + entry['key']
+            mapped = set()
+            for item in items:
+                number = created.get(item['key'])
+                if number is not None and (item['key'] == prefix or item['key'].startswith(prefix + '-')
+                                           or item.get('improvement') == entry['key']):
+                    mapped.add(number)
+            for issue in issues:
+                try:
+                    meta = planning.metadata(issue.get('body', ''))
+                except (ValueError, KeyError):
+                    continue
+                if meta.get('improvement') == entry['key'] or meta['key'] == prefix or meta['key'].startswith(prefix + '-'):
+                    mapped.add(issue['number'])
+            if not mapped:
+                self.state.disposition_candidate(entry['key'], 'deferred',
+                    'Accepted without a mapped "arch-' + entry['key'] + '" issue in the proposal',
+                    'Next planner pass that emits the mapped issue')
+                continue
+            self.state.disposition_candidate(entry['key'], 'accepted', entry['reason'],
+                                             issue=min(mapped))
+            for number in mapped:
+                self.state.map_improvement(entry['key'], number)
+            if cand['disposition'] == 'pending':
+                self.log(f"Candidate {entry['key']} accepted; issues {sorted(mapped)}")
+
+    def planner_review_input(self):
+        """Undispositioned candidates, unresolved accepted work, and prior decisions."""
+        cfg = review_lane.settings(self.config)
+        if not cfg['enabled'] or self.review_stage(cfg) == 'report':
+            return None
+        pending = [json.loads(c['payload']) for c in self.state.candidates('pending')]
+        accepted = [{'key': c['key'], 'title': c['title'],
+                     'issues': self.state.improvement_issues(c['key']),
+                     'proposal': json.loads(c['payload'])}
+                    for c in self.state.unresolved_accepted()]
+        suppressed = [{'key': c['key'], 'disposition': c['disposition'],
+                       'reason': c['reason'], 'revisit': c['revisit']}
+                      for c in self.state.candidates() if c['disposition'] in ('deferred', 'rejected')][:50]
+        if not pending and not accepted and not suppressed:
+            return None
+        return {'candidates': pending, 'accepted': accepted, 'suppressed': suppressed,
+                'active_improvement': self.state.get('review:active_improvement')}
+
     def planner(self, issues, prs):
         current = self.state.get('planner')
         if current:
@@ -428,7 +736,15 @@ Repair context: {repair}
         if self.state.paused():
             return
         pending = self.state.get('pending_proposal')
+        if isinstance(pending, list):
+            # Supervisors before the review lane persisted the bare issues list.
+            pending = {'issues': pending, 'dispositions': []}
         if pending is not None:
+            if not isinstance(pending, dict) or not isinstance(pending.get('issues'), list):
+                self.state.set('pending_proposal', None)
+                self.state.set('last_error', 'Discarded malformed pending proposal')
+                self.log('Discarded malformed pending proposal')
+                return
             ready_count = sum('agent:ready' in [l['name'] for l in i.get('labels', [])] and i.get('state') == 'OPEN' for i in issues)
             known = set()
             for issue in issues:
@@ -437,13 +753,18 @@ Repair context: {repair}
                 except (ValueError, KeyError):
                     pass
             numbers = {i['number'] for i in issues}
-            for item in pending:
+            created = {}
+            for item in pending['issues']:
                 if item['key'] in known or ready_count >= 20:
                     continue
                 if not set(item['dependencies']) <= numbers:
                     raise ValueError('Planner referenced nonexistent dependencies')
-                self.github.create_issue(item['title'], planning.body(item), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
+                number = self.github.create_issue(item['title'], planning.body(item), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
+                created[item['key']] = number
+                if item.get('improvement'):
+                    self.state.map_improvement(item['improvement'], number)
                 ready_count += 1
+            self.apply_dispositions(pending.get('dispositions', []), pending['issues'], issues, created)
             self.state.set('pending_proposal', None)
             return
         now = time.time()
@@ -454,7 +775,7 @@ Repair context: {repair}
         clone = self.runtime.prepare_clone('coordinator')
         output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
         output.parent.mkdir(parents=True, exist_ok=True)
-        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output))
+        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input()))
         self.state.set('planner', {'process': process, 'output': str(output)})
         self.state.set('last_plan', now)
         self.log('Planner started')
@@ -477,6 +798,21 @@ Repair context: {repair}
             if not self.state.get(marker):
                 self.github.comment(job['issue'], f"Local agent reservation: {job['worker']}; attempt {job['attempt']}; branch {job.get('branch') or 'pending'}. <!-- {marker} -->")
                 self.state.set(marker, True)
+        # Priority labels must agree with managed metadata; dispatch sorts by metadata.
+        for issue in issues:
+            if issue.get('state') != 'OPEN':
+                continue
+            try:
+                meta = planning.metadata(issue.get('body') or '')
+            except (ValueError, KeyError):
+                continue
+            labels = [l['name'] for l in issue.get('labels', [])]
+            want = f"priority:P{meta.get('priority', 3)}"
+            wrong = [l for l in labels if l.startswith('priority:P') and l != want]
+            if wrong or (want not in labels and 'agent:ready' in labels):
+                self.github.update_issue(issue['number'],
+                                         add_labels=[] if want in labels else [want],
+                                         remove_labels=wrong)
 
     def retries(self, issues):
         if self.state.paused():
@@ -486,7 +822,7 @@ Repair context: {repair}
             if not self.state.get('retry:' + str(job['issue'])) or job['issue'] not in by_number:
                 continue
             active = self.state.jobs(('working', 'pr-open'))
-            if len(active) >= self.state.capacity() or any(j['concurrency_group'] == job['concurrency_group'] for j in active):
+            if self.slots_used(active) >= self.state.capacity() or any(j['concurrency_group'] == job['concurrency_group'] for j in active):
                 continue
             rec = self.state.get('recovery:' + str(job['issue']))
             if rec is None:
@@ -496,7 +832,10 @@ Repair context: {repair}
     def dispatch(self, issues):
         if self.state.paused():
             return
-        free = self.free_workers(self.state.jobs(('working', 'pr-open')))
+        self.refresh_improvements(issues)
+        capacity = self.state.capacity()
+        if self.slots_used() >= capacity:
+            return
         closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
         def priority(issue):
             try:
@@ -511,11 +850,21 @@ Repair context: {repair}
             meta = planning.metadata(issue['body'])
             if not set(meta['dependencies']) <= closed:
                 continue
+            improvement = meta.get('improvement')
+            active_improvement = self.state.get('review:active_improvement')
+            if improvement and active_improvement and active_improvement != improvement:
+                continue
+            # The reviewer slot is re-enforced after every reservation; worker
+            # clone leasing alone would fill every worker slot past the ceiling.
+            if self.slots_used() >= capacity:
+                return
+            free = self.free_workers(self.state.jobs(('working', 'pr-open')))
             if not free:
                 return
             job = self.state.reserve(issue['number'], free[0], meta['group'])
             if job:
-                free = self.free_workers(self.state.jobs(('working', 'pr-open')))
+                if improvement and not active_improvement:
+                    self.state.set('review:active_improvement', improvement)
                 try:
                     self.launch(job, issue)
                 except Exception as exc:
@@ -534,9 +883,11 @@ Repair context: {repair}
                 while not self.stopping:
                     try:
                         issues = self.github.issues(state='all')
+                        prs = self.github.prs()
                         self.reconcile_workers(issues)
                         self.integrate(issues)
-                        self.planner(issues, self.github.prs())
+                        self.review(issues, prs)
+                        self.planner(issues, prs)
                         self.retries(issues)
                         self.dispatch(issues)
                         self.mirror(issues)
@@ -555,6 +906,9 @@ Repair context: {repair}
                         current_planner = self.state.get('planner')
                         if current_planner:
                             records.append(current_planner['process'])
+                        reviewer = self.state.get('reviewer')
+                        if reviewer:
+                            records.append(reviewer['process'])
                         if any(record and self.runtime.poll(record) is not None for record in records):
                             break
             finally:
@@ -565,4 +919,7 @@ Repair context: {repair}
                 planner = self.state.get('planner')
                 if planner:
                     self.runtime.terminate(planner['process'])
+                reviewer = self.state.get('reviewer')
+                if reviewer:
+                    self.runtime.terminate(reviewer['process'])
                 self.log('Supervisor stopped; work preserved')

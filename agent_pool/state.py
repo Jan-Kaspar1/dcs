@@ -5,6 +5,26 @@ import time
 from pathlib import Path
 
 
+MIGRATIONS = [
+    # 1: daily architecture review lane
+    """
+    CREATE TABLE IF NOT EXISTS reviews(
+      run_id TEXT PRIMARY KEY, slot INTEGER NOT NULL, attempted_sha TEXT,
+      completed_sha TEXT, status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+      started REAL NOT NULL, finished REAL, error TEXT, report TEXT);
+    CREATE TABLE IF NOT EXISTS candidates(
+      key TEXT PRIMARY KEY, run_id TEXT NOT NULL, title TEXT NOT NULL,
+      outcome TEXT NOT NULL, disposition TEXT NOT NULL DEFAULT 'pending',
+      issue INTEGER, reason TEXT, revisit TEXT, assessed INTEGER NOT NULL DEFAULT 0,
+      assessment TEXT, created REAL NOT NULL, updated REAL NOT NULL,
+      payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS improvement_issues(
+      improvement TEXT NOT NULL, issue INTEGER NOT NULL,
+      PRIMARY KEY(improvement, issue));
+    """,
+]
+
+
 class State:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -24,6 +44,9 @@ class State:
             CREATE UNIQUE INDEX IF NOT EXISTS live_group ON jobs(concurrency_group)
               WHERE status IN ('working','pr-open');
         """)
+        version = self.db.execute('PRAGMA user_version').fetchone()[0]
+        for index, script in enumerate(MIGRATIONS[version:], start=version + 1):
+            self.db.executescript(script + f'PRAGMA user_version={index};')
 
     def close(self):
         self.db.close()
@@ -130,3 +153,125 @@ class State:
                 return bool(cursor.rowcount)
         except sqlite3.IntegrityError:
             return False
+
+    def review(self, run_id=None):
+        if run_id:
+            row = self.db.execute('SELECT * FROM reviews WHERE run_id=?', (run_id,)).fetchone()
+        else:
+            row = self.db.execute('SELECT * FROM reviews ORDER BY started DESC LIMIT 1').fetchone()
+        return dict(row) if row else None
+
+    def running_review(self):
+        row = self.db.execute("SELECT * FROM reviews WHERE status='running' ORDER BY started DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def begin_review(self, run_id, slot, sha, attempt):
+        with self.db:
+            self.db.execute("INSERT INTO reviews(run_id,slot,attempted_sha,status,attempt,started) VALUES(?,?,?,'running',?,?)",
+                            (run_id, slot, sha, attempt, time.time()))
+
+    def finish_review(self, run_id, status, error=None, completed_sha=None, report=None):
+        with self.db:
+            self.db.execute("UPDATE reviews SET status=?,finished=?,error=?,"
+                            "completed_sha=COALESCE(?,completed_sha),report=COALESCE(?,report) WHERE run_id=?",
+                            (status, time.time(), error, completed_sha, report, run_id))
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                            ('review:last_finished_at', json.dumps(time.time())))
+
+    def last_completed_sha(self):
+        row = self.db.execute("SELECT completed_sha FROM reviews WHERE completed_sha IS NOT NULL "
+                              "ORDER BY finished DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
+    def record_candidates(self, run_id, candidates):
+        """Persist new pending candidates; returns {key: prior disposition} skipped.
+
+        Re-proposals of a rejected or deferred key reopen it only when the
+        payload changed materially — the recorded revisit condition or new
+        evidence is the reviewer's reason for resubmitting it. Identical
+        re-proposals stay suppressed.
+        """
+        skipped = {}
+        now = time.time()
+        with self.db:
+            for item in candidates:
+                row = self.db.execute('SELECT disposition,payload FROM candidates WHERE key=?', (item['key'],)).fetchone()
+                if row and row['disposition'] in ('deferred', 'rejected') and json.loads(row['payload']) != item:
+                    self.db.execute("UPDATE candidates SET disposition='pending',run_id=?,title=?,outcome=?,"
+                                    "reason=NULL,revisit=NULL,assessed=0,assessment=NULL,payload=?,updated=? WHERE key=?",
+                                    (run_id, item['title'], item['outcome'], json.dumps(item), now, item['key']))
+                    continue
+                if row:
+                    skipped[item['key']] = row['disposition']
+                    continue
+                self.db.execute("INSERT INTO candidates(key,run_id,title,outcome,disposition,payload,created,updated) "
+                                "VALUES(?,?,?,?,'pending',?,?,?)",
+                                (item['key'], run_id, item['title'], item['outcome'],
+                                 json.dumps(item), now, now))
+        return skipped
+
+    def candidate(self, key):
+        row = self.db.execute('SELECT * FROM candidates WHERE key=?', (key,)).fetchone()
+        return dict(row) if row else None
+
+    def candidates(self, disposition=None):
+        query, args = 'SELECT * FROM candidates', []
+        if disposition:
+            query += ' WHERE disposition=?'
+            args.append(disposition)
+        return [dict(r) for r in self.db.execute(query + ' ORDER BY created', args)]
+
+    def disposition_candidate(self, key, decision, reason='', revisit=None, issue=None,
+                              sources=('pending',)):
+        if decision not in ('accepted', 'deferred', 'rejected'):
+            raise ValueError('Invalid disposition')
+        marks = ','.join('?' for _ in sources)
+        with self.db:
+            return bool(self.db.execute(
+                "UPDATE candidates SET disposition=?,reason=?,revisit=?,issue=COALESCE(?,issue),updated=? "
+                "WHERE key=? AND disposition IN (" + marks + ")",
+                (decision, reason[:4000], revisit, issue, time.time(), key, *sources)).rowcount)
+
+    def map_improvement(self, improvement, issue):
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO improvement_issues VALUES(?,?)', (improvement, issue))
+
+    def improvement_issues(self, improvement):
+        return [r[0] for r in self.db.execute(
+            'SELECT issue FROM improvement_issues WHERE improvement=? ORDER BY issue', (improvement,))]
+
+    def unresolved_accepted(self):
+        """Accepted, unassessed improvements with unfinished or unmapped work.
+
+        Complement of pending_assessments: these still owe the planner an
+        outcome — in-flight issues, chains stalled behind a blocked
+        prerequisite, or accepted work that never received a mapped issue.
+        """
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM candidates WHERE disposition='accepted' AND assessed=0 "
+            "AND (NOT EXISTS (SELECT 1 FROM improvement_issues WHERE improvement=candidates.key) "
+            "     OR EXISTS (SELECT 1 FROM improvement_issues ii LEFT JOIN jobs j ON j.issue=ii.issue "
+            "                WHERE ii.improvement=candidates.key AND (j.status IS NULL OR j.status!='done')))")]
+
+    def pending_assessments(self):
+        """Accepted improvements whose mapped issues all finished and are unassessed."""
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM candidates WHERE disposition='accepted' AND assessed=0 "
+            "AND EXISTS (SELECT 1 FROM improvement_issues WHERE improvement=candidates.key) "
+            "AND NOT EXISTS (SELECT 1 FROM improvement_issues ii LEFT JOIN jobs j ON j.issue=ii.issue "
+            "              WHERE ii.improvement=candidates.key AND (j.status IS NULL OR j.status!='done'))")]
+
+    def record_assessment(self, key, assessment):
+        with self.db:
+            self.db.execute('UPDATE candidates SET assessed=1,assessment=?,updated=? WHERE key=?',
+                            (json.dumps(assessment), time.time(), key))
+
+    def review_summary(self):
+        return {'latest': self.review(),
+                'running': self.get('reviewer'),
+                'stage': self.get('review:stage'),
+                'last_slot': self.get('review:last_slot'),
+                'active_improvement': self.get('review:active_improvement'),
+                'pending_candidates': len(self.candidates('pending')),
+                'pending_assessments': len(self.pending_assessments()),
+                'rollout_failure': self.get('review:rollout_failure')}

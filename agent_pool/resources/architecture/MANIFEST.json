@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "https://github.com/mattpocock/skills",
+    "license": "MIT",
+    "revision": "321658273cb1",
+    "provenance": "local copies under C:/Users/Kaspar/.codex/skills inspected 2026-09-14"
+  },
+  "project_owned": [
+    "policy.md",
+    "prompt.md",
+    "NOTICE.md"
+  ],
+  "files": {
+    "LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+    "NOTICE.md": "04cef1c73d76345ce0d4e4e1cb3f827d27b299b68040496e2461815e9267415b",
+    "policy.md": "39fdd523a9a91d5cc087b976ae13952c35323f5acc0b11046e8f301e32f95168",
+    "prompt.md": "0f2de6f66da0e790699821b8169bf4dd446f1b1d88769d7c23e329051962934e",
+    "references/codebase-design/DEEPENING.md": "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1",
+    "references/codebase-design/DESIGN-IT-TWICE.md": "8e740bf98446dbd4dfdc132ac4346d9a7eedaf93de6a495889171cf7f99f16bd",
+    "references/codebase-design/SKILL.md": "2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2",
+    "references/domain-modeling/ADR-FORMAT.md": "944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0",
+    "references/domain-modeling/CONTEXT-FORMAT.md": "17ab16ce783e4d2801ee52fd9acdf550cbf44de65ae76797a93943bbedf22a13",
+    "references/domain-modeling/SKILL.md": "327a2b50620e2fd70abc6893cd6965e76b20f8d0adb0dc2c8d5eb3845efb643e",
+    "references/improve-codebase-architecture/HTML-REPORT.md": "581e8bb5a521e46bbda8ca7e19b15948bed882187108092ebb90c62513b77528",
+    "references/improve-codebase-architecture/SKILL.md": "d1ac25511a936ff4250a48dbcefda363837d6bb9321b3cba73df99fa37270a75"
+  },
+  "adaptations": []
+}
