@@ -413,7 +413,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, inspect })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -424,7 +424,12 @@ A factory returns one of two `DeviceDriver` contributions:
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
   installs the `ScriptedDriver` itself so `FanoutDriver::inspect::<T>(device)`
   reaches its recorded-write log; leave it `None` when the backend has
-  nothing to inspect.
+  nothing to inspect. `field_facing` tells a redundant pair whether the
+  backend reaches the shared field: `true` for remote or real field kinds
+  (`sim-tcp`), `false` for backends private to the instance — a tracking
+  standby's write gate quiesces only field-facing points, and
+  `FanoutDriver::step_local` leaves a field-facing backend's plant clock
+  to the peer owning the field.
 
 Point-to-point connections whose ends live on different backends become
 `FanoutDriver` routes applied at each `step`; both-sim wires stay inside the
@@ -587,7 +592,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     }
     // A self-contained backend; nothing to step — the device holds no
     // simulated dynamics — and nothing beyond the IoDriver surface to
-    // inspect.
+    // inspect. It is private to the instance, not field-facing.
     Ok(DeviceDriver::Backend(DeviceBackend {
         io: Arc::new(MemoryDriver {
             samples: Mutex::new(samples),
@@ -595,6 +600,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         }),
         step: None,
         inspect: None,
+        field_facing: false,
     }))
 }
 
@@ -678,7 +684,7 @@ a monitored run is platform machinery. The split:
 | Per-component diagnostics (`step_errors`, `last_error`, `last_tick`) and point samples in `TelemetrySnapshot`, served by `dcs-monitor`'s HTTP+JSON endpoints | `capture_state`/`restore_state` field coverage for every value carried between scans |
 | Descriptor publication in `TelemetrySnapshot.descriptors`, so the UI renders any registered kind generically | The registration call in the deployed `ComponentRegistry` |
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
-| The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook`, and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), and the optional `inspect` handle |
+| The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook` (and `step_local(dt)` invoking only non-field-facing hooks), and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), the `field_facing` flag, and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |
 
 ## Where errors surface

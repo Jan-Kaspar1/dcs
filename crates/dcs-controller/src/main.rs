@@ -5,7 +5,7 @@
 //! tracking an active peer's checkpoints.
 //!
 //! Usage: `dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
-//!         [--listen ADDR] [--standby ADDR] [--remote ADDR]`
+//!         [--listen ADDR] [--standby ADDR] [--remote ADDR] [--driven]`
 //!
 //! `--ticks N` runs N scans deterministically and prints the final
 //! telemetry snapshot; `--scan-ms MS` paces scans to wall-clock time —
@@ -23,15 +23,29 @@
 //! boundary. Monitoring requires pacing — a pure `--ticks` run stays
 //! deterministic and monitor-free.
 //!
+//! `--driven` is the alternative to pacing for an externally paced run —
+//! the deterministic, request-timed mode a scripted redundant pair runs
+//! under: `--listen` serves the monitor and scans happen only when
+//! `POST /scan` requests them, each requested scan running the scan
+//! cycle's wiring inside the request — a tracking standby's checkpoint
+//! pull first, then the scan, then the plant step a field-owning
+//! instance owes the run — so the run is exactly as deterministic as
+//! the requests driving it. `--driven` requires `--listen` and excludes
+//! `--scan-ms` and `--ticks`.
+//!
 //! `--remote ADDR` attaches to a shared simulated plant served by
 //! `dcs-sim-net`'s `PlantServer` instead of resolving the model's devices
 //! through the registry — the field-observing driver mode of the
 //! standby-field-observation decision.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
-//! decisions: every remote-attached instance runs behind a [`WriteGate`]
-//! at the driver boundary, and the [`Peer`] role machine decides which
-//! peer's writes pass. An active instance started with `--listen ADDR`
+//! decisions: every instance whose driver surface reaches the shared
+//! field runs behind a [`WriteGate`], and the [`Peer`] role machine
+//! decides which peer's writes pass — a `--remote` attachment behind a
+//! gate covering every write, a registry-resolved fan-out declaring
+//! `sim-tcp` devices behind a gate covering only the field-facing
+//! points so a tracking standby's local simulated backends keep
+//! stepping their private plant. An active instance started with `--listen ADDR`
 //! serves `GET /checkpoint`, `GET /role`, and `POST /demote`, and its
 //! pace loop drives scans through the monitor's lock so a checkpoint is
 //! always a between-scans capture. A standby started with
@@ -58,7 +72,7 @@ use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_monitor::{Driven, Monitor, MonitorClient};
 use dcs_runtime::{Peer, ScanError, WriteGate};
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
@@ -87,19 +101,25 @@ impl Driver {
         }
     }
 
-    /// Advances the simulated plant by one scan's `dt`. The local driver
-    /// steps its backends in place; the remote one steps the shared plant
-    /// — callers skip this on a remote standby, where the plant's clock
-    /// belongs to the active.
-    fn step(&self, dt: f64) -> Result<(), String> {
-        match self {
-            Self::Local(fanout) => fanout
+    /// Advances the simulated plant by one scan's `dt`. A field-owning
+    /// instance steps everything — local backends plus the shared
+    /// plant's remote clock; a tracking instance steps only its local
+    /// backends — the shared field's clock belongs to the owner, so a
+    /// remote-attached standby steps nothing and a fan-out standby
+    /// leaves `sim-tcp` backends to the active.
+    fn step(&self, dt: f64, owns_field: bool) -> Result<(), String> {
+        match (self, owns_field) {
+            (Self::Local(fanout), true) => fanout
                 .step(dt)
                 .map_err(|error| format!("plant step failed: {error}")),
-            Self::Remote(remote) => remote
+            (Self::Local(fanout), false) => fanout
+                .step_local(dt)
+                .map_err(|error| format!("plant step failed: {error}")),
+            (Self::Remote(remote), true) => remote
                 .step(dt)
                 .map(|_| ())
                 .map_err(|error| format!("plant step failed: {error}")),
+            (Self::Remote(_), false) => Ok(()),
         }
     }
 }
@@ -122,11 +142,18 @@ struct Options {
     /// Attach to the shared simulated plant at this `dcs-sim-net`
     /// address instead of building a local `SimDriver`.
     remote: Option<String>,
+    /// Serve the monitor without pacing: scans run only when
+    /// `POST /scan` requests them, each request carrying the scan
+    /// cycle's checkpoint pull and plant step with it. Requires
+    /// `--listen`; the deterministic mode a scripted redundant pair
+    /// runs under.
+    driven: bool,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--ticks N] [--scan-ms MS] [--dt T]
                       [--listen ADDR] [--standby ADDR] [--remote ADDR]
+                      [--driven]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -146,6 +173,11 @@ controller scan.
                   switchover action
   --remote ADDR   attach to the shared simulated plant at ADDR instead
                   of a local simulation
+  --driven        serve the monitor without pacing: scans run only when
+                  POST /scan requests them, each request also running a
+                  tracking standby's checkpoint pull and the plant step a
+                  field-owning run paces to its ticks; requires --listen
+                  and excludes --scan-ms and --ticks
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -162,6 +194,7 @@ impl Options {
         let mut listen = None;
         let mut standby = None;
         let mut remote = None;
+        let mut driven = false;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -193,6 +226,7 @@ impl Options {
                 "--listen" => listen = Some(value("--listen")?),
                 "--standby" => standby = Some(value("--standby")?),
                 "--remote" => remote = Some(value("--remote")?),
+                "--driven" => driven = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -205,7 +239,7 @@ impl Options {
             }
         }
         let model = model.ok_or_else(|| "missing <model-file>".to_string())?;
-        if ticks.is_none() && scan_ms.is_none() {
+        if !driven && ticks.is_none() && scan_ms.is_none() {
             scan_ms = Some(100);
         }
         if let Some(period) = scan_ms
@@ -218,7 +252,19 @@ impl Options {
         {
             return Err("--dt must be finite and non-negative".to_string());
         }
-        if listen.is_some() && scan_ms.is_none() {
+        if driven {
+            if listen.is_none() {
+                return Err(
+                    "--driven requires --listen: scans arrive through POST /scan".to_string(),
+                );
+            }
+            if ticks.is_some() || scan_ms.is_some() {
+                return Err(
+                    "--driven paces scans through POST /scan; --ticks and --scan-ms do not apply"
+                        .to_string(),
+                );
+            }
+        } else if listen.is_some() && scan_ms.is_none() {
             return Err(
                 "--listen requires --scan-ms: monitoring runs alongside the paced scan".to_string(),
             );
@@ -231,6 +277,7 @@ impl Options {
             listen,
             standby,
             remote,
+            driven,
         })
     }
 }
@@ -297,18 +344,23 @@ fn main() -> ExitCode {
         }
     };
 
-    // Every remote-attached instance runs behind the write gate: on a
-    // standby it quiesces field writes until promotion lifts it, and on
-    // an active it is what demotion re-closes — the single-writer
-    // invariant of the switchover-semantics decision. The gate covers
-    // the --remote attachment; a local FanoutDriver's sim backends are a
-    // private plant every checkpoint's driver section resynchronizes.
-    // A standby whose model declares `sim-tcp` devices is not yet
-    // quiesced — per-backend gating inside the fan-out is follow-up
-    // work.
+    // Every instance whose driver surface reaches the shared field runs
+    // behind the write gate: on a standby it quiesces field writes until
+    // promotion lifts it, and on an active it is what demotion re-closes
+    // — the single-writer invariant of the switchover-semantics
+    // decision. A `--remote` attachment gates every write; a
+    // registry-resolved fan-out declaring `sim-tcp` devices gates only
+    // the field-facing points, so a tracking standby's local simulated
+    // backends still see their writes and their private plant keeps
+    // tracking.
     let gate = match &driver {
         Driver::Remote(remote) => Some(WriteGate::closed(remote)),
-        _ => None,
+        Driver::Local(fanout) if fanout.has_field_backend() => {
+            Some(WriteGate::closed_covering(fanout, |point| {
+                fanout.is_field_point(point)
+            }))
+        }
+        Driver::Local(_) => None,
     };
     let io: &(dyn IoDriver + Sync) = match &gate {
         Some(gate) => gate,
@@ -335,11 +387,35 @@ fn main() -> ExitCode {
         .unwrap_or(1.0);
     let period = options.scan_ms.map(Duration::from_millis);
 
-    // A local simulated plant is private and steps every scan; the
-    // shared remote plant's clock belongs to whichever peer owns the
-    // field, so the remote case consults the role — a standby does not
-    // step, a promoted standby starts stepping, a demoted active stops.
-    let remote = matches!(driver, Driver::Remote(_));
+    // The externally paced mode: serve the monitor unpaced and let
+    // `POST /scan` requests drive the run — each requested scan carries
+    // a tracking standby's checkpoint pull and the plant step the
+    // peer's field ownership calls for. A scripted redundant pair runs
+    // its whole scenario — converge, promote, demote — through these
+    // requests, tick by tick, without a wall clock.
+    if options.driven {
+        let addr = options.listen.as_deref().unwrap();
+        let track = match &options.standby {
+            Some(active) => match resolve(active) {
+                Ok(active) => Some(active),
+                Err(error) => return fail(error),
+            },
+            None => None,
+        };
+        let monitor = match Monitor::bind_peer(addr, peer, model.signal_index()) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                return fail(format!("cannot bind monitor on {addr}: {error}"));
+            }
+        };
+        let monitor = monitor.driven(Driven {
+            track,
+            after_scan: Some(Box::new(|owns_field| driver.step(dt, owns_field))),
+        });
+        eprintln!("listening on {}", monitor.local_addr());
+        monitor.serve();
+        return ExitCode::SUCCESS;
+    }
 
     if let Some(active_addr) = &options.standby {
         // Standby operation: one checkpoint pull per scan cycle while the
@@ -361,13 +437,7 @@ fn main() -> ExitCode {
                         }
                     };
                 eprintln!("listening on {}", monitor.local_addr());
-                let step = || {
-                    if remote && !monitor.owns_field() {
-                        Ok(())
-                    } else {
-                        driver.step(dt)
-                    }
-                };
+                let step = || driver.step(dt, monitor.owns_field());
                 run_monitored(
                     &monitor,
                     || {
@@ -399,9 +469,7 @@ fn main() -> ExitCode {
                 // Without a monitor nothing can promote this standby;
                 // the RefCell lets the two loop closures share the peer.
                 let peer = std::cell::RefCell::new(peer);
-                let step = || {
-                    if remote { Ok(()) } else { driver.step(dt) }
-                };
+                let step = || driver.step(dt, false);
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
@@ -444,14 +512,8 @@ fn main() -> ExitCode {
                 // stdout a pure snapshot stream.
                 eprintln!("listening on {}", monitor.local_addr());
                 // Demotion may re-quiesce this instance mid-run, so the
-                // remote step consults the role each scan.
-                let step = || {
-                    if remote && !monitor.owns_field() {
-                        Ok(())
-                    } else {
-                        driver.step(dt)
-                    }
-                };
+                // plant step consults the role each scan.
+                let step = || driver.step(dt, monitor.owns_field());
                 run_monitored(
                     &monitor,
                     || monitor.paced_scan(),
@@ -469,7 +531,7 @@ fn main() -> ExitCode {
                 scan_loop(
                     || peer.borrow_mut().scan(),
                     || peer.borrow().snapshot(),
-                    || driver.step(dt),
+                    || driver.step(dt, true),
                     &options,
                     period,
                 )

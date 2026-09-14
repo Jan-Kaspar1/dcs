@@ -206,6 +206,13 @@ pub struct DeviceBackend {
     /// recorded-write log. `None` when the backend exposes nothing
     /// beyond the [`IoDriver`] surface.
     pub inspect: Option<Arc<dyn Any + Send + Sync>>,
+    /// Whether the backend reaches the shared field — a remote or real
+    /// field kind every redundant peer attaches to (`sim-tcp` is, the
+    /// local simulated kinds are not). A tracking peer's write gate
+    /// quiesces writes to field-facing points, and
+    /// [`FanoutDriver::step_local`] leaves a field-facing backend's
+    /// plant clock to the peer owning the field.
+    pub field_facing: bool,
 }
 
 /// What a registered device-kind factory contributes for its device.
@@ -427,6 +434,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             })
         })),
         inspect: Some(inspect),
+        field_facing: true,
     }))
 }
 
@@ -621,6 +629,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         io: driver,
         step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
         inspect: Some(inspect),
+        field_facing: false,
     }))
 }
 
@@ -633,6 +642,9 @@ struct Backend {
     step: Option<StepHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
+    /// [`DeviceBackend::field_facing`] carried into the built driver —
+    /// the shared local simulated backend is always `false`.
+    field_facing: bool,
 }
 
 /// A device backend a [`DriverPlan`] builds: the contributed driver and
@@ -695,6 +707,7 @@ impl DriverPlan {
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
                 inspect: None,
+                field_facing: false,
             });
             sim = Some(driver);
         }
@@ -708,6 +721,7 @@ impl DriverPlan {
                 io: planned.backend.io,
                 step: planned.backend.step,
                 inspect: planned.backend.inspect,
+                field_facing: planned.backend.field_facing,
             });
         }
         Ok(FanoutDriver {
@@ -913,6 +927,23 @@ impl FanoutDriver {
             .and_then(|handle| handle.downcast_ref::<T>())
     }
 
+    /// Whether a field-facing backend — one whose device reaches the
+    /// shared plant every redundant peer attaches to — serves `point`.
+    /// Points no backend owns, and channel-less internal points, are not
+    /// field points. A redundant pair gates its writes by this: only
+    /// field points are the shared field.
+    pub fn is_field_point(&self, point: PointId) -> bool {
+        self.points
+            .get(&point)
+            .is_some_and(|&index| self.backends[index].field_facing)
+    }
+
+    /// Whether any backend is field-facing — when not, every point is a
+    /// private simulated one and a redundant pair needs no write gate.
+    pub fn has_field_backend(&self) -> bool {
+        self.backends.iter().any(|backend| backend.field_facing)
+    }
+
     /// Advances the assembled plant one step of `dt`: applies every
     /// cross-backend wire — copying the output point's value onto the
     /// input — then runs each backend's step hook.
@@ -922,15 +953,33 @@ impl FanoutDriver {
     /// [`SimDriver::step`] an invalid `dt` is [`StepError::InvalidDt`],
     /// never a panic.
     pub fn step(&self, dt: f64) -> Result<(), StepError> {
+        self.step_impl(dt, true)
+    }
+
+    /// The tracking standby's half of [`step`](Self::step): steps only
+    /// the local — non-field-facing — backends, and applies only the
+    /// routes delivering to their points. A field-facing backend's
+    /// plant is the shared field: its clock belongs to the peer owning
+    /// field writes, so a tracking peer leaves it alone and lets every
+    /// checkpoint resynchronize its reads.
+    pub fn step_local(&self, dt: f64) -> Result<(), StepError> {
+        self.step_impl(dt, false)
+    }
+
+    fn step_impl(&self, dt: f64, include_field: bool) -> Result<(), StepError> {
         if !dt.is_finite() || dt < 0.0 {
             return Err(StepError::InvalidDt(dt));
         }
         for route in &self.routes {
-            let value = self.read(route.output).map_err(StepError::Route)?.value;
-            self.write(route.input, value).map_err(StepError::Route)?;
+            if include_field || !self.is_field_point(route.input) {
+                let value = self.read(route.output).map_err(StepError::Route)?.value;
+                self.write(route.input, value).map_err(StepError::Route)?;
+            }
         }
         for backend in &self.backends {
-            if let Some(step) = &backend.step {
+            if (include_field || !backend.field_facing)
+                && let Some(step) = &backend.step
+            {
                 step(dt)?;
             }
         }
