@@ -63,12 +63,25 @@
   .faceplate .param-status { font-size: 0.8rem; color: #666; }
   .faceplate .param-status.warn { color: #a60; }
   .faceplate .param-status.bad { color: #b00; font-weight: bold; }
+  #overview-cards { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+  .pair-card { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
+    min-width: 22rem; background: #fdfdfd; }
+  .pair-card.faulted { border-color: #b00; }
+  .pair-card h3 { margin: 0.2rem 0 0.5rem; }
+  .pair-card h3 a { color: inherit; }
+  .pair-card .active-peer { font-weight: 600; }
 </style>
 </head>
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
 
+<section id="overview" hidden>
+<h2>Controller pairs</h2>
+<div id="overview-cards"></div>
+</section>
+
+<div id="detail">
 <div id="health">
 <section id="pair" hidden>
 <h2>Controller pair</h2>
@@ -143,6 +156,7 @@
   <button type="button" id="command-force">Force</button>
 </form>
 <pre id="receipt"></pre>
+</div>
 
 <script>
 "use strict";
@@ -214,12 +228,32 @@
 // last fault, the driver's volunteered link diagnostics, and the pacing
 // shell's scan-overrun count — so operator-facing health reads as one
 // surface.
-const peers = [{ base: "", name: location.host }];
-for (const raw of new URLSearchParams(location.search).getAll("peer")) {
+//
+// Plant overview (the plant-wide-supervision decision): repeated
+// ?pair=<name>=<host:port>,<host:port>,… URL parameters switch the page
+// into an overview mode rendering one summary card per configured pair
+// — the active peer's identity, each peer's reported role and
+// convergence, the unreachable-peer redundancy fault, and the
+// I/O-health line — each card linking into that pair's own pair view
+// for faceplates, trends, and commands. Aggregation stays page-side
+// over the pairs' existing JSON endpoints: no new endpoint, wire type,
+// or process, and an unreachable pair degrades to a named card fault
+// while the other cards keep updating. Plant topology is deployment
+// configuration carried in URLs and bookmarks, not plant-model data.
+const urlParams = new URLSearchParams(location.search);
+// Normalizes a configured monitor address — the bare host:port or
+// http(s)://… form ?peer and ?pair both take — into a fetch base plus
+// the display name the page shows for it.
+function peerAddress(raw) {
   const base = /^https?:\/\//.test(raw) ? raw.replace(/\/$/, "")
                                        : location.protocol + "//" + raw;
-  if (base !== location.origin && !peers.some(peer => peer.base === base)) {
-    peers.push({ base, name: raw.replace(/^https?:\/\//, "") });
+  return { base, name: raw.replace(/^https?:\/\//, "") };
+}
+const peers = [{ base: "", name: location.host }];
+for (const raw of urlParams.getAll("peer")) {
+  const peer = peerAddress(raw);
+  if (peer.base !== location.origin && !peers.some(p => p.base === peer.base)) {
+    peers.push(peer);
   }
 }
 // Per-peer last-polled state: { report: RoleReport | null, error } —
@@ -227,6 +261,13 @@ for (const raw of new URLSearchParams(location.search).getAll("peer")) {
 const peerState = peers.map(() => ({ report: null, error: null }));
 // Index of the peer currently sourcing the logical view's data.
 let source = 0;
+
+// The configured overview pairs — parsed by parsePairSpec in the
+// overview section below; empty unless ?pair= parameters switch the
+// page into overview mode.
+const overviewPairs = urlParams.getAll("pair")
+  .map(parsePairSpec)
+  .filter(pair => pair !== null);
 
 // Signals declare an optional display group in the model; the point
 // listing organizes itself under those groups. A point whose signal —
@@ -411,15 +452,16 @@ function describeSync(sync) {
   return JSON.stringify(sync);
 }
 
-// The pair's redundancy summary: healthy, or the named redundancy
+// The pair's redundancy health for either the pair section or an
+// overview card: the active peer's name plus the named redundancy
 // faults — an unreachable peer, a degraded or diverged standby
 // convergence, or no peer reporting active. These are pair health,
 // never plant faults.
-function pairSummary() {
+function pairHealth(pairPeers, states) {
   const faults = [];
   let activeName = null;
-  peers.forEach((peer, i) => {
-    const state = peerState[i];
+  pairPeers.forEach((peer, i) => {
+    const state = states[i];
     if (state.error !== null) {
       const was = state.report ? state.report.role + " " : "";
       faults.push(was + peer.name + " unreachable");
@@ -438,9 +480,15 @@ function pairSummary() {
     }
   });
   if (activeName === null) faults.push("no peer reports role active");
-  return faults.length === 0
-    ? "redundant pair healthy — active on " + activeName
-    : "redundancy fault: " + faults.join("; ");
+  return { activeName, faults };
+}
+
+// The pair's redundancy summary line, from pairHealth's verdict.
+function pairSummary() {
+  const health = pairHealth(peers, peerState);
+  return health.faults.length === 0
+    ? "redundant pair healthy — active on " + health.activeName
+    : "redundancy fault: " + health.faults.join("; ");
 }
 
 // Renders the pair section — one row per peer, plus the summary — when
@@ -468,6 +516,213 @@ function renderPair() {
   summary.textContent = pairSummary();
   summary.className = activePeer() >= 0 &&
     peerState.every(state => state.error === null) ? "good" : "bad";
+}
+
+// ---- Plant overview ----
+//
+// The overview mode's half of the pair view: each ?pair= parameter
+// configures one redundant pair outright — `?pair=<name>=<host:port>,
+// <host:port>,…` listing every peer in the same host:port convention
+// ?peer uses (the serving origin is not implied; each pair names its
+// peers). The name is optional — without it the first peer's address
+// stands in — and it is the card's identity: a fully unreachable pair
+// still renders as that name's faulted card. Per card the page polls
+// GET /role on each of the pair's peers and GET /snapshot on the
+// selected source — the same endpoints, payload shapes, and
+// active-then-promoting-then-reachable source rule the pair view runs —
+// showing the active peer's identity, per-peer role and convergence,
+// the unreachable-peer redundancy fault, and the I/O-health line, with
+// the card's name linking into that pair's own pair view. Every fetch
+// failure lands on its own card and is never thrown: one pair's outage
+// degrades to a named card fault while the other cards keep polling.
+
+// Parses one ?pair= value — `[name=]host:port[,host:port],…` — into a
+// card's pair record, or null for a value naming no peers. The record
+// carries the card's whole polled state: per-peer {report, error} like
+// the pair view's peerState, the snapshot-source index, and the source
+// peer's last snapshot or its fetch error.
+function parsePairSpec(raw) {
+  const eq = raw.indexOf("=");
+  const spec = eq >= 0 ? raw.slice(eq + 1) : raw;
+  const pairPeers = [];
+  for (const item of spec.split(",")) {
+    const trimmed = item.trim();
+    if (trimmed === "") continue;
+    const peer = peerAddress(trimmed);
+    if (!pairPeers.some(p => p.base === peer.base)) pairPeers.push(peer);
+  }
+  if (pairPeers.length === 0) return null;
+  const name = eq >= 0 ? raw.slice(0, eq).trim() : "";
+  return {
+    name: name === "" ? pairPeers[0].name : name,
+    peers: pairPeers,
+    state: pairPeers.map(() => ({ report: null, error: null })),
+    source: 0,
+    snapshot: null,
+    snapshotError: null,
+  };
+}
+
+// The card's snapshot source follows the pair view's selection rule:
+// the peer reporting settled active, then a promoting peer, then the
+// previous source while it stays reachable, then any reachable peer.
+function selectPairSource(pair) {
+  const reachable = i =>
+    pair.state[i].error === null && pair.state[i].report !== null;
+  let next = pair.state.findIndex((state, i) =>
+    reachable(i) && state.report.role === "active");
+  if (next < 0) next = pair.state.findIndex((state, i) =>
+    reachable(i) && state.report.role === "promoting");
+  if (next < 0) {
+    next = reachable(pair.source)
+      ? pair.source
+      : pair.state.findIndex((state, i) => reachable(i));
+  }
+  if (next >= 0) pair.source = next;
+}
+
+// Polls one configured pair for its card: GET /role on each of the
+// pair's peers, then GET /snapshot on the selected source for the
+// I/O-health line. Every failure is recorded on the card — the
+// unreachable-peer fault, a failed snapshot fetch — never thrown, so
+// one pair's outage cannot interrupt the other cards' updates.
+async function pollPairCard(pair) {
+  await Promise.all(pair.peers.map(async (peer, i) => {
+    try {
+      const response = await fetch(peer.base + "/role");
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      pair.state[i].report = await response.json();
+      pair.state[i].error = null;
+    } catch (error) {
+      pair.state[i].error = String(error);
+    }
+  }));
+  selectPairSource(pair);
+  pair.snapshot = null;
+  pair.snapshotError = null;
+  const state = pair.state[pair.source];
+  if (state.error !== null || state.report === null) return;
+  try {
+    const response = await fetch(pair.peers[pair.source].base + "/snapshot");
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    pair.snapshot = await response.json();
+  } catch (error) {
+    pair.snapshotError = String(error);
+  }
+}
+
+// The card's link into that pair's own pair view — this same page
+// without ?pair parameters — served by a peer of that pair. The serving
+// peer is the reported active when one reports, else any reachable
+// peer, else the first configured: a link landing on a live monitor
+// when the pair has one, and still naming the pair when it does not.
+// The remaining peers ride along as its ?peer= parameters.
+function pairHref(pair) {
+  const reachable = i =>
+    pair.state[i].error === null && pair.state[i].report !== null;
+  let origin = pair.state.findIndex((state, i) =>
+    reachable(i) && state.report.role === "active");
+  if (origin < 0) origin = pair.state.findIndex((state, i) => reachable(i));
+  if (origin < 0) origin = 0;
+  const others = pair.peers
+    .filter((peer, i) => i !== origin)
+    .map(peer => encodeURIComponent(peer.base));
+  return pair.peers[origin].base + "/" +
+    (others.length === 0 ? "" : "?peer=" + others.join("&peer="));
+}
+
+// The card's I/O-health line: the pair view's io-health troubled rule
+// reduced to one line — link degradation, boundary failures, the
+// attributed last fault, scan overruns — read from the source peer's
+// snapshot. A card with no landed snapshot reports the fetch's failure,
+// or waits out its first poll, instead of inventing health.
+function ioHealthLine(pair) {
+  if (pair.snapshot === null) {
+    return pair.snapshotError !== null
+      ? { text: "no snapshot — " + pair.snapshotError, bad: true }
+      : { text: "awaiting first snapshot", bad: false };
+  }
+  const health = pair.snapshot.io_health;
+  if (!health) return { text: "I/O health not reported", bad: false };
+  const troubles = [];
+  if (health.driver && health.driver.link !== "connected") {
+    troubles.push("link " + health.driver.link);
+  }
+  if (health.failed_reads || health.failed_writes) {
+    troubles.push(health.failed_reads + " failed read(s), " +
+      health.failed_writes + " failed write(s)");
+  }
+  if (health.last_error) {
+    troubles.push("last fault " + describeIoError(health.last_error.error) +
+      " at tick " + health.last_error.tick);
+  }
+  if (health.scan_overruns) {
+    troubles.push(health.scan_overruns + " scan overrun(s)");
+  }
+  return troubles.length === 0
+    ? { text: "I/O healthy", bad: false }
+    : { text: "I/O degraded: " + troubles.join("; "), bad: true };
+}
+
+// One pair's summary card: its name linking into the pair view, the
+// active peer's identity, a per-peer role/convergence/reachability
+// table, the redundancy summary, and the I/O-health line. A fully
+// unreachable pair still renders — the summary names the card's fault
+// and every peer row shows unreachable — so the card degrades rather
+// than disappears.
+function pairCardMarkup(pair) {
+  const health = pairHealth(pair.peers, pair.state);
+  const io = ioHealthLine(pair);
+  const faulted = health.faults.length > 0 || io.bad;
+  const rows = pair.peers.map((peer, i) => {
+    const state = pair.state[i];
+    const report = state.report;
+    const unreachable = state.error !== null;
+    return "<tr><td>" + esc(peer.name) + "</td><td>" +
+      (report ? esc(report.role) : "—") + "</td><td>" +
+      (report && report.sync ? esc(describeSync(report.sync)) : "—") +
+      "</td><td>" + (report ? report.tick : "—") + "</td><td class=\"" +
+      (unreachable ? "bad" : "good") + "\">" +
+      (unreachable ? "unreachable" : "reachable") + "</td></tr>";
+  }).join("");
+  return "<section class=\"pair-card" + (faulted ? " faulted" : "") + "\">" +
+    "<h3><a href=\"" + esc(pairHref(pair)) + "\">" + esc(pair.name) + "</a></h3>" +
+    "<p>active peer: <span class=\"active-peer\">" +
+      (health.activeName === null ? "none reported" : esc(health.activeName)) +
+      "</span></p>" +
+    "<table><thead><tr><th>Peer</th><th>Role</th><th>Standby sync</th>" +
+      "<th>Tick</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>" +
+    "<p class=\"" + (health.faults.length === 0 ? "good" : "bad") + "\">" +
+      esc(health.faults.length === 0
+        ? "redundant pair healthy — active on " + health.activeName
+        : "redundancy fault: " + health.faults.join("; ")) + "</p>" +
+    "<p class=\"" + (io.bad ? "bad" : "good") + "\">" + esc(io.text) + "</p>" +
+    "</section>";
+}
+
+// Renders every configured pair's card — the overview is only its cards.
+function renderOverview() {
+  document.getElementById("overview-cards").innerHTML =
+    overviewPairs.map(pairCardMarkup).join("");
+}
+
+let overviewPolling = false;
+async function refreshOverview() {
+  if (overviewPolling) return;
+  overviewPolling = true;
+  try {
+    // Every pair polls independently: a failed pair records its fault
+    // on its own card — the per-pair degradation the overview promises.
+    await Promise.all(overviewPairs.map(pollPairCard));
+    renderOverview();
+    document.getElementById("status").textContent =
+      overviewPairs.length + " configured pair(s) — polled " +
+      new Date().toLocaleTimeString();
+  } catch (error) {
+    document.getElementById("status").textContent = "poll failed: " + error;
+  } finally {
+    overviewPolling = false;
+  }
 }
 
 let polling = false;
@@ -1563,6 +1818,18 @@ async function submitUnforce(button) {
 }
 
 async function init() {
+  // Overview mode: configured ?pair= parameters switch the page to the
+  // plant overview — the per-pair detail surface stays hidden and the
+  // cards poll each pair's own endpoints, so the serving origin's model
+  // never loads here.
+  if (overviewPairs.length > 0) {
+    document.getElementById("detail").hidden = true;
+    document.getElementById("overview").hidden = false;
+    renderOverview();
+    refreshOverview();
+    setInterval(refreshOverview, 1000);
+    return;
+  }
   index = await (await fetch("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
   const select = document.getElementById("command-point");
