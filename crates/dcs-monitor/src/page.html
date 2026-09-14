@@ -27,6 +27,8 @@
   tr.source td { font-weight: bold; }
   #health { display: flex; flex-wrap: wrap; gap: 1rem 3rem; align-items: flex-start; }
   #health > section { flex: 1 1 24rem; }
+  .forced { background: #a60; color: #fff; font-size: 0.75rem;
+          padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
   #pair-summary.good, #io-health-summary.good { color: #060; }
   #pair-summary.bad, #io-health-summary.bad { color: #b00; font-weight: bold; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
@@ -408,12 +410,15 @@ async function refresh() {
       new Date().toLocaleTimeString();
     renderIoHealth(snapshot.io_health);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+    // The snapshot's force set badges the point's row; ForcedPoint
+    // serializes as {point, value}.
+    const forced = new Set((snapshot.forces || []).map(f => f.point));
     renderFaceplates(snapshot, telemetry);
     const rows = [];
     for (const [group, metas] of groupedPoints()) {
       rows.push("<tr class=\"point-group\"><th colspan=\"8\">" + esc(group) +
         "</th></tr>");
-      for (const meta of metas) rows.push(pointRow(meta, telemetry));
+      for (const meta of metas) rows.push(pointRow(meta, telemetry, forced));
     }
     document.getElementById("points").innerHTML = rows.join("");
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
@@ -486,12 +491,17 @@ function renderIoHealth(health) {
   pane.hidden = false;
 }
 
-// One point's row in the listing table.
-function pointRow(meta, telemetry) {
+// One point's row in the listing table. A forced point — one in the
+// snapshot's force set — carries a badge beside its name; its Substituted
+// quality already shows in the quality column.
+function pointRow(meta, telemetry, forced) {
   const sample = (telemetry.get(meta.point) || {}).sample;
   const quality = sample ? formatQuality(sample.quality) : "no sample";
   const cls = sample ? qualityClass(sample.quality) : "nosample";
-  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + "</td><td>" +
+  const badge = forced.has(meta.point)
+    ? " <span class=\"forced\">forced</span>" : "";
+  return "<tr><td>" + meta.point + "</td><td>" + esc(meta.name) + badge +
+    "</td><td>" +
     meta.direction + "</td><td>" + meta.value_type + "</td><td class=\"value\">" +
     (sample ? formatValue(sample.value) : "") + "</td><td class=\"" + cls + "\">" +
     esc(quality) + "</td><td>" + esc(meta.unit || "") + "</td><td>" +
@@ -944,11 +954,19 @@ function describeEvent(event) {
 }
 
 // A command serializes as {"write_value": {point, kind, value}} |
+// {"force_point": {point, kind, value}} | {"unforce_point": {point}} |
 // {"set_parameter": {component, name, value}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
     return "write " + pointName(write.point) + " := " + formatValue(write.value);
+  }
+  if ("force_point" in command) {
+    const force = command.force_point;
+    return "force " + pointName(force.point) + " := " + formatValue(force.value);
+  }
+  if ("unforce_point" in command) {
+    return "release force on " + pointName(command.unforce_point.point);
   }
   if ("set_parameter" in command) {
     const tuning = command.set_parameter;
