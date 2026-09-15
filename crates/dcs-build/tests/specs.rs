@@ -17,11 +17,12 @@ use std::collections::BTreeSet;
 
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmSpec,
-    CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec,
-    FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec,
-    MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
-    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
+    BoolLatchingAlarmSpec, CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
+    FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec,
+    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec,
+    SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -636,6 +637,98 @@ fn field_input_stale_after_emits_and_enforces_the_budget() {
     assert_eq!(sample.tick, dcs_core::Tick(3));
 }
 
+/// The `backwash-coordinator` plant both reorder cases wire: three
+/// scripted requests and the three permissives on the device, the
+/// writable internal `reorder` instruction point per decision 56, and
+/// internal carriers for the grant/position/bank-state outputs.
+fn backwash_plant(parameters_map: dcs_build::Parameters, reorder: bool) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let req_1_raw = plant.channel::<bool>(sim, "request-1", Direction::In);
+    let req_2_raw = plant.channel::<bool>(sim, "request-2", Direction::In);
+    let req_3_raw = plant.channel::<bool>(sim, "request-3", Direction::In);
+    let supply_raw = plant.channel::<bool>(sim, "supply-ok", Direction::In);
+    let waste_raw = plant.channel::<bool>(sim, "waste-ok", Direction::In);
+    let flow_raw = plant.channel::<bool>(sim, "flow-ok", Direction::In);
+
+    let request_1 = plant.field_input::<bool>(PointId(10), req_1_raw, false);
+    let request_2 = plant.field_input::<bool>(PointId(11), req_2_raw, false);
+    let request_3 = plant.field_input::<bool>(PointId(12), req_3_raw, false);
+    let supply_ok = plant.field_input::<bool>(PointId(13), supply_raw, false);
+    let waste_ok = plant.field_input::<bool>(PointId(14), waste_raw, false);
+    let flow_ok = plant.field_input::<bool>(PointId(15), flow_raw, false);
+    // The operator reorder instruction — the writable internal `In`
+    // point decision 56 prescribes, so writes ride the journaled
+    // receipted path.
+    let reorder_in = plant.internal_input::<i64>(PointId(16), 0, true);
+
+    let bwc = plant.add(BackwashCoordinatorSpec::new(parameters_map, 3, reorder));
+    // `grant`/`position` borrow `bwc` — bind them before the `Sink`
+    // field moves below partially move the instance.
+    let grants = [bwc.grant(1), bwc.grant(2), bwc.grant(3)];
+    let positions = [bwc.position(1), bwc.position(2), bwc.position(3)];
+    plant.connect(request_1, bwc.request(1));
+    plant.connect(request_2, bwc.request(2));
+    plant.connect(request_3, bwc.request(3));
+    plant.connect(supply_ok, bwc.supply_ok);
+    plant.connect(waste_ok, bwc.waste_ok);
+    plant.connect(flow_ok, bwc.flow_ok);
+    if let Some(reorder_port) = bwc.reorder {
+        plant.connect(reorder_in, reorder_port);
+    }
+    for (index, grant) in [20u64, 21, 22].into_iter().zip(grants) {
+        let carrier = plant.internal_output::<bool>(PointId(index), false);
+        plant.connect(&grant, carrier);
+    }
+    for (index, position) in [23u64, 24, 25].into_iter().zip(positions) {
+        let carrier = plant.internal_output::<i64>(PointId(index), 0);
+        plant.connect(&position, carrier);
+    }
+    let active = plant.internal_output::<i64>(PointId(26), 0);
+    plant.connect(&bwc.active, active);
+    let queued = plant.internal_output::<i64>(PointId(27), 0);
+    plant.connect(&bwc.queued, queued);
+    let blocked = plant.internal_output::<bool>(PointId(28), false);
+    plant.connect(&bwc.resource_blocked, blocked);
+    plant
+}
+
+fn backwash_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("queue_policy", Value::Int(0)),
+        ("queued_state", Value::Int(0)),
+    ])
+}
+
+#[test]
+fn backwash_coordinator_spec_emits_an_assembling_document() {
+    // Both forms assemble: `reorder` bound, and the unwired port
+    // omitted — the "a plant not exposing reorder leaves the point
+    // unbound" half the registry's `get("reorder")` serves.
+    for reorder in [true, false] {
+        let model = build_load_assemble(backwash_plant(backwash_parameters(), reorder));
+        assert_eq!(model.components[0].kind, BackwashCoordinatorSpec::KIND);
+        assert_eq!(
+            model.components[0].ports.contains_key("reorder"),
+            reorder,
+            "the optional port follows the spec flag"
+        );
+    }
+}
+
+#[test]
+fn backwash_coordinator_rejects_a_missing_declared_parameter() {
+    // Both parameters are required declared data: a map missing
+    // `queued_state` is `MissingParameter` naming the key at `build`,
+    // before the document exists.
+    let mut parameters_map = backwash_parameters();
+    parameters_map.remove("queued_state");
+    assert!(matches!(
+        backwash_plant(parameters_map, false).build(),
+        Err(BuildError::MissingParameter { ref parameter, .. }) if parameter == "queued_state"
+    ));
+}
+
 /// The registry-enumeration coverage check: every kind the standard
 /// registry serves has a `dcs-build` spec, and no spec names a kind the
 /// registry does not serve. A kind registered without a spec fails
@@ -673,6 +766,7 @@ fn every_registered_kind_has_a_spec() {
         ThresholdChainSpec::KIND,
         FailoverSelectSpec::KIND,
         FlowPacedRatioSpec::KIND,
+        BackwashCoordinatorSpec::KIND,
     ]
     .into_iter()
     .collect();

@@ -341,6 +341,51 @@ the declared fixed answer to a failed pacing signal.
 composition — three instances covering each `on_bad_flow` response,
 one trim-bound; per-port semantics live beside `FlowPacedRatio::KIND`.
 
+The filter-backwash shared-supply contract architecture decision 56
+records adds one variable-arity kind. `backwash-coordinator`
+arbitrates an exclusive grant across `N` filters declared
+`request_i`/`grant_i`/`position_i` under the same indexed-family
+convention `interlock`'s `trip_N` uses — the filter count is the
+highest bound index and every index below it must bind all three. Per
+filter `i`: `request_i` (`in`, `Bool`) is the armed backwash request,
+`grant_i` (`out`, `Bool`) the exclusive supply grant — at most one
+asserted at a time — and `position_i` (`out`, `Int`) the 1-based queue
+position, `0` while the filter is not queued (the grant holder
+included — it holds the grant, not a queue slot; `active` identifies
+it). The bank-level `active` (`out`, `Int`) names the grant holder,
+`queued` (`out`, `Int`) counts pending requests, and
+`resource_blocked` (`out`, `Bool`) asserts while a request stands
+first in queue and a grant permissive fails. The permissives are the
+declared inputs `supply_ok`, `waste_ok`, `flow_ok` (`in`, `Bool`),
+aggregated upstream through plant wiring; a non-`Good` permissive —
+and a non-`Good` `request_i` — reads fail-safe: not-OK and not
+asserted. The grant asserts only while every permissive holds, holds
+while the granted filter's request stands, and releases the scan it
+drops — completion and abort release identically, so the arbiter
+carries no completion vocabulary. The `parameters` are the `Int`
+codes `queue_policy` (`0` FIFO, `1` priority-by-trigger — the
+coordinator sees only `request_i`, so the plant numbers filters in
+priority order — `2` operator-managed, where no grant issues until
+the standing reorder instruction selects the queue's head) and
+`queued_state` (`0` keep filtering until granted, `1` offline with
+standby cover — declared contract data; its effect composes in bank
+wiring). Both are required declared data and `SetParameter`-tunable.
+Where the model binds `reorder` (`in`, `Int`) — conventionally a
+writable internal `in` point, so operator writes ride the journaled
+receipted command path and the held value crosses checkpoints — it
+carries a standing instruction: a `Good` value in `1..=N` naming a
+queued member moves it to the head (and, under `queue_policy` `2`,
+selects it for the grant); `0`, out-of-range, non-queued, and
+non-`Good` values apply nothing. An instance not exposing reorder
+declares no `reorder` port. The ordered queue and the held grant are
+per-scan run state: `capture_state` carries `granted`, `queued_count`,
+and `queue_k` under decision 20, so a checkpointed standby inherits
+order and grant mid-queue.
+`crates/dcs-assembly/fixtures/backwash_coordinator.json` is the
+recorded composition — a three-filter FIFO bank beside a two-filter
+operator-managed bank driving the reorder point; per-port semantics
+live beside `BackwashCoordinator::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
