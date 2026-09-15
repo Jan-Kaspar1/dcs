@@ -16,11 +16,12 @@ use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BlowerGroup, BlowerIo,
     BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DemandFallback,
     DemandFallbackIo, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect,
-    FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock,
-    LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation,
-    MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid,
-    PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, SurgeGuard,
-    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    FeedforwardSum, FeedforwardSumIo, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator,
+    HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm,
+    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
+    PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer,
+    SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer,
+    Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -560,6 +561,19 @@ pub fn registry() -> ComponentRegistry {
                     input: spec.require("in")?,
                     pv: spec.require("pv")?,
                     out: spec.require("out")?,
+                    fallback_active: spec.require("fallback_active")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(FeedforwardSum::KIND, |spec| {
+            boxed(FeedforwardSum::from_parameters(
+                spec.name.as_str(),
+                FeedforwardSumIo {
+                    ff: spec.require("ff")?,
+                    trim: spec.require("trim")?,
+                    out: spec.require("out")?,
+                    clamped: spec.require("clamped")?,
                     fallback_active: spec.require("fallback_active")?,
                 },
                 spec.parameters,

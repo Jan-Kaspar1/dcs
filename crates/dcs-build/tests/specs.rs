@@ -19,12 +19,12 @@ use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
     BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DemandFallbackSpec, DeviationMonitorSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
-    HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
-    ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
-    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FeedforwardSumSpec,
+    FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec,
+    ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec,
+    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
@@ -1070,6 +1070,62 @@ fn demand_fallback_rejects_an_out_of_range_response() {
     ));
 }
 
+/// The `feedforward-sum` plant the tests wire: scripted channels for
+/// `ff` and `trim`, internal carriers for the three outputs.
+fn feedforward_sum_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let ff_raw = plant.channel::<f64>(sim, "ff", Direction::In);
+    let trim_raw = plant.channel::<f64>(sim, "trim", Direction::In);
+
+    let ff = plant.field_input::<f64>(PointId(10), ff_raw, false);
+    let trim = plant.field_input::<f64>(PointId(11), trim_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let clamped = plant.internal_output::<bool>(PointId(21), false);
+    let fallback_active = plant.internal_output::<bool>(PointId(22), false);
+
+    let sum = plant.add(FeedforwardSumSpec::new(parameters_map));
+    plant.connect(ff, sum.ff);
+    plant.connect(trim, sum.trim);
+    plant.connect(&sum.out, out);
+    plant.connect(&sum.clamped, clamped);
+    plant.connect(&sum.fallback_active, fallback_active);
+    plant
+}
+
+fn feedforward_sum_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("trim_min", Value::Float(-10.0)),
+        ("trim_max", Value::Float(10.0)),
+        ("min_demand", Value::Float(0.0)),
+        ("max_demand", Value::Float(100.0)),
+        ("on_bad_ff", Value::Int(0)),
+        ("on_bad_trim", Value::Int(0)),
+    ])
+}
+
+#[test]
+fn feedforward_sum_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(feedforward_sum_plant(feedforward_sum_parameters()));
+    assert_eq!(model.components[0].kind, FeedforwardSumSpec::KIND);
+}
+
+#[test]
+fn feedforward_sum_rejects_an_out_of_range_response() {
+    // `on_bad_ff`/`on_bad_trim` declare the binary code range `0..=1`;
+    // a code outside it is `ParameterOutOfRange` at `build`, before
+    // the document exists.
+    for parameter in ["on_bad_ff", "on_bad_trim"] {
+        let mut parameters_map = feedforward_sum_parameters();
+        parameters_map.insert(parameter.to_string(), Value::Int(4));
+        assert!(matches!(
+            feedforward_sum_plant(parameters_map).build(),
+            Err(BuildError::ParameterOutOfRange { parameter: found, .. })
+                if found == parameter
+        ));
+    }
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -1297,6 +1353,7 @@ fn every_registered_kind_has_a_spec() {
         PhaseMonitorSpec::KIND,
         SurgeGuardSpec::KIND,
         DemandFallbackSpec::KIND,
+        FeedforwardSumSpec::KIND,
     ]
     .into_iter()
     .collect();

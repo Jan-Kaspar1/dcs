@@ -22,26 +22,26 @@ use dcs_blocks::{
     BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
     BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
     DemandFallback, DemandFallbackConfig, DemandFallbackIo, DeviationMonitor, DigitalInput,
-    DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
-    FlowPacedRatioConfig, GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig,
-    HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo,
-    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
-    OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig,
-    PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs,
-    Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SetpointTable,
-    SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo,
-    ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FeedforwardSum, FeedforwardSumConfig,
+    FeedforwardSumIo, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs,
+    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
+    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
+    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
+    RateLimiter, RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
+    SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
+    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
     BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DemandFallbackSpec, DeviationMonitorSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
-    HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
-    ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
-    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FeedforwardSumSpec,
+    FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec,
+    ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec,
+    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
 use dcs_runtime::Component;
@@ -719,6 +719,29 @@ fn specs_match_registered_kinds_descriptors() {
                 on_bad: dcs_blocks::FallbackResponse::Hold,
                 fallback_flow: 25.0,
                 safe_flow: 5.0,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
+    covered.insert(check(
+        &FeedforwardSumSpec::new(Default::default()),
+        &FeedforwardSum::new(
+            "ffs",
+            FeedforwardSumIo {
+                ff: point(1),
+                trim: point(2),
+                out: point(3),
+                clamped: point(4),
+                fallback_active: point(5),
+            },
+            FeedforwardSumConfig {
+                trim_min: -10.0,
+                trim_max: 10.0,
+                min_demand: 0.0,
+                max_demand: 100.0,
+                on_bad_ff: dcs_blocks::BadTermResponse::Drop,
+                on_bad_trim: dcs_blocks::BadTermResponse::Drop,
             },
         )
         .unwrap()

@@ -105,6 +105,10 @@
 //!   response decision 65 records: while the selected `pv` reads
 //!   `Good` the demand passes; a non-`Good` `pv` engages the declared
 //!   hold/fixed/safe response with `fallback_active` asserted.
+//! - [`FeedforwardSum`] — the additive trim decision 66 records: the
+//!   bounded `ff` + `trim` sum on a zone's demand path, the trim's
+//!   authority and the emitted demand bounded, each input's declared
+//!   untrusted response engaged with `fallback_active` asserted.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -132,6 +136,7 @@ mod digital_input;
 mod digital_output;
 mod edge_trigger;
 mod failover_select;
+mod feedforward_sum;
 mod flow_paced_ratio;
 mod header_coordinator;
 mod interlock;
@@ -180,6 +185,9 @@ pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use edge_trigger::{Edge, EdgeTrigger};
 pub use failover_select::FailoverSelect;
+pub use feedforward_sum::{
+    BadTermResponse, FeedforwardSum, FeedforwardSumConfig, FeedforwardSumIo,
+};
 pub use flow_paced_ratio::{FlowPacedRatio, FlowPacedRatioConfig, RatioOutputs};
 pub use header_coordinator::{
     CoordinationStrategy, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, ZoneIo,
@@ -255,6 +263,7 @@ pub const KINDS: &[&str] = &[
     PhaseMonitor::KIND,
     SurgeGuard::KIND,
     DemandFallback::KIND,
+    FeedforwardSum::KIND,
 ];
 
 #[cfg(test)]

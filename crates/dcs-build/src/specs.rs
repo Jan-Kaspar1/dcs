@@ -3569,3 +3569,102 @@ impl Spec for DemandFallbackSpec {
         }
     }
 }
+
+/// Spec for the `feedforward-sum` kind: the additive trim contract
+/// architecture decision 66 records — the bounded `ff` + `trim` sum on
+/// a zone's demand path, the sibling of `flow-paced-ratio` whose
+/// `trim` scales where this kind's adds.
+///
+/// Ports mirror the descriptor: `ff` (`In`, `Float`) — the computed
+/// feed-forward demand; `trim` (`In`, `Float`) — the feedback loop's
+/// additive correction; `out` (`Out`, `Float`) — the summed, bounded
+/// demand; `clamped` and `fallback_active` (`Out`, `Bool`).
+/// Parameters: `trim_min`, `trim_max`, `min_demand`, `max_demand`
+/// (required finite `Float`s — the `min <= max` ordering of each bound
+/// pair is a cross-parameter invariant the kind's `from_parameters`
+/// checks; a spec cannot express it), `on_bad_ff` and `on_bad_trim`
+/// (required `Int` codes in `0..=1` — `0` the untrusted term drops out
+/// and the other term serves alone, `1` the term's last `Good` finite
+/// value stands in).
+pub struct FeedforwardSumSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `feedforward-sum` instance.
+pub struct FeedforwardSumInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `ff` port (`In`, `Float`): the feed-forward demand —
+    /// conventionally a `flow-paced-ratio`'s `demand` with its `trim`
+    /// unwired where the pacing law is proportional.
+    pub ff: Sink<f64>,
+    /// `trim` port (`In`, `Float`): the feedback loop's additive
+    /// correction — typically the zone DO `pid`'s `out`.
+    pub trim: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the summed, bounded demand.
+    pub out: Source<f64>,
+    /// `clamped` port (`Out`, `Bool`): asserts while the trim-authority
+    /// or demand bound engages.
+    pub clamped: Source<bool>,
+    /// `fallback_active` port (`Out`, `Bool`): asserts while a declared
+    /// bad-signal response runs.
+    pub fallback_active: Source<bool>,
+}
+
+impl FeedforwardSumSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "feedforward-sum";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("trim_min", ValueKind::Float, Some(FINITE_F64)),
+        required("trim_max", ValueKind::Float, Some(FINITE_F64)),
+        required("min_demand", ValueKind::Float, Some(FINITE_F64)),
+        required("max_demand", ValueKind::Float, Some(FINITE_F64)),
+        required("on_bad_ff", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+        required("on_bad_trim", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for FeedforwardSumSpec {
+    type Instance = FeedforwardSumInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("ff", Direction::In, ValueKind::Float),
+            port("trim", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("clamped", Direction::Out, ValueKind::Bool),
+            port("fallback_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        FeedforwardSumInstance {
+            id,
+            ff: Sink::port(id, "ff"),
+            trim: Sink::port(id, "trim"),
+            out: Source::port(id, "out"),
+            clamped: Source::port(id, "clamped"),
+            fallback_active: Source::port(id, "fallback_active"),
+        }
+    }
+}

@@ -1,0 +1,277 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "ff": [
+            { "tick": 0, "value": 60.0 },
+            { "tick": 20, "value": 95.0 },
+            { "tick": 25, "value": 30.0 },
+            { "tick": 30, "value": 30.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 40, "value": 40.0 }
+          ],
+          "trim": [
+            { "tick": 0, "value": 5.0 },
+            { "tick": 10, "value": 15.0 },
+            { "tick": 15, "value": -15.0 },
+            { "tick": 20, "value": 10.0 },
+            { "tick": 25, "value": 5.0 },
+            { "tick": 35, "value": 5.0, "quality": "bad", "reason": "device_fault" },
+            { "tick": 45, "value": -8.0 }
+          ]
+        }
+      },
+      "channels": {
+        "ff": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "ff" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "trim" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 25,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 26,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 27,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 28,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "feedforward-demand",
+      "source": 10,
+      "unit": "Nm3/h",
+      "description": "Computed feed-forward air demand — the pacing term the sum adds to"
+    },
+    {
+      "id": 101,
+      "name": "feedback-trim",
+      "source": 11,
+      "unit": "Nm3/h",
+      "description": "The DO loop's additive correction — the trim the sum bounds to its declared authority"
+    },
+    {
+      "id": 102,
+      "name": "drop-served-demand",
+      "source": 20,
+      "unit": "Nm3/h",
+      "description": "The drop/drop sum's served demand — an untrusted term drops out and the other serves alone"
+    },
+    {
+      "id": 103,
+      "name": "drop-clamped",
+      "source": 21,
+      "description": "The drop/drop sum's bound report — trim authority or demand bound engaged"
+    },
+    {
+      "id": 104,
+      "name": "drop-fallback-active",
+      "source": 22,
+      "description": "The drop/drop sum's engagement report — the alarmed transition surface"
+    },
+    {
+      "id": 105,
+      "name": "hold-served-demand",
+      "source": 23,
+      "unit": "Nm3/h",
+      "description": "The hold/hold sum's served demand — an untrusted term stands its last Good value in"
+    },
+    {
+      "id": 106,
+      "name": "hold-fallback-active",
+      "source": 25,
+      "description": "The hold/hold sum's engagement report"
+    },
+    {
+      "id": 107,
+      "name": "mixed-served-demand",
+      "source": 26,
+      "unit": "Nm3/h",
+      "description": "The mixed sum's served demand — feed-forward drops out, trim holds"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "feedforward-sum",
+      "parameters": {
+        "trim_min": { "float": -10.0 },
+        "trim_max": { "float": 10.0 },
+        "min_demand": { "float": 0.0 },
+        "max_demand": { "float": 100.0 },
+        "on_bad_ff": { "int": 0 },
+        "on_bad_trim": { "int": 0 }
+      },
+      "ports": {
+        "ff": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "feedforward-sum",
+      "parameters": {
+        "trim_min": { "float": -10.0 },
+        "trim_max": { "float": 10.0 },
+        "min_demand": { "float": 0.0 },
+        "max_demand": { "float": 100.0 },
+        "on_bad_ff": { "int": 1 },
+        "on_bad_trim": { "int": 1 }
+      },
+      "ports": {
+        "ff": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "feedforward-sum",
+      "parameters": {
+        "trim_min": { "float": -10.0 },
+        "trim_max": { "float": 10.0 },
+        "min_demand": { "float": 0.0 },
+        "max_demand": { "float": 100.0 },
+        "on_bad_ff": { "int": 0 },
+        "on_bad_trim": { "int": 1 }
+      },
+      "ports": {
+        "ff": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "ff" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "trim" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "ff" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 2, "name": "trim" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 3, "name": "ff" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 3, "name": "trim" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "clamped" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "fallback_active" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "clamped" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "fallback_active" } },
+      "to": { "point": 25 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 26 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "clamped" } },
+      "to": { "point": 27 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "fallback_active" } },
+      "to": { "point": 28 }
+    }
+  ]
+}

@@ -5,10 +5,11 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
-    BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
-    DemandFallback, DemandFallbackConfig, DemandFallbackIo, DigitalInput, DigitalOutput, Edge,
-    EdgeTrigger, FallbackResponse, FilterIo, GateOperation, GroupOutputs, GuardResponse,
+    BackwashCoordinatorConfig, BadTermResponse, BlowerGroup, BlowerGroupConfig, BlowerIo,
+    BlowerOutputs, BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
+    CoordinatorOutputs, Counter, DemandFallback, DemandFallbackConfig, DemandFallbackIo,
+    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FallbackResponse, FeedforwardSum,
+    FeedforwardSumConfig, FeedforwardSumIo, FilterIo, GateOperation, GroupOutputs, GuardResponse,
     HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
     ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
@@ -568,12 +569,33 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            FeedforwardSum::new(
+                "ffs",
+                FeedforwardSumIo {
+                    ff: point(&mut specs, 390, Direction::In, ValueKind::Float),
+                    trim: point(&mut specs, 391, Direction::In, ValueKind::Float),
+                    out: point(&mut specs, 392, Direction::Out, ValueKind::Float),
+                    clamped: point(&mut specs, 393, Direction::Out, ValueKind::Bool),
+                    fallback_active: point(&mut specs, 394, Direction::Out, ValueKind::Bool),
+                },
+                FeedforwardSumConfig {
+                    trim_min: -10.0,
+                    trim_max: 10.0,
+                    min_demand: 0.0,
+                    max_demand: 100.0,
+                    on_bad_ff: BadTermResponse::Drop,
+                    on_bad_trim: BadTermResponse::Drop,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 32] = [
+const EXPECTED_KINDS: [&str; 33] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -606,6 +628,7 @@ const EXPECTED_KINDS: [&str; 32] = [
     PhaseMonitor::KIND,
     SurgeGuard::KIND,
     DemandFallback::KIND,
+    FeedforwardSum::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
