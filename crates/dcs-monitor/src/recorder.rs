@@ -9,8 +9,11 @@
 //! - the transition journal of [`JournalEntry`]s, appended in the scan's
 //!   own phase order: command receipts the scan boundary settled (commands
 //!   apply at the scan head), then quality transitions in ascending point
-//!   order (the input read and step phases produced them), then component
-//!   step failures in scan order.
+//!   order (the input read and step phases produced them), then value
+//!   transitions over the declared-`journaled` points in the same
+//!   ascending point order — the durable transition record the
+//!   lifecycle-audit decision adds — then component step failures in
+//!   scan order.
 //!
 //! A scan aborted by a [`ScanError`](dcs_runtime::ScanError) is not
 //! recorded: the run ends at it. Both streams evict oldest-first past the
@@ -20,7 +23,7 @@
 use crate::journal_file::JournalFile;
 use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry,
-    JournalEvent, PointHistory, PointId, Quality, Role, Sample, Tick,
+    JournalEvent, PointHistory, PointId, Quality, Role, Sample, Tick, Value,
 };
 use dcs_runtime::Executor;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -99,6 +102,10 @@ pub(super) struct Recorder {
     /// The last quality observed per point — what transitions diff
     /// against; absent until the point's first observed sample.
     qualities: HashMap<PointId, Quality>,
+    /// The last value observed per declared-`journaled` point — what the
+    /// durable value transitions diff against; absent until the point's
+    /// first observed sample.
+    values: HashMap<PointId, Value>,
     /// Receipt indices of commands accepted but not yet settled.
     open_commands: BTreeSet<usize>,
     /// Per-component `step_errors` counts at the last record, in scan
@@ -129,6 +136,7 @@ impl Recorder {
             journal: replay.entries,
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
+            values: HashMap::new(),
             open_commands: BTreeSet::new(),
             step_counts: Vec::new(),
             sink,
@@ -229,6 +237,37 @@ impl Recorder {
                         point: telemetry.point,
                         from,
                         to: sample.quality,
+                    },
+                );
+            }
+        }
+
+        // A declared-`journaled` point's value transition journals at the
+        // producing scan's tick, in the same ascending point order — the
+        // durable transition record for the status, lifecycle, mode, and
+        // protection points the flag marks. Undeclared points journal no
+        // value entries: the record stays low-volume. The first observed
+        // sample of a journaled point is itself the record's `from:
+        // None` convention, matching `QualityChanged`.
+        let point_map = executor.point_map();
+        for telemetry in &snapshot.points {
+            let Some(sample) = telemetry.sample else {
+                continue;
+            };
+            let journaled = point_map
+                .get(telemetry.point)
+                .is_some_and(|spec| spec.journaled);
+            if !journaled {
+                continue;
+            }
+            let from = self.values.insert(telemetry.point, sample.value);
+            if from != Some(sample.value) {
+                self.push(
+                    scan_tick,
+                    JournalEvent::PointChanged {
+                        point: telemetry.point,
+                        from,
+                        to: sample.value,
                     },
                 );
             }

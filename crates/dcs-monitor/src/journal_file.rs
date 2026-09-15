@@ -311,6 +311,56 @@ mod tests {
     }
 
     #[test]
+    fn point_changed_entries_append_and_replay_with_continuing_seqs_across_a_restart() {
+        let dir = scratch("point-changed");
+        let path = dir.join("journal.jsonl");
+
+        // First lifetime: a first-observation transition and a follow-up
+        // land in the file as ordinary entries — the variant needs no
+        // special file handling.
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        recorder.push(
+            Tick(1),
+            dcs_core::JournalEvent::PointChanged {
+                point: PointId(10),
+                from: None,
+                to: Value::Bool(true),
+            },
+        );
+        recorder.push(
+            Tick(2),
+            dcs_core::JournalEvent::PointChanged {
+                point: PointId(10),
+                from: Some(Value::Bool(true)),
+                to: Value::Bool(false),
+            },
+        );
+        drop(recorder);
+
+        // Second lifetime: the `point_changed` entries replay with
+        // their seqs and the next entry continues the numbering.
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        assert_eq!(
+            recorder
+                .journal(0)
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        recorder.push(
+            Tick(3),
+            dcs_core::JournalEvent::PointChanged {
+                point: PointId(10),
+                from: Some(Value::Bool(false)),
+                to: Value::Bool(true),
+            },
+        );
+        assert_eq!(recorder.journal(0).last().unwrap().seq, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn replay_keeps_the_retained_tail_and_a_resumed_tick_lands_in_the_marker() {
         let dir = scratch("tail");
         let path = dir.join("journal.jsonl");

@@ -114,9 +114,11 @@ fn is_internal(point_map: &PointMap, point: PointId) -> bool {
 /// image carries at their declared `initial` — a malformed declaration
 /// defers [`AssemblyError::InvalidInternalPoint`]. Both carry their
 /// declared `writable` flag into the map, the executor's command-surface
-/// authority, and a field `In` point's declared `stale_after_ticks`
-/// freshness budget rides its spec along — validation confines the field
-/// to channel-bound inputs; the point pairs port-to-port wires
+/// authority, and their `journaled` flag for the recorder's durable
+/// value-transition diff; a field `In` point's declared
+/// `stale_after_ticks` freshness budget rides its spec along —
+/// validation confines the budget to channel-bound inputs. The point
+/// pairs port-to-port wires
 /// synthesize are not declared points and stay unmarked. Connections then bind ports to
 /// points, collect field wires for field point-to-point connections and
 /// internal links for internal ones — a mixed pair defers
@@ -134,7 +136,8 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
             // channel, starting at the neutral value of its kind. The
             // declared freshness budget rides the spec — `None` for a
             // point that never declared one, so the input phase skips
-            // the check entirely.
+            // the check entirely — and the `journaled` flag rides along
+            // for the recorder's value-transition diff.
             (Some(_), _) => {
                 point_map = point_map.with_spec(
                     point.id,
@@ -144,16 +147,26 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
                         internal: None,
                         writable: point.writable,
                         stale_after_ticks: point.stale_after_ticks,
+                        journaled: point.journaled,
                     },
                 );
             }
-            // An internal point: image-carried at its declared initial.
+            // An internal point: image-carried at its declared initial,
+            // carrying the same declared flags — `journaled` covers the
+            // status points a component drives, which are internal `Out`
+            // points in the lifecycle wiring.
             (None, Some(initial)) if initial.kind() == point.value_type => {
-                point_map = if point.writable {
-                    point_map.with_writable_internal(point.id, direction, point.value_type, initial)
-                } else {
-                    point_map.with_internal(point.id, direction, point.value_type, initial)
-                };
+                point_map = point_map.with_spec(
+                    point.id,
+                    PointSpec {
+                        direction,
+                        kind: point.value_type,
+                        internal: Some(initial),
+                        writable: point.writable,
+                        stale_after_ticks: point.stale_after_ticks,
+                        journaled: point.journaled,
+                    },
+                );
             }
             // Reachable only for a model resolved without validation.
             (None, initial) => {

@@ -24,6 +24,9 @@
 //! - the freshness-budget rule: a non-null `stale_after_ticks` may mark a
 //!   field `In` point only — it requires `direction: "in"` and a non-null
 //!   `channel`;
+//! - the journaled-flag rule: `journaled: true` may mark a `bool`/`int`
+//!   point only — the durable journal records discrete state transitions,
+//!   so a `float` point's per-scan stream is rejected from it;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
 //!   additionally requires the `registers` map, and `sim-scripted`
@@ -317,7 +320,8 @@ const SCHEMA_SOURCE: &str = r##"{
         "writable": { "type": "boolean" },
         "stale_after_ticks": {
           "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
-        }
+        },
+        "journaled": { "type": "boolean" }
       },
       "allOf": [
         {
@@ -364,6 +368,15 @@ const SCHEMA_SOURCE: &str = r##"{
               "direction": { "const": "in" },
               "channel": { "not": { "type": "null" } }
             }
+          }
+        },
+        {
+          "if": {
+            "required": ["journaled"],
+            "properties": { "journaled": { "const": true } }
+          },
+          "then": {
+            "properties": { "value_type": { "enum": ["bool", "int"] } }
           }
         },
         {
