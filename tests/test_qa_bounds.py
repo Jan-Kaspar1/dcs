@@ -239,9 +239,10 @@ class ReclaimTests(unittest.TestCase):
 
         with patch.object(runner, 'docker', fake):
             runner.reclaim(self.st, self.cfg, log=lambda m: None)
-        self.assertIn('i1', removed)      # oldest sha's image reaped
-        self.assertNotIn('i2', removed)   # newest kept
-        self.assertNotIn('x9', removed)   # non-QA repo untouched
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, removed)
+        self.assertNotIn('dcs-hwtest/controller:' + SHA_B, removed)
+        self.assertFalse(any('immich' in r or 'x9' in r
+                             for r in removed))
 
 
 class TeardownVisibilityTests(unittest.TestCase):

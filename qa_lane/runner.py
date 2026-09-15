@@ -490,13 +490,20 @@ def reclaim(st, cfg, log=print, docker_ok=True):
             continue  # builder image is never reaped
         if image['tag'] in keep_image_shas:
             continue
-        res = docker('image', 'rm', image['id'], check=False)
+        # Remove by repo:tag, not image id: identical binaries produce a
+        # shared image id across SHAs, and `image rm <id>` refuses while
+        # multiple repositories reference it. Untagging each stale ref
+        # frees the layers once the last tag goes.
+        key = ('image-' + image['repo'].split('/')[-1]
+               + '-' + image['tag'][:12])
+        res = docker('image', 'rm',
+                     image['repo'] + ':' + image['tag'], check=False)
         if res.returncode != 0:
-            _record_reclaim_error(st, 'image-' + image['tag'],
+            _record_reclaim_error(st, key,
                                   'docker image rm failed: '
                                   + res.stderr.strip()[:300])
         else:
-            st.clear_cleanup_error('reclaim-image-' + image['tag'])
+            st.clear_cleanup_error('reclaim-' + key)
             log('reclaim: removed image ' + image['repo']
                 + ':' + image['tag'])
 
