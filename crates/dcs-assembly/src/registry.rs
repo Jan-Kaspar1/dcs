@@ -76,16 +76,17 @@ impl ComponentSpec<'_> {
     /// [`indexed_families`](Self::indexed_families), which reports the
     /// missing member as [`BuildError::UnboundPort`].
     pub fn indexed(&self, prefix: &str) -> Vec<PointId> {
-        self.ports
+        let mut members: Vec<_> = self
+            .ports
             .iter()
             .filter_map(|(name, point)| {
                 name.strip_prefix(prefix)
                     .and_then(|suffix| suffix.parse::<usize>().ok())
                     .map(|index| (index, *point))
             })
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
-            .collect()
+            .collect();
+        members.sort_by_key(|(index, _)| *index);
+        members.into_iter().map(|(_, point)| point).collect()
     }
 
     /// The shared `1..=count` member sets of the named indexed families —
@@ -111,8 +112,8 @@ impl ComponentSpec<'_> {
         let count = prefixes
             .iter()
             .flat_map(|prefix| {
-                self.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
+                self.ports.keys().filter_map(move |name| {
+                    name.strip_prefix(*prefix)
                         .and_then(|suffix| suffix.parse::<usize>().ok())
                 })
             })
@@ -244,10 +245,7 @@ mod tests {
             ("input_2", 92),
             ("out", 93),
         ]);
-        assert_eq!(
-            spec(&ports).indexed("in_"),
-            vec![PointId(1), PointId(3)]
-        );
+        assert_eq!(spec(&ports).indexed("in_"), vec![PointId(1), PointId(3)]);
         // A family with no bound members is empty, not an error.
         assert_eq!(spec(&ports).indexed("trip_"), Vec::<PointId>::new());
     }
