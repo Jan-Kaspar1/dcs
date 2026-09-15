@@ -79,6 +79,10 @@
 //!   and measured chemical rates or totals accumulated over a declared
 //!   window, the relative deviation tripping `deviating` past the
 //!   declared limit;
+//! - [`PhaseMonitor`] — the phase-conditioned verification checks
+//!   decision 61 records: a declared bound on `in` or on
+//!   `in − baseline` evaluated while a condition window stands, a
+//!   captured reference, and a deadline flagging a bound never met;
 //! - [`BackwashCoordinator`] — shared-supply backwash arbitration: an
 //!   ordered request queue and an exclusive held grant gated by the
 //!   declared permissives, with a declared queue policy and operator
@@ -130,6 +134,7 @@ mod median_voter;
 mod motor;
 mod override_select;
 mod params;
+mod phase_monitor;
 mod pid;
 mod pump_group;
 mod rate_limiter;
@@ -175,6 +180,7 @@ pub use median_voter::MedianVoter;
 pub use motor::Motor;
 pub use override_select::OverrideSelect;
 pub use params::{ParameterError, Parameters};
+pub use phase_monitor::{PhaseMode, PhaseMonitor, PhaseMonitorIo};
 pub use pid::{Pid, PidConfig};
 pub use pump_group::{GroupOutputs, PumpGroup, PumpGroupConfig, PumpIo, RotationPolicy};
 pub use rate_limiter::RateLimiter;
@@ -231,6 +237,7 @@ pub const KINDS: &[&str] = &[
     BackwashCoordinator::KIND,
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
+    PhaseMonitor::KIND,
 ];
 
 #[cfg(test)]

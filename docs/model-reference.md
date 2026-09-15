@@ -515,6 +515,47 @@ recorded composition — a three-filter FIFO bank beside a two-filter
 operator-managed bank driving the reorder point; per-port semantics
 live beside `BackwashCoordinator::KIND`.
 
+The post-wash verification checks architecture decision 61 records
+add one fixed-arity kind. `phase-monitor` reads `in` (`in`, `Float`)
+— the measured value — `phase` (`in`, `Bool`) — the condition
+window, wired from decoded phase flags or the return-to-service
+state — and `capture` (`in`, `Bool`) — while asserted inside the
+window the kind tracks `in` as its baseline — and drives `deviation`
+(`out`, `Float`), the reported `in − baseline`; `exceeded` (`out`,
+`Bool`), the excursion condition the alarm set consumes; and
+`overdue` (`out`, `Bool`), the bound-not-met verdict. The
+`parameters` are `bound` (non-negative finite `Float`), `limit_ticks`
+(`Int`, `1`–`i64::MAX`, the scans of the open window within which the
+bound must first be met), and `mode` (`Int` code — `0` absolute
+bound on `in`, `1` magnitude bound on the deviation); all three are
+`SetParameter`-tunable. The window opens on the scan `phase` reads
+`true` and closes on the scan it reads `false`, and each window
+carries its own verdict state — scans stood, the latched `met`, the
+baseline — reset as it opens. Under `mode` `0`, `exceeded` stands
+while `in` reads above `bound` and the first scan within bound
+latches `met`; under `mode` `1`, `deviation` reports `in − baseline`
+(`0.0` until the window's first capture), `exceeded` bounds the
+deviation magnitude, and only a captured deviation can be met — a
+window whose `capture` never runs meets nothing. `overdue` asserts on
+the first window scan past `limit_ticks` without `met`, and clears
+when the bound is met late or the window closes. Outside the window
+the monitor is quiescent — `deviation` `0.0`, both flags clear,
+nothing accrues, a `capture` read `true` acting on nothing — and the
+held baseline drops when the window closes, so a fresh window never
+verifies on a stale reference. A scan where any input is not `Good`,
+or `in` is not finite, is a held scan: the window neither opens nor
+closes, the count stands, nothing captures, and the outputs keep
+their standing values stamped with the merged worst-of input
+qualities — plus `Bad(DeviceFault)` for a non-finite reading the
+point did not report. The baseline, the deadline count, and the
+standing verdicts are run state under decision 20's checkpoint rule,
+so a checkpointed standby continues a mid-window verification
+identically.
+`crates/dcs-assembly/fixtures/phase_monitor.json` is the recorded
+composition — a mode-0 ripening instance beside a mode-1 CBHL
+instance over scripted turbidity, headloss, phase, and capture
+channels; per-port semantics live beside `PhaseMonitor::KIND`.
+
 The aeration-header coordination contract architecture decision 62
 records adds one variable-arity kind. `header-coordinator` owns the
 bank-level coordination the independent per-zone DO→valve loops
