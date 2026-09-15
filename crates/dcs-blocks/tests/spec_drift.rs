@@ -23,6 +23,7 @@ use dcs_blocks::{
     CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger,
     FailoverSelect, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs,
     HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
+    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
     PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
     Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
@@ -33,9 +34,10 @@ use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
     BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
     EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
-    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
-    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
-    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
+    TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -176,6 +178,58 @@ fn specs_match_registered_kinds_descriptors() {
     covered.insert(check(
         &BoolLatchingAlarmSpec::new(Default::default()),
         &BoolLatchingAlarm::new("bal", point(1), point(2), point(3), point(4)).describe(),
+    ));
+    // The managed siblings' `shelve`/`oos`/`suppress` inputs are
+    // optional — declared only where bound — so each spec is checked
+    // against the fully bound and the unmanaged instance.
+    let managed_config = ManagedAlarmConfig {
+        max_shelve_ticks: 5,
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+    let managed_io = |input: usize| ManagedAlarmIo {
+        input: point(input as u64),
+        ack: point(2),
+        shelve: Some(point(3)),
+        oos: Some(point(4)),
+        suppress: Some(point(5)),
+        alarm: point(6),
+        unacknowledged: point(7),
+        shelved: point(8),
+        suppressed: point(9),
+        out_of_service: point(10),
+    };
+    let unmanaged_io = |input: usize| ManagedAlarmIo {
+        shelve: None,
+        oos: None,
+        suppress: None,
+        ..managed_io(input)
+    };
+    let all_managed = ManagedInputs {
+        shelve: true,
+        oos: true,
+        suppress: true,
+    };
+    covered.insert(check(
+        &ManagedLatchingAlarmSpec::new(Default::default(), all_managed),
+        &ManagedLatchingAlarm::new("mlal", managed_io(1), limits, managed_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &ManagedLatchingAlarmSpec::new(Default::default(), ManagedInputs::default()),
+        &ManagedLatchingAlarm::new("mlal", unmanaged_io(1), limits, managed_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &ManagedBoolLatchingAlarmSpec::new(Default::default(), all_managed),
+        &ManagedBoolLatchingAlarm::new("mbal", managed_io(1), managed_config).describe(),
+    ));
+    covered.insert(check(
+        &ManagedBoolLatchingAlarmSpec::new(Default::default(), ManagedInputs::default()),
+        &ManagedBoolLatchingAlarm::new("mbal", unmanaged_io(1), managed_config).describe(),
     ));
     covered.insert(check(
         &InterlockSpec::new(Default::default(), 2),

@@ -16,9 +16,10 @@ use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
     CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
     FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
-    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch,
-    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -134,6 +135,46 @@ pub fn registry() -> ComponentRegistry {
                 spec.require("ack")?,
                 spec.require("alarm")?,
                 spec.require("unacknowledged")?,
+                spec.parameters,
+            ))
+        })
+        .with(ManagedLatchingAlarm::KIND, |spec| {
+            // `shelve`, `oos`, and `suppress` are the optional managed
+            // inputs — bound only where the model wires them
+            // (`ComponentSpec::get`); an unbound port declares no
+            // requirement and exposes no managed surface.
+            boxed(ManagedLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                ManagedAlarmIo {
+                    input: spec.require("in")?,
+                    ack: spec.require("ack")?,
+                    shelve: spec.get("shelve"),
+                    oos: spec.get("oos"),
+                    suppress: spec.get("suppress"),
+                    alarm: spec.require("alarm")?,
+                    unacknowledged: spec.require("unacknowledged")?,
+                    shelved: spec.require("shelved")?,
+                    suppressed: spec.require("suppressed")?,
+                    out_of_service: spec.require("out_of_service")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(ManagedBoolLatchingAlarm::KIND, |spec| {
+            boxed(ManagedBoolLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                ManagedAlarmIo {
+                    input: spec.require("in")?,
+                    ack: spec.require("ack")?,
+                    shelve: spec.get("shelve"),
+                    oos: spec.get("oos"),
+                    suppress: spec.get("suppress"),
+                    alarm: spec.require("alarm")?,
+                    unacknowledged: spec.require("unacknowledged")?,
+                    shelved: spec.require("shelved")?,
+                    suppressed: spec.require("suppressed")?,
+                    out_of_service: spec.require("out_of_service")?,
+                },
                 spec.parameters,
             ))
         })

@@ -20,9 +20,10 @@ use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
     BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
     EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
-    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
-    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
-    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
+    TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -107,6 +108,186 @@ fn bool_latching_alarm_rejects_an_undeclared_parameter() {
     plant.connect(ack, bal.ack);
     plant.connect(&bal.alarm, alarm);
     plant.connect(&bal.unacknowledged, unacknowledged);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::UnknownParameter { ref parameter, .. }) if parameter == "hysteresis"
+    ));
+}
+
+/// The managed-alarm parameter set both managed latching kinds carry:
+/// the shelving bound plus the decision-70 rationalization fields.
+fn managed_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("max_shelve_ticks", Value::Int(5)),
+        ("priority", Value::Int(1)),
+        ("class", Value::Int(2)),
+        ("response_ticks", Value::Int(30)),
+    ])
+}
+
+/// The `managed-latching-alarm` plant the tests wire: a scripted level
+/// on the device, the writable internal `In` points the operator
+/// commands ride — `ack` plus whichever managed inputs the spec
+/// declares — and internal carriers for the five status outputs.
+fn managed_latching_plant(
+    parameters_map: dcs_build::Parameters,
+    managed: ManagedInputs,
+) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level-raw", Direction::In);
+
+    let pv = plant.field_input::<f64>(PointId(10), level_raw, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let shelve = plant.internal_input::<bool>(PointId(12), false, true);
+    let oos = plant.internal_input::<bool>(PointId(13), false, true);
+    let suppress = plant.internal_input::<bool>(PointId(14), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mla = plant.add(ManagedLatchingAlarmSpec::new(parameters_map, managed));
+    plant.connect(pv, mla.input);
+    plant.connect(ack, mla.ack);
+    if let Some(shelve_port) = mla.managed.shelve {
+        plant.connect(shelve, shelve_port);
+    }
+    if let Some(oos_port) = mla.managed.oos {
+        plant.connect(oos, oos_port);
+    }
+    if let Some(suppress_port) = mla.managed.suppress {
+        plant.connect(suppress, suppress_port);
+    }
+    plant.connect(&mla.alarm, alarm);
+    plant.connect(&mla.unacknowledged, unacknowledged);
+    plant.connect(&mla.managed.shelved, shelved);
+    plant.connect(&mla.managed.suppressed, suppressed);
+    plant.connect(&mla.managed.out_of_service, out_of_service);
+    plant
+}
+
+fn managed_limits() -> dcs_build::Parameters {
+    let mut map = managed_parameters();
+    map.insert("low_limit".to_string(), Value::Float(10.0));
+    map.insert("high_limit".to_string(), Value::Float(90.0));
+    map.insert("hysteresis".to_string(), Value::Float(5.0));
+    map
+}
+
+#[test]
+fn managed_latching_alarm_spec_emits_an_assembling_document() {
+    // The fully managed form and a partly bound form both assemble —
+    // the optional managed inputs follow the spec flags.
+    let model = build_load_assemble(managed_latching_plant(
+        managed_limits(),
+        ManagedInputs {
+            shelve: true,
+            oos: true,
+            suppress: true,
+        },
+    ));
+    assert_eq!(model.components[0].kind, ManagedLatchingAlarmSpec::KIND);
+    for name in ["shelve", "oos", "suppress"] {
+        assert!(model.components[0].ports.contains_key(name));
+    }
+
+    let model = build_load_assemble(managed_latching_plant(
+        managed_limits(),
+        ManagedInputs {
+            shelve: true,
+            oos: false,
+            suppress: false,
+        },
+    ));
+    assert_eq!(model.components[0].kind, ManagedLatchingAlarmSpec::KIND);
+    assert!(model.components[0].ports.contains_key("shelve"));
+    assert!(!model.components[0].ports.contains_key("oos"));
+    assert!(!model.components[0].ports.contains_key("suppress"));
+}
+
+#[test]
+fn managed_latching_alarm_rejects_a_missing_managed_parameter() {
+    // The managed set is required declared data: a map missing
+    // `max_shelve_ticks` is `MissingParameter` naming the key at
+    // `build`, before the document exists.
+    let mut parameters_map = managed_limits();
+    parameters_map.remove("max_shelve_ticks");
+    assert!(matches!(
+        managed_latching_plant(parameters_map, ManagedInputs::default()).build(),
+        Err(BuildError::MissingParameter { ref parameter, .. }) if parameter == "max_shelve_ticks"
+    ));
+}
+
+#[test]
+fn managed_bool_latching_alarm_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let power_fail = plant.channel::<bool>(sim, "power-fail", Direction::In);
+
+    let input = plant.field_input::<bool>(PointId(10), power_fail, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let shelve = plant.internal_input::<bool>(PointId(12), false, true);
+    let oos = plant.internal_input::<bool>(PointId(13), false, true);
+    let suppress = plant.internal_input::<bool>(PointId(14), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mbal = plant.add(ManagedBoolLatchingAlarmSpec::new(
+        managed_parameters(),
+        ManagedInputs {
+            shelve: true,
+            oos: true,
+            suppress: true,
+        },
+    ));
+    plant.connect(input, mbal.input);
+    plant.connect(ack, mbal.ack);
+    plant.connect(shelve, mbal.managed.shelve.unwrap());
+    plant.connect(oos, mbal.managed.oos.unwrap());
+    plant.connect(suppress, mbal.managed.suppress.unwrap());
+    plant.connect(&mbal.alarm, alarm);
+    plant.connect(&mbal.unacknowledged, unacknowledged);
+    plant.connect(&mbal.managed.shelved, shelved);
+    plant.connect(&mbal.managed.suppressed, suppressed);
+    plant.connect(&mbal.managed.out_of_service, out_of_service);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, ManagedBoolLatchingAlarmSpec::KIND);
+}
+
+#[test]
+fn managed_bool_latching_alarm_rejects_an_undeclared_parameter() {
+    // The Bool managed sibling declares the managed set only: a
+    // `latching-alarm` limit tunable carried over is `UnknownParameter`
+    // naming the key at `build`, before the document exists.
+    let mut plant = PlantBuilder::new();
+    let input = plant.internal_input::<bool>(PointId(10), false, true);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mut parameters_map = managed_parameters();
+    parameters_map.insert("hysteresis".to_string(), Value::Float(0.5));
+    let mbal = plant.add(ManagedBoolLatchingAlarmSpec::new(
+        parameters_map,
+        ManagedInputs::default(),
+    ));
+    plant.connect(input, mbal.input);
+    plant.connect(ack, mbal.ack);
+    plant.connect(&mbal.alarm, alarm);
+    plant.connect(&mbal.unacknowledged, unacknowledged);
+    plant.connect(&mbal.managed.shelved, shelved);
+    plant.connect(&mbal.managed.suppressed, suppressed);
+    plant.connect(&mbal.managed.out_of_service, out_of_service);
 
     assert!(matches!(
         plant.build(),
@@ -844,6 +1025,8 @@ fn every_registered_kind_has_a_spec() {
         AlarmMonitorSpec::KIND,
         LatchingAlarmSpec::KIND,
         BoolLatchingAlarmSpec::KIND,
+        ManagedLatchingAlarmSpec::KIND,
+        ManagedBoolLatchingAlarmSpec::KIND,
         InterlockSpec::KIND,
         OverrideSelectSpec::KIND,
         ValveSpec::KIND,

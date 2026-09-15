@@ -1159,6 +1159,308 @@ impl Spec for BoolLatchingAlarmSpec {
     }
 }
 
+/// The managed-alarm surface decisions 71–73 record, shared by both
+/// managed latching kinds' specs: which of the optional `shelve`,
+/// `oos`, and `suppress` inputs the instance declares.
+///
+/// A `false` flag emits an instance with no port to wire — the model's
+/// "unbound" case: no shelving surface, never out of service, never
+/// suppressed. The status outputs `shelved`, `suppressed`, and
+/// `out_of_service` are always declared — the uniform Status-role
+/// vocabulary the alarm pane joins.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ManagedInputs {
+    /// Whether the instance declares the `shelve` port — the
+    /// level-observed shelving request, conventionally wired to a
+    /// writable internal `In` point.
+    pub shelve: bool,
+    /// Whether the instance declares the `oos` port — the
+    /// level-observed out-of-service command.
+    pub oos: bool,
+    /// Whether the instance declares the `suppress` port — the
+    /// designed-suppression condition.
+    pub suppress: bool,
+}
+
+/// The bound managed inputs' port declarations, in
+/// `shelve`/`oos`/`suppress` order — the position the kinds'
+/// `io_requirements` place them.
+fn managed_input_ports(inputs: ManagedInputs) -> Vec<PortDecl> {
+    let mut ports = Vec::with_capacity(3);
+    if inputs.shelve {
+        ports.push(port("shelve", Direction::In, ValueKind::Bool));
+    }
+    if inputs.oos {
+        ports.push(port("oos", Direction::In, ValueKind::Bool));
+    }
+    if inputs.suppress {
+        ports.push(port("suppress", Direction::In, ValueKind::Bool));
+    }
+    ports
+}
+
+/// The three managed status outputs' declarations — always all three.
+fn managed_output_ports() -> Vec<PortDecl> {
+    vec![
+        port("shelved", Direction::Out, ValueKind::Bool),
+        port("suppressed", Direction::Out, ValueKind::Bool),
+        port("out_of_service", Direction::Out, ValueKind::Bool),
+    ]
+}
+
+/// The managed-alarm parameter set both managed latching kinds declare:
+/// `max_shelve_ticks` — the shelving bound, `0` declaring
+/// never-shelvable — plus the decision-70 `priority`/`class`/
+/// `response_ticks` rationalization fields; all required non-negative
+/// `Int`s.
+const MANAGED_ALARM_PARAMETERS: &[ParamDecl] = &[
+    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+];
+
+/// Typed handles for the managed-alarm ports both managed latching
+/// kinds share — the `Option` members following the declared set.
+#[derive(Debug)]
+pub struct ManagedAlarmHandles {
+    /// `shelve` port (`In`, `Bool`): the level-observed shelving
+    /// request — `Some` only when the spec declared the port; wiring a
+    /// handle the emitted instance does not carry is `UnknownPort` at
+    /// `build`. Wire it to a writable internal `In` point so operator
+    /// shelve requests ride the receipted command path.
+    pub shelve: Option<Sink<bool>>,
+    /// `oos` port (`In`, `Bool`): the level-observed out-of-service
+    /// command — `Some` only when declared.
+    pub oos: Option<Sink<bool>>,
+    /// `suppress` port (`In`, `Bool`): the designed-suppression
+    /// condition — `Some` only when declared.
+    pub suppress: Option<Sink<bool>>,
+    /// `shelved` port (`Out`, `Bool`): asserts while a shelve request
+    /// stands inside the declared bound.
+    pub shelved: Source<bool>,
+    /// `suppressed` port (`Out`, `Bool`): asserts while `suppress`
+    /// reads `true`.
+    pub suppressed: Source<bool>,
+    /// `out_of_service` port (`Out`, `Bool`): asserts while `oos`
+    /// reads `true`.
+    pub out_of_service: Source<bool>,
+}
+
+impl ManagedAlarmHandles {
+    /// Builds the handles for component `id` under `inputs` — the
+    /// `Option` members `Some` only where the spec declared the port.
+    fn for_component(id: ComponentId, inputs: ManagedInputs) -> Self {
+        Self {
+            shelve: inputs.shelve.then(|| Sink::port(id, "shelve")),
+            oos: inputs.oos.then(|| Sink::port(id, "oos")),
+            suppress: inputs.suppress.then(|| Sink::port(id, "suppress")),
+            shelved: Source::port(id, "shelved"),
+            suppressed: Source::port(id, "suppressed"),
+            out_of_service: Source::port(id, "out_of_service"),
+        }
+    }
+}
+
+/// Spec for the `managed-latching-alarm` kind: `latching-alarm`'s
+/// limit checking and acknowledgment latch plus the shelving,
+/// suppression, and out-of-service lifecycle decisions 71–73 record.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`), `ack` (`In`,
+/// `Bool`), the spec-declared subset of `shelve`/`oos`/`suppress`
+/// (`In`, `Bool`), then `alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service` (all `Out`, `Bool`). Parameters — the
+/// sibling's `low_limit`, `high_limit` (required finite `Float`s) and
+/// `hysteresis` (optional non-negative `Float`), plus the shared
+/// managed set: `max_shelve_ticks`, `priority`, `class`, and
+/// `response_ticks` (required non-negative `Int`s).
+pub struct ManagedLatchingAlarmSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Which managed inputs the instance declares.
+    pub managed: ManagedInputs,
+}
+
+/// Typed port handles for a `managed-latching-alarm` instance.
+pub struct ManagedLatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the monitored analog value.
+    pub input: Sink<f64>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// The managed-alarm ports — optional inputs and the uniform
+    /// status outputs.
+    pub managed: ManagedAlarmHandles,
+    /// `alarm` port (`Out`, `Bool`): the limit-violation state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// trip-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl ManagedLatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "managed-latching-alarm";
+
+    /// The declared parameter set — the sibling's limits plus the
+    /// managed configuration.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("low_limit", ValueKind::Float, Some(FINITE_F64)),
+        required("high_limit", ValueKind::Float, Some(FINITE_F64)),
+        optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `managed` selects which managed inputs the instance declares.
+    pub fn new(parameters: Parameters, managed: ManagedInputs) -> Self {
+        Self {
+            parameters,
+            managed,
+        }
+    }
+}
+
+impl Spec for ManagedLatchingAlarmSpec {
+    type Instance = ManagedLatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("ack", Direction::In, ValueKind::Bool),
+        ];
+        ports.extend(managed_input_ports(self.managed));
+        ports.extend([
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]);
+        ports.extend(managed_output_ports());
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ManagedLatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            managed: ManagedAlarmHandles::for_component(id, self.managed),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
+/// Spec for the `managed-bool-latching-alarm` kind:
+/// `bool-latching-alarm`'s two-flag lifecycle for Bool-sourced
+/// conditions plus the shelving, suppression, and out-of-service
+/// lifecycle decisions 71–73 record.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
+/// `Bool`), the spec-declared subset of `shelve`/`oos`/`suppress`
+/// (`In`, `Bool`), then `alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service` (all `Out`, `Bool`). Parameters — the
+/// shared managed set: `max_shelve_ticks`, `priority`, `class`, and
+/// `response_ticks` (required non-negative `Int`s); the Bool analogue
+/// of the standing limit state has no limits or hysteresis.
+pub struct ManagedBoolLatchingAlarmSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Which managed inputs the instance declares.
+    pub managed: ManagedInputs,
+}
+
+/// Typed port handles for a `managed-bool-latching-alarm` instance.
+pub struct ManagedBoolLatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Bool`): the Bool alarm condition.
+    pub input: Sink<bool>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// The managed-alarm ports — optional inputs and the uniform
+    /// status outputs.
+    pub managed: ManagedAlarmHandles,
+    /// `alarm` port (`Out`, `Bool`): the standing condition state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// asserted-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl ManagedBoolLatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "managed-bool-latching-alarm";
+
+    /// The declared parameter set — the shared managed configuration.
+    pub const PARAMETERS: &'static [ParamDecl] = MANAGED_ALARM_PARAMETERS;
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `managed` selects which managed inputs the instance declares.
+    pub fn new(parameters: Parameters, managed: ManagedInputs) -> Self {
+        Self {
+            parameters,
+            managed,
+        }
+    }
+}
+
+impl Spec for ManagedBoolLatchingAlarmSpec {
+    type Instance = ManagedBoolLatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("in", Direction::In, ValueKind::Bool),
+            port("ack", Direction::In, ValueKind::Bool),
+        ];
+        ports.extend(managed_input_ports(self.managed));
+        ports.extend([
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]);
+        ports.extend(managed_output_ports());
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ManagedBoolLatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            managed: ManagedAlarmHandles::for_component(id, self.managed),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
 /// Spec for the `manual-station` kind: operator-selectable source on an
 /// analog output with a slew-bounded bumpless transfer.
 ///
