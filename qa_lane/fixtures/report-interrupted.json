@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "run_id": "qa-20260915-003",
+  "attempted_sha": "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+  "completed_sha": null,
+  "image": {
+    "controller": "sha256:3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d",
+    "plant": "sha256:7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c"
+  },
+  "started_at": "2026-09-15T18:00:00+00:00",
+  "finished_at": "2026-09-15T18:31:02+00:00",
+  "outcome": "interrupted",
+  "attempt": 1,
+  "host": {"name": "lenovo", "os": "ubuntu"},
+  "scenarios": [
+    {
+      "key": "controller-active",
+      "title": "Active controller owns the simulated field",
+      "expected": "ctrl-a reports role active and its monitor serves a telemetry snapshot",
+      "outcome": "passed",
+      "observations": [
+        "GET /role on ctrl-a reported role=active"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/controller-active-role.json"}
+      ]
+    },
+    {
+      "key": "standby-tracking",
+      "title": "Standby converges behind the active",
+      "expected": "ctrl-b reports role standby with tracking converged",
+      "outcome": "inconclusive",
+      "observations": [
+        "runner killed before this scenario completed"
+      ]
+    },
+    {
+      "key": "operator-command",
+      "title": "Writable point command applies at a scan boundary",
+      "expected": "POST /command marking pump-1 out-of-service is accepted and visible in telemetry",
+      "outcome": "inconclusive",
+      "observations": [
+        "not executed: run interrupted"
+      ]
+    }
+  ],
+  "capability_limitations": [],
+  "infrastructure_failures": [
+    {"key": "runner-killed", "detail": "qa runner process received SIGKILL mid-run; reconciliation marked the record interrupted and removed the labeled rig containers", "phase": "scenarios"}
+  ],
+  "timeline": [
+    {"t": "2026-09-15T18:00:00+00:00", "event": "run-start"},
+    {"t": "2026-09-15T18:01:22+00:00", "event": "images-built"},
+    {"t": "2026-09-15T18:01:55+00:00", "event": "rig-up"},
+    {"t": "2026-09-15T18:31:02+00:00", "event": "reconciled", "detail": "next supervisor start found the dead runner, marked the run interrupted, and removed orphaned containers"}
+  ],
+  "notes": "Interrupted-run fixture: reconciliation preserved the partial evidence and the run record."
+}

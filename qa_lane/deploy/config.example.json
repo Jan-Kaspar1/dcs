@@ -1,0 +1,23 @@
+{
+  "state_dir": "/srv/dcs-hwtest",
+  "src_dir": "/srv/dcs-hwtest/src",
+  "max_runs_per_day": 4,
+  "max_attempts_per_sha": 2,
+  "hard_timeout_seconds": 7200,
+  "min_free_bytes": 10737418240,
+  "active_port": 18080,
+  "standby_port": 18081,
+  "plant_port": 9001,
+  "plant_host_port": 19001,
+  "rig_cpus": "1.0",
+  "rig_memory": "384m",
+  "rig_pids": 128,
+  "builder_image": "rust:1.98.1-bookworm",
+  "builder_cpus": "0-3",
+  "builder_memory": "6g",
+  "builder_pids": 512,
+  "builder_timeout": 5400,
+  "monitor_timeout": 90,
+  "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
+  "dynamics_fixture": "crates/dcs-demo/fixtures/pump_station_dynamics.json"
+}

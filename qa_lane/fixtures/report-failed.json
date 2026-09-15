@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "run_id": "qa-20260915-002",
+  "attempted_sha": "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2",
+  "completed_sha": "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2",
+  "image": {
+    "controller": "sha256:2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c",
+    "plant": "sha256:8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d"
+  },
+  "started_at": "2026-09-15T14:00:00+00:00",
+  "finished_at": "2026-09-15T14:09:17+00:00",
+  "outcome": "failed",
+  "attempt": 1,
+  "host": {"name": "lenovo", "os": "ubuntu"},
+  "scenarios": [
+    {
+      "key": "controller-active",
+      "title": "Active controller owns the simulated field",
+      "expected": "ctrl-a reports role active and its monitor serves a telemetry snapshot",
+      "outcome": "passed",
+      "observations": [
+        "GET /role on ctrl-a reported role=active"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/controller-active-role.json"}
+      ]
+    },
+    {
+      "key": "standby-tracking",
+      "title": "Standby converges behind the active",
+      "expected": "ctrl-b reports role standby with tracking converged within 60 s",
+      "outcome": "failed",
+      "observations": [
+        "ctrl-b reported role=standby but tracking stayed 'diverged' for the full 60 s window",
+        "checkpoint pulls returned 200 throughout; convergence never declared"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/standby-tracking-role.json", "detail": "final RoleReport"},
+        {"kind": "file", "ref": "evidence/standby-tracking-samples.json", "detail": "12 samples at 5 s intervals"}
+      ],
+      "detail": "Reproducible on this revision; candidate product defect in standby convergence."
+    },
+    {
+      "key": "operator-command",
+      "title": "Writable point command applies at a scan boundary",
+      "expected": "POST /command marking pump-1 out-of-service is accepted and visible in telemetry",
+      "outcome": "inconclusive",
+      "observations": [
+        "not executed: scenario depends on a converged standby topology per run order"
+      ]
+    },
+    {
+      "key": "failover",
+      "title": "Demote/promote switchover preserves the field",
+      "expected": "POST /demote on ctrl-a then POST /promote on ctrl-b leaves ctrl-b active",
+      "outcome": "inconclusive",
+      "observations": [
+        "not executed: skipped after standby-tracking failure"
+      ]
+    }
+  ],
+  "capability_limitations": [
+    {"key": "no-ethercat", "detail": "Controller has no EtherCAT driver; all field I/O exercised through the dcs-sim-net remote simulation only.", "blocking": false}
+  ],
+  "infrastructure_failures": [],
+  "timeline": [
+    {"t": "2026-09-15T14:00:00+00:00", "event": "run-start"},
+    {"t": "2026-09-15T14:01:40+00:00", "event": "images-built"},
+    {"t": "2026-09-15T14:02:11+00:00", "event": "rig-up"},
+    {"t": "2026-09-15T14:08:55+00:00", "event": "scenarios-complete", "detail": "1 passed, 1 failed, 2 inconclusive"},
+    {"t": "2026-09-15T14:09:17+00:00", "event": "teardown"}
+  ]
+}

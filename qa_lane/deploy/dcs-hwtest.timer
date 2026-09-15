@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic DCS QA lane cycle
+
+[Timer]
+# Reconcile shortly after boot, then check the queue every 15 minutes.
+# A cycle with nothing queued costs one SQLite read.
+OnBootSec=2min
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

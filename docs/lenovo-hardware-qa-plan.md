@@ -1,7 +1,36 @@
 # Implementation plan: Lenovo hardware QA
 
-Status: proposed, not deployed. Prepared 2026-09-14.
+Status: simulation lane implemented and deployed. Prepared 2026-09-14;
+runner + report contract landed 2026-09-15 (see below).
 Implementation order: second, after [daily architecture review](daily-architecture-review-plan.md).
+
+## Landed 2026-09-15 (HQ-1, HQ-2 deterministic slice, HQ-5 provisioning slice)
+
+- `qa_lane/report.py`: versioned run-report contract (schema_version 1)
+  with validator and passed/failed/interrupted fixtures — run identity,
+  attempted vs completed SHA, image digests, per-scenario outcomes,
+  capability limitations, infrastructure failures, action timeline.
+- `qa_lane/state.py` + `qa_lane/runner.py`: SQLite-backed Lenovo
+  supervisor — exact-SHA queue (newest wins, intervening range
+  preserved), one active run via flock + oneshot unit, daily budget
+  (4/day) and one auto-retry per inconclusive SHA, 2 h hard timeout,
+  restart reconciliation of dead runs and labeled orphan containers.
+- `qa_lane/scenarios.py`: deterministic checks over the simulated rig —
+  active role + telemetry, standby convergence, writable-point command,
+  demote/promote failover, receipts/journal evidence — all through the
+  documented monitor endpoints.
+- `qa_lane/relay.py`: WSL-side sanitizer + publisher pushing
+  `qa/latest.json` and `qa/run-<id>.json` through the Pi report key.
+- `qa_lane/deploy/`: generic systemd unit/timer and config example.
+- Build choice: no CI image pinning exists, so images are compiled on
+  the Lenovo from the pushed `git archive` of the exact SHA inside a
+  cpuset/memory/PID-limited builder container running the checked-in
+  Dockerfile's build stage verbatim, then packaged into the same
+  bookworm-slim + uid 10001 + entrypoint runtime contract. Documented
+  as the interim path until CI-pinned images exist.
+- Report-only: no GitHub issue publication (finding ingestion is a
+  later task). Devin exploration phase not yet added; deterministic
+  scenarios gate it per the plan's ordering.
 
 ## Outcome
 
