@@ -17,13 +17,13 @@ use std::collections::BTreeSet;
 
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
-    LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
+    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec,
+    DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
+    ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
+    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
+    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
@@ -1118,6 +1118,7 @@ fn every_registered_kind_has_a_spec() {
         DeviationMonitorSpec::KIND,
         BackwashCoordinatorSpec::KIND,
         HeaderCoordinatorSpec::KIND,
+        BlowerGroupSpec::KIND,
     ]
     .into_iter()
     .collect();

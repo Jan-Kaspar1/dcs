@@ -87,6 +87,11 @@
 //!   declared constant-pressure, most-open-valve-reset, or
 //!   direct-airflow strategy driving the bounded set-point and
 //!   floored demand, plus the capped pulse-grant set.
+//! - [`BlowerGroup`] — an N-blower staged group on a continuous
+//!   capacity demand: the declared equal split clamped to per-unit
+//!   bounds, the vent-based join/departure choreography behind
+//!   min-run and start-interval protection, the declared rotation and
+//!   staging-authority policies, and the `transition` freeze surface.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -103,6 +108,7 @@ mod alarm_monitor;
 mod analog_input;
 mod analog_output;
 mod backwash_coordinator;
+mod blower_group;
 mod bool_gate;
 mod bool_latching_alarm;
 mod counter;
@@ -142,6 +148,10 @@ pub use analog_output::{AnalogOutput, RawOutput};
 pub use backwash_coordinator::{
     BackwashCoordinator, BackwashCoordinatorConfig, CoordinatorOutputs, FilterIo, PermissiveInputs,
     QueuePolicy, QueuedState,
+};
+pub use blower_group::{
+    BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs, BlowerRotation, StagingAuthority,
+    UnitBounds,
 };
 pub use bool_gate::{BoolGate, GateOperation};
 pub use bool_latching_alarm::BoolLatchingAlarm;
@@ -220,6 +230,7 @@ pub const KINDS: &[&str] = &[
     DeviationMonitor::KIND,
     BackwashCoordinator::KIND,
     HeaderCoordinator::KIND,
+    BlowerGroup::KIND,
 ];
 
 #[cfg(test)]
