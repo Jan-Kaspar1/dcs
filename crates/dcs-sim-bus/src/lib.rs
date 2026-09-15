@@ -62,7 +62,8 @@
 //! list of `ProcessElement` declarations — the same serde vocabulary
 //! `dcs-plant-server --dynamics` merges (`first_order_lag`,
 //! `second_order_lag`, `integrator`, `dead_time`, `noise`,
-//! `bool_flow`, `flow_sum`). The recorded binding encoding: an
+//! `bool_flow`, `flow_sum`, `scaled_flow`). The recorded binding
+//! encoding: an
 //! element's point-valued fields carry register addresses — a
 //! document's `"input": 20` reads register 20. Elements follow the
 //! driver's own conventions, evaluated by the `SimDriver` the bank is
@@ -165,5 +166,6 @@ pub use server::BusServer;
 // re-exported so the device binary and test rigs need no `dcs-sim`
 // dependency of their own.
 pub use dcs_sim::{
-    BoolFlow, DeadTime, FirstOrderLag, FlowSum, Integrator, Noise, ProcessElement, SecondOrderLag,
+    BoolFlow, DeadTime, FirstOrderLag, FlowSum, Integrator, Noise, ProcessElement, ScaledFlow,
+    SecondOrderLag,
 };
