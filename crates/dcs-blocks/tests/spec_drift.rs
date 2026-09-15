@@ -16,30 +16,31 @@
 
 use std::collections::BTreeSet;
 
-use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
+use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
-    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger,
-    FailoverSelect, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs,
-    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
-    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, Rationalization,
-    RotationPolicy, Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch,
-    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
+    BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
+    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
+    FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, HeaderCoordinator,
+    HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmConfig,
+    ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter,
+    Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
+    QueuePolicy, QueuedState, RateLimiter, RatioOutputs, Rationalization, RotationPolicy, Scaling,
+    Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, StagingAuthority,
+    ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
-    LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
+    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec,
+    DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
+    ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
+    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
+    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
-use dcs_core::{ComponentDescriptor, PointId, ValueKind};
+use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
 use dcs_runtime::Component;
 
 /// Asserts `spec` declares the same kind string and ports `descriptor`
@@ -430,6 +431,150 @@ fn specs_match_registered_kinds_descriptors() {
         .unwrap()
         .describe(),
     ));
+    // `blower-group`'s per-blower `cmd_i`/`run_i`/`fault_i`/`avail_i`/
+    // `capacity_i`/`vent_i` families are instance-dependent — `N` is
+    // the spec's `blowers`, matching the pump-group convention — and
+    // `approve` is the optional port, declared only where bound. Its
+    // parameter set is indexed by the unit count — a different key set
+    // per instance — so, like `sequencer`, the spec's recorded
+    // treatment is `declared_parameters() -> None` and `build` leaves
+    // the map to `from_parameters`; the descriptor's parameter
+    // vocabulary is pinned here.
+    let blower_io = |base: u64| BlowerIo {
+        cmd: point(base),
+        run: point(base + 1),
+        fault: point(base + 2),
+        avail: point(base + 3),
+        capacity: point(base + 4),
+        vent: point(base + 5),
+    };
+    let blower_bounds = UnitBounds {
+        min_flow: 20.0,
+        max_flow: 100.0,
+        max_current: 90.0,
+    };
+    let blower_outputs = |base: u64| BlowerOutputs {
+        staged: point(base),
+        none_available: point(base + 1),
+        all_faulted: point(base + 2),
+        staging_pending: point(base + 3),
+        transition: point(base + 4),
+    };
+    let blower_config = BlowerGroupConfig {
+        staging_authority: StagingAuthority::Automatic,
+        stage_up: 0.9,
+        stage_down: 0.8,
+        min_run_ticks: 0,
+        min_start_interval_ticks: 0,
+        vent_ticks: 2,
+        rotation: BlowerRotation::NoRotation,
+    };
+    let blower_group = |approve: Option<PointId>| {
+        BlowerGroup::new(
+            "bg",
+            point(1),
+            approve,
+            vec![blower_io(10), blower_io(20)],
+            vec![blower_bounds; 2],
+            blower_outputs(30),
+            blower_config,
+        )
+        .unwrap()
+    };
+    covered.insert(check_interface(
+        &BlowerGroupSpec::new(Default::default(), 2, true),
+        &blower_group(Some(point(2))).describe(),
+    ));
+    check_interface(
+        &BlowerGroupSpec::new(Default::default(), 2, false),
+        &blower_group(None).describe(),
+    );
+    assert!(
+        BlowerGroupSpec::new(Default::default(), 2, true)
+            .declared_parameters()
+            .is_none(),
+        "blower-group's parameter set is not statically enumerable"
+    );
+    let blower_parameters: Vec<(String, _, _)> = blower_group(None)
+        .describe()
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), parameter.kind, parameter.range))
+        .collect();
+    assert_eq!(
+        blower_parameters,
+        vec![
+            (
+                "staging_authority".to_string(),
+                ValueKind::Int,
+                Some(ParameterRange {
+                    min: Value::Int(0),
+                    max: Value::Int(2),
+                })
+            ),
+            (
+                "stage_up".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "stage_down".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "min_run_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            (
+                "min_start_interval_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            (
+                "unit_1_min_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_1_max_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_1_max_current".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_min_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_max_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_max_current".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            ("vent_ticks".to_string(), ValueKind::Int, Some(POSITIVE_INT)),
+            (
+                "rotation".to_string(),
+                ValueKind::Int,
+                Some(ParameterRange {
+                    min: Value::Int(0),
+                    max: Value::Int(2),
+                })
+            ),
+        ],
+        "blower-group's indexed parameter vocabulary drifted"
+    );
+
     covered.insert(check(
         &SrLatchSpec::new(Default::default()),
         &SrLatch::new("srl", point(1), point(2), point(3)).describe(),
@@ -763,6 +908,62 @@ fn header_coordinator_spec_tracks_zone_count() {
             &HeaderCoordinatorSpec::new(Default::default(), zones),
             &component.describe(),
         );
+    }
+}
+
+#[test]
+fn blower_group_spec_tracks_blower_count() {
+    // The `cmd_i`/`run_i`/`fault_i`/`avail_i`/`capacity_i`/`vent_i`
+    // families are instance-dependent: the spec's port list must
+    // follow the constructed component's — with and without the
+    // optional `approve` port.
+    let config = BlowerGroupConfig {
+        staging_authority: StagingAuthority::Automatic,
+        stage_up: 0.9,
+        stage_down: 0.8,
+        min_run_ticks: 0,
+        min_start_interval_ticks: 0,
+        vent_ticks: 2,
+        rotation: BlowerRotation::NoRotation,
+    };
+    let bounds = UnitBounds {
+        min_flow: 20.0,
+        max_flow: 100.0,
+        max_current: 90.0,
+    };
+    for blowers in [1usize, 2, 5] {
+        for approve in [None, Some(point(9))] {
+            let blower_io: Vec<BlowerIo> = (0..blowers as u64)
+                .map(|n| BlowerIo {
+                    cmd: point(10 + n * 6),
+                    run: point(11 + n * 6),
+                    fault: point(12 + n * 6),
+                    avail: point(13 + n * 6),
+                    capacity: point(14 + n * 6),
+                    vent: point(15 + n * 6),
+                })
+                .collect();
+            let component = BlowerGroup::new(
+                "bg",
+                point(1),
+                approve,
+                blower_io,
+                vec![bounds; blowers],
+                BlowerOutputs {
+                    staged: point(2),
+                    none_available: point(3),
+                    all_faulted: point(4),
+                    staging_pending: point(5),
+                    transition: point(6),
+                },
+                config,
+            )
+            .unwrap();
+            check_interface(
+                &BlowerGroupSpec::new(Default::default(), blowers, approve.is_some()),
+                &component.describe(),
+            );
+        }
     }
 }
 

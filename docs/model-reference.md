@@ -572,6 +572,66 @@ recorded composition — one bank per declared strategy over one
 scripted input set; per-port semantics live beside
 `HeaderCoordinator::KIND`.
 
+The blower-staging contract architecture decision 63 records adds one
+variable-arity kind. `blower-group` stages `N` blowers against a
+continuous `demand` (`in`, `Float` — the `header-coordinator`'s
+`blower_demand`), each unit `i` declared under the indexed-family
+convention with six members: `cmd_i` (`out`, `Bool`) the group's run
+request, `run_i`/`fault_i`/`avail_i` (`in`, `Bool`) the pump-group
+equipment family, `capacity_i` (`out`, `Float`) the unit's share of
+the demand under the equal split clamped to its declared bounds, and
+`vent_i` (`out`, `Bool`) the unloading-vent command — `true` holds the
+unit off the header. The bank level reports `staged` (`out`, `Int`)
+the commanded count, `none_available`/`all_faulted` (`out`, `Bool`)
+the station conditions, `staging_pending` (`out`, `Bool`) a stage
+change standing under a non-automatic authority, and `transition`
+(`out`, `Bool`) a join, departure, or rotation handover in progress —
+the freeze surface the most-open-valve wiring consumes. The
+`parameters` are `staging_authority` (`Int`, `0` automatic, `1`
+operator-approval — a pending change holds on `staging_pending` until
+a `Good` `true` on the bound `approve` point grants it, one assertion
+granting one change; the authority requires the bound port — `2`
+flag-only, recommendations only), `stage_up`/`stage_down` (finite
+`Float`s ≥ 0 — fractions of the committed capacity: `demand` over
+`stage_up × committed` stages up, under `stage_down × (committed −
+the departing unit's ceiling)` stages down), `min_run_ticks` and
+`min_start_interval_ticks` (`Int`s ≥ 0 — the time a joined unit must
+serve before it may depart and a stopped unit must sit out before
+restart), per-unit `unit_<i>_min_flow`/`unit_<i>_max_flow`/
+`unit_<i>_max_current` (finite `Float`s ≥ 0, ordered `min_flow ≤
+max_flow` and `min_flow ≤ max_current`, the effective ceiling the
+tighter of the two maxima), `vent_ticks` (`Int` ≥ 1, the prove window
+both choreography legs get), and `rotation` (`Int`, `0` none — lowest
+index in, most recently joined out — `1` equalize runtime — least-run
+standby swaps in for the most-run joined once the spread reaches
+`max(1, min_run_ticks)`, the join running first and `transition`
+asserted across the handover — `2` fixed order — lowest index in,
+highest joined index out). The join choreography is the decision's
+offline start: `vent_i` opens with `cmd_i`, `run_i` must prove within
+`vent_ticks`, then the vent closes; departure runs it in reverse —
+`cmd_i` drops behind the open vent, `run_i` proves the stop within
+`vent_ticks`, then the vent closes, an unproven stop resolving the
+unit offline anyway with its still-running feedback still
+accumulating run-hours. A joined unit faulting or losing availability
+departs the same scan and its demand hands to the next eligible
+standby. The non-`Good` rules are the decision's: `avail_i` non-`Good`
+reads unavailable, `fault_i` non-`Good` reads failed, `run_i`
+non-`Good` proves neither running nor stopped and accumulates no
+run-hours, a non-`Good` or non-finite `demand` holds the last `Good`
+value, and a non-`Good` `approve` grants nothing; every output
+carries `Good`. Where the model binds `approve` (`in`, `Bool`) —
+conventionally a writable internal `in` point, so grants ride the
+journaled receipted command path — the operator-approval authority
+consumes it; an instance not exposing it declares no `approve` port.
+The staging position, phase timers, run-hours, start/stop references,
+join order, rotation pair, held demand, and consumed approval are
+per-scan run state under decision 20: `capture_state` carries them so
+a checkpointed standby resumes a mid-join run identically.
+`crates/dcs-assembly/fixtures/blower_group.json` is the recorded
+composition — five groups covering every `staging_authority` and
+`rotation` code over one scripted device; per-port semantics live
+beside `BlowerGroup::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is

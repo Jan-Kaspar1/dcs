@@ -13,13 +13,13 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
-    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
-    Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
-    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, Valve, ZoneIo,
+    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BlowerGroup, BlowerIo,
+    BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DeviationMonitor,
+    DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
+    GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo,
+    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
+    OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer,
+    SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -339,6 +339,42 @@ pub fn registry() -> ComponentRegistry {
                     staged: spec.require("staged")?,
                     none_available: spec.require("none_available")?,
                     all_faulted: spec.require("all_faulted")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(BlowerGroup::KIND, |spec| {
+            // The blowers are declared `cmd_1` … `cmd_N`, `run_1` …
+            // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`,
+            // `capacity_1` … `capacity_N`, `vent_1` … `vent_N`
+            // following the pump-group convention; the shared
+            // multi-family accessor counts and requires them.
+            // `approve` is the optional operator release — bound only
+            // where the model wires it; `staging_authority = 1`
+            // without it fails construction naming the parameter.
+            let blowers = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_", "capacity_", "vent_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail, capacity, vent]| BlowerIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                    capacity,
+                    vent,
+                })
+                .collect();
+            boxed(BlowerGroup::from_parameters(
+                spec.name.as_str(),
+                spec.require("demand")?,
+                spec.get("approve"),
+                blowers,
+                BlowerOutputs {
+                    staged: spec.require("staged")?,
+                    none_available: spec.require("none_available")?,
+                    all_faulted: spec.require("all_faulted")?,
+                    staging_pending: spec.require("staging_pending")?,
+                    transition: spec.require("transition")?,
                 },
                 spec.parameters,
             ))
