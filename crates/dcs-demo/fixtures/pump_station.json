@@ -1,0 +1,4483 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "inflow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "level-backup": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "level-primary": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "net-flow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p101-draw": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p102-draw": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-di",
+      "channels": {
+        "p101-moisture": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p101-run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p101-thermal": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p102-moisture": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p102-run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p102-thermal": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "power-fail": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "sim-do",
+      "channels": {
+        "p101-cmd": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "p102-cmd": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "level-primary"
+      }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "level-backup"
+      }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "inflow"
+      }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "net-flow"
+      }
+    },
+    {
+      "id": 120,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "power-fail"
+      }
+    },
+    {
+      "id": 200,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 1.5
+      }
+    },
+    {
+      "id": 201,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 202,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 203,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 204,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 205,
+      "direction": "in",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 206,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 210,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 211,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 212,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 213,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 214,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 215,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 216,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 217,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 218,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 219,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 220,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 221,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1000,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1001,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1002,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1010,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1011,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1012,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1020,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1021,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1022,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1030,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1031,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1032,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1040,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1041,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1042,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1050,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1051,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1052,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p101-draw"
+      }
+    },
+    {
+      "id": 40,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p101-run"
+      }
+    },
+    {
+      "id": 60,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p101-thermal"
+      }
+    },
+    {
+      "id": 80,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p101-moisture"
+      }
+    },
+    {
+      "id": 100,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 3,
+        "name": "p101-cmd"
+      }
+    },
+    {
+      "id": 300,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 301,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 302,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 303,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 304,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 305,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 306,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 307,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 308,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 309,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 310,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 311,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 312,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 313,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 314,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 324,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 325,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 326,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 327,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 328,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 329,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 315,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 316,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 317,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 318,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 319,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 320,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 321,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 322,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 323,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p102-draw"
+      }
+    },
+    {
+      "id": 41,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p102-run"
+      }
+    },
+    {
+      "id": 61,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p102-thermal"
+      }
+    },
+    {
+      "id": 81,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p102-moisture"
+      }
+    },
+    {
+      "id": 101,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 3,
+        "name": "p102-cmd"
+      }
+    },
+    {
+      "id": 332,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 333,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 334,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 335,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 336,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 337,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 338,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 339,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 340,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 341,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 342,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 343,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 344,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 345,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 346,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 356,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 357,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 358,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 359,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 360,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 361,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 347,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 348,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 349,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 350,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 351,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 352,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 353,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 354,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 355,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 10010,
+      "name": "level-primary",
+      "source": 10,
+      "unit": "m",
+      "description": "Primary wet-well level measurement",
+      "group": "wet-well"
+    },
+    {
+      "id": 10011,
+      "name": "level-backup",
+      "source": 11,
+      "unit": "m",
+      "description": "Backup wet-well level measurement",
+      "group": "wet-well"
+    },
+    {
+      "id": 10012,
+      "name": "inflow",
+      "source": 12,
+      "unit": "m3/h",
+      "description": "Declared station inflow — the dynamics document's forcing input",
+      "group": "wet-well"
+    },
+    {
+      "id": 10013,
+      "name": "net-flow",
+      "source": 13,
+      "unit": "m3/h",
+      "description": "Net wet-well flow: inflow plus the pump draws",
+      "group": "wet-well"
+    },
+    {
+      "id": 10120,
+      "name": "power-fail",
+      "source": 120,
+      "unit": "",
+      "description": "Station power-fail contact",
+      "group": "station"
+    },
+    {
+      "id": 10200,
+      "name": "level-selected",
+      "source": 200,
+      "unit": "m",
+      "description": "Failover-selected level the station controls on",
+      "group": "station"
+    },
+    {
+      "id": 10201,
+      "name": "level-chain",
+      "source": 201,
+      "unit": "m",
+      "description": "Selected level delivered to the threshold chain",
+      "group": "station"
+    },
+    {
+      "id": 10202,
+      "name": "level-lah",
+      "source": 202,
+      "unit": "m",
+      "description": "Selected level delivered to the high-level alarm",
+      "group": "station"
+    },
+    {
+      "id": 10203,
+      "name": "level-lal",
+      "source": 203,
+      "unit": "m",
+      "description": "Selected level delivered to the low-level alarm",
+      "group": "station"
+    },
+    {
+      "id": 10204,
+      "name": "demand",
+      "source": 204,
+      "unit": "pumps",
+      "description": "Stage-count demand the threshold chain computes",
+      "group": "station"
+    },
+    {
+      "id": 10205,
+      "name": "demand-in",
+      "source": 205,
+      "unit": "pumps",
+      "description": "Stage-count demand delivered to the pump group",
+      "group": "station"
+    },
+    {
+      "id": 10206,
+      "name": "power-ok",
+      "source": 206,
+      "unit": "",
+      "description": "Station power healthy — the inverted power-fail contact",
+      "group": "station"
+    },
+    {
+      "id": 10210,
+      "name": "duty",
+      "source": 210,
+      "unit": "",
+      "description": "1-based index of the pump holding duty; 0 while none does",
+      "group": "station"
+    },
+    {
+      "id": 10211,
+      "name": "staged",
+      "source": 211,
+      "unit": "pumps",
+      "description": "How many pumps the group currently commands",
+      "group": "station"
+    },
+    {
+      "id": 10212,
+      "name": "duty-call",
+      "source": 212,
+      "unit": "",
+      "description": "The chain's call for the duty pump",
+      "group": "station"
+    },
+    {
+      "id": 10213,
+      "name": "lag-call",
+      "source": 213,
+      "unit": "",
+      "description": "The chain's call for the lag pump",
+      "group": "station"
+    },
+    {
+      "id": 10214,
+      "name": "below-cutoff",
+      "source": 214,
+      "unit": "",
+      "description": "Selected level at or below the dry-run cutoff",
+      "group": "station"
+    },
+    {
+      "id": 10215,
+      "name": "high-level",
+      "source": 215,
+      "unit": "",
+      "description": "Selected level at or above the high setpoint",
+      "group": "station"
+    },
+    {
+      "id": 10216,
+      "name": "backup-active",
+      "source": 216,
+      "unit": "",
+      "description": "The backup level measurement is serving",
+      "group": "station"
+    },
+    {
+      "id": 10217,
+      "name": "none-available",
+      "source": 217,
+      "unit": "",
+      "description": "No pump reports itself available",
+      "group": "station"
+    },
+    {
+      "id": 10218,
+      "name": "all-faulted",
+      "source": 218,
+      "unit": "",
+      "description": "Every pump's fault flag reads failed",
+      "group": "station"
+    },
+    {
+      "id": 10219,
+      "name": "backup-active-in",
+      "source": 219,
+      "unit": "",
+      "description": "Backup-serving flag delivered to its alarm",
+      "group": "station"
+    },
+    {
+      "id": 10220,
+      "name": "none-available-in",
+      "source": 220,
+      "unit": "",
+      "description": "No-pump-available flag delivered to its alarm",
+      "group": "station"
+    },
+    {
+      "id": 10221,
+      "name": "all-faulted-in",
+      "source": 221,
+      "unit": "",
+      "description": "All-faulted flag delivered to its alarm",
+      "group": "station"
+    },
+    {
+      "id": 11000,
+      "name": "lah-ack",
+      "source": 1000,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11001,
+      "name": "lah-alarm",
+      "source": 1001,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11002,
+      "name": "lah-unacknowledged",
+      "source": 1002,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11010,
+      "name": "lal-ack",
+      "source": 1010,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11011,
+      "name": "lal-alarm",
+      "source": 1011,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11012,
+      "name": "lal-unacknowledged",
+      "source": 1012,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11020,
+      "name": "backup-active-ack",
+      "source": 1020,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11021,
+      "name": "backup-active-alarm",
+      "source": 1021,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11022,
+      "name": "backup-active-unacknowledged",
+      "source": 1022,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11030,
+      "name": "none-available-ack",
+      "source": 1030,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11031,
+      "name": "none-available-alarm",
+      "source": 1031,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11032,
+      "name": "none-available-unacknowledged",
+      "source": 1032,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11040,
+      "name": "all-faulted-ack",
+      "source": 1040,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11041,
+      "name": "all-faulted-alarm",
+      "source": 1041,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11042,
+      "name": "all-faulted-unacknowledged",
+      "source": 1042,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11050,
+      "name": "power-fail-ack",
+      "source": 1050,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11051,
+      "name": "power-fail-alarm",
+      "source": 1051,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "station"
+    },
+    {
+      "id": 11052,
+      "name": "power-fail-unacknowledged",
+      "source": 1052,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 10020,
+      "name": "p101-draw",
+      "source": 20,
+      "unit": "m3/h",
+      "description": "Simulated discharge flow the bool_flow element drives",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10040,
+      "name": "p101-run",
+      "source": 40,
+      "unit": "",
+      "description": "Run feedback contact",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10060,
+      "name": "p101-thermal",
+      "source": 60,
+      "unit": "",
+      "description": "Thermal-overload contact",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10080,
+      "name": "p101-moisture",
+      "source": 80,
+      "unit": "",
+      "description": "Moisture ingress contact",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10100,
+      "name": "p101-cmd",
+      "source": 100,
+      "unit": "",
+      "description": "Field run command",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10300,
+      "name": "p101-mode",
+      "source": 300,
+      "unit": "",
+      "description": "Manual takeover — false auto, true hand",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10301,
+      "name": "p101-hand",
+      "source": 301,
+      "unit": "",
+      "description": "Operator's hand run request while manual",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10302,
+      "name": "p101-oos",
+      "source": 302,
+      "unit": "",
+      "description": "Out of service — inhibits auto and hand operation",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10303,
+      "name": "p101-group-cmd",
+      "source": 303,
+      "unit": "",
+      "description": "The pump group's automatic run request",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10304,
+      "name": "p101-group-cmd-in",
+      "source": 304,
+      "unit": "",
+      "description": "Group request delivered to the auto leg",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10305,
+      "name": "p101-auto",
+      "source": 305,
+      "unit": "",
+      "description": "In auto — the inverted manual-mode point",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10306,
+      "name": "p101-auto-leg-in",
+      "source": 306,
+      "unit": "",
+      "description": "In-auto delivered to the auto leg",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10307,
+      "name": "p101-auto-avail-in",
+      "source": 307,
+      "unit": "",
+      "description": "In-auto delivered to availability",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10308,
+      "name": "p101-oos-ok",
+      "source": 308,
+      "unit": "",
+      "description": "In service — the inverted out-of-service point",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10309,
+      "name": "p101-oos-ok-avail-in",
+      "source": 309,
+      "unit": "",
+      "description": "In-service delivered to availability",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10310,
+      "name": "p101-oos-ok-guard-in",
+      "source": 310,
+      "unit": "",
+      "description": "In-service delivered to the command guard",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10311,
+      "name": "p101-power-ok-in",
+      "source": 311,
+      "unit": "",
+      "description": "Station power-ok delivered to availability",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10312,
+      "name": "p101-fault",
+      "source": 312,
+      "unit": "",
+      "description": "The motor's proven command/feedback fault",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10313,
+      "name": "p101-fault-group-in",
+      "source": 313,
+      "unit": "",
+      "description": "Motor fault delivered to the pump group",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10314,
+      "name": "p101-fault-alarm-in",
+      "source": 314,
+      "unit": "",
+      "description": "Motor fault delivered to the alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10324,
+      "name": "p101-thermal-ok",
+      "source": 324,
+      "unit": "",
+      "description": "Thermal contact healthy — the inverted contact",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10325,
+      "name": "p101-thermal-ok-in",
+      "source": 325,
+      "unit": "",
+      "description": "Thermal-healthy delivered to availability",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10326,
+      "name": "p101-moisture-ok",
+      "source": 326,
+      "unit": "",
+      "description": "Moisture contact healthy — the inverted contact",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10327,
+      "name": "p101-moisture-ok-in",
+      "source": 327,
+      "unit": "",
+      "description": "Moisture-healthy delivered to availability",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10328,
+      "name": "p101-avail",
+      "source": 328,
+      "unit": "",
+      "description": "Aggregated availability for the pump group",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10329,
+      "name": "p101-avail-in",
+      "source": 329,
+      "unit": "",
+      "description": "Availability delivered to the pump group",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10315,
+      "name": "p101-fault-ack",
+      "source": 315,
+      "unit": "",
+      "description": "Operator acknowledgment for the motor-fault alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10316,
+      "name": "p101-fault-alarm",
+      "source": 316,
+      "unit": "",
+      "description": "Standing motor-fault alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10317,
+      "name": "p101-fault-unack",
+      "source": 317,
+      "unit": "",
+      "description": "Motor fault latched until acknowledged",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10318,
+      "name": "p101-thermal-ack",
+      "source": 318,
+      "unit": "",
+      "description": "Operator acknowledgment for the thermal alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10319,
+      "name": "p101-thermal-alarm",
+      "source": 319,
+      "unit": "",
+      "description": "Standing thermal-overload alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10320,
+      "name": "p101-thermal-unack",
+      "source": 320,
+      "unit": "",
+      "description": "Thermal overload latched until acknowledged",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10321,
+      "name": "p101-moisture-ack",
+      "source": 321,
+      "unit": "",
+      "description": "Operator acknowledgment for the moisture alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10322,
+      "name": "p101-moisture-alarm",
+      "source": 322,
+      "unit": "",
+      "description": "Standing moisture-ingress alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10323,
+      "name": "p101-moisture-unack",
+      "source": 323,
+      "unit": "",
+      "description": "Moisture ingress latched until acknowledged",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10021,
+      "name": "p102-draw",
+      "source": 21,
+      "unit": "m3/h",
+      "description": "Simulated discharge flow the bool_flow element drives",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10041,
+      "name": "p102-run",
+      "source": 41,
+      "unit": "",
+      "description": "Run feedback contact",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10061,
+      "name": "p102-thermal",
+      "source": 61,
+      "unit": "",
+      "description": "Thermal-overload contact",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10081,
+      "name": "p102-moisture",
+      "source": 81,
+      "unit": "",
+      "description": "Moisture ingress contact",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10101,
+      "name": "p102-cmd",
+      "source": 101,
+      "unit": "",
+      "description": "Field run command",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10332,
+      "name": "p102-mode",
+      "source": 332,
+      "unit": "",
+      "description": "Manual takeover — false auto, true hand",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10333,
+      "name": "p102-hand",
+      "source": 333,
+      "unit": "",
+      "description": "Operator's hand run request while manual",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10334,
+      "name": "p102-oos",
+      "source": 334,
+      "unit": "",
+      "description": "Out of service — inhibits auto and hand operation",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10335,
+      "name": "p102-group-cmd",
+      "source": 335,
+      "unit": "",
+      "description": "The pump group's automatic run request",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10336,
+      "name": "p102-group-cmd-in",
+      "source": 336,
+      "unit": "",
+      "description": "Group request delivered to the auto leg",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10337,
+      "name": "p102-auto",
+      "source": 337,
+      "unit": "",
+      "description": "In auto — the inverted manual-mode point",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10338,
+      "name": "p102-auto-leg-in",
+      "source": 338,
+      "unit": "",
+      "description": "In-auto delivered to the auto leg",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10339,
+      "name": "p102-auto-avail-in",
+      "source": 339,
+      "unit": "",
+      "description": "In-auto delivered to availability",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10340,
+      "name": "p102-oos-ok",
+      "source": 340,
+      "unit": "",
+      "description": "In service — the inverted out-of-service point",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10341,
+      "name": "p102-oos-ok-avail-in",
+      "source": 341,
+      "unit": "",
+      "description": "In-service delivered to availability",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10342,
+      "name": "p102-oos-ok-guard-in",
+      "source": 342,
+      "unit": "",
+      "description": "In-service delivered to the command guard",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10343,
+      "name": "p102-power-ok-in",
+      "source": 343,
+      "unit": "",
+      "description": "Station power-ok delivered to availability",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10344,
+      "name": "p102-fault",
+      "source": 344,
+      "unit": "",
+      "description": "The motor's proven command/feedback fault",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10345,
+      "name": "p102-fault-group-in",
+      "source": 345,
+      "unit": "",
+      "description": "Motor fault delivered to the pump group",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10346,
+      "name": "p102-fault-alarm-in",
+      "source": 346,
+      "unit": "",
+      "description": "Motor fault delivered to the alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10356,
+      "name": "p102-thermal-ok",
+      "source": 356,
+      "unit": "",
+      "description": "Thermal contact healthy — the inverted contact",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10357,
+      "name": "p102-thermal-ok-in",
+      "source": 357,
+      "unit": "",
+      "description": "Thermal-healthy delivered to availability",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10358,
+      "name": "p102-moisture-ok",
+      "source": 358,
+      "unit": "",
+      "description": "Moisture contact healthy — the inverted contact",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10359,
+      "name": "p102-moisture-ok-in",
+      "source": 359,
+      "unit": "",
+      "description": "Moisture-healthy delivered to availability",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10360,
+      "name": "p102-avail",
+      "source": 360,
+      "unit": "",
+      "description": "Aggregated availability for the pump group",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10361,
+      "name": "p102-avail-in",
+      "source": 361,
+      "unit": "",
+      "description": "Availability delivered to the pump group",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10347,
+      "name": "p102-fault-ack",
+      "source": 347,
+      "unit": "",
+      "description": "Operator acknowledgment for the motor-fault alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10348,
+      "name": "p102-fault-alarm",
+      "source": 348,
+      "unit": "",
+      "description": "Standing motor-fault alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10349,
+      "name": "p102-fault-unack",
+      "source": 349,
+      "unit": "",
+      "description": "Motor fault latched until acknowledged",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10350,
+      "name": "p102-thermal-ack",
+      "source": 350,
+      "unit": "",
+      "description": "Operator acknowledgment for the thermal alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10351,
+      "name": "p102-thermal-alarm",
+      "source": 351,
+      "unit": "",
+      "description": "Standing thermal-overload alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10352,
+      "name": "p102-thermal-unack",
+      "source": 352,
+      "unit": "",
+      "description": "Thermal overload latched until acknowledged",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10353,
+      "name": "p102-moisture-ack",
+      "source": 353,
+      "unit": "",
+      "description": "Operator acknowledgment for the moisture alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10354,
+      "name": "p102-moisture-alarm",
+      "source": 354,
+      "unit": "",
+      "description": "Standing moisture-ingress alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10355,
+      "name": "p102-moisture-unack",
+      "source": 355,
+      "unit": "",
+      "description": "Moisture ingress latched until acknowledged",
+      "group": "pump-p102"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "failover-select",
+      "parameters": {},
+      "ports": {
+        "backup": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "backup_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "primary": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "threshold-chain",
+      "parameters": {
+        "cutoff": {
+          "float": 0.5
+        },
+        "high": {
+          "float": 4.0
+        },
+        "lag_start": {
+          "float": 3.0
+        },
+        "on_bad_demand": {
+          "int": 0
+        },
+        "start": {
+          "float": 2.0
+        },
+        "stop": {
+          "float": 1.0
+        }
+      },
+      "ports": {
+        "below_cutoff": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "duty_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "high_level": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "lag_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "level": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "pump-group",
+      "parameters": {
+        "min_off_ticks": {
+          "int": 2
+        },
+        "restage_delay_ticks": {
+          "int": 0
+        },
+        "rotation": {
+          "int": 0
+        },
+        "start_delay_ticks": {
+          "int": 1
+        }
+      },
+      "ports": {
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "in",
+          "value_type": "int"
+        },
+        "duty": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "kind": "latching-alarm",
+      "parameters": {
+        "high_limit": {
+          "float": 4.0
+        },
+        "hysteresis": {
+          "float": 0.1
+        },
+        "low_limit": {
+          "float": -1000000000.0
+        }
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "kind": "latching-alarm",
+      "parameters": {
+        "high_limit": {
+          "float": 1000000000.0
+        },
+        "hysteresis": {
+          "float": 0.1
+        },
+        "low_limit": {
+          "float": 0.5
+        }
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_4": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_5": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 1
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "int": 2
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_4": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_5": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 1
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "int": 2
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "primary"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 11
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "backup"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 202
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 203
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "backup_active"
+        }
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "level"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "demand"
+        }
+      },
+      "to": {
+        "point": 204
+      }
+    },
+    {
+      "from": {
+        "point": 205
+      },
+      "to": {
+        "point": 204
+      }
+    },
+    {
+      "from": {
+        "point": 205
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "duty_call"
+        }
+      },
+      "to": {
+        "point": 212
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "lag_call"
+        }
+      },
+      "to": {
+        "point": 213
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "below_cutoff"
+        }
+      },
+      "to": {
+        "point": 214
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "high_level"
+        }
+      },
+      "to": {
+        "point": 215
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "duty"
+        }
+      },
+      "to": {
+        "point": 210
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 211
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 217
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 218
+      }
+    },
+    {
+      "from": {
+        "point": 120
+      },
+      "to": {
+        "port": {
+          "component": 4,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 206
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "point": 220
+      },
+      "to": {
+        "point": 217
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "point": 218
+      }
+    },
+    {
+      "from": {
+        "point": 1000
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1001
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1002
+      }
+    },
+    {
+      "from": {
+        "point": 202
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1010
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1011
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1012
+      }
+    },
+    {
+      "from": {
+        "point": 203
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1020
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1021
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1022
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1030
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1031
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1032
+      }
+    },
+    {
+      "from": {
+        "point": 220
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1040
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1041
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1042
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1050
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1051
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1052
+      }
+    },
+    {
+      "from": {
+        "point": 120
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "point": 100
+      }
+    },
+    {
+      "from": {
+        "point": 300
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 302
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 80
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 303
+      }
+    },
+    {
+      "from": {
+        "point": 304
+      },
+      "to": {
+        "point": 303
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 305
+      }
+    },
+    {
+      "from": {
+        "point": 306
+      },
+      "to": {
+        "point": 305
+      }
+    },
+    {
+      "from": {
+        "point": 307
+      },
+      "to": {
+        "point": 305
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 308
+      }
+    },
+    {
+      "from": {
+        "point": 309
+      },
+      "to": {
+        "point": 308
+      }
+    },
+    {
+      "from": {
+        "point": 310
+      },
+      "to": {
+        "point": 308
+      }
+    },
+    {
+      "from": {
+        "point": 311
+      },
+      "to": {
+        "point": 206
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 324
+      }
+    },
+    {
+      "from": {
+        "point": 325
+      },
+      "to": {
+        "point": 324
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 326
+      }
+    },
+    {
+      "from": {
+        "point": 327
+      },
+      "to": {
+        "point": 326
+      }
+    },
+    {
+      "from": {
+        "point": 307
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 309
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 311
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 325
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in_4"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 327
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in_5"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 15,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 328
+      }
+    },
+    {
+      "from": {
+        "point": 329
+      },
+      "to": {
+        "point": 328
+      }
+    },
+    {
+      "from": {
+        "point": 329
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 304
+      },
+      "to": {
+        "port": {
+          "component": 16,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 306
+      },
+      "to": {
+        "port": {
+          "component": 16,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 301
+      },
+      "to": {
+        "port": {
+          "component": 17,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 300
+      },
+      "to": {
+        "port": {
+          "component": 17,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 16,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 18,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 17,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 18,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 18,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 19,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 310
+      },
+      "to": {
+        "port": {
+          "component": 19,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 19,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 20,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 20,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 20,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 100
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 20,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 313
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 313
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 314
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 314
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 315
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 316
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 317
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 22,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 318
+      },
+      "to": {
+        "port": {
+          "component": 22,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 319
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 320
+      }
+    },
+    {
+      "from": {
+        "point": 80
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 321
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 322
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 323
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "point": 101
+      }
+    },
+    {
+      "from": {
+        "point": 332
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 334
+      },
+      "to": {
+        "port": {
+          "component": 25,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 26,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 81
+      },
+      "to": {
+        "port": {
+          "component": 27,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 335
+      }
+    },
+    {
+      "from": {
+        "point": 336
+      },
+      "to": {
+        "point": 335
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 337
+      }
+    },
+    {
+      "from": {
+        "point": 338
+      },
+      "to": {
+        "point": 337
+      }
+    },
+    {
+      "from": {
+        "point": 339
+      },
+      "to": {
+        "point": 337
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 25,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 340
+      }
+    },
+    {
+      "from": {
+        "point": 341
+      },
+      "to": {
+        "point": 340
+      }
+    },
+    {
+      "from": {
+        "point": 342
+      },
+      "to": {
+        "point": 340
+      }
+    },
+    {
+      "from": {
+        "point": 343
+      },
+      "to": {
+        "point": 206
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 26,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 356
+      }
+    },
+    {
+      "from": {
+        "point": 357
+      },
+      "to": {
+        "point": 356
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 27,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 358
+      }
+    },
+    {
+      "from": {
+        "point": 359
+      },
+      "to": {
+        "point": 358
+      }
+    },
+    {
+      "from": {
+        "point": 339
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 341
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 343
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 357
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in_4"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 359
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in_5"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 28,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 360
+      }
+    },
+    {
+      "from": {
+        "point": 361
+      },
+      "to": {
+        "point": 360
+      }
+    },
+    {
+      "from": {
+        "point": 361
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 336
+      },
+      "to": {
+        "port": {
+          "component": 29,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 338
+      },
+      "to": {
+        "port": {
+          "component": 29,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 333
+      },
+      "to": {
+        "port": {
+          "component": 30,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 332
+      },
+      "to": {
+        "port": {
+          "component": 30,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 29,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 31,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 30,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 31,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 31,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 32,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 342
+      },
+      "to": {
+        "port": {
+          "component": 32,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 32,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 33,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 33,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 33,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 101
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 33,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 345
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 345
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 346
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 346
+      },
+      "to": {
+        "port": {
+          "component": 34,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 347
+      },
+      "to": {
+        "port": {
+          "component": 34,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 34,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 348
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 34,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 349
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 350
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 351
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 352
+      }
+    },
+    {
+      "from": {
+        "point": 81
+      },
+      "to": {
+        "port": {
+          "component": 36,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 353
+      },
+      "to": {
+        "port": {
+          "component": 36,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 354
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 355
+      }
+    }
+  ]
+}
