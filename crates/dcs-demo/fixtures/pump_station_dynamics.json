@@ -1,0 +1,43 @@
+[
+  {
+    "bool_flow": {
+      "input": 100,
+      "output": 20,
+      "on_rate": -1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 101,
+      "output": 21,
+      "on_rate": -1.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [12, 20, 21],
+      "output": 13,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 10,
+      "initial": 0.8
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 10,
+      "output": 11,
+      "time_constant": 0.5,
+      "initial": 0.8
+    }
+  }
+]
