@@ -12,6 +12,7 @@ import uuid
 from .state import State
 from .github import GitHub, GitHubError
 from .runtime import Runtime
+from . import findings as findings_lane
 from . import planning
 from . import review as review_lane
 
@@ -706,20 +707,46 @@ Repair context: {repair}
     def planner_review_input(self):
         """Undispositioned candidates, unresolved accepted work, and prior decisions."""
         cfg = review_lane.settings(self.config)
-        if not cfg['enabled'] or self.review_stage(cfg) == 'report':
+        qa_cfg = findings_lane.settings(self.config)
+        review_open = cfg['enabled'] and self.review_stage(cfg) != 'report'
+        pending, qa_pending = [], []
+        for row in self.state.candidates('pending'):
+            payload = json.loads(row['payload'])
+            (qa_pending if payload.get('source') == 'qa' else pending).append(payload)
+        # QA capability findings reach the planner even while the architecture
+        # lane is staged at 'report'; architecture candidates stay gated.
+        if not review_open:
+            pending = []
+        if not qa_cfg['enabled']:
+            qa_pending = []
+        accepted, suppressed = [], []
+        if review_open:
+            accepted = [{'key': c['key'], 'title': c['title'],
+                         'issues': self.state.improvement_issues(c['key']),
+                         'proposal': json.loads(c['payload'])}
+                        for c in self.state.unresolved_accepted()]
+            suppressed = [{'key': c['key'], 'disposition': c['disposition'],
+                           'reason': c['reason'], 'revisit': c['revisit']}
+                          for c in self.state.candidates()
+                          if c['disposition'] in ('deferred', 'rejected')][:50]
+        if not pending and not qa_pending and not accepted and not suppressed:
             return None
-        pending = [json.loads(c['payload']) for c in self.state.candidates('pending')]
-        accepted = [{'key': c['key'], 'title': c['title'],
-                     'issues': self.state.improvement_issues(c['key']),
-                     'proposal': json.loads(c['payload'])}
-                    for c in self.state.unresolved_accepted()]
-        suppressed = [{'key': c['key'], 'disposition': c['disposition'],
-                       'reason': c['reason'], 'revisit': c['revisit']}
-                      for c in self.state.candidates() if c['disposition'] in ('deferred', 'rejected')][:50]
-        if not pending and not accepted and not suppressed:
-            return None
-        return {'candidates': pending, 'accepted': accepted, 'suppressed': suppressed,
+        return {'candidates': pending + qa_pending, 'accepted': accepted, 'suppressed': suppressed,
                 'active_improvement': self.state.get('review:active_improvement')}
+
+    def qa(self, issues):
+        """Findings lane: ingest QA reports, route findings, publish dashboard.
+
+        Deliberately fail-safe: a broken report or a down report channel must
+        never wedge the production dispatch loop.
+        """
+        cfg = findings_lane.settings(self.config)
+        if not cfg['enabled'] and not cfg['dashboard']:
+            return
+        try:
+            findings_lane.poll(self.state, self.github, cfg, issues, self.log)
+        except Exception as exc:
+            self.log('QA findings lane failed: ' + str(exc)[:500])
 
     def planner(self, issues, prs):
         current = self.state.get('planner')
@@ -895,6 +922,7 @@ Repair context: {repair}
                         self.retries(issues)
                         self.dispatch(issues)
                         self.mirror(issues)
+                        self.qa(issues)
                         self.state.set('last_error', None)
                         delay = self.config['poll_seconds']
                     except Exception as exc:
