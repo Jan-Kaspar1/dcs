@@ -14,9 +14,10 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter, DigitalInput,
-    DigitalOutput, EdgeTrigger, FailoverSelect, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter,
-    Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
+    DigitalOutput, EdgeTrigger, FailoverSelect, FlowPacedRatio, GroupOutputs, Interlock,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PumpGroup, PumpIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -363,6 +364,23 @@ pub fn registry() -> ComponentRegistry {
                 spec.require("backup")?,
                 spec.require("out")?,
                 spec.require("backup_active")?,
+                spec.parameters,
+            ))
+        })
+        .with(FlowPacedRatio::KIND, |spec| {
+            // `trim` is the optional analyzer correction — bound only
+            // where the model wires it (`ComponentSpec::get`); an
+            // unwired instance paces untrimmed.
+            boxed(FlowPacedRatio::from_parameters(
+                spec.name.as_str(),
+                spec.require("flow")?,
+                spec.require("dose")?,
+                spec.get("trim"),
+                RatioOutputs {
+                    demand: spec.require("demand")?,
+                    clamped: spec.require("clamped")?,
+                    fallback_active: spec.require("fallback_active")?,
+                },
                 spec.parameters,
             ))
         })

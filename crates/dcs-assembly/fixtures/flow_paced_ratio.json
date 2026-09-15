@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "flow": [
+            { "tick": 0, "value": 10.0 },
+            { "tick": 5, "value": 30.0 },
+            { "tick": 10, "value": 4.0 },
+            { "tick": 15, "value": 10.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 20, "value": 10.0 }
+          ],
+          "trim": [
+            { "tick": 0, "value": 1.0 },
+            { "tick": 10, "value": 1.5 },
+            { "tick": 25, "value": 0.0, "quality": "bad", "reason": "device_fault" },
+            { "tick": 30, "value": 1.5 }
+          ]
+        }
+      },
+      "channels": {
+        "flow": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "flow" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "trim" }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "float",
+      "initial": { "float": 2.0 },
+      "writable": true
+    },
+    {
+      "id": 30,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 31,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 32,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 33,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 34,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 35,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 36,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 37,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 38,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "plant-flow",
+      "source": 10,
+      "unit": "ML/d",
+      "description": "Measured process flow — the pacing signal"
+    },
+    {
+      "id": 101,
+      "name": "analyzer-trim",
+      "source": 11,
+      "description": "Analyzer correction the trimmed ratio applies"
+    },
+    {
+      "id": 102,
+      "name": "dose-setpoint",
+      "source": 20,
+      "unit": "mg/L",
+      "description": "Operator dose per flow unit — writable, journaled, checkpointed"
+    },
+    {
+      "id": 103,
+      "name": "dosing-demand",
+      "source": 30,
+      "description": "Trimmed ratio's bounded actuator demand (stop on bad flow)"
+    },
+    {
+      "id": 104,
+      "name": "dosing-fallback",
+      "source": 32,
+      "description": "Engagement flag feeding the loss-of-pacing alarm set"
+    },
+    {
+      "id": 105,
+      "name": "dosing-demand-hold",
+      "source": 33,
+      "description": "Untrimmed ratio's demand (hold-last on bad flow)"
+    },
+    {
+      "id": 106,
+      "name": "dosing-demand-fixed",
+      "source": 36,
+      "description": "Untrimmed ratio's demand (fallback rate on bad flow)"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "flow-paced-ratio",
+      "parameters": {
+        "min_dose": { "float": 0.5 },
+        "max_dose": { "float": 4.0 },
+        "min_rate": { "float": 0.0 },
+        "max_rate": { "float": 50.0 },
+        "on_bad_flow": { "int": 0 },
+        "fallback_rate": { "float": 12.0 },
+        "on_bad_trim": { "int": 0 }
+      },
+      "ports": {
+        "flow": { "direction": "in", "value_type": "float" },
+        "dose": { "direction": "in", "value_type": "float" },
+        "trim": { "direction": "in", "value_type": "float" },
+        "demand": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "flow-paced-ratio",
+      "parameters": {
+        "min_dose": { "float": 0.5 },
+        "max_dose": { "float": 4.0 },
+        "min_rate": { "float": 0.0 },
+        "max_rate": { "float": 50.0 },
+        "on_bad_flow": { "int": 1 },
+        "fallback_rate": { "float": 12.0 },
+        "on_bad_trim": { "int": 1 }
+      },
+      "ports": {
+        "flow": { "direction": "in", "value_type": "float" },
+        "dose": { "direction": "in", "value_type": "float" },
+        "demand": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "flow-paced-ratio",
+      "parameters": {
+        "min_dose": { "float": 0.5 },
+        "max_dose": { "float": 4.0 },
+        "min_rate": { "float": 0.0 },
+        "max_rate": { "float": 50.0 },
+        "on_bad_flow": { "int": 2 },
+        "fallback_rate": { "float": 12.0 },
+        "on_bad_trim": { "int": 0 }
+      },
+      "ports": {
+        "flow": { "direction": "in", "value_type": "float" },
+        "dose": { "direction": "in", "value_type": "float" },
+        "demand": { "direction": "out", "value_type": "float" },
+        "clamped": { "direction": "out", "value_type": "bool" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "flow" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "flow" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 3, "name": "flow" } }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 1, "name": "dose" } }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 2, "name": "dose" } }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 3, "name": "dose" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "trim" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "demand" } },
+      "to": { "point": 30 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "clamped" } },
+      "to": { "point": 31 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "fallback_active" } },
+      "to": { "point": 32 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "demand" } },
+      "to": { "point": 33 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "clamped" } },
+      "to": { "point": 34 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "fallback_active" } },
+      "to": { "point": 35 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "demand" } },
+      "to": { "point": 36 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "clamped" } },
+      "to": { "point": 37 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "fallback_active" } },
+      "to": { "point": 38 }
+    }
+  ]
+}
