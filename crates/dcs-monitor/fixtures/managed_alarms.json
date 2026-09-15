@@ -8,6 +8,8 @@
         "pv1": { "direction": "in", "value_type": "float" },
         "pv2": { "direction": "in", "value_type": "bool" },
         "suppress2": { "direction": "in", "value_type": "bool" },
+        "pv3": { "direction": "in", "value_type": "bool" },
+        "shelve3": { "direction": "in", "value_type": "bool" },
         "power_fail": { "direction": "in", "value_type": "bool" },
         "prot_trip": { "direction": "in", "value_type": "bool" },
         "alarm1": { "direction": "out", "value_type": "bool" },
@@ -19,7 +21,12 @@
         "unack2": { "direction": "out", "value_type": "bool" },
         "shelved2": { "direction": "out", "value_type": "bool" },
         "suppressed2": { "direction": "out", "value_type": "bool" },
-        "oos2": { "direction": "out", "value_type": "bool" }
+        "oos2": { "direction": "out", "value_type": "bool" },
+        "alarm3": { "direction": "out", "value_type": "bool" },
+        "unack3": { "direction": "out", "value_type": "bool" },
+        "shelved3": { "direction": "out", "value_type": "bool" },
+        "suppressed3": { "direction": "out", "value_type": "bool" },
+        "oos3": { "direction": "out", "value_type": "bool" }
       }
     }
   ],
@@ -72,6 +79,19 @@
     },
     {
       "id": 17,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 18,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pv3" }
+    },
+    {
+      "id": 19,
       "direction": "in",
       "value_type": "bool",
       "initial": { "bool": false },
@@ -145,6 +165,47 @@
       "direction": "out",
       "value_type": "bool",
       "channel": { "device": 1, "name": "oos2" },
+      "journaled": true
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "shelve3" }
+    },
+    {
+      "id": 31,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "alarm3" },
+      "journaled": true
+    },
+    {
+      "id": 32,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "unack3" },
+      "journaled": true
+    },
+    {
+      "id": 33,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "shelved3" },
+      "journaled": true
+    },
+    {
+      "id": 34,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "suppressed3" },
+      "journaled": true
+    },
+    {
+      "id": 35,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "oos3" },
       "journaled": true
     },
     {
@@ -291,6 +352,62 @@
       "group": "wet-well"
     },
     {
+      "id": 320,
+      "name": "mba-303-pv",
+      "source": 18,
+      "description": "Condition the third managed Bool alarm checks",
+      "group": "wet-well"
+    },
+    {
+      "id": 321,
+      "name": "mba-303-ack",
+      "source": 19,
+      "description": "Operator acknowledgment for the third managed alarm",
+      "group": "wet-well"
+    },
+    {
+      "id": 322,
+      "name": "mba-303-shelve",
+      "source": 30,
+      "description": "Shelve request for the third managed alarm — field-bound, never writable",
+      "group": "wet-well"
+    },
+    {
+      "id": 323,
+      "name": "mba-303-alarm",
+      "source": 31,
+      "description": "Standing condition state of the third managed alarm",
+      "group": "wet-well"
+    },
+    {
+      "id": 324,
+      "name": "mba-303-unacknowledged",
+      "source": 32,
+      "description": "Latched from trip until acknowledged",
+      "group": "wet-well"
+    },
+    {
+      "id": 325,
+      "name": "mba-303-shelved",
+      "source": 33,
+      "description": "Shelved managed state of the third managed alarm",
+      "group": "wet-well"
+    },
+    {
+      "id": 326,
+      "name": "mba-303-suppressed",
+      "source": 34,
+      "description": "Suppressed managed state of the third managed alarm",
+      "group": "wet-well"
+    },
+    {
+      "id": 327,
+      "name": "mba-303-out-of-service",
+      "source": 35,
+      "description": "Out-of-service state of the third managed alarm",
+      "group": "wet-well"
+    },
+    {
       "id": 330,
       "name": "power-fail",
       "source": 40,
@@ -360,6 +477,31 @@
         "suppressed": { "direction": "out", "value_type": "bool" },
         "out_of_service": { "direction": "out", "value_type": "bool" }
       }
+    },
+    {
+      "id": 3,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "max_shelve_ticks": { "int": 5 },
+        "priority": { "int": 3 },
+        "class": { "int": 1 },
+        "response_ticks": { "int": 45 }
+      },
+      "rationalization": {
+        "consequence": "The recirculation loop loses flow unnoticed",
+        "required_action": "Start the standby recirculation pump",
+        "reference": "WW-OPS-303 recirculation response"
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "bool" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "shelve": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" },
+        "shelved": { "direction": "out", "value_type": "bool" },
+        "suppressed": { "direction": "out", "value_type": "bool" },
+        "out_of_service": { "direction": "out", "value_type": "bool" }
+      }
     }
   ],
   "connections": [
@@ -380,6 +522,14 @@
     { "from": { "port": { "component": 2, "name": "unacknowledged" } }, "to": { "point": 26 } },
     { "from": { "port": { "component": 2, "name": "shelved" } }, "to": { "point": 27 } },
     { "from": { "port": { "component": 2, "name": "suppressed" } }, "to": { "point": 28 } },
-    { "from": { "port": { "component": 2, "name": "out_of_service" } }, "to": { "point": 29 } }
+    { "from": { "port": { "component": 2, "name": "out_of_service" } }, "to": { "point": 29 } },
+    { "from": { "point": 18 }, "to": { "port": { "component": 3, "name": "in" } } },
+    { "from": { "point": 19 }, "to": { "port": { "component": 3, "name": "ack" } } },
+    { "from": { "point": 30 }, "to": { "port": { "component": 3, "name": "shelve" } } },
+    { "from": { "port": { "component": 3, "name": "alarm" } }, "to": { "point": 31 } },
+    { "from": { "port": { "component": 3, "name": "unacknowledged" } }, "to": { "point": 32 } },
+    { "from": { "port": { "component": 3, "name": "shelved" } }, "to": { "point": 33 } },
+    { "from": { "port": { "component": 3, "name": "suppressed" } }, "to": { "point": 34 } },
+    { "from": { "port": { "component": 3, "name": "out_of_service" } }, "to": { "point": 35 } }
   ]
 }
