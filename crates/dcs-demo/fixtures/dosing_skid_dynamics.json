@@ -1,0 +1,67 @@
+[
+  {
+    "flow_sum": {
+      "inputs": [11],
+      "output": 10,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 110,
+      "output": 34,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "scaled_flow": {
+      "input": 111,
+      "output": 35,
+      "gain": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [34, 35],
+      "output": 13,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 100,
+      "output": 30,
+      "on_rate": -10.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 101,
+      "output": 31,
+      "on_rate": -10.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [15, 30, 31],
+      "output": 14,
+      "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 14,
+      "output": 12,
+      "initial": 400.0
+    }
+  }
+]
