@@ -767,10 +767,12 @@ function pairHref(pair) {
 }
 
 // The card's I/O-health line: the pair view's io-health troubled rule
-// reduced to one line — link degradation, boundary failures, the
-// attributed last fault, scan overruns — read from the source peer's
-// snapshot. A card with no landed snapshot reports the fetch's failure,
-// or waits out its first poll, instead of inventing health.
+// reduced to one line — link degradation, boundary failures (including
+// failed cyclic exchanges), a cyclic driver's working-counter
+// mismatches and missed deadlines, the attributed last fault, scan
+// overruns — read from the source peer's snapshot. A card with no
+// landed snapshot reports the fetch's failure, or waits out its first
+// poll, instead of inventing health.
 function ioHealthLine(pair) {
   if (pair.snapshot === null) {
     return pair.snapshotError !== null
@@ -786,6 +788,20 @@ function ioHealthLine(pair) {
   if (health.failed_reads || health.failed_writes) {
     troubles.push(health.failed_reads + " failed read(s), " +
       health.failed_writes + " failed write(s)");
+  }
+  if (health.failed_exchanges) {
+    troubles.push(health.failed_exchanges + " failed exchange(s)");
+  }
+  const exchange = health.driver && health.driver.exchange;
+  if (exchange) {
+    if (exchange.working_counter_mismatches) {
+      troubles.push(exchange.working_counter_mismatches +
+        " working-counter mismatch(es)");
+    }
+    if (exchange.missed_deadlines) {
+      troubles.push(exchange.missed_deadlines +
+        " missed exchange deadline(s)");
+    }
   }
   if (health.last_error) {
     troubles.push("last fault " + describeIoError(health.last_error.error) +
@@ -938,12 +954,19 @@ async function refresh() {
 // the pair view's role and convergence reporting — one surface for
 // operator-facing health. The driver's volunteered diagnostics get rows
 // of their own: a dead transport names link degradation there, visibly
-// separate from the per-point quality column below. IoFault serializes
-// as {tick, point, direction, error}, an IoError as
+// separate from the per-point quality column below, and a cyclic field
+// driver's exchange counters — the once-per-scan process-image exchange
+// the cyclic contract counts — render beside it, so a failed exchange,
+// a missed deadline, or a working-counter shortfall reads as field-
+// communication health rather than hiding behind the per-point rows.
+// IoFault serializes as {tick, point, direction, error}, an IoError as
 // {"disconnected": id} | {"timeout": id} | {"unknown_point": id} |
 // {"type_mismatch": {point, expected, found}} | {"fenced": id}, a
-// LinkState as "connected" | "disconnected", and a Direction as
-// "in" | "out".
+// LinkState as "connected" | "disconnected", a Direction as
+// "in" | "out", and a driver's ExchangeDiagnostics as {attempted,
+// succeeded, working_counter_mismatches, last_exchange_tick,
+// missed_deadlines} — present only when the driver carries the cyclic
+// surface.
 function describeIoError(error) {
   const [variant, detail] = Object.entries(error)[0];
   const name = variant.replace(/_/g, " ");
@@ -972,9 +995,39 @@ function renderIoHealth(health) {
     if (health.driver.last_error) {
       rows.push(healthRow("last link failure", health.driver.last_error));
     }
+    // The cyclic contract's exchange counters ride driver.exchange —
+    // absent on a point-wise driver, which serializes no `exchange`
+    // field, so nothing new renders for one (the absent-field
+    // convention last_error and scan_overruns already follow).
+    const exchange = health.driver.exchange;
+    if (exchange) {
+      rows.push(healthRow("exchanges attempted/succeeded",
+        exchange.attempted + "/" + exchange.succeeded));
+      rows.push(healthRow("working-counter mismatches",
+        exchange.working_counter_mismatches));
+      rows.push(healthRow("missed exchange deadlines",
+        exchange.missed_deadlines));
+      rows.push(healthRow("last exchange tick",
+        exchange.last_exchange_tick == null
+          ? "none" : exchange.last_exchange_tick));
+      // A completed-but-short or completed-but-late exchange is field
+      // degradation the boundary counters below never counted.
+      if (exchange.working_counter_mismatches || exchange.missed_deadlines) {
+        troubled = true;
+      }
+    }
   }
   rows.push(healthRow("failed reads", health.failed_reads));
   rows.push(healthRow("failed writes", health.failed_writes));
+  // The executor's count of failed cyclic exchanges — a boundary
+  // counter like the reads and writes beside it, rendered once a cyclic
+  // surface reports or one has actually failed; a non-cyclic driver
+  // keeps the pane exactly as before.
+  if (health.failed_exchanges ||
+      (health.driver && health.driver.exchange)) {
+    rows.push(healthRow("failed exchanges", health.failed_exchanges || 0));
+    if (health.failed_exchanges) troubled = true;
+  }
   rows.push(healthRow("consecutive failures", health.consecutive_failures));
   if (health.failed_reads || health.failed_writes) troubled = true;
   if (health.last_error) {
