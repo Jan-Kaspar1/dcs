@@ -47,6 +47,12 @@
 //! An unconverged or over-budget peer reports its named sync state
 //! instead of promoting.
 //!
+//! A tracking caller runs the whole cycle once per scan through
+//! [`track_once`](Peer::track_once) — the owns-field gate, the pull,
+//! the miss accounting, and the promote-on-budget check in one place —
+//! and presents the returned [`TrackReport`]; the scan itself stays
+//! caller-owned.
+//!
 //! Promotion — manual or automatic — first runs the field-ownership
 //! claim installed by [`with_field_claim`](Peer::with_field_claim):
 //! the fencing arbitration that makes the shared field refuse a
@@ -219,6 +225,54 @@ pub enum Transfer {
     /// carryover rule — the peer reports [`StandbySync::Reinitialized`]
     /// carrying this report.
     Reinitialized(CarryoverReport),
+}
+
+/// What one standby tracking cycle did — the answer of
+/// [`Peer::track_once`], which the scan-cycle caller presents in its
+/// logs. The cycle's ordering — the owns-field gate, the pull routing
+/// through [`Peer::transfer`], the heartbeat miss accounting, and the
+/// promote-on-budget sequence — lives in the peer; this report carries
+/// the outcome, and the journaled transitions still drain through the
+/// `take_*` queues.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackReport {
+    /// The peer owns the field — `active` or `promoting` — so the cycle
+    /// ran no pull and no failover check: tracking is a field-owner
+    /// no-op.
+    OwnsField,
+    /// The pull produced a checkpoint [`Peer::transfer`] consumed —
+    /// [`Transfer::Applied`] for ordinary convergence,
+    /// [`Transfer::Reinitialized`] for the revision crossing.
+    Applied(Transfer),
+    /// The pull produced a checkpoint the peer refused — the named
+    /// [`ApplyError`], the peer reporting `Degraded`. The active
+    /// served, so no heartbeat miss was counted.
+    Refused(ApplyError),
+    /// The pull produced nothing — an unreachable active or a refused
+    /// request — counted as one heartbeat miss and reported `Degraded`
+    /// with `detail`; the failover budget was not met.
+    Missed {
+        /// What the failed pull reported — the `Degraded` detail.
+        detail: String,
+    },
+    /// The miss run reached the failover budget and the still-converged
+    /// standby promoted itself at this boundary — `report` carries the
+    /// post-promotion role.
+    Promoted {
+        /// What the failed pull reported — the `Degraded` detail.
+        detail: String,
+        /// The role report after the promotion.
+        report: RoleReport,
+    },
+    /// The miss run reached the failover budget but self-promotion was
+    /// refused — `error` names why; the peer keeps reporting the sync
+    /// state the refusal carried.
+    PromotionRefused {
+        /// What the failed pull reported — the `Degraded` detail.
+        detail: String,
+        /// The named refusal.
+        error: SwitchError,
+    },
 }
 
 impl<'d> Peer<'d> {
@@ -635,6 +689,56 @@ impl<'d> Peer<'d> {
         self.sync = StandbySync::Degraded {
             detail: detail.to_string(),
         };
+    }
+
+    /// Runs the standby's per-scan tracking cycle — the once-per-scan
+    /// checkpoint pull the peer-transport decision documents — with the
+    /// whole sequence consolidated beside the state it coordinates: the
+    /// owns-field gate, the pull routed through
+    /// [`transfer`](Self::transfer) or counted as a heartbeat miss by
+    /// [`note_transfer_failed`](Self::note_transfer_failed), and the
+    /// promote-on-budget sequence of [`self_promote`](Self::self_promote)
+    /// when the miss run reaches the
+    /// [`with_failover`](Self::with_failover) budget.
+    ///
+    /// `pull` fetches the active's checkpoint — over the monitoring
+    /// transport in the controller, a stub in tests — answering the
+    /// produced checkpoint or the `Err` detail the peer reports as
+    /// [`StandbySync::Degraded`]. A produced checkpoint resets the miss
+    /// count whether the apply lands or is refused; a produced-nothing
+    /// pull increments it, and the budget-th miss runs the
+    /// self-promotion check at this boundary. The [`TrackReport`]
+    /// describes what the cycle did, for the caller's logs; transitions
+    /// the cycle queued — divergences, reinitializations, role changes —
+    /// still drain through the `take_*` queues for the journal.
+    ///
+    /// A field-owning peer performs no pull and no failover check:
+    /// [`TrackReport::OwnsField`], and `pull` is never invoked. The scan
+    /// itself stays caller-owned — this is the pre-scan tracking half.
+    pub fn track_once(&mut self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
+        if self.owns_field() {
+            return TrackReport::OwnsField;
+        }
+        let detail = match pull() {
+            Ok(checkpoint) => {
+                return match self.transfer(&checkpoint) {
+                    Ok(transfer) => TrackReport::Applied(transfer),
+                    Err(error) => TrackReport::Refused(error),
+                };
+            }
+            Err(detail) => detail,
+        };
+        self.note_transfer_failed(&detail);
+        if !self.failover_due() {
+            return TrackReport::Missed { detail };
+        }
+        match self.self_promote() {
+            Ok(()) => TrackReport::Promoted {
+                detail,
+                report: self.report(),
+            },
+            Err(error) => TrackReport::PromotionRefused { detail, error },
+        }
     }
 
     /// Runs one scan and settles a pending role transition: the first
@@ -1405,5 +1509,155 @@ mod tests {
                 sync: StandbySync::Degraded { detail: "b".into() }
             })
         );
+    }
+
+    /// A produced checkpoint applies through `transfer` — the report
+    /// carries the `Transfer` and the peer reports `tracking`.
+    #[test]
+    fn track_once_applies_a_produced_checkpoint() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4).unwrap();
+        let checkpoint = source.checkpoint();
+
+        let report = peer.track_once(|| Ok(checkpoint));
+        assert_eq!(report, TrackReport::Applied(Transfer::Applied));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(4) }
+        );
+        assert_eq!(peer.missed_transfers(), 0);
+    }
+
+    /// A produced-nothing pull is the heartbeat miss — counted toward
+    /// the budget and reported degraded — while a produced-but-refused
+    /// checkpoint is not a miss at all: the active served.
+    #[test]
+    fn track_once_counts_the_miss_and_reports_the_refusal() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(3);
+
+        let report = peer.track_once(|| Err("fetch from active: refused".to_string()));
+        assert_eq!(
+            report,
+            TrackReport::Missed {
+                detail: "fetch from active: refused".into()
+            }
+        );
+        assert_eq!(peer.missed_transfers(), 1);
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Degraded {
+                detail: "fetch from active: refused".into()
+            }
+        );
+
+        // A checkpoint the apply rejects still proves the active alive:
+        // the miss count resets and the refusal is the named report.
+        let mut foreign = executor(&driver).checkpoint();
+        foreign
+            .components
+            .insert("ghost".to_string(), Default::default());
+        let report = peer.track_once(|| Ok(foreign));
+        assert!(matches!(
+            report,
+            TrackReport::Refused(ApplyError::Restore(RestoreError::UnknownComponent { .. }))
+        ));
+        assert_eq!(peer.missed_transfers(), 0);
+        assert!(matches!(peer.sync_state(), StandbySync::Degraded { .. }));
+        assert!(!peer.failover_due());
+    }
+
+    /// The budget-th miss promotes a still-converged standby at that
+    /// boundary — the report carries the post-change role, and the
+    /// field owner the peer became tracks nothing further.
+    #[test]
+    fn track_once_promotes_on_the_budget_miss() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3).unwrap();
+        let checkpoint = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+
+        assert!(matches!(
+            peer.track_once(|| Err("a".to_string())),
+            TrackReport::Missed { .. }
+        ));
+        let report = peer.track_once(|| Err("b".to_string()));
+        match report {
+            TrackReport::Promoted { detail, report } => {
+                assert_eq!(detail, "b");
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the budget-th miss promotes, got {other:?}"),
+        }
+        assert!(gate.is_open());
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![RoleChange {
+                tick: Tick(3),
+                from: Role::Standby,
+                to: Role::Promoting,
+            }]
+        );
+
+        // Now field-owning, the cycle is a no-op: no pull, no failover
+        // check — a pull that would fail never runs.
+        let report = peer.track_once(|| panic!("a field owner pulls nothing"));
+        assert_eq!(report, TrackReport::OwnsField);
+    }
+
+    /// The budget-th miss on a peer whose convergence proof does not
+    /// stand reports the named refusal instead of promoting.
+    #[test]
+    fn track_once_reports_the_refused_self_promotion() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(1);
+
+        let report = peer.track_once(|| Err("active gone".to_string()));
+        match report {
+            TrackReport::PromotionRefused { detail, error } => {
+                assert_eq!(detail, "active gone");
+                assert_eq!(
+                    error,
+                    SwitchError::NotConverged {
+                        sync: StandbySync::Degraded {
+                            detail: "active gone".into()
+                        }
+                    }
+                );
+            }
+            other => panic!("an unconverged standby reports, got {other:?}"),
+        }
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+        assert!(peer.take_role_changes().is_empty());
+    }
+
+    /// A field-owning peer runs no pull and no failover check — the
+    /// cycle is the reported no-op.
+    #[test]
+    fn track_once_is_a_no_op_for_the_field_owner() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+
+        let report = peer.track_once(|| panic!("a field owner pulls nothing"));
+        assert_eq!(report, TrackReport::OwnsField);
+        assert_eq!(peer.missed_transfers(), 0);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
     }
 }
