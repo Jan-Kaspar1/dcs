@@ -17,8 +17,8 @@
 
 use crate::endpoint::{Sink, Source};
 use crate::spec::{
-    CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_F64,
-    POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
+    BINARY_CODE_RANGE, CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
+    POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
 use dcs_core::{Direction, PointType, ValueKind};
 use dcs_model::ComponentId;
@@ -2105,6 +2105,122 @@ impl Spec for FailoverSelectSpec {
             backup: Sink::port(id, "backup"),
             out: Source::port(id, "out"),
             backup_active: Source::port(id, "backup_active"),
+        }
+    }
+}
+
+/// Spec for the `flow-paced-ratio` kind: the chemical-dosing
+/// `dose × flow` demand — optional analyzer `trim`, declared dose and
+/// rate bounds, and declared responses to untrusted inputs.
+///
+/// Ports mirror the descriptor: `flow` (`In`, `Float`) — the measured
+/// process flow; `dose` (`In`, `Float`) — the operator dose setpoint,
+/// conventionally wired to a writable internal `In` point; `trim`
+/// (`In`, `Float`) — the optional analyzer correction, declared only
+/// when the spec's `trim` flag is set; `demand` (`Out`, `Float`);
+/// `clamped` and `fallback_active` (`Out`, `Bool`). Parameters:
+/// `min_dose`, `max_dose`, `min_rate`, `max_rate`, `fallback_rate`
+/// (required finite `Float`s — the `min <= max` ordering of each bound
+/// pair is a cross-parameter invariant the kind's `from_parameters`
+/// checks; a spec cannot express it), `on_bad_flow` (required `Int` in
+/// `0..=2`), and `on_bad_trim` (required `Int` in `0..=1`).
+pub struct FlowPacedRatioSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Whether the instance declares the optional `trim` port. `false`
+    /// emits an instance with no `trim` to wire — the kind paces
+    /// untrimmed, the port's absence being the "unwired means unity"
+    /// rule.
+    pub trim: bool,
+}
+
+/// Typed port handles for a `flow-paced-ratio` instance.
+pub struct FlowPacedRatioInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `flow` port (`In`, `Float`): the measured process flow — the
+    /// pacing signal.
+    pub flow: Sink<f64>,
+    /// `dose` port (`In`, `Float`): the operator dose setpoint per flow
+    /// unit — wire it to a writable internal `In` point so writes ride
+    /// the journaled receipted path.
+    pub dose: Sink<f64>,
+    /// `trim` port (`In`, `Float`): the analyzer correction —
+    /// `Some` only when the spec declared the port; wiring a handle
+    /// the emitted instance does not carry is `UnknownPort` at `build`.
+    pub trim: Option<Sink<f64>>,
+    /// `demand` port (`Out`, `Float`): the bounded actuator demand.
+    pub demand: Source<f64>,
+    /// `clamped` port (`Out`, `Bool`): asserts while the dose or rate
+    /// bound engages.
+    pub clamped: Source<bool>,
+    /// `fallback_active` port (`Out`, `Bool`): asserts while a declared
+    /// bad-signal response runs.
+    pub fallback_active: Source<bool>,
+}
+
+impl FlowPacedRatioSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "flow-paced-ratio";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("min_dose", ValueKind::Float, Some(FINITE_F64)),
+        required("max_dose", ValueKind::Float, Some(FINITE_F64)),
+        required("min_rate", ValueKind::Float, Some(FINITE_F64)),
+        required("max_rate", ValueKind::Float, Some(FINITE_F64)),
+        required("on_bad_flow", ValueKind::Int, Some(CODE_RANGE)),
+        required("fallback_rate", ValueKind::Float, Some(FINITE_F64)),
+        required("on_bad_trim", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `trim` selects whether the optional analyzer port is declared.
+    pub fn new(parameters: Parameters, trim: bool) -> Self {
+        Self { parameters, trim }
+    }
+}
+
+impl Spec for FlowPacedRatioSpec {
+    type Instance = FlowPacedRatioInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("flow", Direction::In, ValueKind::Float),
+            port("dose", Direction::In, ValueKind::Float),
+        ];
+        if self.trim {
+            ports.push(port("trim", Direction::In, ValueKind::Float));
+        }
+        ports.extend([
+            port("demand", Direction::Out, ValueKind::Float),
+            port("clamped", Direction::Out, ValueKind::Bool),
+            port("fallback_active", Direction::Out, ValueKind::Bool),
+        ]);
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        FlowPacedRatioInstance {
+            id,
+            flow: Sink::port(id, "flow"),
+            dose: Sink::port(id, "dose"),
+            trim: self.trim.then(|| Sink::port(id, "trim")),
+            demand: Source::port(id, "demand"),
+            clamped: Source::port(id, "clamped"),
+            fallback_active: Source::port(id, "fallback_active"),
         }
     }
 }

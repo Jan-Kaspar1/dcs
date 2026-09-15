@@ -67,7 +67,10 @@
 //!   bad-measurement fallback;
 //! - [`FailoverSelect`] — quality-driven selection between a primary
 //!   and a backup analog measurement, alarming the backup-mode
-//!   transition.
+//!   transition;
+//! - [`FlowPacedRatio`] — the chemical-dosing `dose × flow` demand
+//!   with an optional analyzer `trim`, declared dose and rate bounds,
+//!   and declared responses to untrusted inputs.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -91,6 +94,7 @@ mod digital_input;
 mod digital_output;
 mod edge_trigger;
 mod failover_select;
+mod flow_paced_ratio;
 mod interlock;
 mod latching_alarm;
 mod manual_station;
@@ -119,6 +123,7 @@ pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use edge_trigger::{Edge, EdgeTrigger};
 pub use failover_select::FailoverSelect;
+pub use flow_paced_ratio::{FlowPacedRatio, FlowPacedRatioConfig, RatioOutputs};
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
@@ -174,6 +179,7 @@ pub const KINDS: &[&str] = &[
     EdgeTrigger::KIND,
     ThresholdChain::KIND,
     FailoverSelect::KIND,
+    FlowPacedRatio::KIND,
 ];
 
 #[cfg(test)]
