@@ -218,8 +218,15 @@ fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
         .into_iter()
         .collect();
         let executor = Executor::new(&remote, map, vec![]).unwrap();
-        let monitor =
-            Monitor::bind("127.0.0.1:0", executor, SignalIndex { points: vec![] }).unwrap();
+        let monitor = Monitor::bind(
+            "127.0.0.1:0",
+            executor,
+            SignalIndex {
+                points: vec![],
+                components: vec![],
+            },
+        )
+        .unwrap();
         let client = MonitorClient::new(monitor.local_addr());
         thread::scope(|scope| {
             scope.spawn(|| monitor.serve());

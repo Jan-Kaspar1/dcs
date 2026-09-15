@@ -32,7 +32,7 @@ mod schema;
 mod validate;
 
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
-pub use index::{PointSignal, SignalIndex};
+pub use index::{ComponentRecord, PointSignal, SignalIndex};
 pub use lint::{LintFinding, LintRule};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,

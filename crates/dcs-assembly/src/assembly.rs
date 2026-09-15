@@ -356,7 +356,7 @@ pub fn assemble<'d>(
             }
         })?;
         let spec = ComponentSpec {
-            name: format!("{}:{}", instance.kind, instance.id.0),
+            name: instance.name(),
             id: instance.id,
             parameters: &instance.parameters,
             ports: resolved.bindings.get(&instance.id).unwrap_or(&NO_PORTS),
