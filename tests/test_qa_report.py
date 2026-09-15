@@ -79,7 +79,82 @@ class ValidationTests(unittest.TestCase):
 
     def test_rejects_wrong_schema_version(self):
         data = valid_report()
+        data['schema_version'] = 3
+        with self.assertRaises(ValueError):
+            check(data)
+
+    def _verification(self, **kw):
+        entry = {'finding_key': 'standby-tracking', 'case': 'standby-tracking',
+                 'fix_sha': 'f' * 40, 'tested_sha': SHA_A, 'outcome': 'passed',
+                 'fix_ancestry': {'checked': True, 'contained': True,
+                                  'method': 'git merge-base --is-ancestor'},
+                 'evidence': [{'detail': 'reproduction passed'}]}
+        entry.update(kw)
+        return entry
+
+    def test_v2_verifications_channel(self):
+        data = valid_report()
         data['schema_version'] = 2
+        data['verifications'] = [self._verification()]
+        out = check(data)
+        self.assertEqual(out['verifications'][0]['finding_key'],
+                         'standby-tracking')
+
+    def test_v1_rejects_verifications(self):
+        data = valid_report()
+        data['verifications'] = [self._verification()]
+        with self.assertRaises(ValueError):
+            check(data)
+
+    def test_verification_field_errors(self):
+        mutations = {
+            'finding_key': lambda e: e.update(finding_key='Bad Key'),
+            'case': lambda e: e.update(case='Bad_Case'),
+            'fix_sha': lambda e: e.update(fix_sha='zzz'),
+            'tested_sha': lambda e: e.update(tested_sha='short'),
+            'outcome': lambda e: e.update(outcome='maybe'),
+            'missing_tested': lambda e: e.pop('tested_sha'),
+            'ancestry': lambda e: e.update(fix_ancestry={'surprise': 1}),
+            'evidence': lambda e: e.update(evidence=[{'kind': 'file'}]),
+        }
+        for name, mutate in mutations.items():
+            data = valid_report()
+            data['schema_version'] = 2
+            entry = self._verification()
+            mutate(entry)
+            data['verifications'] = [entry]
+            with self.assertRaises(ValueError, msg=name):
+                check(data)
+
+    def test_verification_verdict_requires_tested_sha_match(self):
+        data = valid_report()
+        data['schema_version'] = 2
+        data['verifications'] = [self._verification(tested_sha=SHA_B)]
+        with self.assertRaises(ValueError):
+            check(data)
+
+    def test_inconclusive_verification_on_blocked_run(self):
+        data = valid_report()
+        data['schema_version'] = 2
+        data['outcome'] = 'blocked'
+        data['completed_sha'] = None
+        data['scenarios'] = []
+        data['verifications'] = [self._verification(
+            outcome='inconclusive',
+            fix_ancestry={'checked': True, 'contained': False,
+                          'method': 'git merge-base --is-ancestor',
+                          'detail': 'not an ancestor'},
+            detail='tested revision does not contain the fix')]
+        check(data)
+        # A verdict on an unassessed revision is still rejected.
+        data['verifications'][0]['outcome'] = 'passed'
+        with self.assertRaises(ValueError):
+            check(data)
+
+    def test_duplicate_verification_keys_rejected(self):
+        data = valid_report()
+        data['schema_version'] = 2
+        data['verifications'] = [self._verification(), self._verification()]
         with self.assertRaises(ValueError):
             check(data)
 

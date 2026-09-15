@@ -12,8 +12,11 @@ repository; this directory is the contract those copies mirror.
   deployment step, not a side effect of a merge.
 - `/srv/dcs-hwtest/` — bounded NVMe run storage: `state.db`, `lock`,
   `src/<sha>.tar` + extracted source, `build-cache/`, `cargo-cache/`,
-  `runs/<run_id>/` (report.json, evidence/, timeline.jsonl), and
-  `reports/<run_id>.json` staged for the WSL relay.
+  `runs/<run_id>/` (report.json, evidence/, timeline.jsonl),
+  `reports/<run_id>.json` staged for the WSL relay, `repo.git/` the
+  bare mirror the relay pushes (fix-ancestry checks for verification
+  runs), and `verifications.json` the pending fix-verification queue
+  the relay delivers from the supervisor.
 
 ## Install
 
@@ -49,13 +52,21 @@ sudo systemctl enable --now dcs-hwtest-netpolicy.service
 - Each cycle reconciles dead runs and orphaned labeled containers,
   verifies exclusive ownership (fail-closed), reclaims expired
   retention, re-queues one retry for an inconclusive SHA, enforces the
-  daily budget, verifies the egress policy, then runs the newest
-  queued revision. The daily budget counts runs by the UTC date they
+  daily budget, verifies the egress policy, then dispatches any due
+  fix verification (`qav-*` run ids) ahead of the newest queued
+  revision. The daily budget counts runs by the UTC date they
   actually begin executing (`begin()` stamps `day` at start), so a
   run dispatched at 23:55 and started at 00:30 counts once, on the
   later date.
+- A verification run first proves the tested revision contains the
+  merged fix — `git merge-base --is-ancestor` inside `git_dir` — then
+  replays exactly the finding's original case and records verdict,
+  ancestry check, and evidence in the report's `verifications`
+  channel (schema v2). An unproven or non-containing revision never
+  produces a verdict.
 - `python3 -m qa_lane status` reports queue, active run, block reason,
-  cleanup-failure ledger, retention pins, storage usage, and history.
+  cleanup-failure ledger, retention pins, pending verifications,
+  storage usage, and history.
 - `python3 -m qa_lane preserve run:<id>|sha:<sha> [on|off]` pins or
   unpins evidence the retention reconciler must keep — the
   findings/verification lane uses this so runs tied to unresolved

@@ -9,8 +9,9 @@ supervisor's findings inbox, and `agent_pool/findings.py` does the rest.
 
 ## Report contract
 
-The wire contract is `qa_lane/report.py` schema v1 — the single source of
-truth. `findings.validate_report` delegates to
+The wire contract is `qa_lane/report.py` — the single source of truth.
+Schema v2 adds the optional `verifications` channel (v1 documents remain
+valid input). `findings.validate_report` delegates to
 `qa_lane.report.validate_report`, then `adapt_report` maps the validated
 document onto the lane's internal shape:
 
@@ -33,9 +34,11 @@ runner emits scenarios and limitation/failure records, not findings:
 
 Finding keys are the scenario/limitation/failure keys — stable across runs,
 so re-observation dedups by key (occurrences increment, evidence refreshes).
-Schema v1 has no fix-verification channel: `verifications` remain an
-internal seam until the schema carries them, so the `fix-merged` chain below
-is exercised by tests and by reports built inside the supervisor.
+The schema-v2 `verifications` channel carries fix-verification results from
+dedicated verification runs (run ids `qav-*`) on the Lenovo lane; each entry
+names the finding key, the original case identity, the merged fix SHA, the
+revision actually tested, the runner's ancestry check, the verdict, and the
+evidence.
 
 Only `completed` reports route findings; inconclusive/blocked/interrupted
 runs are recorded as evidence, matching the review lane's rule that partial
@@ -96,6 +99,39 @@ issue and the squash-merge SHA; `pending_verifications` (state accessor and the
 top of `qa/findings.json`) hands the QA scheduler the merged fix's **original
 reproduction** so pending verification runs ahead of fresh exploration.
 
+## Fix verification (Task 2)
+
+The queue flows WSL -> Lenovo and the verdict flows back:
+
+1. `findings.verification_queue` renders every `fix-merged` finding with a
+   known `fix_sha` as a `qa-verifications/1` document — finding key,
+   original case identity, fix SHA, reproduction, expected — written
+   beside the report inbox (`<report_dir>/../verifications.json`,
+   content-hashed/idempotent). The WSL relay pushes it to
+   `/srv/dcs-hwtest/verifications.json` and keeps the lane's bare git
+   mirror (`/srv/dcs-hwtest/repo.git`) current, so verification work
+   reaches Lenovo without GitHub credentials.
+2. Each Lenovo cycle dispatches due verifications **before** the
+   newest-SHA assessment (`qav-*` runs). A verification run proves the
+   tested revision *contains* the fix — `git merge-base --is-ancestor`
+   in the mirror — before any build; a non-containing revision produces
+   a `blocked` report naming the failed check instead of a verdict. A
+   containing revision replays exactly the original scenario case and
+   records verdict + ancestry + evidence in `verifications`.
+3. Back on WSL, `apply_verification` certifies only when the entry
+   matches the awaiting finding, the original case identity, and this
+   report's tested revision; carries `fix_ancestry.contained` and real
+   evidence; and the supervisor's own containment lookup
+   (`github.includes_main(tested_sha, fix_sha)`, the compare-API
+   equivalent of merge-base) agrees. Anything less stays pending:
+   `case-mismatch`, `missing-evidence`, `ancestry-unproven`,
+   `untested-revision`, `sha-mismatch`, `not-contained`.
+4. Failure preservation: a failed/ambiguous merge-SHA lookup leaves the
+   finding `issue-open` and retries next poll; a transient GitHub
+   containment failure parks the entry in `qa:verification_retries` and
+   `retry_verifications` re-applies it next poll. Neither ever advances
+   a chain on an unknown fix SHA.
+
 Merged does not mean verified. For a failed fix the lane creates a *linked
 follow-up issue* (`qa-<key>-fix<N>`, dependency on the prior issue, failing
 evidence embedded) — a bare reopen is insufficient because the dispatcher
@@ -135,8 +171,9 @@ production `main`:
 4. Exercise the worker/CI flow by hand or with the dispatcher fakes; once the
    job is `done`, `reconcile_merged` records the merge SHA and the finding
    goes `fix-merged`; `document()['pending_verifications']` carries the
-   original reproduction.
-5. Drop a verification report (`passed`) → `verified`; (`failed`) → a linked
+   original reproduction and `verifications.json` reaches the Lenovo lane.
+5. The verification run replays the original case on a containing
+   revision (`passed`) → `verified`; (`failed`) → a linked
    `qa-<key>-fix2` follow-up, bounded by `max_fix_cycles`.
 
 Remaining for a fully live demo: a real worker pass against the sandbox repo

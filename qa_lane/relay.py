@@ -73,6 +73,8 @@ def summary(doc):
         'started_at': doc['started_at'],
         'finished_at': doc['finished_at'],
         'scenarios': {s['key']: s['outcome'] for s in doc['scenarios']},
+        'verifications': {v['finding_key']: v['outcome']
+                          for v in doc.get('verifications') or []},
         'capability_limitations': [c['key']
                                    for c in doc['capability_limitations']],
         'infrastructure_failures': [f['key']
@@ -143,10 +145,13 @@ def activity(status):
         else:
             row = {'run_id': entry}
         running.append(row)
-    return _redact({'schema': 'qa-activity/1', 'generated_at': _utcnow(),
-                    'running': running,
-                    'queued': len(status.get('queued') or []),
-                    'last_attempted_sha': status.get('last_attempted_sha')})
+    doc = {'schema': 'qa-activity/1', 'generated_at': _utcnow(),
+           'running': running,
+           'queued': len(status.get('queued') or []),
+           'last_attempted_sha': status.get('last_attempted_sha')}
+    if status.get('pending_verifications') is not None:
+        doc['pending_verifications'] = status['pending_verifications']
+    return _redact(doc)
 
 
 def push(doc_name, payload):
