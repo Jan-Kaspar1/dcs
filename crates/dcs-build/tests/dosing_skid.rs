@@ -531,6 +531,120 @@ fn document_serde_roundtrips() {
 }
 
 #[test]
+fn journaled_marks_the_durable_record_points() {
+    // Decision 74's sweep: every alarm's `alarm`/`unacknowledged`
+    // status points, the mode and managed-state flags decision 75
+    // names, and the protection-relevant status points the
+    // composition carries are declared `journaled` — their value
+    // transitions join the durable journal as `point_changed`
+    // entries. The flag stays opt-in: receipts, demand copies, the
+    // stroke churn, and the float measurements and setpoints keep
+    // their own paths.
+    let emitted = emit();
+    let layout = &emitted.layout;
+    let journaled = |point: PointId| {
+        emitted
+            .model
+            .io_points
+            .iter()
+            .find(|io| io.id == point)
+            .unwrap_or_else(|| panic!("{point:?} is not in the emitted model"))
+            .journaled
+    };
+
+    let mut record = vec![
+        layout.flow_proven,
+        layout.bund_flood,
+        layout.external_inhibit,
+        layout.manual_mode,
+        layout.fallback_active,
+        layout.none_available,
+        layout.dosing_permitted,
+        layout.interlock_tripped,
+        layout.manual_active,
+        layout.all_faulted,
+        layout.deviating,
+    ];
+    let mut off_record = vec![
+        layout.flow,
+        layout.flow_source,
+        layout.tank_level,
+        layout.discharge_rate,
+        layout.net_draw,
+        layout.tank_refill,
+        layout.ratio_demand,
+        layout.gated_demand,
+        layout.demand,
+        layout.stage_demand,
+        layout.duty,
+        layout.staged,
+        layout.clamped,
+        layout.dose_total,
+        layout.deviation,
+        layout.dose,
+        layout.manual_rate,
+        layout.totalizer_reset,
+    ];
+    for alarm in [
+        &layout.tank_low_alarm,
+        &layout.tank_empty_alarm,
+        &layout.pacing_alarm,
+        &layout.bund_alarm,
+        &layout.external_alarm,
+        &layout.deviation_alarm,
+    ] {
+        record.extend([alarm.alarm, alarm.unacknowledged]);
+        // The ack point's writes are already the attributed,
+        // receipted record — it stays off the journaled set.
+        off_record.push(alarm.ack);
+    }
+    for pump in &layout.pumps {
+        record.extend([
+            pump.run,
+            pump.local,
+            pump.pump_fault,
+            pump.out_of_service,
+            pump.avail,
+            pump.motor_fault,
+            pump.speed_gated,
+        ]);
+        off_record.extend([
+            pump.cmd,
+            pump.speed,
+            pump.draw,
+            pump.rate,
+            pump.stroke,
+            pump.stroke_reset,
+            pump.group_cmd,
+            pump.speed_eng,
+            pump.strokes,
+            pump.strokes_done,
+        ]);
+        for alarm in [&pump.fault_alarm, &pump.pump_fault_alarm] {
+            record.extend([alarm.alarm, alarm.unacknowledged]);
+            off_record.push(alarm.ack);
+        }
+    }
+    for point in &record {
+        assert!(journaled(*point), "{point:?} must carry `journaled`");
+    }
+    for point in &off_record {
+        assert!(!journaled(*point), "{point:?} must stay off the record");
+    }
+
+    // The durable record is bool/int-only: no float point may carry
+    // the flag — validation reports `JournaledFloat`.
+    for point in &emitted.model.io_points {
+        if point.journaled {
+            assert!(
+                matches!(point.value_type, ValueKind::Bool | ValueKind::Int),
+                "a journaled float slipped in: {point:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn identical_builds_emit_identical_documents() {
     let first = emit().model;
     let second = emit().model;
