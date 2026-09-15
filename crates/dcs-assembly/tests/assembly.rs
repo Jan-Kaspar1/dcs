@@ -282,17 +282,7 @@ fn registry() -> ComponentRegistry {
             ))
         })
         .with(BoolGate::KIND, |spec| {
-            let mut inputs: Vec<_> = spec
-                .ports
-                .iter()
-                .filter_map(|(name, point)| {
-                    name.strip_prefix("in_")
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                        .map(|index| (index, *point))
-                })
-                .collect();
-            inputs.sort_by_key(|(index, _)| *index);
-            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            let inputs = spec.indexed("in_");
             boxed(BoolGate::from_parameters(
                 spec.name.as_str(),
                 inputs,
