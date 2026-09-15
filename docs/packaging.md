@@ -1,5 +1,14 @@
 # Packaging
 
+This file documents the platform's packaging artifacts: the generic
+container images and the checked-in demonstration rig. What a customer
+plant pins — the release set, pin mechanisms, version scheme, and
+compatibility policy — is the consumer release contract in
+`docs/release-contract.md`. The checked-in fixtures these pages
+reference are platform conformance tests owned by this repository,
+not customer-project examples; a customer plant is an external consumer
+of a pinned release (decision 79).
+
 ## Controller container image
 
 The root `Dockerfile` packages the `dcs-controller` binary as a container
@@ -139,6 +148,11 @@ plant service's healthcheck orders the controllers' one-shot
 statically inspectable declaration — `docker compose config` checks
 it — and like the Dockerfiles it is a checked-in packaging artifact:
 a single-host orchestration declaration that defines no deployment.
+It is also a platform conformance artifact: the reference-station
+fixtures it mounts are owned by this repository as test evidence, not
+as a template for a customer project — the customer-shaped path is an
+independent plant repository pinning a release per
+`docs/release-contract.md`.
 
 What the running rig demonstrates is the reference duty/standby
 pumping station under the redundant pair: the dynamics document drives

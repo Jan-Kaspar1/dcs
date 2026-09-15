@@ -27,6 +27,12 @@ Where each contract lives in code:
 Every field name, kind string, parameter key, and element tag named below
 is the exact identifier those sources read or write.
 
+The checked-in fixtures this reference points at are platform
+conformance artifacts — test evidence owned by this repository, not
+customer-project examples. A customer plant owns its own composition as
+an external consumer of a pinned release; that boundary is the consumer
+release contract in `docs/release-contract.md` (decisions 79–81).
+
 ## Shared vocabulary
 
 - **Ids** are unsigned 64-bit integers serialized as bare JSON numbers.
