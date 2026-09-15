@@ -4,7 +4,7 @@
 //! request only, the named failure surface, graceful shutdown, and
 //! identical scripted runs across restarts.
 
-use dcs_core::{IoDriver, IoError, PointId, Value};
+use dcs_core::{IoDriver, IoError, PointId, Sample, Value};
 use dcs_sim_net::RemoteDriver;
 use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
@@ -30,6 +30,11 @@ const STATION_MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pump_
 const STATION_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-sim/fixtures/pump_station_dynamics.json"
+);
+const DOSING_MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/dosing_skid.json");
+const DOSING_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-sim/fixtures/dosing_skid_dynamics.json"
 );
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -323,6 +328,85 @@ fn a_pump_command_drains_the_well_only_while_it_stands() {
     assert_eq!(level(&driver), 30.0);
 
     assert!(stop(&mut plant).success());
+}
+
+/// One scripted pass over the dosing loop: the level and measured
+/// discharge rate each step while the analog demand stands at 50,
+/// then 20, then 0 — the trace identical runs must reproduce.
+fn dosing_script(addr: SocketAddr) -> Vec<Sample> {
+    let driver = RemoteDriver::connect(addr).unwrap();
+    let mut trace = Vec::new();
+    for demand in [50.0, 20.0, 0.0] {
+        driver.write(PointId(20), Value::Float(demand)).unwrap();
+        for _ in 0..2 {
+            driver.step(1.0).unwrap();
+            trace.push(driver.read(PointId(10)).unwrap());
+            trace.push(driver.read(PointId(11)).unwrap());
+        }
+    }
+    trace
+}
+
+#[test]
+fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
+    // The dosing loop the scaled_flow element exists for: the
+    // metering pump's analog speed demand scaled into the measured
+    // discharge rate and, with a negative gain, into the chemical
+    // tank's drawdown — exercised end to end through the `--dynamics`
+    // merge.
+    let args = [
+        DOSING_MODEL,
+        "--dynamics",
+        DOSING_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ];
+    let mut plant = spawn(&args);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    let read = |point: u64| {
+        let Value::Float(value) = driver.read(PointId(point)).unwrap().value else {
+            panic!("the skid's points are Float")
+        };
+        value
+    };
+
+    // The integrator seeds the tank at its declared initial level and
+    // the zeroed demand drives zero rates — the tank holds.
+    assert_eq!(read(10), 100.0);
+    driver.step(1.0).unwrap();
+    assert_eq!(read(10), 100.0);
+    assert_eq!(read(11), 0.0);
+
+    // The demand standing at 50, the discharge reads 0.5 × 50 and the
+    // tank draws down 25 per time unit, step after step.
+    driver.write(PointId(20), Value::Float(50.0)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(read(11), 25.0);
+    assert_eq!(read(10), 75.0);
+    driver.step(1.0).unwrap();
+    assert_eq!(read(10), 50.0);
+
+    // A changed demand re-scales the draw at the next tick boundary;
+    // zeroing it stops the draw and the level holds.
+    driver.write(PointId(20), Value::Float(20.0)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(read(11), 10.0);
+    assert_eq!(read(10), 40.0);
+    driver.write(PointId(20), Value::Float(0.0)).unwrap();
+    driver.step(1.0).unwrap();
+    assert_eq!(read(10), 40.0);
+
+    assert!(stop(&mut plant).success());
+
+    // Identical scripted step sequences produce identical point
+    // traces across a restart of the merged plant.
+    let mut first = spawn(&args);
+    let first_run = dosing_script(first.addr);
+    assert!(stop(&mut first).success());
+    let mut second = spawn(&args);
+    let second_run = dosing_script(second.addr);
+    assert!(stop(&mut second).success());
+    assert_eq!(first_run, second_run);
 }
 
 #[test]

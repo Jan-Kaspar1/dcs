@@ -1263,6 +1263,58 @@ fn the_device_binary_serves_a_dynamics_document_over_registers() {
 }
 
 #[test]
+fn the_device_binary_serves_a_scaled_flow_document_over_registers() {
+    // A Float demand register scaled into a draw an integrator
+    // consumes: the `scaled_flow` variant merges through the same
+    // `--dynamics` seam `dcs-plant-server` serves.
+    let model = model_file(STATION_MODEL);
+    let dynamics = scratch_file(
+        "dynamics",
+        r#"[
+            {"scaled_flow": {"input": 11, "output": 12, "gain": -0.5, "initial": 0.0}},
+            {"integrator": {"input": 12, "output": 10, "initial": 50.0}}
+        ]"#,
+    );
+    let (_child, addr) = spawn_device(&model, 3, Some(&dynamics));
+
+    // Point 1 reads the level register, point 2 writes the demand
+    // register, point 3 reads the draw register.
+    let bus = BusDriver::connect(
+        addr,
+        &[
+            PointRegister {
+                point: PointId(1),
+                register: 10,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(2),
+                register: 11,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(3),
+                register: 12,
+                kind: ValueKind::Float,
+            },
+        ],
+    )
+    .unwrap();
+    let driver: &dyn IoDriver = &bus;
+
+    // The integrator seeds the level register at its declared initial.
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(50.0));
+
+    // The demand standing, the negative gain draws the level down
+    // proportionally: -0.5 × 50 = -25 per time unit, -12.5 per 0.5
+    // step.
+    driver.write(PointId(2), Value::Float(50.0)).unwrap();
+    bus.step(0.5).unwrap();
+    assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(-25.0));
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(37.5));
+}
+
+#[test]
 fn the_device_binary_reports_named_dynamics_failures() {
     let model = model_file(STATION_MODEL);
 
@@ -1298,6 +1350,25 @@ fn the_device_binary_reports_named_dynamics_failures() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("dynamics element 0"), "{stderr}");
     assert!(stderr.contains("register 14"), "{stderr}");
+
+    // A scaled_flow end on the Bool command register fails the merge
+    // the same way.
+    let dynamics = scratch_file(
+        "dynamics",
+        r#"[{"scaled_flow": {"input": 20, "output": 12, "gain": -0.5, "initial": 0.0}}]"#,
+    );
+    let output = Command::new(DEVICE_BIN)
+        .arg(&model)
+        .arg("--device")
+        .arg("3")
+        .arg("--dynamics")
+        .arg(&dynamics)
+        .output()
+        .expect("binary runs");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dynamics element 0"), "{stderr}");
+    assert!(stderr.contains("register 20 is Bool"), "{stderr}");
 
     // An endpoint register the device does not declare is named too.
     let dynamics = scratch_file(

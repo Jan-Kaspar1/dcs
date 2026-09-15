@@ -129,6 +129,10 @@ fn describe_element_error(error: &ConfigError) -> String {
             "flow_sum element driving register {} has non-finite bias {value}",
             point.0
         ),
+        ConfigError::InvalidGain { point, value } => format!(
+            "scaled_flow element driving register {} has non-finite gain {value}",
+            point.0
+        ),
         ConfigError::NonFiniteInitial { point, value } => format!(
             "element driving register {} has non-finite initial value {value}",
             point.0
@@ -358,7 +362,8 @@ impl RegisterBank {
     /// element vocabulary's own rules: a `Good` input advances the
     /// element — a `bool_flow` stands its `on_rate` or `off_rate` by
     /// its `Bool` gate, a `flow_sum` sums its declared inputs plus
-    /// `bias`, an `integrator` accumulates `u·dt` — and stamps its
+    /// `bias`, a `scaled_flow` stands at `gain` times its `Float`
+    /// input, an `integrator` accumulates `u·dt` — and stamps its
     /// output register `Good`; a non-`Good` input freezes the element
     /// and propagates its quality to the output register's sample, a
     /// `flow_sum` propagating the worst of its inputs' qualities.
@@ -407,7 +412,7 @@ impl fmt::Debug for RegisterBank {
 mod tests {
     use super::*;
     use dcs_core::{QualityReason, ValueKind};
-    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator};
+    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator, ScaledFlow};
 
     fn bank() -> RegisterBank {
         RegisterBank::new([
@@ -741,6 +746,22 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "dynamics element 0 (driving register 12) is invalid: bool_flow element driving register 12 has non-finite on_rate NaN"
+        );
+        // A non-finite scaled_flow gain names the element and its
+        // register the same way.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(14),
+                output: PointId(12),
+                gain: f64::INFINITY,
+                initial: 0.0,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 12) is invalid: scaled_flow element driving register 12 has non-finite gain inf"
         );
         // A negative time constant, and an output register two
         // elements contest.
