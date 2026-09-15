@@ -114,7 +114,8 @@ def _pid_alive(pid):
 
 
 def _managed_containers():
-    result = docker('ps', '-aq', '--filter', 'label=' + MANAGED_LABEL + '=1',
+    # NB: `-q` makes docker ignore --format, so use plain `ps -a`.
+    result = docker('ps', '-a', '--filter', 'label=' + MANAGED_LABEL + '=1',
                     '--format', '{{.ID}} {{.Label "' + RUN_LABEL + '"}}',
                     check=False)
     rows = []
