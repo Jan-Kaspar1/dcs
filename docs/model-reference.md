@@ -756,6 +756,47 @@ identically.
 composition — one instance per `on_bad` code over one scripted input
 set; per-port semantics live beside `DemandFallback::KIND`.
 
+The feed-forward demand injection architecture decision 66 records
+adds one fixed-arity kind — the additive sibling of the landed
+`flow-paced-ratio`, whose `trim` scales multiplicatively where this
+kind's adds. `feedforward-sum` sits on a zone's aeration demand path
+where a load feed-forward or an ammonia-based supervisory trim *adds
+to* the airflow demand rather than scaling it. It reads `ff` (`in`,
+`Float`) — the computed feed-forward demand, conventionally a
+`flow-paced-ratio` with `trim` unwired where the pacing law is
+proportional — and `trim` (`in`, `Float`) — the feedback loop's
+additive correction, typically the zone DO `pid`'s `out` — and drives
+`out` (`out`, `Float`), the summed demand bounded to `[min_demand,
+max_demand]`, `clamped` (`out`, `Bool`), and `fallback_active`
+(`out`, `Bool`) — the decision-50 status vocabulary. The `parameters`
+are `trim_min`/`trim_max` (finite `Float`s, `trim_min` ≤ `trim_max` —
+the feedback portion's declared authority: it trims, never owns, the
+demand), `min_demand`/`max_demand` (finite `Float`s, `min_demand` ≤
+`max_demand` — the emitted-demand bounds), and the `Int` codes
+`on_bad_ff`/`on_bad_trim` (`0` the untrusted term drops out and the
+other term serves alone; `1` the term's last `Good` finite value
+stands in, zero before the first); all six are
+`SetParameter`-tunable. Each scan serves `clamp(ff + clamp(trim,
+trim_min, trim_max), min_demand, max_demand)` — the trim bounded
+before the sum — with `clamped` asserting while either bound engages;
+a term resting exactly on its bound is not a clamp. A non-`Good` or
+non-finite input takes its declared response the same scan — each
+term independently, so both bad compose their responses — with
+`fallback_active` asserted for the engagement's duration and no
+latch: the first `Good` finite scan serves and banks again. The
+served terms still pass through the same bounds, so `clamped` reports
+honestly while a response runs. `out` carries the merged worst of the
+`ff` and `trim` qualities plus `Bad(DeviceFault)` for a non-finite
+reading the point did not report; `clamped` and `fallback_active`
+always carry `Good`. The held last-`Good` terms and the tuned
+parameters are run state under decision 20: `capture_state` carries
+them so a checkpointed standby resumes an engaged response
+identically.
+`crates/dcs-assembly/fixtures/feedforward_sum.json` is the recorded
+composition — drop/drop, hold/hold, and mixed response pairings over
+one scripted `ff`/`trim` set; per-port semantics live beside
+`FeedforwardSum::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
