@@ -83,6 +83,14 @@
 //! record, and a missing file is a cold start. Point history stays
 //! volatile; only the journal persists.
 //!
+//! The alarm flood and performance report (`dcs-alarm-report`, backed by
+//! [`alarm_report`]) is tooling-side aggregation over that record — the
+//! flood-and-performance decision's computing surface: it consumes
+//! `GET /journal` or the journal file plus `GET /history`, joining the
+//! alarm surface from `GET /snapshot` and `GET /signals`, and prints the
+//! declared metric set as JSON. No served metrics endpoint exists; the
+//! report is computed data, not contract.
+//!
 //! The page is the monitoring and control UI consuming the unified
 //! contract: a static, dependency-free HTML+JavaScript asset ([`PAGE`],
 //! no build toolchain) that fetches `/signals` once for point labels,
@@ -237,10 +245,12 @@
 
 #![warn(missing_docs)]
 
+pub mod alarm_report;
 mod journal_file;
 mod pair;
 mod recorder;
 
+pub use journal_file::{JournalData, RunBoundary, read_journal_file};
 pub use pair::{PairClient, PairError, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
 
