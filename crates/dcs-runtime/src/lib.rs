@@ -81,5 +81,5 @@ pub use executor::{
     ComponentStatus, Executor, LinkError, PointMap, PointSpec, ScanError, WiringError,
 };
 pub use gate::WriteGate;
-pub use peer::{ApplyError, Peer, RoleChange, Transfer};
+pub use peer::{ApplyError, Peer, RoleChange, TrackReport, Transfer};
 pub use revision::CarryoverError;
