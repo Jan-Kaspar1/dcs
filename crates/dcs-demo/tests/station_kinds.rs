@@ -231,6 +231,7 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
     }

@@ -274,6 +274,7 @@ fn sim_bus_run_matches_the_all_local_reference() {
         Some(DriverDiagnostics {
             link: LinkState::Connected,
             last_error: None,
+            exchange: None,
         })
     );
     let mut normalized = mixed;
@@ -330,6 +331,7 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
 
@@ -355,6 +357,7 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("device 2: no live connection to the device server".to_string()),
+                exchange: None,
             })
         );
         // Stepping fails on the cross-backend wire first: the route's
@@ -387,6 +390,7 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("device 2: no live connection to the device server".to_string()),
+                exchange: None,
             })
         );
     });

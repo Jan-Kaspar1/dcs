@@ -98,7 +98,8 @@ pub struct IoFault {
     /// attribution without decoding the error variant.
     pub point: PointId,
     /// The scan boundary that saw the failure: `In` for the input-read
-    /// phase, `Out` for the output-write phase.
+    /// phase — including a failed cyclic exchange, which opens that
+    /// phase — `Out` for the output-write phase.
     pub direction: Direction,
     /// The failure the driver reported.
     pub error: IoError,
@@ -122,9 +123,22 @@ pub struct IoHealth {
     /// Total output writes that failed at the scan's write boundary —
     /// each also failed its scan with `ScanError`.
     pub failed_writes: u64,
+    /// Cyclic process-image exchanges that failed at the scan's read
+    /// boundary — one per failed `exchange` call on a driver
+    /// implementing the cyclic contract
+    /// ([`IoDriver::cyclic`](crate::IoDriver::cyclic)), counted once
+    /// however many points the image covers. The held input image still
+    /// answers the reads that follow, so a covered point counts nothing
+    /// until the driver's miss threshold escalates its read to an
+    /// ordinary [`failed_reads`](Self::failed_reads) failure. Always `0`
+    /// for a non-cyclic driver; absent from snapshots serialized before
+    /// the cyclic contract existed.
+    #[serde(default)]
+    pub failed_exchanges: u64,
     /// Driver-boundary operations that have failed in a row: every
-    /// failed read or write extends the count and every successful one
-    /// resets it to zero, so it reads as the failure streak ending at
+    /// failed read, write, or cyclic exchange extends the count and
+    /// every successful one resets it to zero, so it reads as the
+    /// failure streak ending at
     /// [`last_error`](Self::last_error).
     pub consecutive_failures: u64,
     /// The most recent driver-boundary failure, with the tick and point
@@ -267,6 +281,7 @@ mod tests {
             io_health: IoHealth {
                 failed_reads: 4,
                 failed_writes: 1,
+                failed_exchanges: 2,
                 consecutive_failures: 2,
                 last_error: Some(IoFault {
                     tick: Tick(3),
@@ -278,6 +293,13 @@ mod tests {
                 driver: Some(DriverDiagnostics {
                     link: LinkState::Disconnected,
                     last_error: Some("no live connection to the plant server".to_string()),
+                    exchange: Some(crate::ExchangeDiagnostics {
+                        attempted: 5,
+                        succeeded: 3,
+                        working_counter_mismatches: 1,
+                        last_exchange_tick: Some(Tick(2)),
+                        missed_deadlines: 1,
+                    }),
                 }),
             },
             forces: vec![ForcedPoint {
@@ -303,15 +325,22 @@ mod tests {
             snapshot
         );
 
-        // A snapshot serialized before forces and parameter reporting
-        // existed carries neither field and reads back with empty
-        // sections.
+        // A snapshot serialized before forces, parameter reporting, and
+        // the cyclic exchange counters existed carries none of those
+        // fields and reads back with empty sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object_mut().unwrap();
         object.remove("forces");
         object.remove("parameters");
+        object
+            .get_mut("io_health")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_exchanges");
         let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
         assert_eq!(legacy.forces, Vec::new());
         assert_eq!(legacy.parameters, Vec::new());
+        assert_eq!(legacy.io_health.failed_exchanges, 0);
     }
 }

@@ -154,6 +154,44 @@ pub struct DriverDiagnostics {
     /// description, if the driver has seen one — e.g. the error that
     /// severed the link.
     pub last_error: Option<String>,
+    /// The cyclic process-image exchange counters — `Some` only on a
+    /// driver implementing the [`CyclicIoDriver`] contract; absent from
+    /// payloads serialized before the cyclic contract existed.
+    #[serde(default)]
+    pub exchange: Option<ExchangeDiagnostics>,
+}
+
+/// The cyclic process-image exchange counters a [`CyclicIoDriver`]
+/// reports through [`IoDriver::diagnostics`] — the exchange half of the
+/// I/O-health surface.
+///
+/// These are bus-level counters, not per-point ones: one exchange moves
+/// the whole image, so its health aggregates over every point the image
+/// covers. The per-point consequences of a failed or short exchange —
+/// held samples aging to `Stale`, `Disconnected` escalations — still
+/// count under the executor's boundary counters when the scan's reads
+/// see them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExchangeDiagnostics {
+    /// Exchanges the driver has attempted — one per `exchange` call.
+    pub attempted: u64,
+    /// Exchanges that completed: the staged output image published and
+    /// the returned input image latched. `attempted - succeeded` counts
+    /// the exchanges that did not complete at all.
+    pub succeeded: u64,
+    /// Completed exchanges whose working counter fell short — the bus
+    /// answered but named fewer stations than the image covers. The
+    /// driver attributes the shortfall to a station and degrades only
+    /// that station's points; the rest of the image latched.
+    pub working_counter_mismatches: u64,
+    /// The scan tick of the most recent completed exchange — the
+    /// acquisition stamp the currently latched input samples carry.
+    /// `None` before the first completed exchange.
+    pub last_exchange_tick: Option<Tick>,
+    /// Exchange deadlines the driver reports missed — a completed
+    /// exchange whose frame returned past its deadline counts here as
+    /// well as under `succeeded`.
+    pub missed_deadlines: u64,
 }
 
 /// The driver-facing contract: untyped access to logical I/O points.
@@ -221,6 +259,86 @@ pub trait IoDriver {
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         None
     }
+
+    /// The driver's cyclic-exchange surface: `Some` marks a driver
+    /// implementing the cyclic field-I/O contract —
+    /// [`CyclicIoDriver`] — and the executor then calls
+    /// [`exchange`](CyclicIoDriver::exchange) once per scan at the read
+    /// boundary. `None`, the default, keeps the per-point
+    /// `read`/`write` semantics every existing driver kind has; the
+    /// executor never calls `exchange` on it.
+    ///
+    /// A driver wrapping others forwards or aggregates exactly as it
+    /// does for [`diagnostics`](IoDriver::diagnostics): a write gate
+    /// passes the covered driver's surface through — the exchange is
+    /// not a write, so the gate does not quiesce it — and a fan-out
+    /// answers `Some` when any backend is cyclic, its own `exchange`
+    /// exchanging each cyclic backend's image in turn.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        None
+    }
+}
+
+/// The cyclic field-I/O exchange contract: the opt-in half of
+/// [`IoDriver`] for drivers whose transport exchanges a whole process
+/// image once per scan — the shape a real fieldbus like EtherCAT has.
+///
+/// Where a per-point driver answers each `read`/`write` with its own
+/// transport operation, a cyclic driver keeps two local images: the
+/// *input image* the last completed [`exchange`](Self::exchange)
+/// latched and the *output image* `write` calls stage. `read` serves
+/// the latched image and `write` stages the pending image — neither
+/// may perform a transport operation, and the
+/// [`IoError::UnknownPoint`]/[`IoError::TypeMismatch`] semantics are
+/// unchanged.
+///
+/// The executor detects the contract at wiring through
+/// [`IoDriver::cyclic`] and calls `exchange` once per scan after queued
+/// commands apply and before the per-point input reads. One exchange
+/// publishes the output image staged since the previous exchange —
+/// the last scan's write phase plus this scan's applied command
+/// writes — and latches the returned input image atomically, stamping
+/// each latched sample with the exchange's `tick` as its acquisition
+/// stamp. A value a component writes in scan `t` publishes in scan
+/// `t + 1`'s exchange: the contract's one-scan actuation delay.
+///
+/// The acquisition stamp is what makes a point's declared
+/// `stale_after_ticks` budget meaningful over a fieldbus: the input
+/// phase measures the latched sample's stamp against the scan tick, so
+/// when exchanges stop landing the held samples age to
+/// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` under the
+/// declared budget.
+///
+/// Failure semantics an implementation must hold:
+///
+/// - a failed `exchange` completes nothing: the input image holds its
+///   previous latch and the staged output image is retained for the
+///   next exchange. The executor counts the failure once at the
+///   boundary and the driver's
+///   [`diagnostics`](IoDriver::diagnostics) reports the link
+///   [`LinkState::Disconnected`] — one boundary fault, not a fault per
+///   covered point;
+/// - while consecutive misses stay under the device's declared
+///   `exchange_miss_threshold`, `read` keeps serving the held image;
+///   at or past the threshold reads escalate to
+///   [`IoError::Disconnected`];
+/// - an exchange that completes short — a working-counter shortfall
+///   naming one station — latches the answering stations' data and
+///   degrades only the named station's points, while an
+///   unattributable failure degrades the whole bus;
+/// - `write` staging is local and does not escalate: staged outputs
+///   publish on the next exchange that completes.
+///
+/// The `Err`'s [`IoError`] names a point the exchange covers — its
+/// [`IoError::point`] is diagnostic attribution for the I/O-health
+/// record, not a per-point verdict.
+///
+/// The trait is deliberately open: device integrations implement it
+/// from their own crates, like [`IoDriver`] itself.
+pub trait CyclicIoDriver: IoDriver {
+    /// Runs one process-image exchange for scan `tick`, per the
+    /// contract above.
+    fn exchange(&self, tick: Tick) -> Result<(), IoError>;
 }
 
 mod sealed {
@@ -620,5 +738,48 @@ mod tests {
         ] {
             assert_eq!(serde_json::from_str::<IoError>(legacy).unwrap(), error);
         }
+    }
+
+    #[test]
+    fn driver_diagnostics_serde_roundtrip() {
+        for diagnostics in [
+            // A driver reporting only transport health — a non-cyclic
+            // driver, or a cyclic one before its first exchange.
+            DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: None,
+            },
+            // The cyclic exchange section a `CyclicIoDriver` reports.
+            DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("exchange did not complete".to_string()),
+                exchange: Some(ExchangeDiagnostics {
+                    attempted: 9,
+                    succeeded: 6,
+                    working_counter_mismatches: 1,
+                    last_exchange_tick: Some(Tick(4)),
+                    missed_deadlines: 2,
+                }),
+            },
+        ] {
+            let json = serde_json::to_string(&diagnostics).unwrap();
+            assert_eq!(
+                serde_json::from_str::<DriverDiagnostics>(&json).unwrap(),
+                diagnostics
+            );
+        }
+
+        // Payloads serialized before the cyclic contract existed carry
+        // no `exchange` field; the defaulted section still reads them.
+        let legacy = r#"{"link":"connected","last_error":null}"#;
+        assert_eq!(
+            serde_json::from_str::<DriverDiagnostics>(legacy).unwrap(),
+            DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: None,
+            }
+        );
     }
 }

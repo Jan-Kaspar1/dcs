@@ -24,8 +24,8 @@
 use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
-    StateError, StateMap, Tick, Value, ValueKind,
+    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
+    Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
@@ -1224,9 +1224,15 @@ impl IoDriver for FanoutDriver {
     /// diagnose — otherwise `disconnected` when any reporting backend's
     /// link is down, with each backend's last protocol failure named by
     /// the device it serves.
+    ///
+    /// Each reporting backend's cyclic exchange section merges into the
+    /// aggregate's own: counters sum over the buses and
+    /// `last_exchange_tick` takes the earliest reported — the freshest
+    /// exchange every bus has completed is the aggregate's honest bound.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         let mut link = LinkState::Connected;
         let mut errors = Vec::new();
+        let mut exchange: Option<ExchangeDiagnostics> = None;
         let mut reported = false;
         for backend in &self.backends {
             let Some(diagnostics) = backend.io.diagnostics() else {
@@ -1242,10 +1248,203 @@ impl IoDriver for FanoutDriver {
                     .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
                 errors.push(format!("{name}: {error}"));
             }
+            if let Some(section) = diagnostics.exchange {
+                let merged = exchange.get_or_insert_with(ExchangeDiagnostics::default);
+                merged.attempted += section.attempted;
+                merged.succeeded += section.succeeded;
+                merged.working_counter_mismatches += section.working_counter_mismatches;
+                merged.missed_deadlines += section.missed_deadlines;
+                merged.last_exchange_tick =
+                    match (merged.last_exchange_tick, section.last_exchange_tick) {
+                        (Some(held), Some(fresh)) => Some(held.min(fresh)),
+                        (held, fresh) => held.or(fresh),
+                    };
+            }
         }
         reported.then_some(DriverDiagnostics {
             link,
             last_error: (!errors.is_empty()).then(|| errors.join("; ")),
+            exchange,
         })
+    }
+
+    /// The fan-out answers `Some` — reporting
+    /// [`CyclicIoDriver`](dcs_core::CyclicIoDriver) through itself — when
+    /// any backend implements the cyclic contract; its
+    /// [`exchange`](CyclicIoDriver::exchange) then turns each cyclic
+    /// backend's image in backend order.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        self.backends
+            .iter()
+            .any(|backend| backend.io.cyclic().is_some())
+            .then_some(self)
+    }
+}
+
+/// The fan-out's cyclic surface: each backend owns its process image, so
+/// the aggregate `exchange` calls every cyclic backend's exchange in
+/// turn — one call publishing and latching each bus's image. The first
+/// failing backend ends the call with its error, matching the fan-out's
+/// per-point dispatch semantics: an aggregate is only as strong as its
+/// parts, and a bus the call never reached simply holds its image for
+/// the next scan's exchange.
+impl CyclicIoDriver for FanoutDriver {
+    fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        for backend in &self.backends {
+            if let Some(cyclic) = backend.io.cyclic() {
+                cyclic.exchange(tick)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// A minimal per-point backend with no cyclic surface — the shape
+    /// every shipped kind has.
+    struct PointDriver;
+
+    impl IoDriver for PointDriver {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            Err(IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::UnknownPoint(point))
+        }
+    }
+
+    /// A cyclic backend stub: `exchange` is the only transport call,
+    /// counted and ticked; while `fail` stands every exchange misses.
+    struct CyclicBackend {
+        attempted: AtomicU64,
+        succeeded: AtomicU64,
+        last_tick: Mutex<Option<Tick>>,
+        fail: AtomicBool,
+    }
+
+    impl CyclicBackend {
+        fn new() -> Self {
+            Self {
+                attempted: AtomicU64::new(0),
+                succeeded: AtomicU64::new(0),
+                last_tick: Mutex::new(None),
+                fail: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl IoDriver for CyclicBackend {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            Err(IoError::Disconnected(point))
+        }
+
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::Disconnected(point))
+        }
+
+        fn diagnostics(&self) -> Option<DriverDiagnostics> {
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: Some(ExchangeDiagnostics {
+                    attempted: self.attempted.load(Ordering::Relaxed),
+                    succeeded: self.succeeded.load(Ordering::Relaxed),
+                    working_counter_mismatches: 0,
+                    last_exchange_tick: *self.last_tick.lock().unwrap(),
+                    missed_deadlines: 0,
+                }),
+            })
+        }
+
+        fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+            Some(self)
+        }
+    }
+
+    impl CyclicIoDriver for CyclicBackend {
+        fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+            self.attempted.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(IoError::Disconnected(PointId(0)));
+            }
+            self.succeeded.fetch_add(1, Ordering::Relaxed);
+            *self.last_tick.lock().unwrap() = Some(tick);
+            Ok(())
+        }
+    }
+
+    fn backend(device: u64, io: Arc<dyn IoDriver + Send + Sync>) -> Backend {
+        Backend {
+            device: Some(DeviceId(device)),
+            io,
+            step: None,
+            claim: None,
+            inspect: None,
+            field_facing: false,
+        }
+    }
+
+    #[test]
+    fn fanout_aggregates_the_cyclic_surface_over_its_backends() {
+        // An all-point-wise fan-out is not cyclic — the executor never
+        // calls `exchange` on it.
+        let plain = FanoutDriver {
+            backends: vec![backend(1, Arc::new(PointDriver))],
+            points: HashMap::new(),
+            routes: Vec::new(),
+            sim: None,
+        };
+        assert!(plain.cyclic().is_none());
+
+        // A fan-out with cyclic backends answers `Some`, and one
+        // `exchange` turns each cyclic backend's image in order —
+        // the point-wise backend has no exchange to run.
+        let bus_a = Arc::new(CyclicBackend::new());
+        let bus_b = Arc::new(CyclicBackend::new());
+        let fanout = FanoutDriver {
+            backends: vec![
+                backend(1, bus_a.clone()),
+                backend(2, Arc::new(PointDriver)),
+                backend(3, bus_b.clone()),
+            ],
+            points: HashMap::new(),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+        cyclic.exchange(Tick(7)).unwrap();
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+
+        // A failing backend's error propagates and ends the call —
+        // bus_b, later in order, never saw this exchange.
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(8)),
+            Err(IoError::Disconnected(PointId(0)))
+        );
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 2);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+
+        // The aggregate diagnostics merge each reporting backend's
+        // exchange section: counters sum, the freshest exchange every
+        // bus completed bounds `last_exchange_tick`.
+        let diagnostics = fanout.diagnostics().unwrap();
+        assert_eq!(
+            diagnostics.exchange,
+            Some(ExchangeDiagnostics {
+                attempted: 3,
+                succeeded: 2,
+                working_counter_mismatches: 0,
+                last_exchange_tick: Some(Tick(7)),
+                missed_deadlines: 0,
+            })
+        );
     }
 }

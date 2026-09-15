@@ -11,7 +11,8 @@
 //! gate, the promotion path the follow-up switchover ticket builds on.
 
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, PointId, Sample, StateError, StateMap, Value,
+    CyclicIoDriver, DriverDiagnostics, IoDriver, IoError, PointId, Sample, StateError, StateMap,
+    Value,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,6 +128,15 @@ impl IoDriver for WriteGate<'_> {
     /// standby still wants its field link's health reported.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         self.inner.diagnostics()
+    }
+
+    /// The cyclic surface passes through too: the exchange is not a
+    /// write, so the gate does not quiesce it — a quiesced standby still
+    /// exchanges to keep its input image fresh, and the writes the gate
+    /// dropped never reached the driver's staged output image, so
+    /// nothing the standby computed publishes.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        self.inner.cyclic()
     }
 }
 

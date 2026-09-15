@@ -321,6 +321,7 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
 

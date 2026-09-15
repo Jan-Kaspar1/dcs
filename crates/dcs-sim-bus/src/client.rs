@@ -487,6 +487,8 @@ impl IoDriver for BusDriver {
                 LinkState::Disconnected
             },
             last_error: self.last_failure().map(|error| error.to_string()),
+            // A point-wise driver has no cyclic exchange surface.
+            exchange: None,
         })
     }
 }

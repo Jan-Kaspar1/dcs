@@ -49,8 +49,8 @@ pub use descriptor::{
 pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
 pub use io::{
-    Direction, DriverDiagnostics, Input, IoDriver, IoError, LinkState, Output, PointType,
-    TypedSample,
+    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
+    LinkState, Output, PointType, TypedSample,
 };
 pub use journal::{JournalEntry, JournalEvent};
 pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
