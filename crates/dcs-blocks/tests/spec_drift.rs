@@ -19,19 +19,19 @@ use std::collections::BTreeSet;
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, GateOperation, GroupOutputs,
-    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig,
-    PumpGroup, PumpGroupConfig, PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer,
-    SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer,
-    Totalizer, Valve,
+    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FlowPacedRatio,
+    FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm, ManualStation,
+    MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
+    RateLimiter, RatioOutputs, RotationPolicy, Scaling, Sequencer, SequencerStep, SetpointTable,
+    SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmSpec,
     CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec,
-    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec,
+    MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
+    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -386,6 +386,41 @@ fn specs_match_registered_kinds_descriptors() {
     covered.insert(check(
         &FailoverSelectSpec::new(Default::default()),
         &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4)).describe(),
+    ));
+    // `flow-paced-ratio`'s `trim` is the optional port — declared only
+    // where bound, so the spec is checked against both instances.
+    let fpr_config = FlowPacedRatioConfig {
+        min_dose: 0.5,
+        max_dose: 4.0,
+        min_rate: 0.0,
+        max_rate: 50.0,
+        on_bad_flow: 0,
+        fallback_rate: 12.0,
+        on_bad_trim: 0,
+    };
+    let fpr_outputs = || RatioOutputs {
+        demand: point(4),
+        clamped: point(5),
+        fallback_active: point(6),
+    };
+    covered.insert(check(
+        &FlowPacedRatioSpec::new(Default::default(), true),
+        &FlowPacedRatio::new(
+            "fpr",
+            point(1),
+            point(2),
+            Some(point(3)),
+            fpr_outputs(),
+            fpr_config,
+        )
+        .unwrap()
+        .describe(),
+    ));
+    covered.insert(check(
+        &FlowPacedRatioSpec::new(Default::default(), false),
+        &FlowPacedRatio::new("fpr", point(1), point(2), None, fpr_outputs(), fpr_config)
+            .unwrap()
+            .describe(),
     ));
 
     // The coverage guard: the table must pin exactly the kinds the

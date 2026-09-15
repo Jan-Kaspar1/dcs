@@ -311,6 +311,36 @@ composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
 `BoolLatchingAlarm::KIND`.
 
+The chemical-dosing demand contract architecture decision 50 records
+adds one variable-signature kind. `flow-paced-ratio` reads `flow`
+(`in`, `Float`) — the measured process flow — `dose` (`in`, `Float`)
+— the operator's dose setpoint per flow unit, wired to a writable
+internal `in` point so writes ride the journaled receipted command
+path and the held value crosses checkpoints — and `trim` (`in`,
+`Float`) — the optional analyzer correction, declared on the instance
+only where the model wires one, an unwired `trim` meaning unity. It
+drives `demand` (`out`, `Float`), `clamped` (`out`, `Bool`), and
+`fallback_active` (`out`, `Bool`) — the engagement flag the alarm set
+consumes. Each trusted-`flow` scan emits
+`clamp(dose, min_dose, max_dose) × flow × trim` clamped to
+`[min_rate, max_rate]`, `clamped` asserting while either bound
+engages. The `parameters` are the finite `Float` bounds `min_dose` ≤
+`max_dose` and `min_rate` ≤ `max_rate` plus `fallback_rate`, the `Int`
+code `on_bad_flow` (`0` stop — `demand` falls to zero; `1` hold the
+last `Good`-stamped demand; `2` drive `fallback_rate`), and the `Int`
+code `on_bad_trim` (`0` pace untrimmed on flow alone; `1` hold the
+last `Good` trim); all seven are `SetParameter`-tunable. A non-`Good`
+`dose` holds the last `Good` finite setpoint — `demand` zero and
+`fallback_active` asserted until the first one arrives — and `demand`
+always carries the merged worst-of input qualities, so a bad flow
+marks the demand untrusted even under a hold or fallback response.
+Fixed-rate service is not a kind mode: the operator's fixed demand
+rides a `manual-station`, while `on_bad_flow` `2` makes `fallback_rate`
+the declared fixed answer to a failed pacing signal.
+`crates/dcs-assembly/fixtures/flow_paced_ratio.json` is the recorded
+composition — three instances covering each `on_bad_flow` response,
+one trim-bound; per-port semantics live beside `FlowPacedRatio::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
@@ -497,6 +527,7 @@ object whose single key is the snake_case element name:
 | `noise` | `input`, `output`, `amplitude`, `seed`, `initial` | `y = u + amplitude·(2x − 1)`, `x` drawn once per step from a splitmix64 generator seeded by `seed` — the output stays within `u ± amplitude` and identical seeds replay identical deviation sequences. |
 | `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a bool-gated flow source answering an actuator's run command. `input` is the one non-float element end: a `bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
 | `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
+| `scaled_flow` | `input`, `output`, `gain`, `initial` | `y = gain · u`, re-evaluated each step — a `float` demand scaled into the signed rate a downstream `flow_sum` or `integrator` consumes: a metering pump's measured discharge at its analog speed demand, a chemical tank's drawdown under a negative `gain`. `dt` does not scale the output. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
@@ -512,9 +543,9 @@ point it drives):
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
-  `off_rate`, and `bias` finite (`InvalidRate`, `NonFiniteBias` — rates
-  are signed flows, so a negative draw is legal), and `initial` finite
-  (`NonFiniteInitial`);
+  `off_rate`, `gain`, and `bias` finite (`InvalidRate`, `InvalidGain`,
+  `NonFiniteBias` — rates and gains are signed, so a negative draw is
+  legal), and `initial` finite (`NonFiniteInitial`);
 - a non-`Good` input freezes the element's state and propagates its
   quality to the output sample — a `flow_sum` propagating the worst of
   its inputs' qualities;
@@ -545,7 +576,12 @@ command:
 the showcase plant's; `crates/dcs-sim/fixtures/pump_station_dynamics.json`
 is the station loop `bool_flow` and `flow_sum` exist for — two bool-gated
 pump draws and a declared inflow summed into an integrator driving the
-well level.
+well level; and `crates/dcs-sim/fixtures/dosing_skid_dynamics.json` is
+the dosing loop `scaled_flow` exists for — the metering pump's analog
+speed demand scaled into the measured discharge rate and, with a
+negative gain, the chemical tank's drawdown, integrated into the tank
+level — merging onto `crates/dcs-plant/fixtures/dosing_skid.json`'s
+points.
 
 ## Which layer checks what
 

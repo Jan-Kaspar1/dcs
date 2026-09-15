@@ -135,8 +135,10 @@ impl ElementState {
     /// delay line at the new time and outputs the newest sample at or
     /// before `t - delay`; the noise element draws once from its
     /// generator and outputs `u + amplitude · (2x − 1)` for the draw
-    /// `x`, staying within `u ± amplitude`. All are pure functions of
-    /// their arguments and stored state, keeping stepping deterministic.
+    /// `x`, staying within `u ± amplitude`; the scaled flow stands at
+    /// `gain · u` — a rate, not an increment, so `dt` does not scale
+    /// it. All are pure functions of their arguments and stored state,
+    /// keeping stepping deterministic.
     fn advance(&mut self, u: f64, dt: f64) -> f64 {
         match &self.element {
             ProcessElement::FirstOrderLag(element) => {
@@ -176,6 +178,7 @@ impl ElementState {
                 let x = splitmix64_next(&mut self.rng);
                 u + element.amplitude * (2.0 * x - 1.0)
             }
+            ProcessElement::ScaledFlow(element) => element.gain * u,
             ProcessElement::BoolFlow(_) | ProcessElement::FlowSum(_) => {
                 unreachable!("bool_flow and flow_sum step on SimDriver::step's own paths")
             }
@@ -418,7 +421,8 @@ impl SimDriver {
     ///    pushes the input onto its delay line; for a noise element,
     ///    draws the next deviation from its generator; a `bool_flow`
     ///    stands its `on_rate` or `off_rate` by its `Bool` gate; a
-    ///    `flow_sum` sums its declared `Float` inputs plus `bias` — and
+    ///    `flow_sum` sums its declared `Float` inputs plus `bias`; a
+    ///    `scaled_flow` stands at `gain` times its `Float` input — and
     ///    stamps `Good`; a non-`Good` input freezes the element's state,
     ///    delay-line clock and generator included, and propagates its
     ///    quality to the output sample — a `flow_sum` propagating the
@@ -753,7 +757,7 @@ mod tests {
     use super::*;
     use crate::map::{
         BoolFlow, ChannelId, DeadTime, Direction, FirstOrderLag, FlowSum, Integrator, Noise,
-        PointBinding, SecondOrderLag,
+        PointBinding, ScaledFlow, SecondOrderLag,
     };
     use dcs_core::{Input, Output, QualityReason};
 
@@ -2527,5 +2531,356 @@ mod tests {
         sim.write(PointId(20), Value::Bool(true)).unwrap();
         sim.step(1.0);
         assert_eq!(level(&sim), 44.0);
+    }
+
+    /// A `scaled_flow` element scaling an analog demand `Out` point
+    /// onto a driven `Float` rate.
+    fn scaled_flow_map(gain: f64) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(1),
+                output: PointId(2),
+                gain,
+                initial: -1.0,
+            }))
+    }
+
+    #[test]
+    fn scaled_flow_drives_gain_times_the_input_at_tick_boundaries() {
+        let sim = SimDriver::new(scaled_flow_map(0.5)).unwrap();
+        // Before the first step the output holds the declared initial.
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(-1.0));
+
+        // The output stands at gain × the standing demand from the
+        // first step reading it — a rate, so `dt` does not scale it.
+        sim.write(PointId(1), Value::Float(50.0)).unwrap();
+        for dt in [1.0, 0.25, 3.0] {
+            sim.step(dt);
+            assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(25.0));
+        }
+
+        // A changed demand lands at the next tick boundary.
+        sim.write(PointId(1), Value::Float(20.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(10.0));
+
+        // A negative gain declares a draw: the output is the signed
+        // rate while the demand stands.
+        let draw = SimDriver::new(scaled_flow_map(-0.5)).unwrap();
+        draw.write(PointId(1), Value::Float(50.0)).unwrap();
+        draw.step(1.0);
+        assert_eq!(draw.read(PointId(2)).unwrap().value, Value::Float(-25.0));
+    }
+
+    #[test]
+    fn non_good_scaled_flow_input_freezes_output_and_propagates_quality() {
+        let sim = SimDriver::new(scaled_flow_map(0.5)).unwrap();
+        sim.write(PointId(1), Value::Float(50.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(25.0));
+
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        // A write behind the fault is stored but not consumed.
+        sim.write(PointId(1), Value::Float(80.0)).unwrap();
+        for _ in 0..2 {
+            sim.step(1.0);
+            let sample = sim.read(PointId(2)).unwrap();
+            // The documented rule: a non-Good input freezes the
+            // output and propagates its quality.
+            assert_eq!(sample.value, Value::Float(25.0));
+            assert_eq!(sample.quality, quality);
+        }
+
+        // Clearing the fault resumes the scaling on the first Good
+        // step: the stored 80.0 drives gain × 80.
+        sim.clear_fault(PointId(1)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(2)).unwrap();
+        assert_eq!(sample.value, Value::Float(40.0));
+        assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn scaled_flow_rejects_invalid_gain_and_point_kinds() {
+        // The gain must be finite; the rejection names the element's
+        // driven point.
+        for gain in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                scaled_flow_map(gain).validate().unwrap_err(),
+                ConfigError::InvalidGain {
+                    point: PointId(2),
+                    value,
+                } if !value.is_finite()
+            ));
+        }
+
+        // A negative gain is a declared draw and a zero gain a
+        // stopped actuator — signed rates, not errors.
+        assert!(scaled_flow_map(-10.0).validate().is_ok());
+        assert!(scaled_flow_map(0.0).validate().is_ok());
+
+        // The input must be a Float point.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(1),
+                output: PointId(2),
+                gain: 0.5,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+
+        // The driven point must be Float.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(1),
+                output: PointId(2),
+                gain: 0.5,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(2),
+                kind: ValueKind::Bool,
+            }
+        );
+
+        // An unbound end is unknown, like any element end.
+        let map = ChannelMap::new()
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(9),
+                output: PointId(2),
+                gain: 0.5,
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::UnknownPoint(PointId(9))
+        );
+
+        // The initial value must be finite.
+        let mut map = scaled_flow_map(0.5);
+        map.elements = vec![ProcessElement::ScaledFlow(ScaledFlow {
+            input: PointId(1),
+            output: PointId(2),
+            gain: 0.5,
+            initial: f64::INFINITY,
+        })];
+        assert!(matches!(
+            map.validate().unwrap_err(),
+            ConfigError::NonFiniteInitial { point, .. } if point == PointId(2)
+        ));
+    }
+
+    #[test]
+    fn scaled_flow_serde_roundtrips() {
+        let map = scaled_flow_map(-0.5);
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"scaled_flow\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    #[test]
+    fn captured_state_restores_scaled_flow_output_mid_run() {
+        // The element's only state is its standing output; a captured
+        // run continues identically through a fresh driver.
+        let map = scaled_flow_map(0.5);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(50.0)).unwrap();
+        sim.step(1.0);
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        for _ in 0..5 {
+            sim.step(1.0);
+            fresh.step(1.0);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
+    }
+
+    /// The dosing loop this element exists for: the metering pump's
+    /// analog speed demand scaled into the measured discharge rate
+    /// and — with a negative gain — into the chemical tank's drawdown
+    /// rate, integrated into the tank level. The same declaration
+    /// `fixtures/dosing_skid_dynamics.json` carries.
+    fn dosing_map() -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(10, Direction::In)) // tank level
+            .with_point(float_point(11, Direction::In)) // measured discharge rate
+            .with_point(float_point(12, Direction::In)) // tank draw
+            .with_point(float_point(20, Direction::Out)) // speed demand
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(20),
+                output: PointId(11),
+                gain: 0.5,
+                initial: 0.0,
+            }))
+            .with_element(ProcessElement::ScaledFlow(ScaledFlow {
+                input: PointId(20),
+                output: PointId(12),
+                gain: -0.5,
+                initial: 0.0,
+            }))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(12),
+                output: PointId(10),
+                initial: 100.0,
+            }))
+    }
+
+    #[test]
+    fn an_analog_demand_drains_the_tank_proportionally_while_it_stands() {
+        let sim = SimDriver::new(dosing_map()).unwrap();
+        // The integrator seeds the tank at its declared initial level
+        // and the rates hold their declared initials.
+        assert_eq!(level(&sim), 100.0);
+        assert_eq!(sim.read(PointId(11)).unwrap().value, Value::Float(0.0));
+
+        // The zeroed demand drives zero rates; the tank holds.
+        sim.step(1.0);
+        assert_eq!(level(&sim), 100.0);
+
+        // The demand standing at 50, the discharge reads 0.5 × 50 and
+        // the tank draws down the same 25 per time unit, step after
+        // step.
+        sim.write(PointId(20), Value::Float(50.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(11)).unwrap().value, Value::Float(25.0));
+        assert_eq!(sim.read(PointId(12)).unwrap().value, Value::Float(-25.0));
+        assert_eq!(level(&sim), 75.0);
+        sim.step(1.0);
+        assert_eq!(level(&sim), 50.0);
+
+        // A changed demand re-scales the draw at the next tick
+        // boundary: 0.5 × 20 = 10 per time unit.
+        sim.write(PointId(20), Value::Float(20.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(11)).unwrap().value, Value::Float(10.0));
+        assert_eq!(level(&sim), 40.0);
+
+        // Zeroing the demand stops the draw; the level holds.
+        sim.write(PointId(20), Value::Float(0.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(sim.read(PointId(11)).unwrap().value, Value::Float(0.0));
+        assert_eq!(level(&sim), 40.0);
+    }
+
+    /// One scripted run over the dosing loop, returning the level and
+    /// discharge sequence identical runs and restored runs must
+    /// reproduce.
+    fn dosing_run(sim: &SimDriver) -> Vec<Sample> {
+        let mut samples = Vec::new();
+        for demand in [0.0, 50.0, 20.0, 0.0] {
+            sim.write(PointId(20), Value::Float(demand)).unwrap();
+            for _ in 0..3 {
+                sim.step(0.5);
+                samples.push(sim.read(PointId(10)).unwrap());
+                samples.push(sim.read(PointId(11)).unwrap());
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn identical_dosing_runs_produce_identical_samples() {
+        let first = dosing_run(&SimDriver::new(dosing_map()).unwrap());
+        let second = dosing_run(&SimDriver::new(dosing_map()).unwrap());
+        assert_eq!(first, second);
+        // The run actually drew the tank down.
+        let levels: Vec<f64> = first
+            .iter()
+            .step_by(2)
+            .map(|sample| match sample.value {
+                Value::Float(y) => y,
+                _ => panic!("the level point is Float"),
+            })
+            .collect();
+        assert!(levels.iter().any(|&y| y < levels[0]), "{levels:?}");
+    }
+
+    #[test]
+    fn captured_state_restores_the_dosing_loop_mid_run() {
+        let map = dosing_map();
+        let sim = SimDriver::new(map.clone()).unwrap();
+        // Capture mid-run, the demand standing: every element's state
+        // — the integrator's level included — crosses to the fresh
+        // driver, which then continues the sequence identically.
+        sim.write(PointId(20), Value::Float(50.0)).unwrap();
+        for _ in 0..3 {
+            sim.step(0.5);
+        }
+        let state = sim.capture_state().unwrap();
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        assert_eq!(level(&fresh), level(&sim));
+        let continued = dosing_run(&sim);
+        let restored = dosing_run(&fresh);
+        assert_eq!(restored, continued);
+    }
+
+    /// The checked-in dynamics document this issue adds: the dosing
+    /// loop as declared data, the same file `dcs-plant-server
+    /// --dynamics` and `dcs-sim-bus-device --dynamics` merge.
+    const DOSING_DYNAMICS: &str = include_str!("../fixtures/dosing_skid_dynamics.json");
+
+    #[test]
+    fn the_dosing_dynamics_document_declares_the_loop() {
+        let elements: Vec<ProcessElement> = serde_json::from_str(DOSING_DYNAMICS)
+            .expect("the document parses as process-element declarations");
+        let [
+            ProcessElement::ScaledFlow(discharge),
+            ProcessElement::ScaledFlow(draw),
+            ProcessElement::Integrator(tank),
+        ] = elements.as_slice()
+        else {
+            panic!("the document is two scaled_flows and an integrator")
+        };
+        assert_eq!(
+            (discharge.input, discharge.output, discharge.gain),
+            (PointId(20), PointId(11), 0.5)
+        );
+        assert_eq!(
+            (draw.input, draw.output, draw.gain),
+            (PointId(20), PointId(12), -0.5)
+        );
+        assert_eq!((tank.input, tank.output), (PointId(12), PointId(10)));
+
+        // Merged onto the skid's bound points, the document builds
+        // the identical map the coded constructor does.
+        let mut map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(float_point(11, Direction::In))
+            .with_point(float_point(12, Direction::In))
+            .with_point(float_point(20, Direction::Out));
+        for element in elements {
+            map = map.with_element(element);
+        }
+        assert_eq!(map, dosing_map());
+
+        // ...and the merged map runs the loop.
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(20), Value::Float(50.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(level(&sim), 75.0);
     }
 }

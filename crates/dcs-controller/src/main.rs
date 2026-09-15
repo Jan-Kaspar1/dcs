@@ -150,7 +150,7 @@ use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{Driven, Monitor, MonitorClient, MonitorConfig};
-use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, WriteGate};
+use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -821,39 +821,18 @@ fn main() -> ExitCode {
                 run_monitored(
                     &monitor,
                     || {
-                        if !monitor.owns_field() {
-                            match client.checkpoint() {
-                                Ok(checkpoint) => {
-                                    if let Err(error) = monitor.transfer_checkpoint(&checkpoint) {
-                                        eprintln!(
-                                            "standby: rejected checkpoint from {active_addr}: {error}"
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    monitor.note_transfer_failed(format!(
-                                        "fetch from {active_addr}: {error}"
-                                    ));
-                                    eprintln!("standby: fetch from {active_addr} failed: {error}");
-                                }
-                            }
-                            // The heartbeat miss reached the configured
-                            // budget: a still-converged standby promotes
-                            // itself at this boundary; a refusal leaves
-                            // the named convergence state reporting on
-                            // GET /role.
-                            if monitor.failover_due() {
-                                match monitor.self_promote() {
-                                    Ok(report) => eprintln!(
-                                        "standby: {active_addr} unreachable; self-promoted (role {})",
-                                        report.role
-                                    ),
-                                    Err(error) => eprintln!(
-                                        "standby: failover due but self-promotion refused: {error}"
-                                    ),
-                                }
-                            }
-                        }
+                        // The standby's per-scan tracking: one pull, the
+                        // miss accounting, and the promote-on-budget
+                        // sequence — `Peer::track_once` under the
+                        // monitor's lock, its queued transitions
+                        // journaled by the recorder; the report is the
+                        // loop's log lines.
+                        let report = monitor.track_cycle(|| {
+                            client
+                                .checkpoint()
+                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
+                        });
+                        report_tracking(&report, active_addr);
                         monitor.paced_scan()
                     },
                     step,
@@ -870,41 +849,30 @@ fn main() -> ExitCode {
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
-                        if !peer.owns_field() {
-                            match client.checkpoint() {
-                                Ok(checkpoint) => {
-                                    if let Err(error) = peer.transfer(&checkpoint) {
-                                        eprintln!(
-                                            "standby: rejected checkpoint from {active_addr}: {error}"
-                                        );
-                                    }
-                                    for report in peer.take_divergences() {
-                                        eprintln!(
-                                            "standby: staged outputs diverged from the field at tick {}: {:?}",
-                                            report.tick.0, report.mismatches
-                                        );
-                                    }
-                                    for report in peer.take_reinitializations() {
-                                        eprintln!("standby: {report}");
-                                    }
-                                }
-                                Err(error) => {
-                                    peer.note_transfer_failed(format!(
-                                        "fetch from {active_addr}: {error}"
-                                    ));
-                                    eprintln!("standby: fetch from {active_addr} failed: {error}");
-                                }
-                            }
-                            if peer.failover_due() {
-                                match peer.self_promote() {
-                                    Ok(()) => eprintln!(
-                                        "standby: {active_addr} unreachable; self-promoted"
-                                    ),
-                                    Err(error) => eprintln!(
-                                        "standby: failover due but self-promotion refused: {error}"
-                                    ),
-                                }
-                            }
+                        // The same tracking cycle the monitored loop
+                        // runs through `track_cycle`, here directly on
+                        // the peer; without a recorder the transition
+                        // queues drain into the log instead.
+                        let report = peer.track_once(|| {
+                            client
+                                .checkpoint()
+                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
+                        });
+                        report_tracking(&report, active_addr);
+                        for divergence in peer.take_divergences() {
+                            eprintln!(
+                                "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                divergence.tick.0, divergence.mismatches
+                            );
+                        }
+                        for reinitialized in peer.take_reinitializations() {
+                            eprintln!("standby: {reinitialized}");
+                        }
+                        for change in peer.take_role_changes() {
+                            eprintln!(
+                                "standby: role {} -> {} at tick {}",
+                                change.from, change.to, change.tick.0
+                            );
                         }
                         peer.scan()
                     },
@@ -962,6 +930,32 @@ fn main() -> ExitCode {
                     period,
                 )
             }
+        }
+    }
+}
+
+/// The standby loop's presentation half of a tracking cycle: logs what
+/// the [`TrackReport`] `Peer::track_once` returned describes — a refused
+/// checkpoint, a produced-nothing pull counted as a heartbeat miss, or
+/// the failover self-promotion the miss budget triggered (and its named
+/// refusal). `active` is the pulled peer's monitoring address.
+fn report_tracking(report: &TrackReport, active: SocketAddr) {
+    match report {
+        TrackReport::OwnsField | TrackReport::Applied(_) => {}
+        TrackReport::Refused(error) => {
+            eprintln!("standby: rejected checkpoint from {active}: {error}");
+        }
+        TrackReport::Missed { detail } => eprintln!("standby: {detail}"),
+        TrackReport::Promoted { detail, report } => {
+            eprintln!("standby: {detail}");
+            eprintln!(
+                "standby: {active} unreachable; self-promoted (role {})",
+                report.role
+            );
+        }
+        TrackReport::PromotionRefused { detail, error } => {
+            eprintln!("standby: {detail}");
+            eprintln!("standby: failover due but self-promotion refused: {error}");
         }
     }
 }

@@ -241,6 +241,35 @@ pub struct FlowSum {
     pub initial: f64,
 }
 
+/// A scaling flow source: `y = gain · u`, re-evaluated each step.
+///
+/// The element answers an actuator's `Float` demand with the rate the
+/// running actuator produces at that demand — a metering pump's
+/// discharge at its analog speed command, a chemical tank's drawdown
+/// tracking the same demand — so a dynamics document can close a
+/// proportionally driven loop `bool_flow`'s fixed on/off rates cannot
+/// express. The input is a `Float` point (typically the controller's
+/// `Out` demand), the output a `Float` rate: each step the input reads
+/// `u`, the output stands at `gain · u`. Gains are signed — a negative
+/// `gain` declares a draw on a summed balance — and only finiteness is
+/// validated. Like a [`BoolFlow`], the element holds no dynamics: `dt`
+/// does not scale the output — rates, not increments, are what a
+/// downstream [`FlowSum`] and [`Integrator`] consume — and `initial`
+/// covers only the reads before the first `Good` step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ScaledFlow {
+    /// The point read as input `u`; must be a `Float` point.
+    pub input: PointId,
+    /// The point the element drives; must be a `Float` point.
+    pub output: PointId,
+    /// The proportion between input and output — a pump's rate per
+    /// unit of demand, negative for a draw on a summed balance. Must
+    /// be finite.
+    pub gain: f64,
+    /// The output value before the first step. Must be finite.
+    pub initial: f64,
+}
+
 /// A simulated process element advancing one point's value from other
 /// points'.
 ///
@@ -268,6 +297,8 @@ pub enum ProcessElement {
     BoolFlow(BoolFlow),
     /// A [`FlowSum`].
     FlowSum(FlowSum),
+    /// A [`ScaledFlow`].
+    ScaledFlow(ScaledFlow),
 }
 
 impl ProcessElement {
@@ -285,6 +316,7 @@ impl ProcessElement {
             Self::Noise(element) => Some(element.input),
             Self::BoolFlow(element) => Some(element.input),
             Self::FlowSum(_) => None,
+            Self::ScaledFlow(element) => Some(element.input),
         }
     }
 
@@ -300,6 +332,7 @@ impl ProcessElement {
             Self::Noise(element) => std::slice::from_ref(&element.input),
             Self::BoolFlow(element) => std::slice::from_ref(&element.input),
             Self::FlowSum(element) => &element.inputs,
+            Self::ScaledFlow(element) => std::slice::from_ref(&element.input),
         }
     }
 
@@ -313,6 +346,7 @@ impl ProcessElement {
             Self::Noise(element) => element.output,
             Self::BoolFlow(element) => element.output,
             Self::FlowSum(element) => element.output,
+            Self::ScaledFlow(element) => element.output,
         }
     }
 
@@ -326,6 +360,7 @@ impl ProcessElement {
             Self::Noise(element) => element.initial,
             Self::BoolFlow(element) => element.initial,
             Self::FlowSum(element) => element.initial,
+            Self::ScaledFlow(element) => element.initial,
         }
     }
 }
@@ -390,8 +425,8 @@ impl ChannelMap {
     /// - element ends are `Float` points — except a `bool_flow`'s gate
     ///   input, which must be a `Bool` point — `time_constant`, `delay`,
     ///   and `damping_ratio` are finite and positive, `amplitude` is
-    ///   finite and non-negative, `on_rate`, `off_rate`, and `bias` are
-    ///   finite, and `initial` is finite;
+    ///   finite and non-negative, `on_rate`, `off_rate`, `gain`, and
+    ///   `bias` are finite, and `initial` is finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -481,6 +516,14 @@ impl ChannelMap {
                 return Err(ConfigError::NonFiniteBias {
                     point: sum.output,
                     value: sum.bias,
+                });
+            }
+            if let ProcessElement::ScaledFlow(flow) = element
+                && !flow.gain.is_finite()
+            {
+                return Err(ConfigError::InvalidGain {
+                    point: flow.output,
+                    value: flow.gain,
                 });
             }
             if let ProcessElement::FirstOrderLag(lag) = element
@@ -627,6 +670,13 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A `scaled_flow` element's `gain` is not finite.
+    InvalidGain {
+        /// The element's output point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// An element's `initial` is not finite.
     NonFiniteInitial {
         /// The element's output point.
@@ -713,6 +763,11 @@ impl fmt::Display for ConfigError {
             Self::NonFiniteBias { point, value } => write!(
                 f,
                 "flow_sum element driving point {} has non-finite bias {value}",
+                point.0
+            ),
+            Self::InvalidGain { point, value } => write!(
+                f,
+                "scaled_flow element driving point {} has non-finite gain {value}",
                 point.0
             ),
             Self::NonFiniteInitial { point, value } => write!(

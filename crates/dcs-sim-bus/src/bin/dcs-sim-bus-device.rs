@@ -17,8 +17,8 @@
 //! `--dynamics` merges a device-side dynamics document: a JSON list of
 //! [`ProcessElement`] declarations (`first_order_lag`,
 //! `second_order_lag`, `integrator`, `dead_time`, `noise`, `bool_flow`,
-//! `flow_sum`) standing in for field physics — the same seam
-//! `dcs-plant-server --dynamics` serves, with the document's
+//! `flow_sum`, `scaled_flow`) standing in for field physics — the same
+//! seam `dcs-plant-server --dynamics` serves, with the document's
 //! point-valued fields carrying register addresses. Each element is
 //! validated as it merges, so a rejection names the element and the
 //! register it drives. Element state is bank state — the served field,
@@ -65,9 +65,9 @@ it on ADDR until signaled (SIGINT/SIGTERM).
   --device ID      the sim-bus device to serve (required)
   --dynamics FILE  merge a JSON list of process-element declarations —
                    first_order_lag, second_order_lag, integrator,
-                   dead_time, noise, bool_flow, flow_sum — over the
-                   bank's registers; an element's point-valued fields
-                   carry register addresses
+                   dead_time, noise, bool_flow, flow_sum, scaled_flow —
+                   over the bank's registers; an element's point-valued
+                   fields carry register addresses
   --listen ADDR    serve the register protocol on ADDR; defaults to the
                    device's declared \"address\" parameter — a port of 0
                    binds an ephemeral port, reported on stderr
