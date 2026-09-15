@@ -196,9 +196,17 @@ impl PlantBuilder {
             id,
             kind: kind.to_string(),
             channels: BTreeMap::new(),
+            hardware: false,
             parameters: BTreeMap::new(),
         });
         self.devices.last_mut().unwrap()
+    }
+
+    /// The device `id` names, mutable — the crate-internal accessor the
+    /// device-kind surfaces (e.g. [`ethercat`](crate::ethercat)) use to
+    /// populate a declared device's `parameters`.
+    pub(crate) fn device_mut(&mut self, id: DeviceId) -> Option<&mut Device> {
+        self.devices.iter_mut().find(|device| device.id == id)
     }
 
     /// Declares a channel of `name` on `device`, carrying `direction`

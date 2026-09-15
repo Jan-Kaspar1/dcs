@@ -14,6 +14,7 @@ serde_json = "1.0.151"
 dcs-assembly = { path = "../dcs-assembly" }
 dcs-controller = { path = "../dcs-controller" }
 dcs-core = { path = "../dcs-core" }
+dcs-ethercat = { path = "../dcs-ethercat" }
 dcs-monitor = { path = "../dcs-monitor" }
 dcs-runtime = { path = "../dcs-runtime" }
 dcs-sim = { path = "../dcs-sim" }

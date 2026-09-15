@@ -44,6 +44,20 @@ pub struct Device {
     pub kind: String,
     /// The device's channels, keyed by channel name.
     pub channels: BTreeMap<String, Channel>,
+    /// Whether the device's kind is hardware-bound: `true` marks a
+    /// device whose kind requires physical field hardware — the model's
+    /// visible evidence that no simulated backend may serve it. The
+    /// kind's registered factory enforces the marker both ways: a
+    /// hardware-bound kind rejects a device that omits it, and a
+    /// simulated kind rejects a device that carries it — so a model
+    /// declaring a hardware kind fails startup if the hardware cannot
+    /// initialize rather than silently falling back to simulation.
+    ///
+    /// Optional like [`IoPoint::writable`]: documents that predate it
+    /// deserialize as `false`, and `false` serializes back without the
+    /// key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hardware: bool,
     /// Kind-specific addressing and configuration parameters for the
     /// device's driver integration — e.g. a remote endpoint. The model
     /// treats them as opaque; the registered device-kind factory
@@ -587,6 +601,41 @@ mod tests {
         let reloaded = PlantModel::load(&json).unwrap();
         assert!(!reloaded.io_points[0].journaled);
         assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    /// The `ethercat` declaration fixture: a hardware-bound device
+    /// carrying the field-bus identity, process-image mapping, and
+    /// startup policy under `Device.parameters`.
+    const ETHERCAT: &str = include_str!("../../dcs-assembly/fixtures/ethercat.json");
+
+    #[test]
+    fn documents_predating_hardware_load_unchanged() {
+        // Devices without the optional field deserialize `hardware` as
+        // `false`, and `false` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.devices.iter().all(|device| !device.hardware));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"hardware\""), "{json}");
+    }
+
+    #[test]
+    fn ethercat_fixture_loads_validates_and_roundtrips() {
+        // The hardware-bound declaration: the model layer reads the
+        // marker and leaves the kind-specific parameter grammar to the
+        // kind's factory — the document loads, validates, and
+        // round-trips under MODEL_VERSION unchanged.
+        let model = PlantModel::load(ETHERCAT).unwrap();
+        assert_eq!(model.version, MODEL_VERSION);
+        assert!(model.devices[0].hardware);
+        assert_eq!(model.devices[0].kind, "ethercat");
+        assert!(model.validate().is_empty(), "{:?}", model.validate());
+
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"hardware\": true"), "{json}");
+        assert!(json.contains("\"bus\": \"ecat0\""), "{json}");
+        let reloaded = PlantModel::load(&json).unwrap();
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
     }

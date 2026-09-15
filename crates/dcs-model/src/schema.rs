@@ -29,8 +29,10 @@
 //!   so a `float` point's per-scan stream is rejected from it;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
-//!   additionally requires the `registers` map, and `sim-scripted`
-//!   requires the `script` map — the parts of each kind's contract JSON
+//!   additionally requires the `registers` map, `sim-scripted` requires
+//!   the `script` map, and `ethercat` requires the `hardware` marker plus
+//!   the `bus`, `identity`, `mapping`, `exchange_miss_threshold`, and
+//!   `startup` parameter shapes — the parts of each kind's contract JSON
 //!   Schema can write down. Other kinds' parameters stay unconstrained
 //!   objects: the `sim*` prefix family is open-ended, so the schema does
 //!   not pin its parameter rule (the standard `sim` factory rejecting all
@@ -60,7 +62,11 @@
 //!   resolves, a `registers` map covering exactly the declared channels
 //!   with no shared register, a `script` keyed to bound `in` channels with
 //!   per-entry values matching the channel kind and strictly increasing
-//!   ticks;
+//!   ticks, an `ethercat` `mapping` placing every declared channel in the
+//!   image matching its direction at non-overlapping offsets shaped for
+//!   its value kind, and `safe_outputs` covering exactly the `out`
+//!   channels — those depend on the channel table the document declares
+//!   elsewhere;
 //! - the lexical integer/float distinction — JSON Schema compares numbers
 //!   mathematically, so `1.0` passes an integer field the serde loader
 //!   rejects;
@@ -114,7 +120,30 @@ const SCHEMA_SOURCE: &str = r##"{
     "direction": { "enum": ["in", "out"] },
     "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },
+    "u32-int": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "register-index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "image-offset": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["byte", "bit"],
+          "properties": {
+            "byte": { "$ref": "#/$defs/u32-int" },
+            "bit": { "type": "integer", "minimum": 0, "maximum": 7 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["byte", "bits"],
+          "properties": {
+            "byte": { "$ref": "#/$defs/u32-int" },
+            "bits": { "enum": [8, 16, 32, 64] }
+          }
+        }
+      ]
+    },
     "bool-value": {
       "type": "object",
       "additionalProperties": false,
@@ -210,6 +239,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
         },
+        "hardware": { "type": "boolean" },
         "parameters": { "type": "object" }
       },
       "allOf": [
@@ -288,6 +318,76 @@ const SCHEMA_SOURCE: &str = r##"{
                     "additionalProperties": {
                       "type": "array",
                       "items": { "$ref": "#/$defs/script-entry" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "ethercat" } }
+          },
+          "then": {
+            "required": ["hardware", "parameters"],
+            "properties": {
+              "hardware": { "const": true },
+              "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "bus",
+                  "identity",
+                  "mapping",
+                  "exchange_miss_threshold",
+                  "startup"
+                ],
+                "properties": {
+                  "bus": { "type": "string", "minLength": 1 },
+                  "identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["vendor", "product", "revision"],
+                    "properties": {
+                      "vendor": { "$ref": "#/$defs/u32-int" },
+                      "product": { "$ref": "#/$defs/u32-int" },
+                      "revision": { "$ref": "#/$defs/u32-int" }
+                    }
+                  },
+                  "mapping": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "inputs": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        }
+                      },
+                      "outputs": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        }
+                      }
+                    }
+                  },
+                  "exchange_miss_threshold": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "safe_outputs": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/value" }
+                  },
+                  "startup": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["on_mismatch"],
+                    "properties": {
+                      "on_mismatch": { "const": "fail" }
                     }
                   }
                 }

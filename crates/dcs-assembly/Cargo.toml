@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 dcs-core = { path = "../dcs-core" }
+dcs-ethercat = { path = "../dcs-ethercat" }
 dcs-model = { path = "../dcs-model" }
 dcs-runtime = { path = "../dcs-runtime" }
 dcs-sim = { path = "../dcs-sim" }
