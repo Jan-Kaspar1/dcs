@@ -27,6 +27,9 @@
 //!   analog signal;
 //! - [`LatchingAlarm`] — the same limit checking plus an
 //!   operator-acknowledgment latch driven by an `ack` input;
+//! - [`BoolLatchingAlarm`] — the Bool-input latching sibling: `alarm`
+//!   follows a Bool condition and `unacknowledged` latches its fresh
+//!   assertion until the same `ack` rule clears it;
 //! - [`Interlock`] — analog pass-through gated by Bool trip inputs and a
 //!   permissive, driving a configured safe value while tripped;
 //! - [`OverrideSelect`] — deterministic selection between a control and
@@ -81,6 +84,7 @@ mod alarm_monitor;
 mod analog_input;
 mod analog_output;
 mod bool_gate;
+mod bool_latching_alarm;
 mod counter;
 pub mod describe;
 mod digital_input;
@@ -109,6 +113,7 @@ pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
 pub use analog_output::{AnalogOutput, RawOutput};
 pub use bool_gate::{BoolGate, GateOperation};
+pub use bool_latching_alarm::BoolLatchingAlarm;
 pub use counter::Counter;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
@@ -150,6 +155,7 @@ pub const KINDS: &[&str] = &[
     DigitalOutput::KIND,
     AlarmMonitor::KIND,
     LatchingAlarm::KIND,
+    BoolLatchingAlarm::KIND,
     Interlock::KIND,
     OverrideSelect::KIND,
     Valve::KIND,
