@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+from . import findings
 from . import review
 
 DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests']
@@ -17,4 +18,5 @@ def load(path=None):
     config.setdefault('poll_seconds', 60)
     config.setdefault('timeout_seconds', 7200)
     config['review'] = review.settings(config)
+    config['qa'] = findings.settings(config)
     return config
