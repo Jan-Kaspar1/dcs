@@ -1089,10 +1089,12 @@ impl<'d> Executor<'d> {
     /// The checkpoint bundles the current tick, every component's
     /// [`capture_state`](Component::capture_state) keyed by name (empty
     /// for stateless components), the driver's captured state when it
-    /// implements the contract, and the image-carried point samples: the
+    /// implements the contract, the image-carried point samples: the
     /// `Out` samples — the last written output values — plus the internal
-    /// `In` samples, so held operator values and link carriers transfer.
-    /// It is serde-serializable, so an active
+    /// `In` samples, so held operator values and link carriers transfer,
+    /// and the command receipt log — the run's audit — so `GET /receipts`
+    /// answers identically on a peer that adopted the checkpoint. It is
+    /// serde-serializable, so an active
     /// controller can ship it to a standby over the same JSON channel the
     /// monitoring contract uses. See the [`Checkpoint`] docs for how this
     /// maps to real redundancy.
@@ -1126,6 +1128,7 @@ impl<'d> Executor<'d> {
                 .filter_map(|(point, _)| image.get(&point).map(|sample| (point, *sample)))
                 .collect(),
             forces: self.forces.clone(),
+            receipts: self.receipts.clone(),
         }
     }
 
@@ -1191,6 +1194,7 @@ impl<'d> Executor<'d> {
                 .map(|(&point, &sample)| (point, sample)),
         );
         executor.forces = checkpoint.forces.clone();
+        executor.adopt_receipts(checkpoint);
         Ok(executor)
     }
 
@@ -1206,9 +1210,12 @@ impl<'d> Executor<'d> {
     /// points the map serves as `Out` with the declared kinds, and its
     /// internal section must name image-carried `In` points — then the
     /// driver and each component restore their captured state, the tick
-    /// resumes from `checkpoint.tick`, and the output image becomes
+    /// resumes from `checkpoint.tick`, the output image becomes
     /// exactly the checkpoint's while its internal `In` samples overlay
-    /// the image's held values. The next [`scan`](Executor::scan) then
+    /// the image's held values, and the receipt log becomes the
+    /// checkpoint's — the pair's one command audit, entries still
+    /// `Accepted` re-queued for this run's next boundary. The next
+    /// [`scan`](Executor::scan) then
     /// continues the run the checkpoint captured.
     ///
     /// Like `restore`, a rejected apply changes nothing the run
@@ -1282,7 +1289,25 @@ impl<'d> Executor<'d> {
         // The checkpoint's force set is authoritative: the standby
         // forces exactly what the active forced — no more, no less.
         self.forces.clone_from(&checkpoint.forces);
+        self.adopt_receipts(checkpoint);
         Ok(())
+    }
+
+    /// Adopts a checkpoint's receipt log verbatim — the pair's one
+    /// command audit, converging `GET /receipts` on every peer — and
+    /// re-queues the entries still `Accepted` at capture. A command
+    /// taken over between its submission boundary and its applying scan
+    /// is run state like the image's: the restoring run applies it at
+    /// its own next boundary, so a switchover mid-flight never drops it.
+    fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
+        self.receipts.clone_from(&checkpoint.receipts);
+        self.pending_commands = checkpoint
+            .receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+            .map(|(index, _)| index)
+            .collect();
     }
 
     /// Consumes a checkpoint captured under a *different* model — the
@@ -1291,9 +1316,11 @@ impl<'d> Executor<'d> {
     ///
     /// The rule is documented in [`crate::revision`]: writable internal
     /// `In` points and `Out` image samples matched by declared identity
-    /// carry their last values, forces carry all-or-nothing, component
-    /// and driver state reinitialize, and the tick resumes at the
-    /// checkpoint's. The rule classifies the whole checkpoint before any
+    /// carry their last values, forces carry all-or-nothing, the receipt
+    /// log carries verbatim — the run's audit survives the boundary,
+    /// entries still `Accepted` re-queued to settle under the revision —
+    /// component and driver state reinitialize, and the tick resumes at
+    /// the checkpoint's. The rule classifies the whole checkpoint before any
     /// state moves, so a revision that breaks it — a kind-retyped
     /// carried point, an unservable force, an unreadable format — fails
     /// with a named [`CarryoverError`] and changes nothing the run
@@ -1405,6 +1432,7 @@ impl<'d> Executor<'d> {
         }
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
+        self.adopt_receipts(checkpoint);
 
         let initialized = self
             .map
@@ -3908,6 +3936,87 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_carries_the_command_receipt_log() {
+        // The run's command audit is run state like the image's: the
+        // checkpoint carries the receipt log so the pair presents one
+        // `GET /receipts` answer whichever peer serves it.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver);
+        executor.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        executor.scan().unwrap();
+
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.receipts, executor.receipts());
+
+        // The section rides the serialized form, and a checkpoint
+        // written before it existed restores as an empty log.
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let roundtrip: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.receipts, executor.receipts());
+        let mut legacy = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("receipts");
+        let legacy: Checkpoint = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.receipts.is_empty());
+    }
+
+    #[test]
+    fn apply_converges_the_receipt_log_and_requeues_accepted() {
+        // The running standby's half: `apply` converges the receipt log
+        // to the checkpoint's — the pair's one command audit — and
+        // re-queues a command captured still-`Accepted` between its
+        // submission boundary and its applying scan, so a takeover
+        // mid-flight never drops it.
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = setpoint_rig(&active_driver);
+        active.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+        );
+        active.scan().unwrap();
+        // The second command is checkpointed still-`Accepted`: submitted
+        // after the settling scan, captured before its own boundary.
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(7.0)));
+        let checkpoint = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = setpoint_rig(&standby_driver);
+        standby.apply(&checkpoint).unwrap();
+        assert_eq!(standby.receipts(), active.receipts());
+
+        // The re-queued command lands at the standby's next boundary
+        // exactly as the active's would have landed it.
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(driver_value(&standby_driver, 20), Value::Float(14.0));
+
+        // The cold-start half adopts the same log.
+        let restored_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let restored = Executor::restore(
+            &restored_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(30), Direction::Out, ValueKind::Float),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &checkpoint,
+            None,
+        )
+        .unwrap();
+        assert_eq!(restored.receipts(), active.receipts());
+    }
+
+    #[test]
     fn checkpoint_rejects_a_force_on_an_unforceable_point() {
         // A checkpoint naming a forced point this map does not serve as
         // a writable `In` — or whose kind disagrees — is a different
@@ -5453,6 +5562,7 @@ mod tests {
             .into_iter()
             .collect(),
             forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
+            receipts: Vec::new(),
         }
     }
 

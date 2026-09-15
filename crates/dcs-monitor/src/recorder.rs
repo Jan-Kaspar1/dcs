@@ -106,8 +106,14 @@ pub(super) struct Recorder {
     /// durable value transitions diff against; absent until the point's
     /// first observed sample.
     values: HashMap<PointId, Value>,
-    /// Receipt indices of commands accepted but not yet settled.
-    open_commands: BTreeSet<usize>,
+    /// The outcome last observed for each receipt in the executor's
+    /// log — what the journal diffs against. A locally submitted
+    /// command marks its entry at `note_command`; a checkpoint-adopted
+    /// log's receipts first appear at the adopting scan's record, so a
+    /// command that crossed peers inside the checkpoint journals its
+    /// settlement on the observing peer as well — the pair's one
+    /// command audit trail.
+    receipt_outcomes: Vec<Option<CommandOutcome>>,
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
@@ -137,7 +143,7 @@ impl Recorder {
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
             values: HashMap::new(),
-            open_commands: BTreeSet::new(),
+            receipt_outcomes: Vec::new(),
             step_counts: Vec::new(),
             sink,
         })
@@ -147,8 +153,8 @@ impl Recorder {
     /// `receipt_index` in the executor's log.
     ///
     /// A command refused at submission is already final and is journaled
-    /// at the run's current tick; an accepted one is tracked until a scan
-    /// boundary settles it.
+    /// at the run's current tick; an accepted one is marked observed and
+    /// the next record journals the outcome its boundary settled.
     pub(super) fn note_command(
         &mut self,
         receipt_index: usize,
@@ -156,19 +162,34 @@ impl Recorder {
         tick: Tick,
     ) {
         match receipt.outcome {
-            CommandOutcome::Accepted { .. } => {
-                self.open_commands.insert(receipt_index);
-            }
+            CommandOutcome::Accepted { .. } => {}
             CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. } => {
-                self.push(tick, JournalEvent::CommandSettled { receipt });
+                self.push(
+                    tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                );
             }
         }
+        self.observe(receipt_index, receipt.outcome);
     }
 
     /// Journals a receipt that never entered the executor's log — a
     /// command refused before it could queue, e.g. at the role boundary.
     pub(super) fn note_settled(&mut self, receipt: CommandReceipt, tick: Tick) {
         self.push(tick, JournalEvent::CommandSettled { receipt });
+    }
+
+    /// Marks `outcome` as the last observed at `index` in the receipt
+    /// log, extending the observed vector on first sight of an index —
+    /// a checkpoint-adopted log's receipts surface here before ever
+    /// passing `note_command`.
+    fn observe(&mut self, index: usize, outcome: CommandOutcome) {
+        if self.receipt_outcomes.len() <= index {
+            self.receipt_outcomes.resize(index + 1, None);
+        }
+        self.receipt_outcomes[index] = Some(outcome);
     }
 
     /// Journals a reported-role transition at `tick` — a promotion or
@@ -196,28 +217,38 @@ impl Recorder {
     /// Records one completed scan attributed to `scan_tick`; see the
     /// module docs for the event ordering.
     pub(super) fn record_scan(&mut self, executor: &Executor<'_>, scan_tick: Tick) {
-        // Commands settle at the scan head, before the input read.
-        let settled: Vec<(usize, Tick)> = self
-            .open_commands
-            .iter()
-            .filter_map(|&index| {
-                match executor.receipts()[index].outcome {
-                    CommandOutcome::Accepted { .. } => None,
-                    // An applied command reports the tick it applied at; a
-                    // boundary rejection is attributed to this scan.
-                    CommandOutcome::Applied { tick } => Some((index, tick)),
-                    CommandOutcome::Rejected { .. } => Some((index, scan_tick)),
-                }
-            })
-            .collect();
-        for (index, event_tick) in settled {
-            self.open_commands.remove(&index);
-            self.push(
-                event_tick,
-                JournalEvent::CommandSettled {
-                    receipt: executor.receipts()[index].clone(),
-                },
-            );
+        // Commands settle at the scan head, before the input read. A
+        // receipt journals on the outcome transition this record
+        // observes — whether the command was submitted here or arrived
+        // adopted inside a checkpoint, so the run's command audit reads
+        // the same on either peer. An applied receipt reports the tick
+        // it applied at; a boundary rejection is attributed to this
+        // scan.
+        for index in 0..executor.receipts().len() {
+            let receipt = &executor.receipts()[index];
+            let observed = self
+                .receipt_outcomes
+                .get(index)
+                .and_then(|outcome| outcome.as_ref());
+            if observed == Some(&receipt.outcome) {
+                continue;
+            }
+            match receipt.outcome {
+                CommandOutcome::Accepted { .. } => {}
+                CommandOutcome::Applied { tick } => self.push(
+                    tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
+                CommandOutcome::Rejected { .. } => self.push(
+                    scan_tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
+            }
+            self.observe(index, receipt.outcome.clone());
         }
 
         let snapshot = executor.snapshot();
