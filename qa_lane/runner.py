@@ -145,29 +145,31 @@ def _pid_alive(pid):
     return b'qa_lane' in cmdline or b'qa-lane' in cmdline
 
 
-def _managed_containers():
-    # NB: `-q` makes docker ignore --format, so use plain `ps -a`.
-    result = docker('ps', '-a', '--filter', 'label=' + MANAGED_LABEL + '=1',
+def _labeled_rows(*args):
+    """(ok, [(object_id, run_label)]) for managed docker objects.
+
+    ok=False means the listing itself failed — callers must treat that
+    as 'cannot prove no leftovers', not as 'no leftovers'.
+    """
+    result = docker(*args, '--filter', 'label=' + MANAGED_LABEL + '=1',
                     '--format', '{{.ID}} {{.Label "' + RUN_LABEL + '"}}',
                     check=False)
     rows = []
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            rows.append((parts[0], parts[1]))
-    return rows
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                rows.append((parts[0], parts[1]))
+    return result.returncode == 0, rows
+
+
+def _managed_containers():
+    # NB: `-q` makes docker ignore --format, so use plain `ps -a`.
+    return _labeled_rows('ps', '-a')
 
 
 def _managed_networks():
-    result = docker('network', 'ls', '--filter',
-                    'label=' + MANAGED_LABEL + '=1', '--format',
-                    '{{.ID}} {{.Label "' + RUN_LABEL + '"}}', check=False)
-    rows = []
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            rows.append((parts[0], parts[1]))
-    return rows
+    return _labeled_rows('network', 'ls')
 
 
 def reconcile(st, cfg, log=print):
@@ -187,7 +189,9 @@ def reconcile(st, cfg, log=print):
                          + ' gone; reconciled', time.time())
             log('reconcile: marked ' + record['run_id'] + ' interrupted')
             _write_interrupted_report(st, record, cfg, log)
-    for cid, run_id in _managed_containers():
+    containers_ok, containers = _managed_containers()
+    networks_ok, networks = _managed_networks()
+    for cid, run_id in containers:
         if run_id not in live:
             res = docker('rm', '-f', cid, check=False)
             if res.returncode != 0:
@@ -198,7 +202,7 @@ def reconcile(st, cfg, log=print):
             else:
                 st.clear_cleanup_error('cleanup-container-' + cid)
                 log('reconcile: removed orphaned container ' + cid)
-    for nid, run_id in _managed_networks():
+    for nid, run_id in networks:
         if run_id not in live:
             res = docker('network', 'rm', nid, check=False)
             if res.returncode != 0:
@@ -209,6 +213,19 @@ def reconcile(st, cfg, log=print):
             else:
                 st.clear_cleanup_error('cleanup-network-' + nid)
                 log('reconcile: removed orphaned network ' + nid)
+    # Sweep ledger entries for docker objects that no longer exist —
+    # e.g. a leftover removed manually between cycles. The entry did
+    # its job (blocked cycles, surfaced in reports); it must not
+    # outlive the object it describes. Only sweep when the listing
+    # itself succeeded — a failed listing proves nothing.
+    if containers_ok and networks_ok:
+        extant = {cid for cid, _ in containers} \
+            | {nid for nid, _ in networks}
+        for key in list(st.cleanup_errors()):
+            for prefix in ('cleanup-container-', 'cleanup-network-'):
+                if key.startswith(prefix) \
+                        and key[len(prefix):] not in extant:
+                    st.clear_cleanup_error(key)
 
 
 def ownership_block(st, log=print):
@@ -225,6 +242,8 @@ def ownership_block(st, log=print):
                            survived reconcile — teardown or host
                            docker is misbehaving, and starting a run
                            on top of leftovers is unsafe.
+      docker-listing-failed the managed-object listing itself failed —
+                           'no leftovers found' cannot be proven.
     Returns (reason, detail) or None.
     """
     active = st.runs(qa_state.ACTIVE_STATUSES)
@@ -232,10 +251,14 @@ def ownership_block(st, log=print):
         ids = ', '.join(r['run_id'] for r in active)
         return ('active-run-conflict',
                 'run record(s) still active under another pid: ' + ids)
-    leftovers = ([('container', cid, rid)
-                  for cid, rid in _managed_containers()]
-                 + [('network', nid, rid)
-                    for nid, rid in _managed_networks()])
+    containers_ok, containers = _managed_containers()
+    networks_ok, networks = _managed_networks()
+    if not (containers_ok and networks_ok):
+        return ('docker-listing-failed',
+                'cannot enumerate managed containers/networks — '
+                'cannot prove exclusive ownership')
+    leftovers = ([('container', cid, rid) for cid, rid in containers]
+                 + [('network', nid, rid) for nid, rid in networks])
     if leftovers:
         detail = '; '.join(kind + ' ' + ref + ' (run ' + rid + ')'
                            for kind, ref, rid in leftovers[:8])
@@ -825,10 +848,26 @@ def _teardown_rig(run_id, timeline, st=None):
         elif st is not None:
             st.clear_cleanup_error('cleanup-' + kind + '-' + ref)
 
-    for cid, label_run in _managed_containers():
+    containers_ok, containers = _managed_containers()
+    networks_ok, networks = _managed_networks()
+    for ok, kind in ((containers_ok, 'containers'),
+                     (networks_ok, 'networks')):
+        if ok:
+            if st is not None:
+                st.clear_cleanup_error('cleanup-listing-' + kind)
+        else:
+            failures.append({'key': 'cleanup-listing-' + kind,
+                             'detail': 'docker listing of managed '
+                             + kind + ' failed — teardown may be '
+                             'incomplete', 'phase': 'cleanup'})
+            if st is not None:
+                st.record_cleanup_error(
+                    'cleanup-listing-' + kind,
+                    'docker listing of managed ' + kind + ' failed')
+    for cid, label_run in containers:
         if label_run == run_id:
             _remove('container', cid, ('rm', '-f', cid))
-    for nid, label_run in _managed_networks():
+    for nid, label_run in networks:
         if label_run == run_id:
             _remove('network', nid, ('network', 'rm', nid))
     detail = 'run containers and network removed'
