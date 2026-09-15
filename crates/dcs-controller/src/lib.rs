@@ -18,8 +18,9 @@ use dcs_blocks::{
     DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
     GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo,
     ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
-    OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer,
-    SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -518,6 +519,20 @@ pub fn registry() -> ComponentRegistry {
                     most_open: spec.require("most_open")?,
                     at_bound: spec.require("at_bound")?,
                     pulse_blocked: spec.require("pulse_blocked")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(PhaseMonitor::KIND, |spec| {
+            boxed(PhaseMonitor::from_parameters(
+                spec.name.as_str(),
+                PhaseMonitorIo {
+                    input: spec.require("in")?,
+                    phase: spec.require("phase")?,
+                    capture: spec.require("capture")?,
+                    deviation: spec.require("deviation")?,
+                    exceeded: spec.require("exceeded")?,
+                    overdue: spec.require("overdue")?,
                 },
                 spec.parameters,
             ))

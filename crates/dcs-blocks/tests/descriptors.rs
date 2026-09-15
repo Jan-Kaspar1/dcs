@@ -10,10 +10,10 @@ use dcs_blocks::{
     DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
     HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
     ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, Rationalization,
-    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, StagingAuthority,
-    Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
+    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
+    RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter,
+    SrLatch, StagingAuthority, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -507,12 +507,29 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            PhaseMonitor::new(
+                "phm",
+                PhaseMonitorIo {
+                    input: point(&mut specs, 360, Direction::In, ValueKind::Float),
+                    phase: point(&mut specs, 361, Direction::In, ValueKind::Bool),
+                    capture: point(&mut specs, 362, Direction::In, ValueKind::Bool),
+                    deviation: point(&mut specs, 363, Direction::Out, ValueKind::Float),
+                    exceeded: point(&mut specs, 364, Direction::Out, ValueKind::Bool),
+                    overdue: point(&mut specs, 365, Direction::Out, ValueKind::Bool),
+                },
+                0.5,
+                5,
+                PhaseMode::Absolute,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 29] = [
+const EXPECTED_KINDS: [&str; 30] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -542,6 +559,7 @@ const EXPECTED_KINDS: [&str; 29] = [
     BackwashCoordinator::KIND,
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
+    PhaseMonitor::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
