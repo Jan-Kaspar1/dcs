@@ -797,6 +797,43 @@ composition — drop/drop, hold/hold, and mixed response pairings over
 one scripted `ff`/`trim` set; per-port semantics live beside
 `FeedforwardSum::KIND`.
 
+The one-sided derivative annunciation the decision-75 seam map's
+recorded gap names adds one fixed-arity kind. `rate-of-rise` reads
+`in` (`in`, `Float`) — the measured value — and drives `rate` (`out`,
+`Float`), the per-scan first difference in the input's declared
+measured-units-per-tick (components own no wall clock — a scan is the
+unit), and `rising` (`out`, `Bool`), the standing condition a
+downstream `bool-latching-alarm`/`managed-bool-latching-alarm` `in`
+consumes. The `parameters` are `rate_limit` (strictly positive finite
+`Float`, the per-tick rise the flag asserts at) and `initial_rate`
+(finite `Float`, the rate reported until the first `Good` sample pair
+completes a difference — a plant choosing the alarm-until-proven
+posture declares an initial at or above the bound); both are
+`SetParameter`-tunable. Each scan where `in` reads `Good` and finite
+banks the sample and, once a pair stands, reports `in − previous` —
+signed, so a rising input asserts at the bound while a falling
+excursion, however fast, stays silent: the one-sided verdict the
+IJmuiden composition's `deviation-monitor`-versus-`signal-filter`
+detector cannot express. A difference overflowing `f64` saturates at
+`±f64::MAX`. A scan whose `in` is not `Good`, or not finite, freezes
+— the previous sample holds, `rate` and `rising` hold their standing
+values stamped with the input's quality plus `Bad(DeviceFault)` for a
+non-finite reading the point did not report — and the recovery scan
+differences against the last banked sample, the whole excursion
+across the gap reporting as one per-tick rate. Neither output
+latches: `rising` releases the first evaluated scan below the bound,
+the alarm kind the flag feeds owning the held annunciation. The
+kind is deliberately one-sided — whether a declared `direction`
+parameter or a falling sibling covers the other side is the
+parameterization record's open item. The banked previous sample, the
+standing rate and flag, and the tuned parameters are run state under
+decision 20: `capture_state` carries them so a checkpointed standby
+differences the next sample identically, no spurious edge.
+`crates/dcs-assembly/fixtures/rate_of_rise.json` is the recorded
+composition — a silent-initial instance beside a declared-initial
+instance asserting until its first `Good` pair, over one scripted
+level; per-port semantics live beside `RateOfRise::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is

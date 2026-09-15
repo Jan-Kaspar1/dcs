@@ -28,9 +28,10 @@ use dcs_blocks::{
     ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
     PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
-    RateLimiter, RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
-    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    RateLimiter, RateOfRise, RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer,
+    SequencerStep, SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard,
+    SurgeGuardConfig, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds,
+    Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
@@ -40,7 +41,7 @@ use dcs_build::specs::{
     FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec,
     ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec,
     MedianVoterSpec, MotorSpec, OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
+    RateLimiterSpec, RateOfRiseSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
     ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
@@ -746,6 +747,12 @@ fn specs_match_registered_kinds_descriptors() {
         )
         .unwrap()
         .describe(),
+    ));
+    covered.insert(check(
+        &RateOfRiseSpec::new(Default::default()),
+        &RateOfRise::new("ror", point(1), point(2), point(3), 0.5, 0.0)
+            .unwrap()
+            .describe(),
     ));
     // `backwash-coordinator`'s per-filter `request_i`/`grant_i`/
     // `position_i` families are instance-dependent — `N` is the spec's

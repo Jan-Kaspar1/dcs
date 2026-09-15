@@ -23,7 +23,7 @@ use dcs_build::specs::{
     FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec,
     ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec,
     MedianVoterSpec, MotorSpec, OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
+    RateLimiterSpec, RateOfRiseSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
     ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
@@ -1126,6 +1126,47 @@ fn feedforward_sum_rejects_an_out_of_range_response() {
     }
 }
 
+/// The `rate-of-rise` plant the tests wire: a scripted `in` channel
+/// and internal carriers for the `rate` and `rising` outputs.
+fn rate_of_rise_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), level_raw, false);
+    let rate = plant.internal_output::<f64>(PointId(20), 0.0);
+    let rising = plant.internal_output::<bool>(PointId(21), false);
+
+    let monitor = plant.add(RateOfRiseSpec::new(parameters_map));
+    plant.connect(input, monitor.input);
+    plant.connect(&monitor.rate, rate);
+    plant.connect(&monitor.rising, rising);
+    plant
+}
+
+#[test]
+fn rate_of_rise_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(rate_of_rise_plant(parameters([
+        ("rate_limit", Value::Float(0.5)),
+        ("initial_rate", Value::Float(0.0)),
+    ])));
+    assert_eq!(model.components[0].kind, RateOfRiseSpec::KIND);
+}
+
+#[test]
+fn rate_of_rise_rejects_a_non_positive_bound() {
+    // `rate_limit` declares the strictly positive range; a zero bound
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    assert!(matches!(
+        rate_of_rise_plant(parameters([
+            ("rate_limit", Value::Float(0.0)),
+            ("initial_rate", Value::Float(0.0)),
+        ]))
+        .build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "rate_limit"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -1354,6 +1395,7 @@ fn every_registered_kind_has_a_spec() {
         SurgeGuardSpec::KIND,
         DemandFallbackSpec::KIND,
         FeedforwardSumSpec::KIND,
+        RateOfRiseSpec::KIND,
     ]
     .into_iter()
     .collect();
