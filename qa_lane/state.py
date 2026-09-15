@@ -119,6 +119,20 @@ class State:
                 (run_id, sha, 'queued', attempt, day, now, range_first))
         return self.run(run_id)
 
+    def queue_verification(self, run_id, sha, now, day):
+        """Queue a dedicated fix-verification run (run ids 'qav-*').
+
+        Unlike enqueue() this never supersedes queued assessment runs:
+        verification work is additive and is dispatched ahead of the
+        newest-SHA assessment by the cycle.
+        """
+        with self.db:
+            self.db.execute(
+                'INSERT INTO runs(run_id,attempted_sha,status,attempt,day,'
+                "created) VALUES(?,?, 'queued', 1, ?, ?)",
+                (run_id, sha, day, now))
+        return self.run(run_id)
+
     def next_queued(self):
         queued = self.runs(('queued',))
         return queued[-1] if queued else None

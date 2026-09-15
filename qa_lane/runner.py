@@ -111,6 +111,9 @@ def load_config(path=None):
         'QA_LANE_CONFIG', '/srv/homelab/dcs-hwtest/config.json')
     if Path(path).is_file():
         cfg.update(json.loads(Path(path).read_text()))
+    # Bare mirror the relay pushes to; verification runs check fix
+    # ancestry (`git merge-base --is-ancestor`) against it.
+    cfg.setdefault('git_dir', str(Path(cfg['state_dir']) / 'repo.git'))
     return cfg
 
 
@@ -563,12 +566,13 @@ def _maybe_retry(st, cfg, now, day):
                attempt=attempts + 1)
 
 
-def _new_run_id(st, now):
+def _new_run_id(st, now, prefix='qa'):
     day = _utcnow().strftime('%Y%m%d')
     seq = 1
-    while st.run('qa-' + day + '-' + format(seq, '03d')) is not None:
+    while st.run(prefix + '-' + day + '-'
+                 + format(seq, '03d')) is not None:
         seq += 1
-    return 'qa-' + day + '-' + format(seq, '03d')
+    return prefix + '-' + day + '-' + format(seq, '03d')
 
 
 def _ensure_egress_policy(log):
@@ -625,10 +629,17 @@ def cycle(cfg, log=print):
         if st.started_today(day) >= cfg['max_runs_per_day']:
             log('cycle: daily run budget reached')
             return
-        record = st.next_queued()
-        if record is None:
+        # Pending fix verifications dispatch ahead of the newest-SHA
+        # assessment: a merged fix is re-verified on a revision proven to
+        # contain it before the lane spends a run on fresh exploration.
+        from . import verify
+        record = verify.next_run(st, cfg, now, log)
+        queued = record if record is not None else st.next_queued()
+        if queued is None:
             log('cycle: nothing queued')
             return
+        # The egress gate covers both run kinds: a verification run
+        # builds images and starts a rig exactly like an assessment.
         if cfg.get('egress_required'):
             missing = _ensure_egress_policy(log)
             if missing:
@@ -636,7 +647,10 @@ def cycle(cfg, log=print):
                              'host firewall rules absent: '
                              + '; '.join(missing[:5]), log)
                 return
-        run(st, record, cfg, log)
+        if record is not None:
+            verify.run(st, record, cfg, log)
+        else:
+            run(st, queued, cfg, log)
     finally:
         st.close()
         lock.close()
@@ -878,7 +892,7 @@ def _teardown_rig(run_id, timeline, st=None):
 
 
 def _persist_report(st, record, cfg, outcome, completed_sha, images,
-                    results, infra, events, log=print):
+                    results, infra, events, log=print, verifications=None):
     """Validate, store, stage, and record a report for a run record.
 
     The durable cleanup ledger is merged into infrastructure_failures
@@ -915,6 +929,8 @@ def _persist_report(st, record, cfg, outcome, completed_sha, images,
     if record.get('range_first'):
         report_doc['changed_range'] = {
             'first': record['range_first'], 'last': record['attempted_sha']}
+    if verifications is not None:
+        report_doc['verifications'] = verifications
     qa_report.validate_report(json.dumps(report_doc),
                               run_id=record['run_id'],
                               attempted_sha=record['attempted_sha'])
@@ -1086,6 +1102,7 @@ def run(st, record, cfg, log=print):
 def status(cfg):
     st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
     try:
+        from . import verify
         runs = st.runs()
         try:
             storage = qa_storage_usage(cfg)
@@ -1107,6 +1124,7 @@ def status(cfg):
                         'status': r['status'], 'outcome': r['outcome'],
                         'attempt': r['attempt'], 'day': r['day']}
                        for r in runs[-10:]],
+            'pending_verifications': len(verify.load_queue(cfg)),
         }
     finally:
         st.close()

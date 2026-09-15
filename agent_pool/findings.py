@@ -29,10 +29,18 @@ the lane's internal finding records from the report's evidence channels:
     infrastructure_failures[]    -> infrastructure finding (operational record)
     blocked/inconclusive case    -> infrastructure finding (rig-side cause)
 
-Report schema v1 has no fix-verification channel, so 'verifications' stay an
-internal seam (exercised by tests and a future schema version), and the
-finding fields the wire schema does not carry (module, severity, confidence)
-are derived conservatively by the adapter.
+Report schema v2 carries the fix-verification channel: a dedicated
+verification run on the Lenovo lane replays the finding's original case on a
+revision proven to contain the merged fix (git merge-base --is-ancestor in
+the lane's bare mirror) and records the verdict, the ancestry check, and the
+evidence. apply_verification certifies only a report whose entry matches the
+finding key, the original case identity, and the tested revision, carries
+real evidence, and survives the supervisor's own containment lookup — a
+generic passing run or an unrelated case can never mark a fix verified.
+GitHub lookup failures (network, auth, ambiguous merge) leave the
+verification pending and are retried on the next poll. The finding fields
+the wire schema does not carry (module, severity, confidence) are derived
+conservatively by the adapter.
 """
 import hashlib
 import json
@@ -76,7 +84,8 @@ FINDING_FIELDS = {'key', 'kind', 'module', 'severity', 'confidence', 'title',
                   'test_requirements', 'product_cause'}
 REQUIRED_FINDING = {'key', 'kind', 'module', 'severity', 'confidence',
                     'title', 'summary', 'evidence'}
-VERIFICATION_FIELDS = {'finding_key', 'fix_sha', 'case', 'outcome', 'evidence'}
+VERIFICATION_FIELDS = {'finding_key', 'fix_sha', 'case', 'tested_sha',
+                       'fix_ancestry', 'outcome', 'evidence', 'detail'}
 
 DEFAULT_PUBLISH = {'document': 'findings',
                    'identity': '~/.ssh/dcs_qa_report_ed25519',
@@ -204,8 +213,9 @@ VERDICT_OUTCOMES = ('passed', 'failed')  # runs whose assessment completed
 def validate_verification(entry):
     """One fix-verification result (finding -> fix SHA -> case -> outcome).
 
-    Schema v1 reports cannot carry these; they arrive through the internal
-    seam (tests, or a future schema version) and are validated the same way.
+    Wire reports carry them in the schema-v2 'verifications' channel;
+    the internal seam (tests, supervisor-built reports) validates the
+    same shape.
     """
     if not isinstance(entry, dict) \
             or not {'finding_key', 'outcome'} <= set(entry) <= VERIFICATION_FIELDS:
@@ -217,8 +227,26 @@ def validate_verification(entry):
         raise ValueError('Invalid verification outcome')
     if entry.get('fix_sha') is not None and not SHA40.match(entry['fix_sha']):
         raise ValueError('verification fix_sha must be 40-hex')
+    if entry.get('tested_sha') is not None \
+            and not SHA40.match(entry['tested_sha']):
+        raise ValueError('verification tested_sha must be 40-hex')
     if entry.get('case') is not None:
         _text(entry['case'], 'verification.case', 4000)
+    ancestry = entry.get('fix_ancestry')
+    if ancestry is not None:
+        if not isinstance(ancestry, dict) \
+                or not set(ancestry) <= {'checked', 'contained', 'method',
+                                         'detail'}:
+            raise ValueError('Invalid verification fix_ancestry')
+        if 'checked' in ancestry and type(ancestry['checked']) is not bool:
+            raise ValueError('fix_ancestry.checked must be boolean')
+        if 'contained' in ancestry \
+                and ancestry['contained'] is not None and type(ancestry['contained']) is not bool:
+            raise ValueError('fix_ancestry.contained must be boolean')
+        if ancestry.get('method') is not None:
+            _text(ancestry['method'], 'fix_ancestry.method', 200)
+        if ancestry.get('detail') is not None:
+            _text(ancestry['detail'], 'fix_ancestry.detail', 2000)
     if entry.get('evidence') is not None:
         if not isinstance(entry['evidence'], list) \
                 or len(entry['evidence']) > 20:
@@ -226,6 +254,8 @@ def validate_verification(entry):
         for ev in entry['evidence']:
             _text(ev if isinstance(ev, str) else ev.get('detail'),
                   'verification.evidence', 2000)
+    if entry.get('detail') is not None:
+        _text(entry['detail'], 'verification.detail', 4000)
     return _redact_tree(entry)
 
 
@@ -318,7 +348,9 @@ def adapt_report(data):
     if 'notes' in report:
         report['notes'] = redact(report['notes'])
     report['findings'] = derive_findings(data)
-    report['verifications'] = []
+    report['verifications'] = [
+        validate_verification(dict(v))
+        for v in data.get('verifications') or []]
     return report
 
 
@@ -526,7 +558,7 @@ def ingest_report(state, github, cfg, report, issues, log):
         if fields:
             state.set_qa_finding(finding['key'], **fields)
         summary['findings'][finding['key']] = status
-    if routing:
+    if cfg['enabled'] and cfg['mode'] == 'route':
         for entry in report['verifications']:
             summary['verifications'][entry['finding_key']] = \
                 apply_verification(state, github, cfg, entry, report, log)
@@ -536,21 +568,73 @@ def ingest_report(state, github, cfg, report, issues, log):
     return summary
 
 
+RETRY_KEY = 'qa:verification_retries'
+
+
+def _stash_verification(state, entry, report):
+    """Park a verification the GitHub lookup could not settle; the next
+    poll retries it instead of losing it with the consumed report."""
+    stash = dict(state.get(RETRY_KEY, {}))
+    stash[entry['finding_key']] = {'entry': entry,
+                                   'run_id': report.get('run_id'),
+                                   'sha': report.get('sha')}
+    state.set(RETRY_KEY, stash)
+
+
+def _unstash_verification(state, key):
+    stash = dict(state.get(RETRY_KEY, {}))
+    if key in stash:
+        del stash[key]
+        state.set(RETRY_KEY, stash)
+
+
 def apply_verification(state, github, cfg, entry, report, log):
+    """Gate a verification result before it moves the findings chain.
+
+    A fix is verified only when the report entry names the awaiting
+    finding, the original case identity, and the revision actually
+    tested (this report's assessed SHA); carries the runner's ancestry
+    proof and real evidence; and the supervisor's own containment lookup
+    agrees the tested revision contains the merged fix. Lookup failures
+    and unproven ancestry never advance the chain: the finding stays
+    fix-merged and transient failures retry on the next poll.
+    """
     finding = state.qa_finding(entry['finding_key'])
     if not finding:
         return 'unknown-finding'
     if finding['status'] != 'fix-merged':
         return 'not-awaiting-verification'
-    if entry.get('fix_sha') and finding.get('fix_sha') \
-            and entry['fix_sha'] != finding['fix_sha']:
+    if not finding.get('fix_sha'):
+        # Never advance a chain on an unknown fix SHA.
+        return 'fix-sha-unknown'
+    if entry.get('fix_sha') != finding['fix_sha']:
         return 'sha-mismatch'
+    if entry.get('case') != finding['key']:
+        # An unrelated passing case cannot certify this finding.
+        return 'case-mismatch'
+    if not entry.get('tested_sha') or entry['tested_sha'] != report.get('sha'):
+        return 'untested-revision'
+    if not (entry.get('fix_ancestry') or {}).get('contained'):
+        return 'ancestry-unproven'
     if entry['outcome'] == 'inconclusive':
         return 'inconclusive'
+    if not entry.get('evidence'):
+        return 'missing-evidence'
+    try:
+        contained = github is not None and github.includes_main(
+            entry['tested_sha'], finding['fix_sha'])
+    except Exception as exc:
+        _stash_verification(state, entry, report)
+        log('QA finding %s verification lookup failed; pending retry: %s'
+            % (finding['key'], str(exc)[:200]))
+        return 'lookup-failed'
+    if not contained:
+        return 'not-contained'
     if entry['outcome'] == 'passed':
         state.set_qa_finding(finding['key'], status='verified')
-        log('QA finding %s verified against fix %s'
-            % (finding['key'], (finding.get('fix_sha') or '')[:12]))
+        log('QA finding %s verified against fix %s on %s'
+            % (finding['key'], finding['fix_sha'][:12],
+               entry['tested_sha'][:12]))
         return 'verified'
     state.set_qa_finding(finding['key'], status='failed')
     reason = 'Verification of fix %s failed. Evidence: %s' % (
@@ -559,6 +643,18 @@ def apply_verification(state, github, cfg, entry, report, log):
                   for e in (entry.get('evidence') or []))[:1000] or 'see QA report')
     _redispatch(state, github, cfg, finding, report, log, reason)
     return 'failed'
+
+
+def retry_verifications(state, github, cfg, log):
+    """Re-apply verifications a transient GitHub failure parked."""
+    for key, item in list(state.get(RETRY_KEY, {}).items()):
+        result = apply_verification(state, github, cfg, item['entry'],
+                                    {'run_id': item.get('run_id'),
+                                     'sha': item.get('sha')}, log)
+        if result != 'lookup-failed':
+            _unstash_verification(state, key)
+            log('QA finding %s verification retry settled: %s'
+                % (key, result))
 
 
 def ingest_inbox(state, github, cfg, issues, log):
@@ -661,7 +757,12 @@ def sync_candidates(state, log):
 
 
 def reconcile_merged(state, github, cfg, log):
-    """fix-merged transition: the tracked issue's job finished and merged."""
+    """fix-merged transition: the tracked issue's job finished and merged.
+
+    A failed or ambiguous merge-SHA lookup leaves the finding issue-open
+    — pending — so the next poll retries; a chain never advances on an
+    unknown fix SHA.
+    """
     for finding in state.qa_findings(('issue-open', 'redispatched')):
         job = state.job(finding['issue']) if finding['issue'] else None
         if not job or job['status'] != 'done':
@@ -673,6 +774,11 @@ def reconcile_merged(state, github, cfg, log):
             except Exception as exc:
                 log('QA finding %s: could not read merge SHA for PR %s: %s'
                     % (finding['key'], job['pr'], exc))
+                continue  # transient: retried on the next poll
+            if not sha:
+                log('QA finding %s: PR %s has no merge commit yet; pending'
+                    % (finding['key'], job['pr']))
+                continue  # ambiguous merge: retried on the next poll
         state.set_qa_finding(finding['key'], status='fix-merged', fix_sha=sha)
         log('QA finding %s fix merged at %s; verification queued'
             % (finding['key'], (sha or '')[:12]))
@@ -690,8 +796,56 @@ def poll(state, github, cfg, issues, log):
             route_pending(state, github, cfg, issues, log,
                           budget=max(0, cfg['max_issues_per_report'] - spent))
         reconcile_merged(state, github, cfg, log)
+        if cfg['mode'] == 'route':
+            retry_verifications(state, github, cfg, log)
+        write_verification_queue(state, cfg, log)
     if cfg['dashboard']:
         publish_dashboard(state, cfg, log)
+
+
+def verification_queue(state):
+    """The Lenovo-facing pending-verification queue (qa-verifications/1).
+
+    One item per fix-merged finding whose merged fix SHA is known: the
+    finding key, the original case identity, the fix SHA, and the stored
+    reproduction/expected pair — everything the lane needs to replay the
+    original reproduction on a revision proven to contain the fix.
+    """
+    items = []
+    for row in state.pending_verifications():
+        if not row.get('fix_sha'):
+            continue  # an unknown fix can never be verified
+        payload = json.loads(row['payload'])
+        items.append({'finding_key': row['key'], 'case': row['key'],
+                      'fix_sha': row['fix_sha'], 'issue': row['issue'],
+                      'reproduction': payload.get('reproduction'),
+                      'expected': payload.get('expected')})
+    return {'schema': 'qa-verifications/1', 'generated_at': int(time.time()),
+            'items': items}
+
+
+def write_verification_queue(state, cfg, log):
+    """Drop qa/verifications.json beside the report inbox; content-hashed
+    so rewrites (and the relay's push) stay idempotent. The WSL relay
+    picks the file up and delivers it to the Lenovo lane."""
+    if not cfg.get('report_dir'):
+        return False
+    doc = verification_queue(state)
+    stable = json.dumps({**doc, 'generated_at': 0}, sort_keys=True)
+    digest = hashlib.sha256(stable.encode()).hexdigest()
+    if state.get('qa:queue_hash') == digest:
+        return False
+    path = Path(cfg['report_dir']).parent / 'verifications.json'
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + '.tmp')
+        tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.replace(path)
+    except OSError as exc:
+        log('QA verification queue write failed: ' + str(exc)[:300])
+        return False
+    state.set('qa:queue_hash', digest)
+    return True
 
 
 def document(state):

@@ -32,6 +32,25 @@ Implementation order: second, after [daily architecture review](daily-architectu
   later task). Devin exploration phase not yet added; deterministic
   scenarios gate it per the plan's ordering.
 
+### Landed 2026-09-15 (fix verification, Task 2)
+
+- `qa_lane/report.py` schema v2: optional `verifications` channel —
+  finding key, original case identity, fix SHA, tested SHA, ancestry
+  record, verdict, evidence. v1 reports remain valid input.
+- `qa_lane/verify.py` + runner/state hooks: pending verifications arrive
+  as `verifications.json` (`qa-verifications/1`) pushed by the WSL
+  relay; `qav-*` verification runs dispatch ahead of the newest-SHA
+  assessment, prove the tested revision contains the fix via
+  `git merge-base --is-ancestor` in the lane's bare mirror (`git_dir`),
+  and replay exactly the original case. A non-containing revision is a
+  `blocked` report naming the check, never a verdict.
+- `agent_pool/findings.py`: `apply_verification` requires matching
+  finding key + case identity + this report's tested revision + ancestry
+  proof + real evidence, plus the supervisor's own containment lookup;
+  failed/ambiguous merge-SHA lookups stay pending and retry next poll,
+  and transient containment failures park for retry. The pending queue
+  is emitted as `verifications.json` beside the report inbox.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
@@ -120,7 +139,9 @@ where appropriate. Do not build a second general-purpose issue dispatcher.
    Start the controller in simulation when hardware execution is not yet supported.
 6. Start ephemeral Devin with the configured CLI and `swe-2-high`. The agent first
    determines what works today, then chooses an exploratory plan with observable
-   expected outcomes. It verifies pending fixes before unrelated exploration.
+   expected outcomes. It verifies pending fixes before unrelated exploration
+   (deterministic slice landed: `qav-*` verification runs replay a finding's
+   original case ahead of the newest-SHA assessment).
 7. Devin operates monitoring/commands/browser UI and approved harness actions.
    Persist evidence during the run so a timeout does not erase all diagnostics.
 8. Validate the report, reconcile findings with the backlog, stop the controller,

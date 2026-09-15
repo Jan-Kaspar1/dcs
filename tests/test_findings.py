@@ -82,6 +82,25 @@ def finding(key='scan-restamp', kind='defect', module='crates/dcs-core',
     return item
 
 
+def verification(key='scan-restamp', outcome='passed', fix=FIX_SHA,
+                 tested=SHA, case=None, ancestry='default', evidence='default',
+                 **kw):
+    """A complete verification entry: matching case identity, the tested
+    revision, the runner's ancestry proof, and real evidence."""
+    if ancestry == 'default':
+        ancestry = {'checked': True, 'contained': True,
+                    'method': 'git merge-base --is-ancestor'}
+    if evidence == 'default':
+        evidence = [{'detail': 'reproduction replayed on ' + tested[:8],
+                     'source': 'run evidence'}]
+    entry = {'finding_key': key, 'outcome': outcome, 'fix_sha': fix,
+             'case': case if case is not None else key,
+             'tested_sha': tested, 'fix_ancestry': ancestry,
+             'evidence': evidence}
+    entry.update(kw)
+    return entry
+
+
 def internal(run_id='qa-20990101-002', items=(), verifications=(),
              status='completed', sha=SHA):
     """An internal post-adaptation report — the shape ingest_report consumes.
@@ -224,7 +243,7 @@ class ValidationTests(LaneFixture):
 
     def test_field_errors(self):
         mutations = {
-            'schema_version': lambda d: d.update(schema_version=2),
+            'schema_version': lambda d: d.update(schema_version=3),
             'run_id': lambda d: d.update(run_id='Bad Key'),
             'attempted_sha': lambda d: d.update(attempted_sha='abc'),
             'outcome': lambda d: d.update(outcome='ok'),
@@ -513,8 +532,7 @@ class VerificationChainTests(LaneFixture):
         pending = self.state.pending_verifications()
         self.assertEqual([p['key'] for p in pending], ['scan-restamp'])
         self.ingest(internal(run_id='qa-20990101-010', verifications=[
-            {'finding_key': 'scan-restamp', 'outcome': 'passed',
-             'fix_sha': FIX_SHA}]))
+            verification()]))
         self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
                          'verified')
 
@@ -522,8 +540,8 @@ class VerificationChainTests(LaneFixture):
         self.seed()
         self.merge_finding()
         self.ingest(internal(run_id='qa-20990101-010', verifications=[
-            {'finding_key': 'scan-restamp', 'outcome': 'failed',
-             'fix_sha': FIX_SHA, 'evidence': ['still restamps']}]))
+            verification(outcome='failed',
+                         evidence=[{'detail': 'still restamps'}])]))
         row = self.state.qa_finding('scan-restamp')
         self.assertEqual(row['status'], 'redispatched')
         self.assertEqual(row['cycles'], 2)
@@ -539,7 +557,7 @@ class VerificationChainTests(LaneFixture):
         for round_ in range(2):
             self.ingest(internal(run_id='qa-20990101-01%d' % round_,
                                  verifications=[
-                {'finding_key': 'scan-restamp', 'outcome': 'failed'}]))
+                verification(outcome='failed')]))
             if round_ == 0:
                 row = self.state.qa_finding('scan-restamp')
                 self.assertEqual(row['status'], 'redispatched')
@@ -551,7 +569,7 @@ class VerificationChainTests(LaneFixture):
     def test_verification_requires_fix_merged(self):
         self.seed()
         self.ingest(internal(run_id='qa-20990101-010', verifications=[
-            {'finding_key': 'scan-restamp', 'outcome': 'passed'}]))
+            verification()]))
         report_row = self.state.qa_report('qa-20990101-010')
         self.assertIn('not-awaiting-verification', report_row['summary'])
         self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
@@ -568,6 +586,187 @@ class VerificationChainTests(LaneFixture):
         row = self.state.qa_finding('scan-restamp')
         self.assertEqual(row['status'], 'redispatched')
         self.assertEqual(self.github.created, 2)
+
+
+class VerificationGateTests(LaneFixture):
+    """A verification certifies only a report entry that matches the
+    finding key, the original case, and the tested revision, carries the
+    ancestry proof and real evidence, and survives the supervisor's own
+    containment lookup."""
+
+    def seed_merged(self):
+        drop(self.root, report(scenarios=[scenario('scan-restamp')]))
+        self.poll()
+        self.state.reserve(101, 'worker-01', 'dcs-core')
+        self.state.complete(101)
+        self.state.update_job(101, pr=42)
+        self.github.pull_requests[42] = dict(merge_commit_sha=FIX_SHA)
+        self.poll()
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def apply(self, entry, run_id='qa-20990101-010'):
+        self.ingest(internal(run_id=run_id, verifications=[entry]))
+        row = self.state.qa_report(run_id)
+        return row['summary']
+
+    def test_unrelated_case_cannot_certify(self):
+        self.seed_merged()
+        summary = self.apply(verification(case='controller-active'))
+        self.assertIn('case-mismatch', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_missing_evidence_cannot_certify(self):
+        self.seed_merged()
+        summary = self.apply(verification(evidence=[]))
+        self.assertIn('missing-evidence', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_unproven_ancestry_cannot_certify(self):
+        self.seed_merged()
+        for index, bad in enumerate(
+                ({'checked': True, 'contained': False}, None,
+                 {'checked': False, 'contained': None})):
+            summary = self.apply(verification(ancestry=bad),
+                                 run_id='qa-20990101-01%d' % index)
+            self.assertIn('ancestry-unproven', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_untested_revision_cannot_certify(self):
+        self.seed_merged()
+        summary = self.apply(verification(tested='b' * 40))
+        self.assertIn('untested-revision', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_sha_mismatch_cannot_certify(self):
+        self.seed_merged()
+        summary = self.apply(verification(fix='c' * 40))
+        self.assertIn('sha-mismatch', summary)
+
+    def test_unknown_fix_sha_never_advances(self):
+        self.seed_merged()
+        self.state.set_qa_finding('scan-restamp', fix_sha=None)
+        summary = self.apply(verification(fix=None))
+        self.assertIn('fix-sha-unknown', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_supervisor_containment_lookup_gates(self):
+        self.seed_merged()
+        self.github.includes_main = lambda head, base: False
+        summary = self.apply(verification())
+        self.assertIn('not-contained', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+
+    def test_lookup_failure_stays_pending_and_retries(self):
+        self.seed_merged()
+        calls = []
+
+        def flaky(head, base):
+            calls.append(1)
+            raise RuntimeError('network unreachable')
+
+        self.github.includes_main = flaky
+        summary = self.apply(verification())
+        self.assertIn('lookup-failed', summary)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+        self.assertEqual(calls, [1])
+        # The next poll retries the parked entry and settles it.
+        self.github.includes_main = lambda head, base: True
+        self.poll()
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'verified')
+        self.assertEqual(self.state.get('qa:verification_retries'), {})
+
+    def test_reconcile_retries_failed_merge_lookup(self):
+        drop(self.root, report(scenarios=[scenario('scan-restamp')]))
+        self.poll()
+        self.state.reserve(101, 'worker-01', 'dcs-core')
+        self.state.complete(101)
+        self.state.update_job(101, pr=42)
+
+        def missing(number):
+            raise RuntimeError('HTTP 503')
+
+        self.github.pr = missing
+        self.poll()
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'issue-open')
+        self.github.pull_requests[42] = dict(merge_commit_sha=FIX_SHA)
+        self.github.pr = lambda number: self.github.pull_requests[number]
+        self.poll()
+        row = self.state.qa_finding('scan-restamp')
+        self.assertEqual((row['status'], row['fix_sha']),
+                         ('fix-merged', FIX_SHA))
+
+    def test_ambiguous_merge_stays_pending(self):
+        drop(self.root, report(scenarios=[scenario('scan-restamp')]))
+        self.poll()
+        self.state.reserve(101, 'worker-01', 'dcs-core')
+        self.state.complete(101)
+        self.state.update_job(101, pr=42)
+        self.github.pull_requests[42] = dict(merge_commit_sha=None)
+        self.poll()
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'issue-open')
+
+
+class VerificationQueueTests(LaneFixture):
+    """The Lenovo-facing queue doc lands beside the report inbox,
+    content-hashed so re-publication is idempotent."""
+
+    def seed_merged(self):
+        drop(self.root, report(scenarios=[scenario('scan-restamp')]))
+        self.poll()
+        self.state.reserve(101, 'worker-01', 'dcs-core')
+        self.state.complete(101)
+        self.state.update_job(101, pr=42)
+        self.github.pull_requests[42] = dict(merge_commit_sha=FIX_SHA)
+        self.poll()
+
+    def queue_path(self):
+        return Path(self.root) / 'qa' / 'verifications.json'
+
+    def test_queue_doc_carries_pending_items(self):
+        self.seed_merged()
+        self.poll()
+        path = self.queue_path()
+        self.assertTrue(path.is_file())
+        doc = json.loads(path.read_text())
+        self.assertEqual(doc['schema'], 'qa-verifications/1')
+        self.assertEqual(len(doc['items']), 1)
+        item = doc['items'][0]
+        self.assertEqual(item['finding_key'], 'scan-restamp')
+        self.assertEqual(item['case'], 'scan-restamp')
+        self.assertEqual(item['fix_sha'], FIX_SHA)
+        self.assertEqual(item['issue'], 101)
+        self.assertIn('scenario scan-restamp', item['reproduction'])
+
+    def test_queue_write_is_idempotent_and_current(self):
+        self.seed_merged()
+        self.poll()
+        first = self.queue_path().read_text()
+        self.poll()
+        self.assertEqual(self.queue_path().read_text(), first)
+        self.assertIsNotNone(self.state.get('qa:queue_hash'))
+        # Settled findings drop out of the queue on the next poll.
+        self.state.set_qa_finding('scan-restamp', status='verified')
+        self.poll()
+        doc = json.loads(self.queue_path().read_text())
+        self.assertEqual(doc['items'], [])
+
+    def test_unknown_fix_sha_not_queued(self):
+        self.seed_merged()
+        self.state.set_qa_finding('scan-restamp', fix_sha=None)
+        self.poll()
+        doc = json.loads(self.queue_path().read_text())
+        self.assertEqual(doc['items'], [])
 
 
 class PublicationTests(LaneFixture):
@@ -668,9 +867,7 @@ class EndToEndTests(LaneFixture):
         # through the internal seam (schema v1 carries no verifications yet).
         findings.ingest_report(state, self.github, cfg,
                                internal(run_id='qa-20990101-010',
-                                        verifications=[
-            {'finding_key': 'scan-restamp', 'outcome': 'passed',
-             'fix_sha': FIX_SHA}]),
+                                        verifications=[verification()]),
             self.github.issues(), self.log)
         self.assertEqual(state.qa_finding('scan-restamp')['status'], 'verified')
         self.assertEqual(self.github.created, 1)
