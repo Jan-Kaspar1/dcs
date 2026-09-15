@@ -15,10 +15,10 @@ use dcs_assembly::{
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
     CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
-    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
-    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, Valve,
+    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
+    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
+    Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch,
+    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -404,6 +404,37 @@ pub fn registry() -> ComponentRegistry {
                     active: spec.require("active")?,
                     queued: spec.require("queued")?,
                     resource_blocked: spec.require("resource_blocked")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(HeaderCoordinator::KIND, |spec| {
+            // The zones are declared `valve_pos_1` … `valve_pos_N`,
+            // `airflow_1` … `airflow_N`, `pulsing_1` … `pulsing_N`,
+            // `pulse_grant_1` … `pulse_grant_N` following the
+            // interlock's `trip_N` convention; the shared multi-family
+            // accessor counts and requires them — a partial family or
+            // a gap fails `UnboundPort` naming the missing member.
+            let zones = spec
+                .indexed_families(["valve_pos_", "airflow_", "pulsing_", "pulse_grant_"])?
+                .into_iter()
+                .map(|[valve_pos, airflow, pulsing, pulse_grant]| ZoneIo {
+                    valve_pos,
+                    airflow,
+                    pulsing,
+                    pulse_grant,
+                })
+                .collect();
+            boxed(HeaderCoordinator::from_parameters(
+                spec.name.as_str(),
+                spec.require("pressure")?,
+                zones,
+                HeaderOutputs {
+                    pressure_sp: spec.require("pressure_sp")?,
+                    blower_demand: spec.require("blower_demand")?,
+                    most_open: spec.require("most_open")?,
+                    at_bound: spec.require("at_bound")?,
+                    pulse_blocked: spec.require("pulse_blocked")?,
                 },
                 spec.parameters,
             ))

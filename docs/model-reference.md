@@ -415,6 +415,63 @@ recorded composition — a three-filter FIFO bank beside a two-filter
 operator-managed bank driving the reorder point; per-port semantics
 live beside `BackwashCoordinator::KIND`.
 
+The aeration-header coordination contract architecture decision 62
+records adds one variable-arity kind. `header-coordinator` owns the
+bank-level coordination the independent per-zone DO→valve loops
+cannot express — the shared discharge header lets the loops hunt
+each other through the common pressure, so a bank coordinator holds
+the coordination strategy and the plant-wide pulse cap. Per zone `i`
+declared under the indexed-family convention — the zone count is the
+highest bound index and every index below it must bind all four
+members: `valve_pos_i` (`in`, `Float`) the zone valve's position
+feedback, `airflow_i` (`in`, `Float`) the zone's airflow demand,
+`pulsing_i` (`in`, `Bool`) the zone's mixing-pulse request, and
+`pulse_grant_i` (`out`, `Bool`) the coordinator's pulse admission.
+The bank level reads `pressure` (`in`, `Float`) — the header
+transmitter — and drives `pressure_sp` (`out`, `Float`) the emitted
+set-point, `blower_demand` (`out`, `Float`) the aggregate capacity
+demand, `most_open` (`out`, `Int`) the 1-based index of the zone
+whose `valve_pos_i` reads highest — `0` while no zone's position is
+trusted, a tie resolving to the lowest index — `at_bound` (`out`,
+`Bool`) asserted while the emitted set-point rests at a declared
+pressure bound or the demand rests at the airflow floor, and
+`pulse_blocked` (`out`, `Bool`) asserted while a pulse request
+stands refused by the cap. The `parameters` are the `Int` code
+`strategy` (`0` constant header pressure — `pressure_sp` holds the
+declared `pressure_hold`; `1` most-open-valve pressure reset —
+`pressure_sp` walks once every `adjust_ticks` scans, by the
+most-open valve's distance outside the `mov_band_lo`–`mov_band_hi`
+band, until the valve settles inside it; `2` direct-airflow control
+— `blower_demand` carries the summed zone demands and `pressure_sp`
+emits the clamped hold as an inert reference), the finite `Float`s
+`pressure_hold` (the held set-point and the walk's initial value),
+`pressure_min`/`pressure_max` (the emitted set-point's clamp) and
+`mov_band_lo`/`mov_band_hi` (each pair ordered), `adjust_ticks`
+(`Int` ≥ 1, the minimum interval between set-point moves),
+`min_total_airflow` (finite `Float` ≥ 0, the header-level mixing
+floor), and `max_pulsing` (`Int` ≥ 0, the simultaneous pulse-grant
+cap); all nine are `SetParameter`-tunable, a retune breaking a bound
+pair refused naming the parameter. The non-`Good` rules are the
+decision's: a `Good` finite `valve_pos_i` alone may claim the
+most-open identity; a non-`Good` or non-finite `airflow_i` holds the
+zone's last trusted demand — a zone never trusted contributes
+nothing — and `blower_demand` floors at `min_total_airflow`; a
+non-`Good` `pulsing_i` reads as not requesting, releasing any held
+grant; and a reset-strategy interval landing on a non-`Good` or
+non-finite `pressure`, or an empty most-open selection, skips that
+move rather than catching up — the held set-point does not step on
+an untrusted read. Pulse grants hold while their request stands and
+waiting requests admit in ascending zone order as capacity frees.
+The emitted set-point, the aggregate demand, the most-open identity,
+the adjustment timer, the held per-zone demands, and the grant set
+are per-scan run state under decision 20: `capture_state` carries
+them so a checkpointed standby resumes the walk without stepping the
+header pressure.
+`crates/dcs-assembly/fixtures/header_coordinator.json` is the
+recorded composition — one bank per declared strategy over one
+scripted input set; per-port semantics live beside
+`HeaderCoordinator::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
