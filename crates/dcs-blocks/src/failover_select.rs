@@ -28,8 +28,11 @@ use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepErr
 ///
 /// `backup_active` asserts while the backup is selected — the
 /// transition into backup mode is the alarmed condition the decision
-/// calls for — and reports `false` while the primary serves. It always
-/// carries `Quality::Good`: it is the selector's own computed state.
+/// calls for; the station fixture wires it into a
+/// `bool-latching-alarm` whose `unacknowledged` latches the engagement
+/// until the operator acknowledges — and reports `false` while the
+/// primary serves. It always carries `Quality::Good`: it is the
+/// selector's own computed state.
 ///
 /// The selector is stateless and declares no parameters; a failed
 /// primary's recovery re-selects it the same scan its sample turns
@@ -136,7 +139,9 @@ impl Component for FailoverSelect {
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, PortDescriptor, ValueKind};
+    use dcs_core::{Direction, PortDescriptor, StateError, StateMap, ValueKind};
+    use dcs_model::{ComponentId, ComponentInstance};
+    use std::collections::BTreeMap;
 
     const PRIMARY: PointId = PointId(10);
     const BACKUP: PointId = PointId(11);
@@ -202,7 +207,10 @@ mod tests {
         for reason in [
             Quality::Bad(QualityReason::DeviceFault),
             Quality::Bad(QualityReason::CommunicationFault),
+            Quality::Bad(QualityReason::ConfigurationFault),
             Quality::Uncertain(QualityReason::Stale),
+            Quality::Uncertain(QualityReason::Substituted),
+            Quality::Uncertain(QualityReason::OutOfRange),
         ] {
             let mut block = component();
             let io = io();
@@ -283,6 +291,41 @@ mod tests {
         feed(&io, BACKUP, 9.0, Quality::Bad(QualityReason::DeviceFault));
         block.step(&io, Tick(1)).unwrap();
         assert_eq!(io.written(ACTIVE).unwrap().quality, Quality::Good);
+    }
+
+    #[test]
+    fn the_selector_is_stateless_across_capture_and_restore() {
+        // The mode is derived from the inputs each scan — nothing is
+        // captured, so a restored standby recomputes the same
+        // selection from the same samples and a checkpoint mid-backup
+        // needs no kind state to carry it.
+        let mut block = component();
+        let state = block.capture_state();
+        assert!(state.is_empty());
+        block.restore_state(&state).unwrap();
+
+        // A field the kind never captured is rejected, not ignored.
+        let mut incompatible = StateMap::new();
+        incompatible.insert("on_backup", Value::Bool(true));
+        assert!(matches!(
+            block.restore_state(&incompatible),
+            Err(StateError::UnknownField { ref field, .. }) if field == "on_backup"
+        ));
+    }
+
+    #[test]
+    fn builds_from_parameter_map() {
+        // The kind declares no parameters: the empty map builds, and a
+        // stray key is unread here — undeclared keys are the spec's
+        // `UnknownParameter` case at composition time.
+        let instance = ComponentInstance {
+            id: ComponentId(1),
+            kind: FailoverSelect::KIND.to_string(),
+            parameters: Parameters::new(),
+            ports: BTreeMap::new(),
+        };
+        FailoverSelect::from_parameters("fsel", PRIMARY, BACKUP, OUT, ACTIVE, &instance.parameters)
+            .unwrap();
     }
 
     #[test]

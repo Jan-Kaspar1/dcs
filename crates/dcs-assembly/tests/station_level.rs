@@ -2,8 +2,10 @@
 //! architecture decision 42 records: the checked-in fixture composes a
 //! `failover-select` (primary/backup scripted level sources), a
 //! `threshold-chain` (the ordered setpoint table driving a stage-count
-//! demand), a two-pump `pump-group` consuming that demand, and the
-//! recorded manual-takeover composition — a writable `mode` point per
+//! demand), a two-pump `pump-group` consuming that demand, the
+//! `bool-latching-alarm` wired onto `backup_active` — the alarmed
+//! backup-mode engagement decisions 42 and 43 call for — and the
+//! recorded manual-takeover composition: a writable `mode` point per
 //! pump gating `cmd_i` against the operator's `hand` request through
 //! `digital-input`/`bool-gate` wiring into the effective `eff_i`
 //! request. Scripted deterministic runs exercise the chain in order
@@ -22,8 +24,8 @@ use dcs_assembly::{
     resolve_drivers,
 };
 use dcs_blocks::{
-    BoolGate, DigitalInput, FailoverSelect, GroupOutputs, PumpGroup, PumpIo, ThresholdChain,
-    ThresholdOutputs,
+    BoolGate, BoolLatchingAlarm, DigitalInput, FailoverSelect, GroupOutputs, PumpGroup, PumpIo,
+    ThresholdChain, ThresholdOutputs,
 };
 use dcs_core::{
     Command, CommandError, CommandOutcome, IoDriver, PointId, Sample, Tick, Value, ValueKind,
@@ -46,6 +48,9 @@ const HAND_1: PointId = PointId(31);
 const MODE_2: PointId = PointId(32);
 const HAND_2: PointId = PointId(33);
 const SEL_BACKUP: PointId = PointId(41);
+const BACKUP_ACK: PointId = PointId(48);
+const SEL_ALARM: PointId = PointId(49);
+const SEL_UNACK: PointId = PointId(62);
 const DEMAND: PointId = PointId(23);
 const DUTY_CALL: PointId = PointId(43);
 const LAG_CALL: PointId = PointId(44);
@@ -127,6 +132,16 @@ fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(BoolLatchingAlarm::KIND, |spec| {
+            boxed(BoolLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
+                spec.parameters,
+            ))
+        })
         .with(DigitalInput::KIND, |spec| {
             boxed(DigitalInput::from_parameters(
                 spec.name.as_str(),
@@ -205,6 +220,15 @@ fn int_at(executor: &Executor, point: PointId) -> i64 {
     }
 }
 
+/// The image-carried Bool on `point` — how the internal `sel-backup`
+/// link reads.
+fn bool_at(executor: &Executor, point: PointId) -> bool {
+    match sample(executor, point).value {
+        Value::Bool(value) => value,
+        value => panic!("point {point:?}: expected Bool, got {value:?}"),
+    }
+}
+
 /// The scripted run. Each scan reads the scripted entries the driver's
 /// last `step` made current: the tick-`t` entry is first read at scan
 /// `t + 1`, and the chain sees the failover's selection one loopback
@@ -234,10 +258,11 @@ fn station_level_fixture_assembles_through_the_registry() {
             .iter()
             .all(|component| component.step_errors == 0)
     );
-    // The recorded composition assembled: failover, chain, group, and
-    // the per-pump takeover gates — two digital-inputs and six
-    // bool-gates — eleven components in all.
-    assert_eq!(snapshot.components.len(), 11);
+    // The recorded composition assembled: failover, chain, group, the
+    // backup-mode latching alarm, and the per-pump takeover gates —
+    // two digital-inputs and six bool-gates — twelve components in
+    // all.
+    assert_eq!(snapshot.components.len(), 12);
 }
 
 /// The scripted sweep drives the declared setpoint chain in order: the
@@ -316,9 +341,13 @@ fn scripted_level_sweep_drives_the_chain_in_order() {
 
 /// The failover path the decision records: the `sel-out`/`sel-backup`
 /// pair selects the primary while it reads `Good`; a failed primary
-/// switches the chain onto the backup and alarms the transition; when
-/// every source fails the chain's declared `on_bad_demand` — `0` here —
-/// answers instead of silently controlling on bad data.
+/// switches the chain onto the backup and the `bool-latching-alarm`
+/// wired onto `backup_active` captures the transition — the alarmed
+/// backup-mode engagement the decision requires. When every source
+/// fails the chain's declared `on_bad_demand` — `0` here — answers
+/// instead of silently controlling on bad data, and the recorded
+/// return rule re-selects a recovered `Good` primary the same scan.
+/// The alarm latch outlives the return until the operator's `ack`.
 #[test]
 fn a_non_good_level_follows_the_declared_fallback() {
     let model = model(STATION_LEVEL);
@@ -326,29 +355,39 @@ fn a_non_good_level_follows_the_declared_fallback() {
     let mut executor = build_executor(&model, &driver);
 
     // Scan 40: the primary is still the 3.0 of tick 37 — demand holds
-    // 0 and the backup flag is clear.
+    // 0, the backup flag is clear, and the alarm is quiet.
     scan_to(&mut executor, &driver, 40);
-    assert!(!boolean(&driver, SEL_BACKUP));
+    assert!(!bool_at(&executor, SEL_BACKUP));
+    assert!(!boolean(&driver, SEL_ALARM));
+    assert!(!boolean(&driver, SEL_UNACK));
     assert_eq!(int_at(&executor, DEMAND), 0);
 
     // Scan 41 the failover reads the primary's Bad entry and selects
-    // the backup; the alarmed transition asserts.
+    // the backup: `backup_active` asserts on the internal point the
+    // same scan — the alarmed transition's source.
     scan_to(&mut executor, &driver, 41);
-    assert!(boolean(&driver, SEL_BACKUP));
+    assert!(bool_at(&executor, SEL_BACKUP));
 
-    // Scan 42 the chain reads the backup's Good 5.0 through the
-    // internal link — mid-band, so the duty call asserts on the backup
-    // measurement. `sel-out` carries the backup value with Good
-    // quality.
+    // Scan 42 the internal link lands the asserted flag on the alarm's
+    // `in`: the latching alarm captures the transition — `alarm`
+    // follows the condition and `unacknowledged` latches the fresh
+    // trip — while the chain reads the backup's Good 5.0 and calls the
+    // duty pump on the backup measurement. `sel-out` carries the
+    // backup value with Good quality.
     scan_to(&mut executor, &driver, 42);
+    assert!(boolean(&driver, SEL_ALARM));
+    assert!(boolean(&driver, SEL_UNACK));
     assert_eq!(int_at(&executor, DEMAND), 1);
     assert!(boolean(&driver, DUTY_CALL));
     assert_eq!(sample(&executor, SEL_OUT).value, Value::Float(5.0));
 
     // Scan 44 the backup itself goes Bad: `out` carries that failed
-    // sample — every source is down.
+    // sample — every source is down — while the alarm's condition and
+    // latch both stand.
     scan_to(&mut executor, &driver, 44);
     assert!(!sample(&executor, SEL_OUT).quality.is_good());
+    assert!(boolean(&driver, SEL_ALARM));
+    assert!(boolean(&driver, SEL_UNACK));
     // Scan 45 the chain reads the non-Good level: the declared fallback
     // emits, the calls drop, and no condition flag can assert on a
     // measurement the chain cannot read.
@@ -360,10 +399,34 @@ fn a_non_good_level_follows_the_declared_fallback() {
     assert!(!boolean(&driver, HIGH_LEVEL));
 
     // Scan 47 the recovered primary re-selects — `backup_active`
-    // clears — and scan 48 the chain reads the primary's 3.0 again.
+    // clears, the recorded immediate-return rule — and scan 48 the
+    // chain reads the primary's 3.0 again while the link carries the
+    // cleared flag to the alarm: `alarm` follows it down but the latch
+    // stands until the operator acknowledges.
     scan_to(&mut executor, &driver, 48);
-    assert!(!boolean(&driver, SEL_BACKUP));
+    assert!(!bool_at(&executor, SEL_BACKUP));
+    assert!(!boolean(&driver, SEL_ALARM));
+    assert!(boolean(&driver, SEL_UNACK));
     assert_eq!(int_at(&executor, DEMAND), 0);
+
+    // The operator's `ack` clears the latch at the next scan boundary;
+    // releasing the point leaves the alarm ready for a fresh trip.
+    let receipt = executor.submit_command(Command::WriteValue {
+        point: BACKUP_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    });
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    scan(&mut executor, &driver);
+    assert!(!boolean(&driver, SEL_UNACK));
+    executor.submit_command(Command::WriteValue {
+        point: BACKUP_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(false),
+    });
+    scan(&mut executor, &driver);
+    assert!(!boolean(&driver, SEL_ALARM));
+    assert!(!boolean(&driver, SEL_UNACK));
 }
 
 /// The manual-takeover composition the decision records: the writable
@@ -566,6 +629,9 @@ fn checkpointed_standby_continues_the_run_identically() {
     // is behind the chain).
     scan_to(&mut active, &driver_a, 52);
     assert_eq!(int_at(&active, DEMAND), 1);
+    // The backup-mode latch tripped at scan 42 still stands — the mode
+    // the checkpoint must carry.
+    assert!(boolean(&driver_a, SEL_UNACK));
     let checkpoint = active.checkpoint();
 
     let driver_b = build_driver(&model);
@@ -581,6 +647,54 @@ fn checkpointed_standby_continues_the_run_identically() {
         serde_json::to_string(&active.snapshot()).unwrap(),
         serde_json::to_string(&standby.snapshot()).unwrap()
     );
+    let writes_a = driver_a
+        .inspect::<ScriptedDriver>(SCRIPTED_DEVICE)
+        .unwrap()
+        .writes();
+    let writes_b = driver_b
+        .inspect::<ScriptedDriver>(SCRIPTED_DEVICE)
+        .unwrap()
+        .writes();
+    assert_eq!(writes_a[writes_a.len() - writes_b.len()..], writes_b[..]);
+}
+
+/// The engaged backup mode is run state: a standby applying a
+/// checkpoint taken while the backup serves — `backup_active`
+/// asserted, the latching alarm tripped — continues the same run:
+/// the failover window's tail (the all-bad fallback, the primary's
+/// recovery, the standing latch) replays identically instead of
+/// restarting on the primary.
+#[test]
+fn checkpointed_standby_mid_backup_keeps_the_engaged_mode() {
+    let model = model(STATION_LEVEL);
+    let driver_a = build_driver(&model);
+    let mut active = build_executor(&model, &driver_a);
+
+    // Scan 43: the backup is serving and the alarm's latch stands.
+    scan_to(&mut active, &driver_a, 43);
+    assert!(bool_at(&active, SEL_BACKUP));
+    assert!(boolean(&driver_a, SEL_UNACK));
+    let checkpoint = active.checkpoint();
+
+    let driver_b = build_driver(&model);
+    let mut standby = build_executor(&model, &driver_b);
+    standby.apply(&checkpoint).unwrap();
+    // The restored image carries the asserted flag and the held
+    // internal link — the standby does not see a cleared mode.
+    assert!(bool_at(&standby, SEL_BACKUP));
+
+    for _ in 0..8 {
+        scan(&mut active, &driver_a);
+        scan(&mut standby, &driver_b);
+    }
+
+    assert_eq!(
+        serde_json::to_string(&active.snapshot()).unwrap(),
+        serde_json::to_string(&standby.snapshot()).unwrap()
+    );
+    // Through the failover window's tail the latch never cleared on
+    // either side.
+    assert!(boolean(&driver_b, SEL_UNACK));
     let writes_a = driver_a
         .inspect::<ScriptedDriver>(SCRIPTED_DEVICE)
         .unwrap()

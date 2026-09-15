@@ -498,6 +498,37 @@ fn failover_select_spec_emits_an_assembling_document() {
 }
 
 #[test]
+fn failover_select_rejects_an_undeclared_parameter() {
+    // The kind declares no parameters: a stray key — a `latch` flag
+    // carried over from a remembered return rule, say — is
+    // `UnknownParameter` naming the key at `build`, before the
+    // document exists.
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let primary_raw = plant.channel::<f64>(sim, "level", Direction::In);
+    let backup_raw = plant.channel::<f64>(sim, "backup", Direction::In);
+
+    let primary = plant.field_input::<f64>(PointId(10), primary_raw, false);
+    let backup = plant.field_input::<f64>(PointId(11), backup_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let backup_active = plant.internal_output::<bool>(PointId(21), false);
+
+    let select = plant.add(FailoverSelectSpec::new(parameters([(
+        "latch",
+        Value::Bool(true),
+    )])));
+    plant.connect(primary, select.primary);
+    plant.connect(backup, select.backup);
+    plant.connect(&select.out, out);
+    plant.connect(&select.backup_active, backup_active);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::UnknownParameter { ref parameter, .. }) if parameter == "latch"
+    ));
+}
+
+#[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
     let sim = plant.device("sim").id;

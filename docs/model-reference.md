@@ -282,10 +282,17 @@ chain emits while `level` is non-`Good`, the decision's declared
 answer to a failed measurement. `failover-select` is parameterless:
 `primary` and `backup` (`in`, `Float`), `out` (`out`, `Float`)
 carrying the selected sample with its quality, and `backup_active`
-(`out`, `Bool`) asserted while the backup serves. The pair wires
+(`out`, `Bool`) asserted while the backup serves. The switch rule is
+quality-driven — `out` carries `primary` while it reads `Good` with a
+finite value, else `backup` verbatim, quality included — and the
+return rule is immediate: a primary reading `Good` again re-selects
+the same scan, no latch. The pair wires
 `failover-select.out` onto `threshold-chain.level` through a linked
 point pair — an internal link carries quality, a field loopback does
 not — and `threshold-chain.demand` onto `pump-group.demand` likewise.
+`backup_active` takes the same route into a `bool-latching-alarm`'s
+`in` — the alarmed backup-mode engagement decision 43 maps — with a
+model-writable `ack` point releasing the latch.
 `crates/dcs-assembly/fixtures/station_level.json` is the recorded
 composition, manual-takeover gates included; per-port semantics live
 beside `ThresholdChain::KIND` and `FailoverSelect::KIND`.
