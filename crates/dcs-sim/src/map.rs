@@ -270,6 +270,73 @@ pub struct ScaledFlow {
     pub initial: f64,
 }
 
+/// A threshold process element: a `Float` input driving a `Bool`
+/// contact — the [`BoolFlow`]'s mirror.
+///
+/// The element is the dynamics vocabulary's Float-to-Bool shape: a
+/// level, pressure, or temperature crossing a declared bound asserts a
+/// contact, so a plant-side protective or limit function — the
+/// Bool contact a [`BoolFlow`]'s emergency draw then gates on — is a
+/// declared element rather than a scheduled script. The declared
+/// parameterization is a pair of `on`/`off` bounds whose order carries
+/// the trip direction: `on > off` declares a rising (high-side) trip —
+/// the contact asserts when `u` reaches `on` and releases once `u`
+/// falls strictly below `off`; `on < off` declares a falling
+/// (low-side) trip — the contact asserts when `u` reaches `on` and
+/// releases once `u` rises strictly above `off`. Between the bounds the
+/// contact holds its state: the gap `|on - off|` is the declared
+/// hysteresis band that keeps a hovering input from chattering the
+/// contact. A `NaN` input satisfies no bound and also holds — the
+/// comparison rule the alarm vocabulary records. Like a [`BoolFlow`],
+/// the element holds no dynamics: `dt` does not scale the decision and
+/// `initial` covers only the reads before the first `Good` step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Threshold {
+    /// The point read as input `u`; must be a `Float` point.
+    pub input: PointId,
+    /// The point the element drives — the contact; must be a `Bool`
+    /// point.
+    pub output: PointId,
+    /// The bound asserting the contact: `u` reaching `on` in the trip
+    /// direction asserts it. Must be finite.
+    pub on: f64,
+    /// The bound releasing the contact: `u` crossing back strictly past
+    /// `off` releases it. Must be finite and distinct from `on` —
+    /// `on > off` declares a rising trip, `on < off` a falling one.
+    pub off: f64,
+    /// The contact state before the first `Good` step.
+    pub initial: bool,
+}
+
+impl Threshold {
+    /// The contact state after reading `u`: asserted when `u` crosses
+    /// `on` in the trip direction, released when `u` crosses back
+    /// strictly past `off`, `contact` otherwise — inside the
+    /// hysteresis band and on a `NaN` input alike.
+    ///
+    /// `on > off` is the rising trip: `u >= on` asserts, `u < off`
+    /// releases. `on < off` is the falling trip: `u <= on` asserts,
+    /// `u > off` releases. Validation rejects `on == off`, so the two
+    /// arms are exhaustive.
+    pub fn evaluate(&self, u: f64, contact: bool) -> bool {
+        if self.on > self.off {
+            if u >= self.on {
+                true
+            } else if u < self.off {
+                false
+            } else {
+                contact
+            }
+        } else if u <= self.on {
+            true
+        } else if u > self.off {
+            false
+        } else {
+            contact
+        }
+    }
+}
+
 /// A simulated process element advancing one point's value from other
 /// points'.
 ///
@@ -279,7 +346,8 @@ pub struct ScaledFlow {
 /// single-input variants read one point — [`input`](Self::input)
 /// reports it; a [`FlowSum`] reads a declared list, the vocabulary's
 /// one multi-input shape, and [`inputs`](Self::inputs) covers every
-/// variant.
+/// variant. Every variant drives a `Float` point except a
+/// [`Threshold`], whose contact output is a `Bool` point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessElement {
@@ -299,6 +367,8 @@ pub enum ProcessElement {
     FlowSum(FlowSum),
     /// A [`ScaledFlow`].
     ScaledFlow(ScaledFlow),
+    /// A [`Threshold`].
+    Threshold(Threshold),
 }
 
 impl ProcessElement {
@@ -317,6 +387,7 @@ impl ProcessElement {
             Self::BoolFlow(element) => Some(element.input),
             Self::FlowSum(_) => None,
             Self::ScaledFlow(element) => Some(element.input),
+            Self::Threshold(element) => Some(element.input),
         }
     }
 
@@ -333,6 +404,7 @@ impl ProcessElement {
             Self::BoolFlow(element) => std::slice::from_ref(&element.input),
             Self::FlowSum(element) => &element.inputs,
             Self::ScaledFlow(element) => std::slice::from_ref(&element.input),
+            Self::Threshold(element) => std::slice::from_ref(&element.input),
         }
     }
 
@@ -347,20 +419,24 @@ impl ProcessElement {
             Self::BoolFlow(element) => element.output,
             Self::FlowSum(element) => element.output,
             Self::ScaledFlow(element) => element.output,
+            Self::Threshold(element) => element.output,
         }
     }
 
-    /// The output value before the first step.
-    pub fn initial(&self) -> f64 {
+    /// The output value before the first step — a `Float` for every
+    /// variant but a [`Threshold`], whose declared initial contact is
+    /// a `Bool`.
+    pub fn initial(&self) -> Value {
         match self {
-            Self::FirstOrderLag(element) => element.initial,
-            Self::SecondOrderLag(element) => element.initial,
-            Self::Integrator(element) => element.initial,
-            Self::DeadTime(element) => element.initial,
-            Self::Noise(element) => element.initial,
-            Self::BoolFlow(element) => element.initial,
-            Self::FlowSum(element) => element.initial,
-            Self::ScaledFlow(element) => element.initial,
+            Self::FirstOrderLag(element) => Value::Float(element.initial),
+            Self::SecondOrderLag(element) => Value::Float(element.initial),
+            Self::Integrator(element) => Value::Float(element.initial),
+            Self::DeadTime(element) => Value::Float(element.initial),
+            Self::Noise(element) => Value::Float(element.initial),
+            Self::BoolFlow(element) => Value::Float(element.initial),
+            Self::FlowSum(element) => Value::Float(element.initial),
+            Self::ScaledFlow(element) => Value::Float(element.initial),
+            Self::Threshold(element) => Value::Bool(element.initial),
         }
     }
 }
@@ -423,10 +499,13 @@ impl ChannelMap {
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
     /// - element ends are `Float` points — except a `bool_flow`'s gate
-    ///   input, which must be a `Bool` point — `time_constant`, `delay`,
-    ///   and `damping_ratio` are finite and positive, `amplitude` is
-    ///   finite and non-negative, `on_rate`, `off_rate`, `gain`, and
-    ///   `bias` are finite, and `initial` is finite;
+    ///   input and a `threshold`'s contact output, which must be `Bool`
+    ///   points — `time_constant`, `delay`, and `damping_ratio` are
+    ///   finite and positive, `amplitude` is finite and non-negative,
+    ///   `on_rate`, `off_rate`, `gain`, and `bias` are finite, a
+    ///   `threshold`'s `on`/`off` bounds are finite and distinct —
+    ///   their separation the declared hysteresis band — and `initial`
+    ///   is finite;
     /// - no point is driven by more than one loopback or element.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut points = HashMap::with_capacity(self.points.len());
@@ -479,20 +558,25 @@ impl ChannelMap {
         for element in &self.elements {
             // Every end must name a bound point of the kind the end
             // requires: Float throughout, except a bool_flow's gate
-            // input, which must be a Bool point.
+            // input and a threshold's contact output, which must be
+            // Bool points.
             for point in element.inputs().iter().copied().chain([element.output()]) {
                 let bound = binding(&points, point)?;
-                let gate = match element {
-                    ProcessElement::BoolFlow(flow) => flow.input == point,
-                    _ => false,
-                };
+                let gate = matches!(element, ProcessElement::BoolFlow(flow) if flow.input == point);
+                let contact = matches!(element, ProcessElement::Threshold(threshold) if threshold.output == point);
                 if gate && bound.kind() != ValueKind::Bool {
                     return Err(ConfigError::ElementGateKind {
                         point,
                         kind: bound.kind(),
                     });
                 }
-                if !gate && bound.kind() != ValueKind::Float {
+                if contact && bound.kind() != ValueKind::Bool {
+                    return Err(ConfigError::ElementContactKind {
+                        point,
+                        kind: bound.kind(),
+                    });
+                }
+                if !gate && !contact && bound.kind() != ValueKind::Float {
                     return Err(ConfigError::ElementPointKind {
                         point,
                         kind: bound.kind(),
@@ -564,10 +648,32 @@ impl ChannelMap {
                     value: noise.amplitude,
                 });
             }
-            if !element.initial().is_finite() {
+            if let ProcessElement::Threshold(threshold) = element {
+                for (bound, value) in [("on", threshold.on), ("off", threshold.off)] {
+                    if !value.is_finite() {
+                        return Err(ConfigError::InvalidBound {
+                            point: threshold.output,
+                            bound,
+                            value,
+                        });
+                    }
+                }
+                if threshold.on == threshold.off {
+                    return Err(ConfigError::NonPositiveBand {
+                        point: threshold.output,
+                        on: threshold.on,
+                        off: threshold.off,
+                    });
+                }
+            }
+            // A threshold's Bool initial is always valid; every other
+            // variant's is the `Float` the finiteness check covers.
+            if let Value::Float(initial) = element.initial()
+                && !initial.is_finite()
+            {
                 return Err(ConfigError::NonFiniteInitial {
                     point: element.output(),
-                    value: element.initial(),
+                    value: initial,
                 });
             }
             if !driven.insert(element.output()) {
@@ -626,6 +732,14 @@ pub enum ConfigError {
         /// The kind the point declares.
         kind: ValueKind,
     },
+    /// A `threshold` element's contact output is bound to a non-`Bool`
+    /// point.
+    ElementContactKind {
+        /// The offending point.
+        point: PointId,
+        /// The kind the point declares.
+        kind: ValueKind,
+    },
     /// A lag's `time_constant` is not finite and positive.
     InvalidTimeConstant {
         /// The lag's output point.
@@ -676,6 +790,26 @@ pub enum ConfigError {
         point: PointId,
         /// The offending value.
         value: f64,
+    },
+    /// A `threshold` element's `on` or `off` bound is not finite.
+    InvalidBound {
+        /// The element's output point.
+        point: PointId,
+        /// Which declared bound is invalid: `"on"` or `"off"`.
+        bound: &'static str,
+        /// The offending value.
+        value: f64,
+    },
+    /// A `threshold` element's `on` and `off` bounds are equal — the
+    /// contact would have no hysteresis band, so its release would
+    /// chatter on the assert bound.
+    NonPositiveBand {
+        /// The element's output point.
+        point: PointId,
+        /// The declared `on` bound.
+        on: f64,
+        /// The declared `off` bound — equal to `on`.
+        off: f64,
     },
     /// An element's `initial` is not finite.
     NonFiniteInitial {
@@ -735,6 +869,11 @@ impl fmt::Display for ConfigError {
                 "a bool_flow element's gate must read a Bool point, but point {} is {kind:?}",
                 point.0
             ),
+            Self::ElementContactKind { point, kind } => write!(
+                f,
+                "a threshold element's contact must drive a Bool point, but point {} is {kind:?}",
+                point.0
+            ),
             Self::InvalidTimeConstant { point, value } => write!(
                 f,
                 "lag driving point {} has non-positive or non-finite time constant {value}",
@@ -768,6 +907,20 @@ impl fmt::Display for ConfigError {
             Self::InvalidGain { point, value } => write!(
                 f,
                 "scaled_flow element driving point {} has non-finite gain {value}",
+                point.0
+            ),
+            Self::InvalidBound {
+                point,
+                bound,
+                value,
+            } => write!(
+                f,
+                "threshold element driving point {} has non-finite {bound} bound {value}",
+                point.0
+            ),
+            Self::NonPositiveBand { point, on, off } => write!(
+                f,
+                "threshold element driving point {} declares no hysteresis band: on {on} equals off {off}",
                 point.0
             ),
             Self::NonFiniteInitial { point, value } => write!(

@@ -67,10 +67,12 @@
 //!   finding). `sis-active` is the actuation contact the dynamics
 //!   document's `bool_flow` gates on — the emergency draw acts on the
 //!   process every plant step, whether or not the controller scans.
-//!   The layer's trip *decision* is a level-triggered threshold the
-//!   `ProcessElement` vocabulary does not express — the recorded
-//!   contract gap this composition reports rather than works around —
-//!   so the reference scenario asserts the contact on the declared
+//!   The layer's trip *decision* is a level-triggered threshold —
+//!   expressed by the `threshold` process element (#309), the
+//!   vocabulary's Float→Bool shape — but this composition predates its
+//!   adoption: rewiring the contact from the declared schedule tick to
+//!   the level crossing is a follow-on ticket, so the reference
+//!   scenario still asserts the contact on the declared
 //!   `schedule::SIS_TRIP` tick, the same tick the scripted `sis-trip`
 //!   report plays back: the layer's declared behavior stands on the
 //!   schedule, its action remains the dynamics' own. Trip, bypass, and
@@ -100,6 +102,7 @@ use crate::specs::{
     ManagedAlarmHandles, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
     ManualStationSpec, SignalFilterSpec, ThresholdChainSpec, ValveSpec,
 };
+pub use crate::station::ManagedAlarmLayout;
 use crate::station::{AlarmLayout, rationalization};
 use crate::{
     BuildError, Direction, PlantBuilder, PointId, SignalId, Sink, Source, Value, parameters,
@@ -294,34 +297,6 @@ impl IjmuidenConfig {
             lah_max_shelve_ticks: 6,
         }
     }
-}
-
-/// One managed alarm's place in the emitted document — the two-flag
-/// surface plus the decision-71 managed status points, and the
-/// declared lifecycle inputs where bound.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedAlarmLayout {
-    /// The alarm component instance's id.
-    pub component: ComponentId,
-    /// The writable internal `In` point the operator ack lands on.
-    pub ack: PointId,
-    /// The writable internal `In` point carrying the shelve request —
-    /// `Some` only where the instance declares the `shelve` port.
-    pub shelve: Option<PointId>,
-    /// The writable internal `In` point carrying the out-of-service
-    /// command — `Some` only where the instance declares the `oos`
-    /// port.
-    pub oos: Option<PointId>,
-    /// The internal `Out` point carrying the standing `alarm` output.
-    pub alarm: PointId,
-    /// The internal `Out` point carrying the `unacknowledged` latch.
-    pub unacknowledged: PointId,
-    /// The internal `Out` point carrying the `shelved` status.
-    pub shelved: PointId,
-    /// The internal `Out` point carrying the `suppressed` status.
-    pub suppressed: PointId,
-    /// The internal `Out` point carrying the `out_of_service` status.
-    pub out_of_service: PointId,
 }
 
 /// Where everything the composition declares landed — the ids the
