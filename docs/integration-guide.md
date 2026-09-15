@@ -402,6 +402,10 @@ everything the model declared for the device:
 
 - `spec.id`, `spec.kind` — the device id and, under a prefix registration,
   the device's actual kind string;
+- `spec.hardware` — the model's `hardware` marker: `true` declares the
+  device hardware-bound. A hardware-bound kind's factory requires it; a
+  simulated kind's factory rejects it — the marker is honest evidence in
+  both directions, never a hint a backend may ignore;
 - `spec.parameters` — kind-specific addressing as arbitrary JSON
   (`BTreeMap<String, serde_json::Value>`); the model treats it as opaque, so
   the factory owns all validation;

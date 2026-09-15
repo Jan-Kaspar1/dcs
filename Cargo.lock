@@ -106,6 +106,7 @@ version = "0.1.0"
 dependencies = [
  "dcs-blocks",
  "dcs-core",
+ "dcs-ethercat",
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
@@ -133,6 +134,7 @@ dependencies = [
  "dcs-assembly",
  "dcs-controller",
  "dcs-core",
+ "dcs-ethercat",
  "dcs-model",
  "dcs-monitor",
  "dcs-runtime",
@@ -179,6 +181,14 @@ dependencies = [
  "dcs-runtime",
  "dcs-sim",
  "dcs-sim-bus",
+ "serde_json",
+]
+
+[[package]]
+name = "dcs-ethercat"
+version = "0.1.0"
+dependencies = [
+ "dcs-core",
  "serde_json",
 ]
 

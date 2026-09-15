@@ -1,0 +1,11 @@
+[package]
+name = "dcs-ethercat"
+description = "EtherCAT device kind for the DCS plant model: field-bus identity, process-image mapping, and startup policy contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-core = { path = "../dcs-core" }
+serde_json = "1.0.151"

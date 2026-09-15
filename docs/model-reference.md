@@ -52,9 +52,10 @@ is the exact identifier those sources read or write.
   section.)
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
-  and an unset field serializes back without the key. `parameters` on a
-  device, `channel`/`initial`/`writable`/`journaled` on an io_point, and
-  `unit`/`description`/`group` on a signal all follow this convention.
+  and an unset field serializes back without the key. `hardware` and
+  `parameters` on a device, `channel`/`initial`/`writable`/`journaled` on
+  an io_point, and `unit`/`description`/`group` on a signal all follow
+  this convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
   canonical model document — what `PlantModel::fingerprint` hashes —
@@ -113,6 +114,7 @@ assembly.
 | `id` | `DeviceId` (u64) | Required; unique within `devices` — `ValidationError::DuplicateId { collection: "device" }`. |
 | `kind` | string | Required; opaque to the model. Resolved by `dcs_assembly::DriverRegistry` at assembly — exact registration first, then prefix in registration order; an unregistered kind is `AssemblyError::UnknownDeviceKind`. The built-in kinds are in the next section. |
 | `channels` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. A channel is a physical endpoint an io_point binds to. A channel no io_point binds is lint `unbound_channel`, not an error. |
+| `hardware` | bool | Optional; unset means `false`. `true` marks the device *hardware-bound*: its kind requires physical field hardware, and no simulated backend may serve it. The kind's factory enforces the marker both ways at assembly — a hardware-bound kind rejects a device omitting it (`InvalidDeviceParameters`), and a simulated kind rejects a device carrying it — so a model declaring a hardware kind fails startup if the hardware cannot initialize rather than silently falling back to simulation. |
 | `parameters` | object: name → arbitrary JSON | Optional. Kind-specific addressing and configuration, opaque to the model — the registered device-kind factory owns all validation at assembly (`AssemblyError::InvalidDeviceParameters`). Unlike component parameters these are general JSON values, so a kind can carry strings and structured addressing data. |
 
 Example:
@@ -883,14 +885,14 @@ internal-point wiring.
 `Device.kind` resolves through the deployment's `DriverRegistry`;
 `DriverRegistry::standard()` (`crates/dcs-assembly/src/drivers.rs`)
 installs the built-in set: exact registrations for `sim-tcp`, `sim-bus`,
-and `sim-scripted`, plus the `sim` prefix serving every other `sim*`
-name (`sim` itself and role-flavored kinds like `sim-8ai`, `sim-4ao`,
-`sim-ai`, `sim-ao` — the convention `dcs-demo` established). Exact
-registrations always win over the prefix, which is how the three exact
-kinds route to their own backends.
+`sim-scripted`, and `ethercat`, plus the `sim` prefix serving every other
+`sim*` name (`sim` itself and role-flavored kinds like `sim-8ai`,
+`sim-4ao`, `sim-ai`, `sim-ao` — the convention `dcs-demo` established).
+Exact registrations always win over the prefix, which is how the other
+exact kinds route to their own backends.
 
-Every factory receives the device's declared `channels`, its
-`parameters`, and the `io_point`s bound to those channels as
+Every factory receives the device's declared `channels`, its `hardware`
+marker, its `parameters`, and the `io_point`s bound to those channels as
 `DevicePoint`s — already guaranteed by validation to agree on direction
 and value kind — and must serve exactly those points. A rejected
 parameter is `AssemblyError::InvalidDeviceParameters` naming the device
@@ -995,6 +997,63 @@ manual promotion only (decision 28).
 
 `crates/dcs-assembly/fixtures/mixed_bus.json` shows a `sim-bus` device
 beside a local `sim` one.
+
+### `ethercat` — hardware-bound cyclic field-bus
+
+An EtherCAT coupler or remote-I/O station — the first *hardware-bound*
+kind. The device declares `"hardware": true`, and the kind's factory
+requires the marker: a model omitting it is `InvalidDeviceParameters`,
+and a `sim*` device carrying the marker is rejected for the symmetric
+reason. The parameter grammar lives in `crates/dcs-ethercat/src/
+params.rs` (`DeviceParameters::parse`); parameters:
+
+- `"bus"` — required non-empty string: the *logical* bus name. The
+  model names the bus; **deployment configuration binds the name to a
+  host interface outside the document** (decision 47) — no parameter
+  names a host interface, so a plant model stays identical wherever the
+  controller runs. `crates/dcs-assembly/tests/ethercat.rs` pins that
+  the declared vocabulary admits no interface field;
+- `"identity"` — required object `{"vendor": <u32>, "product": <u32>,
+  "revision": <u32>}`: the expected station identity the master checks
+  the answering station against before outputs are enabled;
+- `"mapping"` — required object `{"inputs": {...}, "outputs": {...}}`:
+  the channel → process-data-offset layout. Each direction's image
+  places every declared channel of that direction — `{"byte": <u32>,
+  "bit": <0–7>}` for a `bool` channel, or a byte-aligned `{"byte":
+  <u32>, "bits": <width>}` field for an `int` channel (8, 16, 32, or 64
+  bits) or a `float` channel (32 or 64 bits). No two channels' bit
+  ranges may overlap inside an image;
+- `"exchange_miss_threshold"` — required integer ≥ 1: consecutive
+  failed cyclic exchanges before the device's reads escalate to
+  `IoError::Disconnected` under the decision-78 cyclic contract;
+- `"safe_outputs"` — object channel → tagged `Value`, required when the
+  device declares `out` channels: every `out` channel's declared safe
+  state, matching the channel's `value_type`, staged into the output
+  image before the first exchange;
+- `"startup"` — required object `{"on_mismatch": "fail"}`: the only
+  policy the contract admits. A station identity or layout mismatch is
+  a **hard startup failure** — a hardware-bound kind is never silently
+  substituted by simulation and never runs degraded against a station
+  that does not match the declaration.
+
+Any other parameter key is rejected. A malformed declaration —
+missing `bus`, a mistyped identity, colliding offsets, a channel placed
+in the wrong image or left unmapped, a bad threshold, a non-`fail`
+startup policy, a missing or kind-mismatched safe state — is
+`InvalidDeviceParameters` before any scan. Until the EtherCAT master
+integration lands (Lenovo QA lane HQ-4), a *well-formed* declaration
+still fails assembly as `DeviceBackend`: no bus can initialize, and the
+kind fails startup rather than substituting a simulated backend. The
+emitted JSON Schema carries the kind-conditional shape for the keys it
+can express; the channel-table-dependent rules stay with the factory.
+
+`dcs-build` composes the same declaration through
+`dcs_build::ethercat` — `EthercatSpec` carries the bus, identity, and
+miss threshold, and `ethercat_input`/`ethercat_output` declare each
+channel with its `ImageOffset` (and, for outputs, its safe state), so a
+mistyped offset is a compile-time-adjacent panic rather than an
+assembly error. `crates/dcs-assembly/fixtures/ethercat.json` is the
+reference document the builder's test emits byte-for-byte.
 
 ## The dynamics document
 
