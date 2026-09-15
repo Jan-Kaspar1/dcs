@@ -68,7 +68,7 @@ pub struct StationProfile {
 
 /// One channel's declared location in the bus process image, relative
 /// to its station's direction area.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelLayout {
     /// The station position the channel lives on.
     pub station: usize,
@@ -213,8 +213,13 @@ fn parse_stations(value: Option<&serde_json::Value>) -> Result<Vec<StationProfil
             for key in object.keys() {
                 if !matches!(
                     key.as_str(),
-                    "position" | "vendor_id" | "product_id" | "revision" | "name"
-                        | "input_bytes" | "output_bytes"
+                    "position"
+                        | "vendor_id"
+                        | "product_id"
+                        | "revision"
+                        | "name"
+                        | "input_bytes"
+                        | "output_bytes"
                 ) {
                     return Err(invalid(format!("unknown key {key:?}")));
                 }
@@ -223,8 +228,11 @@ fn parse_stations(value: Option<&serde_json::Value>) -> Result<Vec<StationProfil
                 let Some(value) = object.get(name) else {
                     return Err(invalid(format!("missing {name:?}")));
                 };
-                unsigned(value)
-                    .ok_or_else(|| invalid(format!("{name:?} must be an unsigned integer or \"0x…\" string, found {value}")))
+                unsigned(value).ok_or_else(|| {
+                    invalid(format!(
+                        "{name:?} must be an unsigned integer or \"0x…\" string, found {value}"
+                    ))
+                })
             };
             let position = field("position")?;
             if position != index as u64 {
@@ -237,9 +245,7 @@ fn parse_stations(value: Option<&serde_json::Value>) -> Result<Vec<StationProfil
                 Some(value) => match value.as_str() {
                     Some(name) => Some(name.to_string()),
                     None => {
-                        return Err(invalid(format!(
-                            "\"name\" must be a string, found {value}"
-                        )));
+                        return Err(invalid(format!("\"name\" must be a string, found {value}")));
                     }
                 },
             };
@@ -277,9 +283,11 @@ fn parse_layout(
         ));
     };
     let mut layout = BTreeMap::new();
-    // Claimed bit ranges per direction, so two channels cannot share
-    // image bits — the same check the register map makes per register.
-    let mut claimed: [Vec<Range<usize>>; 2] = [Vec::new(), Vec::new()];
+    // Claimed bit ranges per station and direction — a channel's bits
+    // are relative to its own station's area, so channels on different
+    // stations cannot overlap — the same check the register map makes
+    // per register.
+    let mut claimed: BTreeMap<(usize, bool), Vec<Range<usize>>> = BTreeMap::new();
     for (channel, entry) in object {
         let Some(&declared) = channels.get(channel.as_str()) else {
             return Err(format!(
@@ -297,10 +305,12 @@ fn parse_layout(
                 parsed.station, declared.direction
             ));
         }
-        let claimed = &mut claimed[match declared.direction {
-            dcs_model::Direction::In => 0,
-            dcs_model::Direction::Out => 1,
-        }];
+        let claimed = claimed
+            .entry((
+                parsed.station,
+                declared.direction == dcs_model::Direction::Out,
+            ))
+            .or_default();
         if let Some(other) = claimed
             .iter()
             .find(|range| range.start < parsed.bits.end && parsed.bits.start < range.end)
@@ -315,7 +325,9 @@ fn parse_layout(
     }
     for channel in channels.keys() {
         if !layout.contains_key(channel) {
-            return Err(format!("layout does not cover declared channel {channel:?}"));
+            return Err(format!(
+                "layout does not cover declared channel {channel:?}"
+            ));
         }
     }
     Ok(layout)
@@ -342,7 +354,9 @@ fn parse_layout_entry(
             return Err(invalid(format!("missing {name:?}")));
         };
         value.as_u64().ok_or_else(|| {
-            invalid(format!("{name:?} must be a non-negative integer, found {value}"))
+            invalid(format!(
+                "{name:?} must be a non-negative integer, found {value}"
+            ))
         })
     };
     let station = usize::try_from(integer("station")?)
@@ -353,9 +367,7 @@ fn parse_layout_entry(
         None => None,
         Some(value) => {
             let Some(bit) = value.as_u64().filter(|&bit| bit < 8) else {
-                return Err(invalid(format!(
-                    "\"bit\" must be in 0..8, found {value}"
-                )));
+                return Err(invalid(format!("\"bit\" must be in 0..8, found {value}")));
             };
             Some(bit as usize)
         }
@@ -368,8 +380,10 @@ fn parse_layout_entry(
                     "\"width\" must be a positive integer, found {value}"
                 )));
             };
-            Some(usize::try_from(width)
-                .map_err(|_| invalid("\"width\" exceeds usize".to_string()))?)
+            Some(
+                usize::try_from(width)
+                    .map_err(|_| invalid("\"width\" exceeds usize".to_string()))?,
+            )
         }
     };
     let bits = match declared.value_type {
@@ -490,12 +504,12 @@ mod tests {
                 "product_id": 950,
                 "revision": 2,
                 "name": "750-354",
-                "input_bytes": 4,
+                "input_bytes": 8,
                 "output_bytes": 1
             }],
             "layout": {
                 "di-1": {"station": 0, "offset": 0, "bit": 0},
-                "ai-1": {"station": 0, "offset": 0, "width": 4},
+                "ai-1": {"station": 0, "offset": 1, "width": 4},
                 "do-1": {"station": 0, "offset": 0, "bit": 0}
             },
             "safe_state": {"do-1": {"bool": false}}
@@ -511,9 +525,9 @@ mod tests {
         assert_eq!(parsed.miss_threshold, 3);
         assert_eq!(parsed.stations.len(), 1);
         assert_eq!(parsed.stations[0].vendor_id, 0xad);
-        assert_eq!(parsed.stations[0].input_bytes, 4);
+        assert_eq!(parsed.stations[0].input_bytes, 8);
         assert_eq!(parsed.layout["di-1"].bits, 0..1);
-        assert_eq!(parsed.layout["ai-1"].bits, 0..32);
+        assert_eq!(parsed.layout["ai-1"].bits, 8..40);
         assert_eq!(parsed.layout["do-1"].bits, 0..1);
         assert_eq!(parsed.safe_state["do-1"], Value::Bool(false));
     }
@@ -567,8 +581,7 @@ mod tests {
             }
         });
         // di-1 and ai-1 overlap at input bits 0..1.
-        let map: BTreeMap<String, serde_json::Value> =
-            serde_json::from_value(parameters).unwrap();
+        let map: BTreeMap<String, serde_json::Value> = serde_json::from_value(parameters).unwrap();
         let error = DeviceParameters::parse(&map, &channels()).unwrap_err();
         assert!(error.contains("overlap"), "{error}");
     }
