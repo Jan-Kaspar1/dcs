@@ -30,6 +30,10 @@
 //! - [`BoolLatchingAlarm`] — the Bool-input latching sibling: `alarm`
 //!   follows a Bool condition and `unacknowledged` latches its fresh
 //!   assertion until the same `ack` rule clears it;
+//! - [`ManagedLatchingAlarm`] and [`ManagedBoolLatchingAlarm`] — the
+//!   managed siblings: each latching kind's vocabulary plus the
+//!   shelving, suppression, and out-of-service lifecycle decisions
+//!   71–73 record;
 //! - [`Interlock`] — analog pass-through gated by Bool trip inputs and a
 //!   permissive, driving a configured safe value while tripped;
 //! - [`OverrideSelect`] — deterministic selection between a control and
@@ -112,6 +116,9 @@ mod flow_paced_ratio;
 mod header_coordinator;
 mod interlock;
 mod latching_alarm;
+mod managed;
+mod managed_bool_latching_alarm;
+mod managed_latching_alarm;
 mod manual_station;
 mod median_voter;
 mod motor;
@@ -149,6 +156,9 @@ pub use header_coordinator::{
 };
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
+pub use managed::{ManagedAlarmConfig, ManagedAlarmIo};
+pub use managed_bool_latching_alarm::ManagedBoolLatchingAlarm;
+pub use managed_latching_alarm::ManagedLatchingAlarm;
 pub use manual_station::ManualStation;
 pub use median_voter::MedianVoter;
 pub use motor::Motor;
@@ -184,6 +194,8 @@ pub const KINDS: &[&str] = &[
     AlarmMonitor::KIND,
     LatchingAlarm::KIND,
     BoolLatchingAlarm::KIND,
+    ManagedLatchingAlarm::KIND,
+    ManagedBoolLatchingAlarm::KIND,
     Interlock::KIND,
     OverrideSelect::KIND,
     Valve::KIND,

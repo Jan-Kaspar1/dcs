@@ -311,6 +311,45 @@ composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
 `BoolLatchingAlarm::KIND`.
 
+The managed alarm lifecycle architecture decisions 71–73 record adds
+two fixed-arity kinds, one managed sibling per latching kind.
+`managed-latching-alarm` keeps `latching-alarm`'s
+`in`/`ack`/`alarm`/`unacknowledged` vocabulary and its
+`low_limit`/`high_limit`/`hysteresis` parameters exactly;
+`managed-bool-latching-alarm` keeps `bool-latching-alarm`'s — `in` a
+`Bool`, `alarm` following the input directly. Each adds the uniform
+managed-state outputs `shelved`, `suppressed`, and `out_of_service`
+(`out`, `Bool`, `Status` role), three optional `in`/`Bool` inputs the
+instance declares only where the model wires one, and the `Int`
+`max_shelve_ticks` bound; both carry the decision-70
+`priority`/`class`/`response_ticks` parameters like every alarm kind.
+`shelve` and `oos` bind writable internal `In` points so operator
+commands ride the receipted `WriteValue` path: a `true` level requests
+the state, `false` returns it manually — out-of-service has no
+automatic return. Shelving asserts `shelved` while the request stands
+inside the bound, counts the request's asserting scan as the first,
+and drops at `max_shelve_ticks` even while the request still stands —
+a re-shelve requires the request to cycle through `false`. A zero
+`max_shelve_ticks` declares never-shelvable; an unbound or unwritable
+`shelve` point rejects stronger still, `NotWritable` at submission.
+`suppress` binds declared wiring — designed or state-based — asserting
+`suppressed` while it withholds `unacknowledged`'s latch; release
+evaluates fresh, so a condition that outlasted its suppression arrives
+as a new transition. While any managed flag stands, `alarm` keeps
+reporting process truth and `unacknowledged` its latch — the flag
+reroutes presentation, never erases the record: shelving an active
+alarm leaves both flags standing, an ack mid-shelve clears the latch
+normally, a trip mid-OOS evaluates and latches, and an unbound
+managed input reports its flag standing-clear. The shelve-expiry
+countdown, the out-of-service state, and the suppression state all
+ride `capture_state`, so a tracking standby promoted mid-shelve
+continues the remaining bound identically.
+`crates/dcs-assembly/fixtures/managed_alarms.json` is the recorded
+composition — three instances covering the full surface, a
+bound-but-unwritable `shelve`, and an unbound `suppress`; per-port
+semantics live beside `ManagedLatchingAlarm::KIND` and
+`ManagedBoolLatchingAlarm::KIND`.
+
 The chemical-dosing demand contract architecture decision 50 records
 adds one variable-signature kind. `flow-paced-ratio` reads `flow`
 (`in`, `Float`) — the measured process flow — `dose` (`in`, `Float`)

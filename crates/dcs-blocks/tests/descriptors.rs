@@ -8,8 +8,9 @@ use dcs_blocks::{
     BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
     CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo,
     GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs,
-    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
+    Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
+    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid,
+    PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
     RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer,
     Valve, ZoneIo,
 };
@@ -319,6 +320,58 @@ fn rig() -> Rig {
             point(&mut specs, 252, Direction::Out, ValueKind::Bool),
             point(&mut specs, 253, Direction::Out, ValueKind::Bool),
         )),
+        // The managed siblings, fully bound — `in`/`ack` plus the
+        // `shelve`/`oos`/`suppress` inputs and the five status outputs.
+        Box::new(
+            ManagedLatchingAlarm::new(
+                "mlal",
+                ManagedAlarmIo {
+                    input: point(&mut specs, 300, Direction::In, ValueKind::Float),
+                    ack: point(&mut specs, 301, Direction::In, ValueKind::Bool),
+                    shelve: Some(point(&mut specs, 302, Direction::In, ValueKind::Bool)),
+                    oos: Some(point(&mut specs, 303, Direction::In, ValueKind::Bool)),
+                    suppress: Some(point(&mut specs, 304, Direction::In, ValueKind::Bool)),
+                    alarm: point(&mut specs, 305, Direction::Out, ValueKind::Bool),
+                    unacknowledged: point(&mut specs, 306, Direction::Out, ValueKind::Bool),
+                    shelved: point(&mut specs, 307, Direction::Out, ValueKind::Bool),
+                    suppressed: point(&mut specs, 308, Direction::Out, ValueKind::Bool),
+                    out_of_service: point(&mut specs, 309, Direction::Out, ValueKind::Bool),
+                },
+                AlarmLimits {
+                    low: 10.0,
+                    high: 90.0,
+                    hysteresis: 5.0,
+                },
+                ManagedAlarmConfig {
+                    max_shelve_ticks: 5,
+                    priority: 1,
+                    class: 2,
+                    response_ticks: 30,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(ManagedBoolLatchingAlarm::new(
+            "mbal",
+            ManagedAlarmIo {
+                input: point(&mut specs, 320, Direction::In, ValueKind::Bool),
+                ack: point(&mut specs, 321, Direction::In, ValueKind::Bool),
+                shelve: Some(point(&mut specs, 322, Direction::In, ValueKind::Bool)),
+                oos: Some(point(&mut specs, 323, Direction::In, ValueKind::Bool)),
+                suppress: Some(point(&mut specs, 324, Direction::In, ValueKind::Bool)),
+                alarm: point(&mut specs, 325, Direction::Out, ValueKind::Bool),
+                unacknowledged: point(&mut specs, 326, Direction::Out, ValueKind::Bool),
+                shelved: point(&mut specs, 327, Direction::Out, ValueKind::Bool),
+                suppressed: point(&mut specs, 328, Direction::Out, ValueKind::Bool),
+                out_of_service: point(&mut specs, 329, Direction::Out, ValueKind::Bool),
+            },
+            ManagedAlarmConfig {
+                max_shelve_ticks: 5,
+                priority: 1,
+                class: 2,
+                response_ticks: 30,
+            },
+        )),
         Box::new(
             BackwashCoordinator::new(
                 "bwc",
@@ -396,7 +449,7 @@ fn rig() -> Rig {
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 26] = [
+const EXPECTED_KINDS: [&str; 28] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -421,6 +474,8 @@ const EXPECTED_KINDS: [&str; 26] = [
     SrLatch::KIND,
     EdgeTrigger::KIND,
     BoolLatchingAlarm::KIND,
+    ManagedLatchingAlarm::KIND,
+    ManagedBoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
     HeaderCoordinator::KIND,
 ];

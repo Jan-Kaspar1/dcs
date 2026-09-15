@@ -92,6 +92,25 @@ fn check_on_a_valid_fixture_prints_the_assembly_summary_and_exits_zero() {
 }
 
 #[test]
+fn check_accepts_the_managed_alarms_fixture() {
+    let managed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../dcs-assembly/fixtures/managed_alarms.json"
+    );
+    let output = run(&[managed, "--check"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for line in [
+        "check ok:",
+        "components: 3",
+        "  managed-latching-alarm: 1",
+        "  managed-bool-latching-alarm: 2",
+    ] {
+        assert!(stdout.contains(line), "{line} missing from:\n{stdout}");
+    }
+}
+
+#[test]
 fn check_output_is_deterministic_across_runs() {
     let first = run(&[TANK_LOOP, "--check"]);
     let second = run(&[TANK_LOOP, "--check"]);
