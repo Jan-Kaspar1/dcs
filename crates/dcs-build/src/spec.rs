@@ -162,12 +162,21 @@ pub const FRACTION_F64: ParameterRange = ParameterRange {
 };
 
 /// The inclusive bound the `Int` selection-code parameters of
-/// `bool-gate` (`operation`) and `edge-trigger` (`edge`) accept — the
-/// declared codes `0`, `1`, `2`. Mirrors each kind's private range
-/// constant.
+/// `bool-gate` (`operation`), `edge-trigger` (`edge`),
+/// `threshold-chain` (`on_bad_demand`), and `flow-paced-ratio`
+/// (`on_bad_flow`) accept — the declared codes `0`, `1`, `2`. Mirrors
+/// each kind's private range constant.
 pub(crate) const CODE_RANGE: ParameterRange = ParameterRange {
     min: Value::Int(0),
     max: Value::Int(2),
+};
+
+/// The inclusive bound a binary `Int` selection-code parameter accepts
+/// — the declared codes `0` and `1`, as `flow-paced-ratio`'s
+/// `on_bad_trim`. Mirrors the kind's private range constant.
+pub(crate) const BINARY_CODE_RANGE: ParameterRange = ParameterRange {
+    min: Value::Int(0),
+    max: Value::Int(1),
 };
 
 /// A component kind's declared interface, supplied to

@@ -19,9 +19,9 @@ use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmSpec,
     CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec,
-    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec,
+    MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
+    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -528,6 +528,77 @@ fn failover_select_rejects_an_undeclared_parameter() {
     ));
 }
 
+/// The `flow-paced-ratio` plant both tests wire: a scripted flow and
+/// trim on the device, a writable internal `dose` setpoint per decision
+/// 50, and internal carriers for the three outputs.
+fn flow_paced_ratio_plant(parameters_map: dcs_build::Parameters, trim: bool) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let flow_raw = plant.channel::<f64>(sim, "flow", Direction::In);
+    let trim_raw = plant.channel::<f64>(sim, "trim", Direction::In);
+
+    let flow = plant.field_input::<f64>(PointId(10), flow_raw, false);
+    let trim_in = plant.field_input::<f64>(PointId(11), trim_raw, false);
+    // The operator dose setpoint — the writable internal `In` point
+    // decision 50 prescribes, so writes ride the journaled receipted
+    // path.
+    let dose = plant.internal_input::<f64>(PointId(12), 2.0, true);
+    let demand = plant.internal_output::<f64>(PointId(20), 0.0);
+    let clamped = plant.internal_output::<bool>(PointId(21), false);
+    let fallback_active = plant.internal_output::<bool>(PointId(22), false);
+
+    let ratio = plant.add(FlowPacedRatioSpec::new(parameters_map, trim));
+    plant.connect(flow, ratio.flow);
+    plant.connect(dose, ratio.dose);
+    if let Some(trim_port) = ratio.trim {
+        plant.connect(trim_in, trim_port);
+    }
+    plant.connect(&ratio.demand, demand);
+    plant.connect(&ratio.clamped, clamped);
+    plant.connect(&ratio.fallback_active, fallback_active);
+    plant
+}
+
+fn ratio_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("min_dose", Value::Float(0.5)),
+        ("max_dose", Value::Float(4.0)),
+        ("min_rate", Value::Float(0.0)),
+        ("max_rate", Value::Float(50.0)),
+        ("on_bad_flow", Value::Int(0)),
+        ("fallback_rate", Value::Float(12.0)),
+        ("on_bad_trim", Value::Int(0)),
+    ])
+}
+
+#[test]
+fn flow_paced_ratio_spec_emits_an_assembling_document() {
+    // Both forms assemble: `trim` bound, and the unwired port omitted —
+    // the "unwired means unity" half the registry's `get("trim")`
+    // serves.
+    for trim in [true, false] {
+        let model = build_load_assemble(flow_paced_ratio_plant(ratio_parameters(), trim));
+        assert_eq!(model.components[0].kind, FlowPacedRatioSpec::KIND);
+        assert_eq!(
+            model.components[0].ports.contains_key("trim"),
+            trim,
+            "the optional port follows the spec flag"
+        );
+    }
+}
+
+#[test]
+fn flow_paced_ratio_rejects_an_out_of_range_response_code() {
+    // `on_bad_flow` declares the code range `0..=2`; a code outside it
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    let mut parameters_map = ratio_parameters();
+    parameters_map.insert("on_bad_flow".to_string(), Value::Int(9));
+    assert!(matches!(
+        flow_paced_ratio_plant(parameters_map, false).build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "on_bad_flow"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -601,6 +672,7 @@ fn every_registered_kind_has_a_spec() {
         EdgeTriggerSpec::KIND,
         ThresholdChainSpec::KIND,
         FailoverSelectSpec::KIND,
+        FlowPacedRatioSpec::KIND,
     ]
     .into_iter()
     .collect();

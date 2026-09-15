@@ -311,6 +311,36 @@ composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
 `BoolLatchingAlarm::KIND`.
 
+The chemical-dosing demand contract architecture decision 50 records
+adds one variable-signature kind. `flow-paced-ratio` reads `flow`
+(`in`, `Float`) — the measured process flow — `dose` (`in`, `Float`)
+— the operator's dose setpoint per flow unit, wired to a writable
+internal `in` point so writes ride the journaled receipted command
+path and the held value crosses checkpoints — and `trim` (`in`,
+`Float`) — the optional analyzer correction, declared on the instance
+only where the model wires one, an unwired `trim` meaning unity. It
+drives `demand` (`out`, `Float`), `clamped` (`out`, `Bool`), and
+`fallback_active` (`out`, `Bool`) — the engagement flag the alarm set
+consumes. Each trusted-`flow` scan emits
+`clamp(dose, min_dose, max_dose) × flow × trim` clamped to
+`[min_rate, max_rate]`, `clamped` asserting while either bound
+engages. The `parameters` are the finite `Float` bounds `min_dose` ≤
+`max_dose` and `min_rate` ≤ `max_rate` plus `fallback_rate`, the `Int`
+code `on_bad_flow` (`0` stop — `demand` falls to zero; `1` hold the
+last `Good`-stamped demand; `2` drive `fallback_rate`), and the `Int`
+code `on_bad_trim` (`0` pace untrimmed on flow alone; `1` hold the
+last `Good` trim); all seven are `SetParameter`-tunable. A non-`Good`
+`dose` holds the last `Good` finite setpoint — `demand` zero and
+`fallback_active` asserted until the first one arrives — and `demand`
+always carries the merged worst-of input qualities, so a bad flow
+marks the demand untrusted even under a hold or fallback response.
+Fixed-rate service is not a kind mode: the operator's fixed demand
+rides a `manual-station`, while `on_bad_flow` `2` makes `fallback_rate`
+the declared fixed answer to a failed pacing signal.
+`crates/dcs-assembly/fixtures/flow_paced_ratio.json` is the recorded
+composition — three instances covering each `on_bad_flow` response,
+one trim-bound; per-port semantics live beside `FlowPacedRatio::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
