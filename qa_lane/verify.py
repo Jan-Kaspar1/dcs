@@ -286,6 +286,23 @@ def run(st, record, cfg, log=print):
             _mark_reported(st, key, item['fix_sha'], sha, run_id,
                            'inconclusive')
             return
+        # Same storage bound as assessment runs: a verification run is
+        # still a run, and its evidence consumes the lane footprint.
+        try:
+            usage = runner.qa_storage_usage(cfg)
+        except Exception as exc:
+            blocked('cannot measure the lane footprint: '
+                    + str(exc)[:300])
+            _mark_reported(st, key, item['fix_sha'], sha, run_id,
+                           'inconclusive')
+            return
+        if usage['total'] + cfg['run_headroom_bytes']                 > cfg['qa_storage_max_bytes']:
+            blocked('lane footprint ' + str(usage['total'])
+                    + ' + headroom ' + str(cfg['run_headroom_bytes'])
+                    + ' exceeds ' + str(cfg['qa_storage_max_bytes']))
+            _mark_reported(st, key, item['fix_sha'], sha, run_id,
+                           'inconclusive')
+            return
         src_tar = Path(cfg['src_dir']) / (sha + '.tar')
         src = Path(cfg['src_dir']) / sha
         if not src.is_dir():

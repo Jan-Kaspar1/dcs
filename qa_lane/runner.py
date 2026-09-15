@@ -634,13 +634,12 @@ def cycle(cfg, log=print):
         # contain it before the lane spends a run on fresh exploration.
         from . import verify
         record = verify.next_run(st, cfg, now, log)
-        if record is not None:
-            verify.run(st, record, cfg, log)
-            return
-        record = st.next_queued()
-        if record is None:
+        queued = record if record is not None else st.next_queued()
+        if queued is None:
             log('cycle: nothing queued')
             return
+        # The egress gate covers both run kinds: a verification run
+        # builds images and starts a rig exactly like an assessment.
         if cfg.get('egress_required'):
             missing = _ensure_egress_policy(log)
             if missing:
@@ -648,7 +647,10 @@ def cycle(cfg, log=print):
                              'host firewall rules absent: '
                              + '; '.join(missing[:5]), log)
                 return
-        run(st, record, cfg, log)
+        if record is not None:
+            verify.run(st, record, cfg, log)
+        else:
+            run(st, queued, cfg, log)
     finally:
         st.close()
         lock.close()
