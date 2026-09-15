@@ -625,14 +625,14 @@ mod tests {
     fn a_lone_excursion_inside_a_tracking_window_never_asserts() {
         let mut block = component();
         let io = io();
-        // One scan at half delivery inside an otherwise tracking
-        // window dilutes below the limit — the comparison is the
-        // window's, not the scan's.
-        for (tick, measured) in [(1, 10.0), (2, 5.0), (3, 10.0), (4, 10.0)] {
+        // One scan's thirty-percent shortfall inside an otherwise
+        // tracking window dilutes below the limit — the comparison is
+        // the window's, not the scan's.
+        for (tick, measured) in [(1, 10.0), (2, 7.0), (3, 10.0), (4, 10.0)] {
             step(&mut block, &io, 10.0, measured, tick);
             assert!(!deviating_value(&io), "tick {tick}");
         }
-        assert_eq!(deviation(&io).value, Value::Float(-0.125));
+        assert_eq!(deviation(&io).value, Value::Float(-0.075));
     }
 
     #[test]
