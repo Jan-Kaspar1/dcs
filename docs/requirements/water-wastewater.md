@@ -2,7 +2,7 @@
 
 This is the initial requirements baseline for the first target market. It is intentionally narrower than a complete water-industry DCS specification. The simulated reference plant is a duty/standby pumping station with a wet well or tank, level measurement, discharge measurement, motor feedback, permissives, trips, and operator controls.
 
-Station operating-policy evidence and open assumptions are recorded in `docs/research/pumping-station.md` (issue #195); the requirement entries below cite it where the sources sharpen or qualify the acceptance evidence.
+Station operating-policy evidence and open assumptions are recorded in `docs/research/pumping-station.md` (issue #195); the requirement entries below cite it where the sources sharpen or qualify the acceptance evidence. Alarm-lifecycle evidence for the `WW-ALM-001` candidate is recorded in `docs/research/alarm-management.md` (issue #234).
 
 ## Accepted foundation requirements
 
@@ -28,7 +28,7 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 - **Status:** accepted
 - **Need:** Abnormal process and equipment conditions are visible with lifecycle state, timestamps, acknowledgment, and actor attribution sufficient for an operator to understand what happened.
-- **Acceptance evidence:** The reference application generates representative process and equipment alarms, exposes current alarm state and transition history, and preserves the durable journal across a controller restart. The research note sharpens the representative set: high and low wet-well level, per-pump fail-to-start and fail-to-stop, measurement fault, backup-control-mode engagement, and station power/communication faults — each a latching alarm with a standing flag, an unacknowledged latch, and a journaled acknowledgment. Alarm priorities, shelving, suppression, and classes remain deferred (decision 38; feeds `WW-ALM-001`); which alarms must latch until acknowledged is a recorded customer-validation question.
+- **Acceptance evidence:** The reference application generates representative process and equipment alarms, exposes current alarm state and transition history, and preserves the durable journal across a controller restart. The research note sharpens the representative set: high and low wet-well level, per-pump fail-to-start and fail-to-stop, measurement fault, backup-control-mode engagement, and station power/communication faults — each a latching alarm with a standing flag, an unacknowledged latch, and a journaled acknowledgment. Alarm priorities, shelving, suppression, and classes remain deferred (decision 38; feeds `WW-ALM-001` — lifecycle evidence and the seam mapping are in `docs/research/alarm-management.md`); which alarms must latch until acknowledged is a recorded customer-validation question.
 
 ### WW-OPS-003 — Signal and communication confidence
 
@@ -76,7 +76,9 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 These subjects are likely relevant but are not implementation authority yet:
 
-- `WW-ALM-001`: alarm priorities, shelving, suppression, out-of-service state, and flood handling — the pumping-station note gathers supporting lifecycle evidence but the station alarm set stays on the two-flag model per decision 38; promotion awaits the customer answers it records;
+- `WW-ALM-001`: alarm priorities, shelving, suppression, out-of-service state, and flood handling — still candidate. `docs/research/alarm-management.md` (issue #234) maps the standards' lifecycle (ISA-18.2 / IEC 62682) onto the implemented two-flag model and the decision-38 per-kind extension seam: the normal/acknowledged/returned-to-normal axis, per-alarm latch policy, designed and state-based suppression through `in`-gating wiring, priority and class as declared metadata, shelving as a per-kind sibling, and flood/performance metrics over the journal and history all land without contract work; named managed-state visibility, dedicated lifecycle journal events, a shelve/suppress command variant, and an in-model rationalization record are the items that would need it. Promotion stays withheld: the owner evidence for managed states, priorities, and flood handling sits at alarm-program scale (a utility-wide ISA-18.2 alarm standard; a citywide network's documented flood problem), while small-station specifications require the alarm set and its telemetry delivery — so no observable acceptance criteria are justified yet.
+  - Open assumptions for customer validation (enumerated in the note): whether the client runs an ISA-18.2/IEC 62682 alarm philosophy at all; which alarms must latch until acknowledged; the required priority scheme; shelving policy, authority, and per-alarm bounds if shelving is wanted; which alarms are state-dependent; out-of-service versus the equipment maintenance-inhibit mode; flood-monitoring versus flood-suppression expectations; and alarm delivery/escalation for unattended stations.
+  - Revisit condition: promote when a first-client alarm philosophy or owner specification names managed-state handling (shelving, suppression, out-of-service), priority classes, or flood handling as required — or when the reference station's acceptance scenario demonstrates a nuisance-alarm or flood condition the two-flag model cannot make observable;
 - `WW-CTL-005`: aeration or dissolved-oxygen control;
 - `WW-ENG-002`: bulk engineering, templates, naming conventions, and site-specific parameter sets;
 - `WW-LCM-002`: deployment topology, backup and restore, version upgrades, rollback, and commissioning workflow;
