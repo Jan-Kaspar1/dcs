@@ -195,13 +195,15 @@ pub mod points {
     pub fn out_of_service(index: usize) -> PointId {
         PointId(302 + 32 * index as u64)
     }
-    /// Pump `index`'s motor-fault alarm's writable ack.
+    /// Pump `index`'s managed motor-fault alarm's writable ack — the
+    /// alarm region's `1000 + 10·a` blocks start per-pump alarms at
+    /// `a = 6 + 3·index` (fault/thermal/moisture in order).
     pub fn fault_ack(index: usize) -> PointId {
-        PointId(315 + 32 * index as u64)
+        PointId(1000 + 10 * (6 + 3 * index as u64))
     }
-    /// Pump `index`'s thermal alarm's writable ack.
+    /// Pump `index`'s managed thermal alarm's writable ack.
     pub fn thermal_ack(index: usize) -> PointId {
-        PointId(318 + 32 * index as u64)
+        PointId(1000 + 10 * (7 + 3 * index as u64))
     }
     /// The high-level alarm's writable ack.
     pub const LAH_ACK: PointId = PointId(1000);

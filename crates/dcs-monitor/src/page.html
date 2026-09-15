@@ -59,6 +59,7 @@
   tr.protection.bad td, tr.protection.substituted td,
   tr.protection.uncertain td { background: #dde8f4; font-style: italic; }
   button.ack { color: #b00; font-weight: bold; }
+  button.managed { color: #a60; font-weight: bold; margin-left: 0.3rem; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -283,7 +284,18 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // issuing an ordinary receipted write_value — no alarm-specific
 // protocol — and because the kind's ack is level-observed the pane
 // pulses it: once the write's apply tick has scanned past, a second
-// receipted write drops the point back to false.
+// receipted write drops the point back to false. The managed kinds'
+// `shelve` and `oos` inputs join the same way — the descriptor's
+// bound-point annotation plus the bound point's writable mark — but
+// they are held level-observed, not pulsed: the affordance writes the
+// request level and leaves it standing until the opposite command,
+// rendering shelve/unshelve and out-of-service/return-to-service by
+// the request point's live level rather than the flag, since `shelved`
+// drops at the max_shelve_ticks bound while the request still stands
+// and a re-shelve needs the request cycled through false. An unbound
+// or unwritable managed input offers nothing — the never-shelvable
+// surface — and a write attempted anyway meets the receipted path's
+// named rejection.
 //
 // The protection boundary (the independent-protection-layer decision):
 // each ?protection=<group> parameter names a model signal `group`
@@ -1476,6 +1488,45 @@ function ackAffordance(descriptor) {
     "\">ack</button>";
 }
 
+// The managed-state request inputs a managed kind may declare —
+// `shelve` and `oos`, Bool, In — with each direction's label: the
+// raise command while the request reads false, the release while it
+// stands. Joined by port name across kinds like the status vocabulary
+// — a kind's managed command surface is exactly the bound,
+// model-writable subset.
+const MANAGED_ACTIONS = [
+  { port: "shelve", raise: "shelve", release: "unshelve" },
+  { port: "oos", raise: "out of service", release: "return to service" },
+];
+
+// The managed-state affordances, offered only where the component
+// declares the request input wired to a point the model marked
+// writable — the same metadata gate `ack` passes. Unlike the ack pulse
+// the managed inputs are held level-observed: the button writes the
+// request's level and leaves it standing until the opposite command,
+// so the label tracks the request point's live level rather than the
+// flag — `shelved` drops at the max_shelve_ticks bound while the
+// request still stands, and a re-shelve needs the request cycled
+// through false. An unbound or unwritable input offers nothing — the
+// never-shelvable surface — and a write attempted anyway meets the
+// receipted path's named rejection.
+function managedAffordance(descriptor, telemetry) {
+  const parts = [];
+  for (const action of MANAGED_ACTIONS) {
+    const port = descriptor.ports.find(p =>
+      p.name === action.port && p.direction === "in" && p.kind === "bool");
+    if (!port || port.point == null) continue;
+    const meta = metaByPoint.get(port.point);
+    if (!meta || !meta.writable) continue;
+    const held = isAsserted(portSample(port, telemetry));
+    const label = held ? action.release : action.raise;
+    parts.push("<button type=\"button\" class=\"managed\" data-point=\"" +
+      port.point + "\" data-level=\"" + !held + "\" title=\"" +
+      esc(label + " " + descriptor.label) + "\">" + esc(label) + "</button>");
+  }
+  return parts.join("");
+}
+
 // The live sample of the component's status Out port named `name`, or
 // null when the kind declares none — the uniform-vocabulary join the
 // managed flags and the two-flag truth share.
@@ -1621,8 +1672,10 @@ function commandPoint(command) {
 // the states the row routes and filters by — the component's asserted
 // managed flags, "active" while `alarm` stands, "unacknowledged" while
 // the latch stands. `managed` is the subset of states in the uniform
-// vocabulary, in MANAGED_STATES order.
-function alarmRow(descriptor, port, sample, telemetry, forced, parameters, ack) {
+// vocabulary, in MANAGED_STATES order. `actions` is the component's
+// affordance cell — the ack plus managed-state commands — rendered on
+// its first row only.
+function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actions) {
   const states = alarmRowStates(descriptor, telemetry);
   const cls = qualityClass(sample.quality);
   const meta = portMeta(port);
@@ -1644,7 +1697,7 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, ack) 
       "</td>" +
       "<td>" + lastChangedTick(port.point, sample) + "</td>" +
       "<td>" + priorityMarkup(descriptor.name, parameters) + "</td>" +
-      "<td>" + ack + "</td></tr>",
+      "<td>" + actions + "</td></tr>",
   };
 }
 
@@ -1666,20 +1719,23 @@ function renderAlarms(snapshot, telemetry, forced) {
   const parameters = new Map(
     (snapshot.parameters || []).map(p => [p.name, p.values]));
   const filter = document.getElementById("alarm-filter").value;
-  // One ack affordance per component per render: a latching kind's
+  // One affordance cell per component per render: a latching kind's
   // `alarm` and `unacknowledged` can stand together, and both clear
-  // through the same `ack` input — the row built once is shared by
-  // every managed list its states route it to.
-  const acked = new Set();
+  // through the same `ack` input — and every managed list the states
+  // route the component's rows to shares the one affordance set, the
+  // ack plus the managed-state commands, built once.
+  const offered = new Set();
   const rows = [];
   let degraded = 0;
   for (const { descriptor, port } of join.standing) {
     const sample = port.point == null ? null : portSample(port, telemetry);
     if (!isAsserted(sample)) continue;
-    const ack = acked.has(descriptor.name) ? "" : ackAffordance(descriptor);
-    if (ack !== "") acked.add(descriptor.name);
+    const actions = offered.has(descriptor.name)
+      ? ""
+      : ackAffordance(descriptor) + managedAffordance(descriptor, telemetry);
+    if (actions !== "") offered.add(descriptor.name);
     const row = alarmRow(descriptor, port, sample, telemetry, forced,
-      parameters, ack);
+      parameters, actions);
     if (row.degraded) degraded++;
     rows.push(row);
   }
@@ -1781,6 +1837,30 @@ async function submitAck(button) {
         ackReleases.set(point, answer.outcome.applied.tick);
       }
     }
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+  }
+  refresh();
+}
+
+// A managed-state submission: an ordinary receipted write_value of the
+// affordance's target level on the bound request point. Unlike the ack
+// pulse the managed inputs are held level-observed — no release write
+// follows: a shelve request stands until the unshelve, max_shelve_ticks
+// bounding the flag rather than the request; an oos request stands
+// until the return, there being no automatic return. The named
+// rejection of a refused write lands in the receipt pane and the
+// journal like every other command's.
+async function submitManaged(button) {
+  const point = Number(button.dataset.point);
+  const meta = metaByPoint.get(point);
+  if (!meta || !meta.writable) return;
+  try {
+    await submitCommand({ write_value: {
+      point: point,
+      kind: meta.value_type,
+      value: { bool: button.dataset.level === "true" },
+    } });
   } catch (error) {
     document.getElementById("receipt").textContent = "command failed: " + error;
   }
@@ -2306,12 +2386,17 @@ async function init() {
     }
     refresh();
   });
-  // The alarm pane's ack affordance takes the same delegated shape —
-  // the rows re-render on every poll — and the state select re-filters
-  // the lists on the next refresh, triggered immediately here.
+  // The alarm pane's affordances take the same delegated shape — the
+  // rows re-render on every poll — and the state select re-filters the
+  // lists on the next refresh, triggered immediately here.
   document.getElementById("alarm-pane").addEventListener("click", async event => {
     const ack = event.target.closest("button.ack");
-    if (ack) await submitAck(ack);
+    if (ack) {
+      await submitAck(ack);
+      return;
+    }
+    const managed = event.target.closest("button.managed");
+    if (managed) await submitManaged(managed);
   });
   document.getElementById("alarm-filter").addEventListener("change", refresh);
   // The point listing's force and release affordances take the same

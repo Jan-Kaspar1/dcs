@@ -36,6 +36,11 @@ const DOSING_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-sim/fixtures/dosing_skid_dynamics.json"
 );
+const PROTECTION_MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/protection.json");
+const PROTECTION_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-sim/fixtures/protection_dynamics.json"
+);
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_point.json"
@@ -407,6 +412,94 @@ fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
     let second_run = dosing_script(second.addr);
     assert!(stop(&mut second).success());
     assert_eq!(first_run, second_run);
+}
+
+/// One scripted pass over the protection loop: the level and the
+/// `sis-active` contact each step — the trace identical runs must
+/// reproduce.
+fn protection_script(addr: SocketAddr) -> Vec<(Sample, Sample)> {
+    let driver = RemoteDriver::connect(addr).unwrap();
+    (0..6)
+        .map(|_| {
+            driver.step(1.0).unwrap();
+            (
+                driver.read(PointId(10)).unwrap(),
+                driver.read(PointId(30)).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_level_crossing_drives_the_protection_contact_through_the_merge() {
+    // The threshold element the vocabulary was missing: a Float input
+    // driving a Bool contact with a declared hysteresis band, merged
+    // through `--dynamics` and gating a `bool_flow` emergency draw —
+    // a plant-side protection pattern expressed entirely in a
+    // dynamics document, no scheduled script asserting the contact.
+    let args = [
+        PROTECTION_MODEL,
+        "--dynamics",
+        PROTECTION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ];
+    let mut plant = spawn(&args);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    let level = || {
+        let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
+            panic!("the level point is Float")
+        };
+        level
+    };
+    let contact = || driver.read(PointId(30)).unwrap().value;
+
+    // The integrator seeds the well at its declared initial level and
+    // the threshold seeds the contact at its declared initial Bool.
+    assert_eq!(level(), 6.0);
+    assert_eq!(contact(), Value::Bool(false));
+
+    // The declared inflow — net +4 per unit — climbs the well to 10,
+    // past the `on` bound of 8: the next step's threshold read
+    // asserts the contact and engages the draw.
+    driver.step(1.0).unwrap();
+    assert_eq!(level(), 10.0);
+    assert_eq!(contact(), Value::Bool(false));
+    driver.step(1.0).unwrap();
+    assert_eq!(contact(), Value::Bool(true));
+    assert_eq!(driver.read(PointId(12)).unwrap().value, Value::Float(-20.0));
+    assert_eq!(level(), -6.0);
+
+    // Back below `off`, the contact releases and the draw stops at
+    // the next boundary — the loop oscillates on the element's own
+    // bounds with no script tick asserting anything.
+    driver.step(1.0).unwrap();
+    assert_eq!(contact(), Value::Bool(false));
+    assert_eq!(driver.read(PointId(12)).unwrap().value, Value::Float(0.0));
+    assert_eq!(level(), -2.0);
+
+    assert!(stop(&mut plant).success());
+
+    // Identical scripted step sequences produce identical point
+    // traces across a restart of the merged plant.
+    let mut first = spawn(&args);
+    let first_run = protection_script(first.addr);
+    assert!(stop(&mut first).success());
+    let mut second = spawn(&args);
+    let second_run = protection_script(second.addr);
+    assert!(stop(&mut second).success());
+    assert_eq!(first_run, second_run);
+    // The trace actually asserted and released the contact.
+    assert!(
+        first_run
+            .iter()
+            .any(|(_, contact)| contact.value == Value::Bool(true))
+    );
+    assert!(
+        first_run
+            .iter()
+            .any(|(_, contact)| contact.value == Value::Bool(false))
+    );
 }
 
 #[test]

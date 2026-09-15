@@ -1179,7 +1179,8 @@ fn the_device_binary_reports_named_startup_failures() {
 /// A model declaring one `sim-bus` device carrying the station-loop
 /// register map the shared dynamics document drives: level register 10,
 /// inflow 11, pump draws 12 and 13, net flow 14, run commands 20 and
-/// 21.
+/// 21 — plus the Bool `sis-active` contact register 30 the protection
+/// document's `threshold` drives.
 const STATION_MODEL: &str = r#"{
   "version": 1,
   "devices": [
@@ -1195,7 +1196,8 @@ const STATION_MODEL: &str = r#"{
           "pump-b-flow": 13,
           "net-flow": 14,
           "pump-a-run": 20,
-          "pump-b-run": 21
+          "pump-b-run": 21,
+          "sis-active": 30
         }
       },
       "channels": {
@@ -1205,7 +1207,8 @@ const STATION_MODEL: &str = r#"{
         "pump-b-flow": { "direction": "in", "value_type": "float" },
         "net-flow": { "direction": "in", "value_type": "float" },
         "pump-a-run": { "direction": "out", "value_type": "bool" },
-        "pump-b-run": { "direction": "out", "value_type": "bool" }
+        "pump-b-run": { "direction": "out", "value_type": "bool" },
+        "sis-active": { "direction": "in", "value_type": "bool" }
       }
     }
   ],
@@ -1312,6 +1315,67 @@ fn the_device_binary_serves_a_scaled_flow_document_over_registers() {
     bus.step(0.5).unwrap();
     assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(-25.0));
     assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(37.5));
+}
+
+/// The protection-loop document — the same file
+/// `dcs-plant-server --dynamics` merges: a `threshold` on level
+/// register 10 driving the `sis-active` Bool register 30, gating the
+/// `bool_flow` emergency draw on 12.
+const PROTECTION_DYNAMICS: &str = include_str!("../../dcs-sim/fixtures/protection_dynamics.json");
+
+#[test]
+fn the_device_binary_serves_a_threshold_protection_document_over_registers() {
+    // The Float-to-Bool element merges through the register seam: the
+    // level crossing asserts the contact register, which gates the
+    // emergency draw — no scheduled script involved.
+    let model = model_file(STATION_MODEL);
+    let dynamics = scratch_file("dynamics", PROTECTION_DYNAMICS);
+    let (_child, addr) = spawn_device(&model, 3, Some(&dynamics));
+
+    // Point 1 reads the level register, point 2 the contact, point 3
+    // the draw.
+    let bus = BusDriver::connect(
+        addr,
+        &[
+            PointRegister {
+                point: PointId(1),
+                register: 10,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(2),
+                register: 30,
+                kind: ValueKind::Bool,
+            },
+            PointRegister {
+                point: PointId(3),
+                register: 12,
+                kind: ValueKind::Float,
+            },
+        ],
+    )
+    .unwrap();
+    let driver: &dyn IoDriver = &bus;
+    let contact = |driver: &dyn IoDriver| driver.read(PointId(2)).unwrap().value;
+
+    // The integrator seeds the level at 6.0, the contact released.
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(6.0));
+    assert_eq!(contact(driver), Value::Bool(false));
+
+    // The level climbing past `on` — 6 + 4·1 = 10 — asserts the
+    // contact at the tick boundary reading the crossing; the gated
+    // draw engages on that same step and pulls the level back.
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(false));
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(true));
+    assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(-20.0));
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(-6.0));
+
+    // Back below `off`, the contact releases cleanly.
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(false));
+    assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(0.0));
 }
 
 #[test]

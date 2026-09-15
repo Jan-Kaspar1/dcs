@@ -105,6 +105,10 @@ fn describe_element_error(error: &ConfigError) -> String {
             "a bool_flow element's gate must read a Bool register, but register {} is {kind:?}",
             point.0
         ),
+        ConfigError::ElementContactKind { point, kind } => format!(
+            "a threshold element's contact must drive a Bool register, but register {} is {kind:?}",
+            point.0
+        ),
         ConfigError::InvalidTimeConstant { point, value } => format!(
             "lag driving register {} has non-positive or non-finite time constant {value}",
             point.0
@@ -131,6 +135,18 @@ fn describe_element_error(error: &ConfigError) -> String {
         ),
         ConfigError::InvalidGain { point, value } => format!(
             "scaled_flow element driving register {} has non-finite gain {value}",
+            point.0
+        ),
+        ConfigError::InvalidBound {
+            point,
+            bound,
+            value,
+        } => format!(
+            "threshold element driving register {} has non-finite {bound} bound {value}",
+            point.0
+        ),
+        ConfigError::NonPositiveBand { point, on, off } => format!(
+            "threshold element driving register {} declares no hysteresis band: on {on} equals off {off}",
             point.0
         ),
         ConfigError::NonFiniteInitial { point, value } => format!(
@@ -363,7 +379,10 @@ impl RegisterBank {
     /// element — a `bool_flow` stands its `on_rate` or `off_rate` by
     /// its `Bool` gate, a `flow_sum` sums its declared inputs plus
     /// `bias`, a `scaled_flow` stands at `gain` times its `Float`
-    /// input, an `integrator` accumulates `u·dt` — and stamps its
+    /// input, an `integrator` accumulates `u·dt`, a `threshold`
+    /// evaluates its `Float` input against the declared `on`/`off`
+    /// bounds and drives the contact onto its `Bool` register — and
+    /// stamps its
     /// output register `Good`; a non-`Good` input freezes the element
     /// and propagates its quality to the output register's sample, a
     /// `flow_sum` propagating the worst of its inputs' qualities.
@@ -412,7 +431,7 @@ impl fmt::Debug for RegisterBank {
 mod tests {
     use super::*;
     use dcs_core::{QualityReason, ValueKind};
-    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator, ScaledFlow};
+    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator, ScaledFlow, Threshold};
 
     fn bank() -> RegisterBank {
         RegisterBank::new([
@@ -588,6 +607,10 @@ mod tests {
             },
             RegisterDecl {
                 register: 20,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 21,
                 initial: Value::Bool(false),
             },
         ]
@@ -772,12 +795,167 @@ mod tests {
             time_constant: -1.0,
             initial: 0.0,
         }));
-        let error = RegisterBank::with_dynamics(decls, contested).unwrap_err();
+        let error = RegisterBank::with_dynamics(decls.clone(), contested).unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("dynamics element 3 (driving register 10)"),
             "{error}"
         );
+
+        // A threshold's contact on a Float register names the element
+        // and the register it drives.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(12),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 12) is invalid: a threshold element's contact must drive a Bool register, but register 12 is Float"
+        );
+        // A non-finite bound names the element, its register, and the
+        // bound that offended.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: f64::NAN,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 20) is invalid: threshold element driving register 20 has non-finite on bound NaN"
+        );
+        // Equal bounds declare no hysteresis band.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: 7.5,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 20) is invalid: threshold element driving register 20 declares no hysteresis band: on 7.5 equals off 7.5"
+        );
+        // And a threshold input on a Bool register is the
+        // vocabulary's ordinary Float-end rejection.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(20),
+                output: PointId(21),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("register 20 is Bool"), "{error}");
+    }
+
+    /// The protection-loop document — the shared fixture both
+    /// `--dynamics` seams merge: a `threshold` on level register 10
+    /// driving the `sis-active` Bool register 30, gating the
+    /// `bool_flow` emergency draw on 12, summed with the inflow on 11
+    /// into net register 13, integrated back into the level.
+    const PROTECTION_DYNAMICS: &str =
+        include_str!("../../dcs-sim/fixtures/protection_dynamics.json");
+
+    fn protection_decls() -> Vec<RegisterDecl> {
+        vec![
+            RegisterDecl {
+                register: 10,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 11,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 12,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 13,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 30,
+                initial: Value::Bool(false),
+            },
+        ]
+    }
+
+    fn protection_elements() -> Vec<ProcessElement> {
+        serde_json::from_str(PROTECTION_DYNAMICS).unwrap()
+    }
+
+    #[test]
+    fn a_declared_threshold_drives_the_contact_register_over_the_bank() {
+        let bank = RegisterBank::with_dynamics(protection_decls(), protection_elements()).unwrap();
+        // Element initials seed the registers they drive: the level at
+        // the integrator's initial, the contact released.
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(6.0));
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+
+        // The level climbing past `on` asserts the contact; the gated
+        // draw engages on the same step and pulls the level back.
+        bank.step(1.0);
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(10.0));
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(true));
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(-20.0));
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(-6.0));
+
+        // Back below `off`, the contact releases and the draw stops.
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(0.0));
+    }
+
+    #[test]
+    fn a_non_good_threshold_input_holds_the_contact_and_propagates_quality() {
+        let bank = RegisterBank::with_dynamics(protection_decls(), protection_elements()).unwrap();
+        // Push the level past `on` so the contact stands asserted.
+        bank.step(1.0);
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(true));
+
+        // Fault the level register: the threshold freezes its standing
+        // contact and stamps the injected quality on it — and the
+        // propagated quality freezes the gated draw in turn.
+        bank.inject_quality(10, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        bank.step(1.0);
+        assert_eq!(
+            bank.read(30).unwrap(),
+            Sample::new(
+                Value::Bool(true),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(3)
+            )
+        );
+        assert_eq!(
+            bank.read(12).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(-20.0));
     }
 }

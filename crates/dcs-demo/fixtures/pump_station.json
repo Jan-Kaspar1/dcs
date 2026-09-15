@@ -295,6 +295,15 @@
     },
     {
       "id": 1001,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1003,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -303,7 +312,34 @@
       "journaled": true
     },
     {
-      "id": 1002,
+      "id": 1004,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1005,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1006,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1007,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -322,6 +358,16 @@
     },
     {
       "id": 1011,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 1013,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -330,7 +376,34 @@
       "journaled": true
     },
     {
-      "id": 1012,
+      "id": 1014,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1015,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1016,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1017,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -348,7 +421,7 @@
       "writable": true
     },
     {
-      "id": 1021,
+      "id": 1023,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -357,7 +430,34 @@
       "journaled": true
     },
     {
-      "id": 1022,
+      "id": 1024,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1025,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1026,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1027,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -375,7 +475,7 @@
       "writable": true
     },
     {
-      "id": 1031,
+      "id": 1033,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -384,7 +484,34 @@
       "journaled": true
     },
     {
-      "id": 1032,
+      "id": 1034,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1035,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1036,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1037,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -402,7 +529,7 @@
       "writable": true
     },
     {
-      "id": 1041,
+      "id": 1043,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -411,7 +538,34 @@
       "journaled": true
     },
     {
-      "id": 1042,
+      "id": 1044,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1045,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1046,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1047,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -429,7 +583,7 @@
       "writable": true
     },
     {
-      "id": 1051,
+      "id": 1053,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -438,7 +592,34 @@
       "journaled": true
     },
     {
-      "id": 1052,
+      "id": 1054,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1055,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1056,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1057,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -670,7 +851,23 @@
       }
     },
     {
-      "id": 315,
+      "id": 330,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 331,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1060,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -679,7 +876,7 @@
       "writable": true
     },
     {
-      "id": 316,
+      "id": 1063,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -688,7 +885,7 @@
       "journaled": true
     },
     {
-      "id": 317,
+      "id": 1064,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -697,7 +894,34 @@
       "journaled": true
     },
     {
-      "id": 318,
+      "id": 1065,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1066,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1067,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1070,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -706,7 +930,7 @@
       "writable": true
     },
     {
-      "id": 319,
+      "id": 1073,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -715,7 +939,7 @@
       "journaled": true
     },
     {
-      "id": 320,
+      "id": 1074,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -724,7 +948,34 @@
       "journaled": true
     },
     {
-      "id": 321,
+      "id": 1075,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1076,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1077,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1080,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -733,7 +984,7 @@
       "writable": true
     },
     {
-      "id": 322,
+      "id": 1083,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -742,7 +993,34 @@
       "journaled": true
     },
     {
-      "id": 323,
+      "id": 1084,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1085,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1086,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1087,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -974,7 +1252,23 @@
       }
     },
     {
-      "id": 347,
+      "id": 362,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 363,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1090,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -983,7 +1277,7 @@
       "writable": true
     },
     {
-      "id": 348,
+      "id": 1093,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -992,7 +1286,7 @@
       "journaled": true
     },
     {
-      "id": 349,
+      "id": 1094,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1001,7 +1295,34 @@
       "journaled": true
     },
     {
-      "id": 350,
+      "id": 1095,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1096,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1097,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1100,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -1010,7 +1331,7 @@
       "writable": true
     },
     {
-      "id": 351,
+      "id": 1103,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1019,7 +1340,7 @@
       "journaled": true
     },
     {
-      "id": 352,
+      "id": 1104,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1028,7 +1349,34 @@
       "journaled": true
     },
     {
-      "id": 353,
+      "id": 1105,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1106,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1107,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1110,
       "direction": "in",
       "value_type": "bool",
       "initial": {
@@ -1037,7 +1385,7 @@
       "writable": true
     },
     {
-      "id": 354,
+      "id": 1113,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1046,7 +1394,34 @@
       "journaled": true
     },
     {
-      "id": 355,
+      "id": 1114,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1115,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1116,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1117,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1258,18 +1633,50 @@
     },
     {
       "id": 11001,
-      "name": "lah-alarm",
+      "name": "lah-shelve",
       "source": 1001,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Operator shelving request for the alarm",
       "group": "station"
     },
     {
-      "id": 11002,
+      "id": 11003,
+      "name": "lah-alarm",
+      "source": 1003,
+      "unit": "",
+      "description": "Standing alarm state — process truth under every managed flag",
+      "group": "station"
+    },
+    {
+      "id": 11004,
       "name": "lah-unacknowledged",
-      "source": 1002,
+      "source": 1004,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11005,
+      "name": "lah-shelved",
+      "source": 1005,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11006,
+      "name": "lah-suppressed",
+      "source": 1006,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11007,
+      "name": "lah-out-of-service",
+      "source": 1007,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1282,18 +1689,50 @@
     },
     {
       "id": 11011,
-      "name": "lal-alarm",
+      "name": "lal-shelve",
       "source": 1011,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Operator shelving request for the alarm",
       "group": "station"
     },
     {
-      "id": 11012,
+      "id": 11013,
+      "name": "lal-alarm",
+      "source": 1013,
+      "unit": "",
+      "description": "Standing alarm state — process truth under every managed flag",
+      "group": "station"
+    },
+    {
+      "id": 11014,
       "name": "lal-unacknowledged",
-      "source": 1012,
+      "source": 1014,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11015,
+      "name": "lal-shelved",
+      "source": 1015,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11016,
+      "name": "lal-suppressed",
+      "source": 1016,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11017,
+      "name": "lal-out-of-service",
+      "source": 1017,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1305,19 +1744,43 @@
       "group": "station"
     },
     {
-      "id": 11021,
+      "id": 11023,
       "name": "backup-active-alarm",
-      "source": 1021,
+      "source": 1023,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "station"
     },
     {
-      "id": 11022,
+      "id": 11024,
       "name": "backup-active-unacknowledged",
-      "source": 1022,
+      "source": 1024,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11025,
+      "name": "backup-active-shelved",
+      "source": 1025,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11026,
+      "name": "backup-active-suppressed",
+      "source": 1026,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11027,
+      "name": "backup-active-out-of-service",
+      "source": 1027,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1329,19 +1792,43 @@
       "group": "station"
     },
     {
-      "id": 11031,
+      "id": 11033,
       "name": "none-available-alarm",
-      "source": 1031,
+      "source": 1033,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "station"
     },
     {
-      "id": 11032,
+      "id": 11034,
       "name": "none-available-unacknowledged",
-      "source": 1032,
+      "source": 1034,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11035,
+      "name": "none-available-shelved",
+      "source": 1035,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11036,
+      "name": "none-available-suppressed",
+      "source": 1036,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11037,
+      "name": "none-available-out-of-service",
+      "source": 1037,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1353,19 +1840,43 @@
       "group": "station"
     },
     {
-      "id": 11041,
+      "id": 11043,
       "name": "all-faulted-alarm",
-      "source": 1041,
+      "source": 1043,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "station"
     },
     {
-      "id": 11042,
+      "id": 11044,
       "name": "all-faulted-unacknowledged",
-      "source": 1042,
+      "source": 1044,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11045,
+      "name": "all-faulted-shelved",
+      "source": 1045,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11046,
+      "name": "all-faulted-suppressed",
+      "source": 1046,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11047,
+      "name": "all-faulted-out-of-service",
+      "source": 1047,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1377,19 +1888,43 @@
       "group": "station"
     },
     {
-      "id": 11051,
+      "id": 11053,
       "name": "power-fail-alarm",
-      "source": 1051,
+      "source": 1053,
       "unit": "",
-      "description": "Standing alarm state",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "station"
     },
     {
-      "id": 11052,
+      "id": 11054,
       "name": "power-fail-unacknowledged",
-      "source": 1052,
+      "source": 1054,
       "unit": "",
       "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11055,
+      "name": "power-fail-shelved",
+      "source": 1055,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11056,
+      "name": "power-fail-suppressed",
+      "source": 1056,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11057,
+      "name": "power-fail-out-of-service",
+      "source": 1057,
+      "unit": "",
+      "description": "Out of service on the declared path",
       "group": "station"
     },
     {
@@ -1601,75 +2136,163 @@
       "group": "pump-p101"
     },
     {
-      "id": 10315,
+      "id": 10330,
+      "name": "p101-fault-sup",
+      "source": 330,
+      "unit": "",
+      "description": "Out-of-service state delivered to the fault alarm's suppression",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10331,
+      "name": "p101-fault-sup-in",
+      "source": 331,
+      "unit": "",
+      "description": "The fault alarm's suppression condition",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11060,
       "name": "p101-fault-ack",
-      "source": 315,
+      "source": 1060,
       "unit": "",
-      "description": "Operator acknowledgment for the motor-fault alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p101"
     },
     {
-      "id": 10316,
+      "id": 11063,
       "name": "p101-fault-alarm",
-      "source": 316,
+      "source": 1063,
       "unit": "",
-      "description": "Standing motor-fault alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p101"
     },
     {
-      "id": 10317,
-      "name": "p101-fault-unack",
-      "source": 317,
+      "id": 11064,
+      "name": "p101-fault-unacknowledged",
+      "source": 1064,
       "unit": "",
-      "description": "Motor fault latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
       "group": "pump-p101"
     },
     {
-      "id": 10318,
+      "id": 11065,
+      "name": "p101-fault-shelved",
+      "source": 1065,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11066,
+      "name": "p101-fault-suppressed",
+      "source": 1066,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11067,
+      "name": "p101-fault-out-of-service",
+      "source": 1067,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11070,
       "name": "p101-thermal-ack",
-      "source": 318,
+      "source": 1070,
       "unit": "",
-      "description": "Operator acknowledgment for the thermal alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p101"
     },
     {
-      "id": 10319,
+      "id": 11073,
       "name": "p101-thermal-alarm",
-      "source": 319,
+      "source": 1073,
       "unit": "",
-      "description": "Standing thermal-overload alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p101"
     },
     {
-      "id": 10320,
-      "name": "p101-thermal-unack",
-      "source": 320,
+      "id": 11074,
+      "name": "p101-thermal-unacknowledged",
+      "source": 1074,
       "unit": "",
-      "description": "Thermal overload latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
       "group": "pump-p101"
     },
     {
-      "id": 10321,
+      "id": 11075,
+      "name": "p101-thermal-shelved",
+      "source": 1075,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11076,
+      "name": "p101-thermal-suppressed",
+      "source": 1076,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11077,
+      "name": "p101-thermal-out-of-service",
+      "source": 1077,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11080,
       "name": "p101-moisture-ack",
-      "source": 321,
+      "source": 1080,
       "unit": "",
-      "description": "Operator acknowledgment for the moisture alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p101"
     },
     {
-      "id": 10322,
+      "id": 11083,
       "name": "p101-moisture-alarm",
-      "source": 322,
+      "source": 1083,
       "unit": "",
-      "description": "Standing moisture-ingress alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p101"
     },
     {
-      "id": 10323,
-      "name": "p101-moisture-unack",
-      "source": 323,
+      "id": 11084,
+      "name": "p101-moisture-unacknowledged",
+      "source": 1084,
       "unit": "",
-      "description": "Moisture ingress latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11085,
+      "name": "p101-moisture-shelved",
+      "source": 1085,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11086,
+      "name": "p101-moisture-suppressed",
+      "source": 1086,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11087,
+      "name": "p101-moisture-out-of-service",
+      "source": 1087,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
       "group": "pump-p101"
     },
     {
@@ -1881,75 +2504,163 @@
       "group": "pump-p102"
     },
     {
-      "id": 10347,
+      "id": 10362,
+      "name": "p102-fault-sup",
+      "source": 362,
+      "unit": "",
+      "description": "Out-of-service state delivered to the fault alarm's suppression",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10363,
+      "name": "p102-fault-sup-in",
+      "source": 363,
+      "unit": "",
+      "description": "The fault alarm's suppression condition",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11090,
       "name": "p102-fault-ack",
-      "source": 347,
+      "source": 1090,
       "unit": "",
-      "description": "Operator acknowledgment for the motor-fault alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p102"
     },
     {
-      "id": 10348,
+      "id": 11093,
       "name": "p102-fault-alarm",
-      "source": 348,
+      "source": 1093,
       "unit": "",
-      "description": "Standing motor-fault alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p102"
     },
     {
-      "id": 10349,
-      "name": "p102-fault-unack",
-      "source": 349,
+      "id": 11094,
+      "name": "p102-fault-unacknowledged",
+      "source": 1094,
       "unit": "",
-      "description": "Motor fault latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
       "group": "pump-p102"
     },
     {
-      "id": 10350,
+      "id": 11095,
+      "name": "p102-fault-shelved",
+      "source": 1095,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11096,
+      "name": "p102-fault-suppressed",
+      "source": 1096,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11097,
+      "name": "p102-fault-out-of-service",
+      "source": 1097,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11100,
       "name": "p102-thermal-ack",
-      "source": 350,
+      "source": 1100,
       "unit": "",
-      "description": "Operator acknowledgment for the thermal alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p102"
     },
     {
-      "id": 10351,
+      "id": 11103,
       "name": "p102-thermal-alarm",
-      "source": 351,
+      "source": 1103,
       "unit": "",
-      "description": "Standing thermal-overload alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p102"
     },
     {
-      "id": 10352,
-      "name": "p102-thermal-unack",
-      "source": 352,
+      "id": 11104,
+      "name": "p102-thermal-unacknowledged",
+      "source": 1104,
       "unit": "",
-      "description": "Thermal overload latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
       "group": "pump-p102"
     },
     {
-      "id": 10353,
+      "id": 11105,
+      "name": "p102-thermal-shelved",
+      "source": 1105,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11106,
+      "name": "p102-thermal-suppressed",
+      "source": 1106,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11107,
+      "name": "p102-thermal-out-of-service",
+      "source": 1107,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11110,
       "name": "p102-moisture-ack",
-      "source": 353,
+      "source": 1110,
       "unit": "",
-      "description": "Operator acknowledgment for the moisture alarm",
+      "description": "Operator acknowledgment for the alarm",
       "group": "pump-p102"
     },
     {
-      "id": 10354,
+      "id": 11113,
       "name": "p102-moisture-alarm",
-      "source": 354,
+      "source": 1113,
       "unit": "",
-      "description": "Standing moisture-ingress alarm",
+      "description": "Standing alarm state — process truth under every managed flag",
       "group": "pump-p102"
     },
     {
-      "id": 10355,
-      "name": "p102-moisture-unack",
-      "source": 355,
+      "id": 11114,
+      "name": "p102-moisture-unacknowledged",
+      "source": 1114,
       "unit": "",
-      "description": "Moisture ingress latched until acknowledged",
+      "description": "Latched until the operator acknowledges",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11115,
+      "name": "p102-moisture-shelved",
+      "source": 1115,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11116,
+      "name": "p102-moisture-suppressed",
+      "source": 1116,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11117,
+      "name": "p102-moisture-out-of-service",
+      "source": 1117,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
       "group": "pump-p102"
     }
   ],
@@ -2120,7 +2831,7 @@
     },
     {
       "id": 5,
-      "kind": "latching-alarm",
+      "kind": "managed-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
@@ -2133,6 +2844,9 @@
         },
         "low_limit": {
           "float": -1000000000.0
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 1
@@ -2159,6 +2873,22 @@
           "direction": "in",
           "value_type": "float"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelve": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2167,7 +2897,7 @@
     },
     {
       "id": 6,
-      "kind": "latching-alarm",
+      "kind": "managed-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
@@ -2180,6 +2910,9 @@
         },
         "low_limit": {
           "float": 0.5
+        },
+        "max_shelve_ticks": {
+          "int": 8
         },
         "priority": {
           "int": 1
@@ -2206,6 +2939,22 @@
           "direction": "in",
           "value_type": "float"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelve": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2214,10 +2963,13 @@
     },
     {
       "id": 7,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 2
@@ -2244,6 +2996,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2252,10 +3016,13 @@
     },
     {
       "id": 8,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 1
@@ -2282,6 +3049,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2290,10 +3069,13 @@
     },
     {
       "id": 9,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 1
@@ -2320,6 +3102,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2328,10 +3122,13 @@
     },
     {
       "id": 10,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 1
@@ -2356,6 +3153,18 @@
         },
         "in": {
           "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
           "value_type": "bool"
         },
         "unacknowledged": {
@@ -2596,10 +3405,13 @@
     },
     {
       "id": 21,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 2
@@ -2626,6 +3438,26 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "oos": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppress": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2634,10 +3466,13 @@
     },
     {
       "id": 22,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 2
@@ -2664,6 +3499,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2672,10 +3519,13 @@
     },
     {
       "id": 23,
-      "kind": "bool-latching-alarm",
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 3
@@ -2702,6 +3552,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2713,7 +3575,7 @@
       "kind": "digital-input",
       "parameters": {
         "invert": {
-          "bool": true
+          "bool": false
         }
       },
       "ports": {
@@ -2786,6 +3648,25 @@
     },
     {
       "id": 28,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 29,
       "kind": "bool-gate",
       "parameters": {
         "operation": {
@@ -2810,29 +3691,6 @@
           "value_type": "bool"
         },
         "in_5": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 29,
-      "kind": "bool-gate",
-      "parameters": {
-        "operation": {
-          "int": 0
-        }
-      },
-      "ports": {
-        "in_1": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_2": {
           "direction": "in",
           "value_type": "bool"
         },
@@ -2870,7 +3728,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 1
+          "int": 0
         }
       },
       "ports": {
@@ -2893,7 +3751,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 0
+          "int": 1
         }
       },
       "ports": {
@@ -2913,6 +3771,29 @@
     },
     {
       "id": 33,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 34,
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
@@ -2939,11 +3820,14 @@
       }
     },
     {
-      "id": 34,
-      "kind": "bool-latching-alarm",
+      "id": 35,
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 2
@@ -2970,6 +3854,26 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "oos": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppress": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -2977,11 +3881,14 @@
       }
     },
     {
-      "id": 35,
-      "kind": "bool-latching-alarm",
+      "id": 36,
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 2
@@ -3008,6 +3915,18 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
@@ -3015,11 +3934,14 @@
       }
     },
     {
-      "id": 36,
-      "kind": "bool-latching-alarm",
+      "id": 37,
+      "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
           "int": 2
+        },
+        "max_shelve_ticks": {
+          "int": 0
         },
         "priority": {
           "int": 3
@@ -3046,7 +3968,38 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
         "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": false
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
           "direction": "out",
           "value_type": "bool"
         }
@@ -3310,13 +4263,24 @@
     },
     {
       "from": {
+        "point": 1001
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "shelve"
+        }
+      }
+    },
+    {
+      "from": {
         "port": {
           "component": 5,
           "name": "alarm"
         }
       },
       "to": {
-        "point": 1001
+        "point": 1003
       }
     },
     {
@@ -3327,7 +4291,40 @@
         }
       },
       "to": {
-        "point": 1002
+        "point": 1004
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1005
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1006
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1007
       }
     },
     {
@@ -3354,13 +4351,24 @@
     },
     {
       "from": {
+        "point": 1011
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "shelve"
+        }
+      }
+    },
+    {
+      "from": {
         "port": {
           "component": 6,
           "name": "alarm"
         }
       },
       "to": {
-        "point": 1011
+        "point": 1013
       }
     },
     {
@@ -3371,7 +4379,40 @@
         }
       },
       "to": {
-        "point": 1012
+        "point": 1014
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1015
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1016
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1017
       }
     },
     {
@@ -3404,7 +4445,7 @@
         }
       },
       "to": {
-        "point": 1021
+        "point": 1023
       }
     },
     {
@@ -3415,7 +4456,40 @@
         }
       },
       "to": {
-        "point": 1022
+        "point": 1024
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1025
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1026
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1027
       }
     },
     {
@@ -3448,7 +4522,7 @@
         }
       },
       "to": {
-        "point": 1031
+        "point": 1033
       }
     },
     {
@@ -3459,7 +4533,40 @@
         }
       },
       "to": {
-        "point": 1032
+        "point": 1034
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1035
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1036
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1037
       }
     },
     {
@@ -3492,7 +4599,7 @@
         }
       },
       "to": {
-        "point": 1041
+        "point": 1043
       }
     },
     {
@@ -3503,7 +4610,40 @@
         }
       },
       "to": {
-        "point": 1042
+        "point": 1044
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1045
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1046
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1047
       }
     },
     {
@@ -3536,7 +4676,7 @@
         }
       },
       "to": {
-        "point": 1051
+        "point": 1053
       }
     },
     {
@@ -3547,7 +4687,40 @@
         }
       },
       "to": {
-        "point": 1052
+        "point": 1054
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1055
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1056
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1057
       }
     },
     {
@@ -4001,23 +5174,64 @@
     },
     {
       "from": {
-        "point": 314
+        "point": 302
       },
       "to": {
         "port": {
-          "component": 21,
+          "component": 24,
           "name": "in"
         }
       }
     },
     {
       "from": {
-        "point": 315
+        "port": {
+          "component": 24,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 330
+      }
+    },
+    {
+      "from": {
+        "point": 331
+      },
+      "to": {
+        "point": 330
+      }
+    },
+    {
+      "from": {
+        "point": 1060
       },
       "to": {
         "port": {
           "component": 21,
           "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 302
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "oos"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 331
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "suppress"
         }
       }
     },
@@ -4029,7 +5243,7 @@
         }
       },
       "to": {
-        "point": 316
+        "point": 1063
       }
     },
     {
@@ -4040,7 +5254,117 @@
         }
       },
       "to": {
-        "point": 317
+        "point": 1064
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1065
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1066
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1067
+      }
+    },
+    {
+      "from": {
+        "point": 314
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1070
+      },
+      "to": {
+        "port": {
+          "component": 22,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1073
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1074
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1075
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1076
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1077
       }
     },
     {
@@ -4056,11 +5380,11 @@
     },
     {
       "from": {
-        "point": 318
+        "point": 1080
       },
       "to": {
         "port": {
-          "component": 22,
+          "component": 23,
           "name": "ack"
         }
       }
@@ -4068,23 +5392,56 @@
     {
       "from": {
         "port": {
-          "component": 22,
+          "component": 23,
           "name": "alarm"
         }
       },
       "to": {
-        "point": 319
+        "point": 1083
       }
     },
     {
       "from": {
         "port": {
-          "component": 22,
+          "component": 23,
           "name": "unacknowledged"
         }
       },
       "to": {
-        "point": 320
+        "point": 1084
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1085
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1086
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1087
       }
     },
     {
@@ -4096,39 +5453,6 @@
           "component": 23,
           "name": "in"
         }
-      }
-    },
-    {
-      "from": {
-        "point": 321
-      },
-      "to": {
-        "port": {
-          "component": 23,
-          "name": "ack"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 23,
-          "name": "alarm"
-        }
-      },
-      "to": {
-        "point": 322
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 23,
-          "name": "unacknowledged"
-        }
-      },
-      "to": {
-        "point": 323
       }
     },
     {
@@ -4145,7 +5469,7 @@
       },
       "to": {
         "port": {
-          "component": 24,
+          "component": 25,
           "name": "in"
         }
       }
@@ -4156,7 +5480,7 @@
       },
       "to": {
         "port": {
-          "component": 25,
+          "component": 26,
           "name": "in"
         }
       }
@@ -4167,7 +5491,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 27,
           "name": "in"
         }
       }
@@ -4178,7 +5502,7 @@
       },
       "to": {
         "port": {
-          "component": 27,
+          "component": 28,
           "name": "in"
         }
       }
@@ -4205,7 +5529,7 @@
     {
       "from": {
         "port": {
-          "component": 24,
+          "component": 25,
           "name": "out"
         }
       },
@@ -4232,7 +5556,7 @@
     {
       "from": {
         "port": {
-          "component": 25,
+          "component": 26,
           "name": "out"
         }
       },
@@ -4267,7 +5591,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 27,
           "name": "out"
         }
       },
@@ -4286,7 +5610,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 28,
           "name": "out"
         }
       },
@@ -4308,7 +5632,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in_1"
         }
       }
@@ -4319,7 +5643,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in_2"
         }
       }
@@ -4330,7 +5654,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in_3"
         }
       }
@@ -4341,7 +5665,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in_4"
         }
       }
@@ -4352,7 +5676,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in_5"
         }
       }
@@ -4360,7 +5684,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "out"
         }
       },
@@ -4393,7 +5717,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_1"
         }
       }
@@ -4404,7 +5728,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_2"
         }
       }
@@ -4415,7 +5739,7 @@
       },
       "to": {
         "port": {
-          "component": 30,
+          "component": 31,
           "name": "in_1"
         }
       }
@@ -4426,7 +5750,7 @@
       },
       "to": {
         "port": {
-          "component": 30,
+          "component": 31,
           "name": "in_2"
         }
       }
@@ -4434,28 +5758,14 @@
     {
       "from": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 31,
+          "component": 32,
           "name": "in_1"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 30,
-          "name": "out"
-        }
-      },
-      "to": {
-        "port": {
-          "component": 31,
-          "name": "in_2"
         }
       }
     },
@@ -4469,6 +5779,20 @@
       "to": {
         "port": {
           "component": 32,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 32,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 33,
           "name": "in_1"
         }
       }
@@ -4479,7 +5803,7 @@
       },
       "to": {
         "port": {
-          "component": 32,
+          "component": 33,
           "name": "in_2"
         }
       }
@@ -4487,13 +5811,13 @@
     {
       "from": {
         "port": {
-          "component": 32,
+          "component": 33,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "cmd"
         }
       }
@@ -4504,7 +5828,7 @@
       },
       "to": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "run"
         }
       }
@@ -4512,7 +5836,7 @@
     {
       "from": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "out"
         }
       },
@@ -4534,7 +5858,7 @@
     {
       "from": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "fault"
         }
       },
@@ -4571,22 +5895,140 @@
     },
     {
       "from": {
-        "point": 346
+        "point": 334
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 38,
           "name": "in"
         }
       }
     },
     {
       "from": {
-        "point": 347
+        "port": {
+          "component": 38,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 362
+      }
+    },
+    {
+      "from": {
+        "point": 363
+      },
+      "to": {
+        "point": 362
+      }
+    },
+    {
+      "from": {
+        "point": 1090
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 35,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 334
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "oos"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 363
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "suppress"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1093
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1094
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1095
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1096
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1097
+      }
+    },
+    {
+      "from": {
+        "point": 346
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1100
+      },
+      "to": {
+        "port": {
+          "component": 36,
           "name": "ack"
         }
       }
@@ -4594,23 +6036,56 @@
     {
       "from": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "alarm"
         }
       },
       "to": {
-        "point": 348
+        "point": 1103
       }
     },
     {
       "from": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "unacknowledged"
         }
       },
       "to": {
-        "point": 349
+        "point": 1104
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1105
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1106
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1107
       }
     },
     {
@@ -4619,18 +6094,18 @@
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 36,
           "name": "in"
         }
       }
     },
     {
       "from": {
-        "point": 350
+        "point": 1110
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "ack"
         }
       }
@@ -4638,23 +6113,56 @@
     {
       "from": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "alarm"
         }
       },
       "to": {
-        "point": 351
+        "point": 1113
       }
     },
     {
       "from": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "unacknowledged"
         }
       },
       "to": {
-        "point": 352
+        "point": 1114
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 37,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1115
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 37,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1116
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 37,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1117
       }
     },
     {
@@ -4663,42 +6171,9 @@
       },
       "to": {
         "port": {
-          "component": 36,
+          "component": 37,
           "name": "in"
         }
-      }
-    },
-    {
-      "from": {
-        "point": 353
-      },
-      "to": {
-        "port": {
-          "component": 36,
-          "name": "ack"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 36,
-          "name": "alarm"
-        }
-      },
-      "to": {
-        "point": 354
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 36,
-          "name": "unacknowledged"
-        }
-      },
-      "to": {
-        "point": 355
       }
     }
   ]

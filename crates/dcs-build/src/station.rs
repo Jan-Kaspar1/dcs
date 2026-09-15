@@ -27,13 +27,35 @@
 //!   the operator's writable `hand_i` request — `motor.cmd_i = (cmd_i
 //!   and not mode_i) or (hand_i and mode_i)`, guarded by in-service,
 //!   through `bool-gate` instances and `digital-input` inversions.
-//! - **Alarms (decision 43):** every alarm is a wired latching instance
-//!   with a writable internal `ack` point — analog `latching-alarm`s on
-//!   the selected level at the declared `high` and `cutoff` thresholds,
-//!   `bool-latching-alarm`s on each motor's fault flag, the failover's
-//!   `backup_active`, the group's `none_available`/`all_faulted`, the
-//!   per-pump thermal and moisture contacts, and the station power-fail
-//!   field point.
+//! - **Alarms (decision 43's set on the decision-71–73 managed
+//!   kinds):** every alarm is a wired managed latching instance with a
+//!   writable internal `ack` point — `managed-latching-alarm`s on the
+//!   selected level at the declared `high` and `cutoff` thresholds,
+//!   `managed-bool-latching-alarm`s on each motor's fault flag, the
+//!   failover's `backup_active`, the group's
+//!   `none_available`/`all_faulted`, the per-pump thermal and moisture
+//!   contacts, and the station power-fail field point. Every managed
+//!   status point is `journaled` (decision 74), and the lifecycle
+//!   wiring is the station's declared WW-ALM-002 site policy — open
+//!   customer assumptions carried as data:
+//!   - the high-level alarm is never-shelvable twice over —
+//!     `max_shelve_ticks = 0` and its `shelve` port bound to a
+//!     read-only point, so a shelve request answers `NotWritable` at
+//!     submission, the documented rejection path;
+//!   - the low-level alarm is the shelvable nuisance case — an
+//!     extended low well holds the condition while the site works —
+//!     its `shelve` bound to a writable point under
+//!     `config.lal_max_shelve_ticks`, the receipted, actor-attributed
+//!     command path;
+//!   - every per-pump fault alarm takes the pump's declared
+//!     maintenance-inhibit state as its managed surface: `oos` binds
+//!     the pump's own writable `out_of_service` point — the declared
+//!     state's writable point covering the out-of-service path — and
+//!     `suppress` reads the same state through the delivered copy a
+//!     `digital-input` pass-through composes, a component binding each
+//!     point once. The textbook designed suppression (decision 73): a
+//!     fault alarm on a deliberately offline machine stays named and
+//!     countable without annunciating.
 //!
 //! ## The declared point-id scheme
 //!
@@ -42,23 +64,29 @@
 //! inflow, `13` net-flow, `20+i` per-pump draw, `40+i` run, `60+i`
 //! thermal, `80+i` moisture, `100+i` command, `120` power-fail (`i` the
 //! 0-based pump index, `pumps <= 20`). Internal carriers start at `200`,
-//! per-pump internal blocks at `300 + 32·i`, station-alarm points at
-//! `1000 + 10·a`, and every point's signal sits at `10000 + point`. The
-//! scheme is deterministic in declaration order, so identical builder
-//! invocations emit identical documents.
+//! per-pump internal blocks at `300 + 32·i`, and every alarm — station
+//! and per-pump — owns a ten-point block at `1000 + 10·a` with the
+//! managed layout the reference compositions share: `ack`/`shelve`/
+//! `oos` at offsets 0–2 where the instance declares the input,
+//! `alarm`/`unacknowledged`/`shelved`/`suppressed`/`out_of_service` at
+//! 3–7. The station alarms take `a` = 0–5 in declaration order and pump
+//! `i`'s fault/thermal/moisture alarms `a` = 6 + 3·i + 0/1/2; every
+//! point's signal sits at `10000 + point`. The scheme is deterministic
+//! in declaration order, so identical builder invocations emit
+//! identical documents.
 //!
 //! Bool state signals and the index-valued `duty` declare an empty
 //! unit — a deliberate "unitless" marker rather than an omitted one, so
 //! the document lints clean.
 
 use crate::specs::{
-    BoolGateSpec, BoolLatchingAlarmInstance, BoolLatchingAlarmSpec, DigitalInputSpec,
-    FailoverSelectSpec, LatchingAlarmInstance, LatchingAlarmSpec, MotorSpec, PumpGroupInstance,
-    PumpGroupSpec, ThresholdChainSpec,
+    BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, ManagedAlarmHandles,
+    ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, MotorSpec,
+    PumpGroupInstance, PumpGroupSpec, ThresholdChainSpec,
 };
 use crate::{
-    BuildError, ChannelRef, Direction, OutPoint, PlantBuilder, PointId, SignalId, Sink, Source,
-    Value, parameters,
+    BuildError, ChannelRef, Direction, InPoint, OutPoint, PlantBuilder, PointId, SignalId, Sink,
+    Source, Value, parameters,
 };
 use dcs_model::{ComponentId, PlantModel, Rationalization};
 
@@ -126,9 +154,15 @@ mod carriers {
 /// `PUMP_BASE + i * PUMP_STRIDE .. +PUMP_STRIDE`.
 const PUMP_BASE: u64 = 300;
 const PUMP_STRIDE: u64 = 32;
-/// Station-alarm points: alarm `a` owns `ALARM_BASE + a * 10 .. +10` —
-/// `ack`, `alarm`, `unacknowledged` at offsets 0, 1, 2.
+/// Alarm points: alarm `a` owns `ALARM_BASE + a * 10 .. +10` with the
+/// managed layout — `ack`/`shelve`/`oos` at offsets 0–2 where declared,
+/// `alarm`/`unacknowledged`/`shelved`/`suppressed`/`out_of_service` at
+/// 3–7.
 const ALARM_BASE: u64 = 1000;
+/// The first per-pump alarm index: pump `i`'s fault/thermal/moisture
+/// alarms take `PUMP_ALARM_BASE + 3·i` + 0/1/2, after the six station
+/// alarms.
+const PUMP_ALARM_BASE: u64 = 6;
 /// Every point's signal id is `SIGNAL_BASE + point`.
 const SIGNAL_BASE: u64 = 10_000;
 
@@ -182,6 +216,12 @@ pub struct PumpStationConfig {
     pub motor_fault_ticks: i64,
     /// The level alarms' hysteresis band, in metres.
     pub level_alarm_hysteresis: f64,
+    /// The low-level alarm's `max_shelve_ticks` — the shelvable
+    /// nuisance alarm's bound, the request's asserting scan counting as
+    /// the first. Which station alarms are shelvable and their bounds
+    /// are the site's declared WW-ALM-002 policy — open customer
+    /// assumptions carried as data, not defaults.
+    pub lal_max_shelve_ticks: i64,
 }
 
 impl PumpStationConfig {
@@ -204,6 +244,7 @@ impl PumpStationConfig {
             min_off_ticks: 2,
             motor_fault_ticks: 2,
             level_alarm_hysteresis: 0.1,
+            lal_max_shelve_ticks: 8,
         }
     }
 }
@@ -220,6 +261,39 @@ pub struct AlarmLayout {
     pub alarm: PointId,
     /// The internal `Out` point carrying the `unacknowledged` latch.
     pub unacknowledged: PointId,
+}
+
+/// One managed alarm's place in the emitted document — the two-flag
+/// surface plus the decision-71 managed status points, and the points
+/// the declared `shelve`/`oos` lifecycle inputs bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedAlarmLayout {
+    /// The alarm component instance's id.
+    pub component: ComponentId,
+    /// The writable internal `In` point the operator ack lands on.
+    pub ack: PointId,
+    /// The point the `shelve` input binds — `Some` only where the
+    /// instance declares the port. The point's `writable` flag is the
+    /// declared shelving policy: a writable point carries the
+    /// receipted, actor-attributed operator request; a read-only one
+    /// is the never-shelvable declaration whose writes answer
+    /// `NotWritable` at submission.
+    pub shelve: Option<PointId>,
+    /// The point the `oos` input binds — `Some` only where the
+    /// instance declares the port: the operator's out-of-service
+    /// command point, or the pump's own maintenance-inhibit point for
+    /// the per-pump set.
+    pub oos: Option<PointId>,
+    /// The internal `Out` point carrying the standing `alarm` output.
+    pub alarm: PointId,
+    /// The internal `Out` point carrying the `unacknowledged` latch.
+    pub unacknowledged: PointId,
+    /// The internal `Out` point carrying the `shelved` status.
+    pub shelved: PointId,
+    /// The internal `Out` point carrying the `suppressed` status.
+    pub suppressed: PointId,
+    /// The internal `Out` point carrying the `out_of_service` status.
+    pub out_of_service: PointId,
 }
 
 /// Pump `index`'s place in the emitted document.
@@ -256,12 +330,13 @@ pub struct PumpLayout {
     pub avail: PointId,
     /// The `motor` instance's id.
     pub motor: ComponentId,
-    /// The motor-fault alarm.
-    pub fault_alarm: AlarmLayout,
-    /// The thermal-overload alarm.
-    pub thermal_alarm: AlarmLayout,
-    /// The moisture alarm.
-    pub moisture_alarm: AlarmLayout,
+    /// The managed motor-fault alarm — `oos` bound to the pump's
+    /// `out_of_service` point, `suppress` to its delivered copy.
+    pub fault_alarm: ManagedAlarmLayout,
+    /// The managed thermal-overload alarm.
+    pub thermal_alarm: ManagedAlarmLayout,
+    /// The managed moisture alarm.
+    pub moisture_alarm: ManagedAlarmLayout,
 }
 
 /// Where everything the composition declares landed — the ids the
@@ -309,18 +384,22 @@ pub struct PumpStationLayout {
     pub pump_group: ComponentId,
     /// Per-pump layouts, in `index` order.
     pub pumps: Vec<PumpLayout>,
-    /// The high-level latching alarm (trips at `config.high`).
-    pub high_level_alarm: AlarmLayout,
-    /// The low-level latching alarm (trips at `config.cutoff`).
-    pub low_level_alarm: AlarmLayout,
-    /// The backup-measurement-serving alarm.
-    pub backup_active_alarm: AlarmLayout,
-    /// The no-pump-available alarm.
-    pub none_available_alarm: AlarmLayout,
-    /// The every-pump-faulted alarm.
-    pub all_faulted_alarm: AlarmLayout,
-    /// The station power-fail alarm.
-    pub power_fail_alarm: AlarmLayout,
+    /// The managed high-level latching alarm (trips at `config.high`) —
+    /// never-shelvable: `max_shelve_ticks = 0` and a read-only bound
+    /// `shelve` point, so a shelve request answers `NotWritable`.
+    pub high_level_alarm: ManagedAlarmLayout,
+    /// The managed low-level latching alarm (trips at `config.cutoff`) —
+    /// the shelvable nuisance case, `shelve` writable under
+    /// `config.lal_max_shelve_ticks`.
+    pub low_level_alarm: ManagedAlarmLayout,
+    /// The managed backup-measurement-serving alarm.
+    pub backup_active_alarm: ManagedAlarmLayout,
+    /// The managed no-pump-available alarm.
+    pub none_available_alarm: ManagedAlarmLayout,
+    /// The managed every-pump-faulted alarm.
+    pub all_faulted_alarm: ManagedAlarmLayout,
+    /// The managed station power-fail alarm.
+    pub power_fail_alarm: ManagedAlarmLayout,
 }
 
 /// The composed station: the emitted document plus the layout every
@@ -614,79 +693,112 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         Value::Bool(true),
     )])));
     // The decision-70 codes are declared data — the site priority/class
-    // vocabulary and response budgets stay an open customer assumption.
-    let lah = plant.add(LatchingAlarmSpec::new(
+    // vocabulary and response budgets stay an open customer assumption,
+    // as does the shelving policy: which alarms are shelvable and their
+    // bounds are WW-ALM-002's recorded site decisions, not defaults.
+    // The high-level alarm is the never-shelvable critical
+    // annunciation, twice over: `max_shelve_ticks = 0` makes a delivered
+    // request inert and the declared `shelve` port binds a read-only
+    // point, so a shelve command answers `NotWritable` at submission —
+    // the documented rejection path the reference plant exercises.
+    let lah = plant.add(ManagedLatchingAlarmSpec::new(
         parameters([
             ("low_limit", Value::Float(-PARKED_LIMIT)),
             ("high_limit", Value::Float(config.high)),
             ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(1)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs {
+            shelve: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "The wet well overflows the bench",
             "Start a pump and investigate why the demand did not call one",
             "lah-alarm",
         ),
     ));
-    let lal = plant.add(LatchingAlarmSpec::new(
+    // The low-level alarm is the shelvable nuisance case: an extended
+    // low well holds the condition while the site works, so its
+    // `shelve` binds a writable point — the receipted,
+    // actor-attributed request path — bounded by the declared
+    // `lal_max_shelve_ticks`.
+    let lal = plant.add(ManagedLatchingAlarmSpec::new(
         parameters([
             ("low_limit", Value::Float(config.cutoff)),
             ("high_limit", Value::Float(PARKED_LIMIT)),
             ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
+            ("max_shelve_ticks", Value::Int(config.lal_max_shelve_ticks)),
             ("priority", Value::Int(1)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs {
+            shelve: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "The wet well pumps dry and the running pumps cavitate",
             "Stop the running pumps and investigate the low level",
             "lal-alarm",
         ),
     ));
-    let backup_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    // The remaining station alarms declare no lifecycle inputs —
+    // never-shelvable with no shelving surface, never suppressed,
+    // never out of service; their managed status outputs still report.
+    let backup_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(2)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "The backup level instrument carries the station unnoticed",
             "Check the primary level instrument",
             "backup-active-alarm",
         ),
     ));
-    let none_available_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    let none_available_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(1)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "Demand stands with no pump available to meet it",
             "Restore a pump to service or clear its faults",
             "none-available-alarm",
         ),
     ));
-    let all_faulted_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    let all_faulted_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(1)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "Every pump is faulted; the station cannot pump",
             "Dispatch maintenance to clear the pump faults",
             "all-faulted-alarm",
         ),
     ));
-    let power_fail_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    let power_fail_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(1)),
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "Station power is lost; the pumps cannot run",
             "Switch to backup power and investigate the supply",
@@ -722,28 +834,88 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     plant.connect(none_available_in, none_available);
     plant.connect(all_faulted_in, all_faulted);
 
-    // The station-level alarms — each latching on its condition and its
-    // own writable ack point.
-    let high_level_alarm = station_alarm(&mut plant, 0, &lah, "lah", "station");
+    // The station-level alarms — each latching on its condition, its
+    // own writable ack point, and the declared lifecycle surface the
+    // site policy names. `lah`'s `shelve` binds read-only — the
+    // never-shelvable rejection path; `lal`'s binds writable — the
+    // bounded, receipted operator request.
+    let high_level_alarm = managed_station_alarm(
+        &mut plant,
+        0,
+        lah.id,
+        &lah.ack,
+        &lah.managed,
+        &lah.alarm,
+        &lah.unacknowledged,
+        false,
+        "lah",
+        "station",
+    );
     plant.connect(level_lah, &lah.input);
-    let low_level_alarm = station_alarm(&mut plant, 1, &lal, "lal", "station");
+    let low_level_alarm = managed_station_alarm(
+        &mut plant,
+        1,
+        lal.id,
+        &lal.ack,
+        &lal.managed,
+        &lal.alarm,
+        &lal.unacknowledged,
+        true,
+        "lal",
+        "station",
+    );
     plant.connect(level_lal, &lal.input);
-    let backup_active_alarm =
-        station_alarm(&mut plant, 2, &backup_alarm, "backup-active", "station");
+    let backup_active_alarm = managed_station_alarm(
+        &mut plant,
+        2,
+        backup_alarm.id,
+        &backup_alarm.ack,
+        &backup_alarm.managed,
+        &backup_alarm.alarm,
+        &backup_alarm.unacknowledged,
+        false,
+        "backup-active",
+        "station",
+    );
     plant.connect(backup_active_in, &backup_alarm.input);
-    let none_available_alarm_layout = station_alarm(
+    let none_available_alarm_layout = managed_station_alarm(
         &mut plant,
         3,
-        &none_available_alarm,
+        none_available_alarm.id,
+        &none_available_alarm.ack,
+        &none_available_alarm.managed,
+        &none_available_alarm.alarm,
+        &none_available_alarm.unacknowledged,
+        false,
         "none-available",
         "station",
     );
     plant.connect(none_available_in, &none_available_alarm.input);
-    let all_faulted_alarm_layout =
-        station_alarm(&mut plant, 4, &all_faulted_alarm, "all-faulted", "station");
+    let all_faulted_alarm_layout = managed_station_alarm(
+        &mut plant,
+        4,
+        all_faulted_alarm.id,
+        &all_faulted_alarm.ack,
+        &all_faulted_alarm.managed,
+        &all_faulted_alarm.alarm,
+        &all_faulted_alarm.unacknowledged,
+        false,
+        "all-faulted",
+        "station",
+    );
     plant.connect(all_faulted_in, &all_faulted_alarm.input);
-    let power_fail_alarm_layout =
-        station_alarm(&mut plant, 5, &power_fail_alarm, "power-fail", "station");
+    let power_fail_alarm_layout = managed_station_alarm(
+        &mut plant,
+        5,
+        power_fail_alarm.id,
+        &power_fail_alarm.ack,
+        &power_fail_alarm.managed,
+        &power_fail_alarm.alarm,
+        &power_fail_alarm.unacknowledged,
+        false,
+        "power-fail",
+        "station",
+    );
     plant.connect(power_fail, &power_fail_alarm.input);
 
     // Per-pump wiring.
@@ -839,82 +1011,215 @@ fn signal(
         .group(group);
 }
 
-/// What the shared alarm wiring needs of either latching kind: the
-/// instance id, the ack sink, and the two output handles.
-trait AlarmHandles {
-    /// The instance's component id.
-    fn id(&self) -> ComponentId;
-    /// The `ack` port.
-    fn ack(&self) -> Sink<bool>;
-    /// The `alarm` port.
-    fn alarm(&self) -> Source<bool>;
-    /// The `unacknowledged` port.
-    fn unacknowledged(&self) -> Source<bool>;
-}
-
-impl AlarmHandles for LatchingAlarmInstance {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-    fn ack(&self) -> Sink<bool> {
-        self.ack.clone()
-    }
-    fn alarm(&self) -> Source<bool> {
-        self.alarm.clone()
-    }
-    fn unacknowledged(&self) -> Source<bool> {
-        self.unacknowledged.clone()
-    }
-}
-
-impl AlarmHandles for BoolLatchingAlarmInstance {
-    fn id(&self) -> ComponentId {
-        self.id
-    }
-    fn ack(&self) -> Sink<bool> {
-        self.ack.clone()
-    }
-    fn alarm(&self) -> Source<bool> {
-        self.alarm.clone()
-    }
-    fn unacknowledged(&self) -> Source<bool> {
-        self.unacknowledged.clone()
-    }
-}
-
-/// Declares one alarm's points — the writable `ack`, the `alarm` and
-/// `unacknowledged` outputs — wires them, and registers the three
-/// signals under `{prefix}-ack`/`-alarm`/`-unacknowledged`. The
-/// caller wires the alarm's `in` port — its value kind differs between
-/// the analog and Bool kinds.
-fn station_alarm<A: AlarmHandles>(
+/// Declares one managed alarm's points and wires them: the writable
+/// `ack`, each declared `shelve`/`oos` request point — `shelve`
+/// carrying the alarm's declared writability policy — and the five
+/// status outputs. Both managed kinds expose the same
+/// `id`/`ack`/`managed`/`alarm`/`unacknowledged` fields, so the one
+/// helper serves either; the caller wires the alarm's `in` port — its
+/// value kind differs between them — and any `suppress` input, whose
+/// source is declared plant state rather than a per-alarm request
+/// point.
+#[allow(clippy::too_many_arguments)]
+fn managed_station_alarm(
     plant: &mut PlantBuilder,
     index: u64,
-    instance: &A,
+    component: ComponentId,
+    ack_port: &Sink<bool>,
+    managed: &ManagedAlarmHandles,
+    alarm_port: &Source<bool>,
+    unacknowledged_port: &Source<bool>,
+    shelve_writable: bool,
     prefix: &str,
     group: &str,
-) -> AlarmLayout {
+) -> ManagedAlarmLayout {
     let base = ALARM_BASE + index * 10;
     let ack = plant.internal_input::<bool>(PointId(base), false, true);
-    let alarm = plant.internal_output::<bool>(PointId(base + 1), false);
-    let unacknowledged = plant.internal_output::<bool>(PointId(base + 2), false);
-    // Decision 74's lifecycle audit: the `alarm`/`unacknowledged`
-    // status points are `journaled` — activation, return, and the
-    // latch's clear all land as durable `point_changed` entries. The
-    // `ack` point stays receipted-only: its writes are already the
-    // attributed record.
-    plant.journaled(alarm);
-    plant.journaled(unacknowledged);
-    plant.connect(ack, instance.ack());
-    plant.connect(instance.alarm(), alarm);
-    plant.connect(instance.unacknowledged(), unacknowledged);
+    let shelve = managed
+        .shelve
+        .as_ref()
+        .map(|_| plant.internal_input::<bool>(PointId(base + 1), false, shelve_writable));
+    let oos = managed
+        .oos
+        .as_ref()
+        .map(|_| plant.internal_input::<bool>(PointId(base + 2), false, true));
+    let alarm = plant.internal_output::<bool>(PointId(base + 3), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(base + 4), false);
+    let shelved = plant.internal_output::<bool>(PointId(base + 5), false);
+    let suppressed = plant.internal_output::<bool>(PointId(base + 6), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(base + 7), false);
+
+    // Decision 74's lifecycle audit: every status point is `journaled`
+    // — activation, return, the latch's clear, shelving assertion and
+    // expiry, suppression, and out-of-service entry and return all land
+    // as durable `point_changed` entries. The declared request points
+    // journal too: their transitions are the lifecycle actions recorded
+    // beside their attributed receipts. `ack` stays receipted-only —
+    // its writes are already the record.
+    for point in [alarm, unacknowledged, shelved, suppressed, out_of_service] {
+        plant.journaled(point);
+    }
+    for point in [shelve, oos].into_iter().flatten() {
+        plant.journaled(point);
+    }
+
+    plant.connect(ack, ack_port);
+    if let (Some(point), Some(port)) = (shelve, managed.shelve.as_ref()) {
+        plant.connect(point, port);
+    }
+    if let (Some(point), Some(port)) = (oos, managed.oos.as_ref()) {
+        plant.connect(point, port);
+    }
+    plant.connect(alarm_port, alarm);
+    plant.connect(unacknowledged_port, unacknowledged);
+    plant.connect(&managed.shelved, shelved);
+    plant.connect(&managed.suppressed, suppressed);
+    plant.connect(&managed.out_of_service, out_of_service);
+
+    signal(
+        plant,
+        PointId(base),
+        &format!("{prefix}-ack"),
+        "",
+        "Operator acknowledgment for the alarm",
+        group,
+    );
+    if let Some(point) = shelve {
+        signal(
+            plant,
+            point.into(),
+            &format!("{prefix}-shelve"),
+            "",
+            "Operator shelving request for the alarm",
+            group,
+        );
+    }
+    if let Some(point) = oos {
+        signal(
+            plant,
+            point.into(),
+            &format!("{prefix}-oos"),
+            "",
+            "Operator out-of-service command for the alarm",
+            group,
+        );
+    }
     for (offset, suffix, description) in [
-        (0, "ack", "Operator acknowledgment for the alarm"),
-        (1, "alarm", "Standing alarm state"),
         (
-            2,
+            3,
+            "alarm",
+            "Standing alarm state — process truth under every managed flag",
+        ),
+        (
+            4,
             "unacknowledged",
             "Latched until the operator acknowledges",
+        ),
+        (5, "shelved", "Shelved within the declared bound"),
+        (6, "suppressed", "Suppressed by the declared condition"),
+        (7, "out-of-service", "Out of service on the declared path"),
+    ] {
+        signal(
+            plant,
+            PointId(base + offset),
+            &format!("{prefix}-{suffix}"),
+            "",
+            description,
+            group,
+        );
+    }
+    ManagedAlarmLayout {
+        component,
+        ack: PointId(base),
+        shelve: shelve.map(|_| PointId(base + 1)),
+        oos: oos.map(|_| PointId(base + 2)),
+        alarm: PointId(base + 3),
+        unacknowledged: PointId(base + 4),
+        shelved: PointId(base + 5),
+        suppressed: PointId(base + 6),
+        out_of_service: PointId(base + 7),
+    }
+}
+
+/// Declares one per-pump managed alarm's points — the writable `ack`
+/// and the five status outputs — wires them, and binds the declared
+/// `oos`/`suppress` inputs to the pump's maintenance-inhibit state:
+/// `oos` reads `inhibit` — the pump's own writable out-of-service
+/// point — while `suppress` reads `suppress_in`, the delivered copy
+/// `wire_pump` composes, since a component binds each point once. A
+/// fault alarm on a deliberately offline machine stays named and
+/// countable without annunciating — decision 73's station wiring. The
+/// caller wires the alarm's `in` port.
+#[allow(clippy::too_many_arguments)]
+fn pump_alarm(
+    plant: &mut PlantBuilder,
+    index: u64,
+    component: ComponentId,
+    ack_port: &Sink<bool>,
+    managed: &ManagedAlarmHandles,
+    alarm_port: &Source<bool>,
+    unacknowledged_port: &Source<bool>,
+    inhibit: InPoint<bool>,
+    suppress_in: InPoint<bool>,
+    prefix: &str,
+    group: &str,
+) -> ManagedAlarmLayout {
+    let base = ALARM_BASE + index * 10;
+    let ack = plant.internal_input::<bool>(PointId(base), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(base + 3), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(base + 4), false);
+    let shelved = plant.internal_output::<bool>(PointId(base + 5), false);
+    let suppressed = plant.internal_output::<bool>(PointId(base + 6), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(base + 7), false);
+
+    // The same decision-74 lifecycle audit as the station set: all five
+    // status points are `journaled`.
+    for point in [alarm, unacknowledged, shelved, suppressed, out_of_service] {
+        plant.journaled(point);
+    }
+
+    plant.connect(ack, ack_port);
+    if let Some(port) = managed.oos.as_ref() {
+        plant.connect(inhibit, port);
+    }
+    if let Some(port) = managed.suppress.as_ref() {
+        plant.connect(suppress_in, port);
+    }
+    plant.connect(alarm_port, alarm);
+    plant.connect(unacknowledged_port, unacknowledged);
+    plant.connect(&managed.shelved, shelved);
+    plant.connect(&managed.suppressed, suppressed);
+    plant.connect(&managed.out_of_service, out_of_service);
+
+    signal(
+        plant,
+        PointId(base),
+        &format!("{prefix}-ack"),
+        "",
+        "Operator acknowledgment for the alarm",
+        group,
+    );
+    for (offset, suffix, description) in [
+        (
+            3,
+            "alarm",
+            "Standing alarm state — process truth under every managed flag",
+        ),
+        (
+            4,
+            "unacknowledged",
+            "Latched until the operator acknowledges",
+        ),
+        (5, "shelved", "Shelved within the declared bound"),
+        (
+            6,
+            "suppressed",
+            "Suppressed while the pump is out of service",
+        ),
+        (
+            7,
+            "out-of-service",
+            "Out of service with the pump's maintenance state",
         ),
     ] {
         signal(
@@ -926,11 +1231,16 @@ fn station_alarm<A: AlarmHandles>(
             group,
         );
     }
-    AlarmLayout {
-        component: instance.id(),
+    ManagedAlarmLayout {
+        component,
         ack: PointId(base),
-        alarm: PointId(base + 1),
-        unacknowledged: PointId(base + 2),
+        shelve: None,
+        oos: managed.oos.as_ref().map(|_| inhibit.into()),
+        alarm: PointId(base + 3),
+        unacknowledged: PointId(base + 4),
+        shelved: PointId(base + 5),
+        suppressed: PointId(base + 6),
+        out_of_service: PointId(base + 7),
     }
 }
 
@@ -1208,36 +1518,55 @@ fn wire_pump(
         "fault_ticks",
         Value::Int(config.motor_fault_ticks),
     )])));
-    let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    // The pump's three alarms, all managed. The fault alarm declares
+    // `oos`/`suppress` — both bound below to the pump's own
+    // out-of-service point, so the maintenance-inhibit state doubles
+    // as the designed-suppression condition: a deliberately offline
+    // pump's fault stays named and countable without annunciating
+    // (decision 73). The contact alarms declare no lifecycle inputs —
+    // never-shelvable with no shelving surface, never suppressed,
+    // never out of service; their managed status outputs still
+    // report.
+    let fault_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(2)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
+        ManagedInputs {
+            oos: true,
+            suppress: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "The pump cannot run while its fault stands",
             "Clear the motor fault and reset the pump",
             &format!("{tag}-fault-alarm"),
         ),
     ));
-    let thermal_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    let thermal_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(2)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "The motor overheats and the pump trips out",
             "Investigate the thermal overload and reset the contact",
             &format!("{tag}-thermal-alarm"),
         ),
     ));
-    let moisture_alarm = plant.add(BoolLatchingAlarmSpec::new(
+    let moisture_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
+            ("max_shelve_ticks", Value::Int(0)),
             ("priority", Value::Int(3)),
             ("class", Value::Int(2)),
             ("response_ticks", Value::Int(60)),
         ]),
+        ManagedInputs::default(),
         rationalization(
             "Water ingress degrades the motor insulation",
             "Schedule a seal inspection for the pump",
@@ -1296,94 +1625,83 @@ fn wire_pump(
     plant.connect(fault_group_in, fault);
     plant.connect(fault_group_in, group.fault(index + 1));
     plant.connect(fault_alarm_in, fault);
-    plant.connect(fault_alarm_in, fault_alarm.input);
 
-    // The pump's three alarms — motor fault, thermal contact, moisture
-    // contact — each on its own writable ack.
-    let fault_ack = plant.internal_input::<bool>(PointId(base + 15), false, true);
-    let fault_alarm_out = plant.internal_output::<bool>(PointId(base + 16), false);
-    let fault_unack_out = plant.internal_output::<bool>(PointId(base + 17), false);
-    let thermal_ack = plant.internal_input::<bool>(PointId(base + 18), false, true);
-    let thermal_alarm_out = plant.internal_output::<bool>(PointId(base + 19), false);
-    let thermal_unack_out = plant.internal_output::<bool>(PointId(base + 20), false);
-    let moisture_ack = plant.internal_input::<bool>(PointId(base + 21), false, true);
-    let moisture_alarm_out = plant.internal_output::<bool>(PointId(base + 22), false);
-    let moisture_unack_out = plant.internal_output::<bool>(PointId(base + 23), false);
-    // Every alarm's `alarm`/`unacknowledged` status points join the
-    // durable record — decision 74's lifecycle audit.
-    for point in [
-        fault_alarm_out,
-        fault_unack_out,
-        thermal_alarm_out,
-        thermal_unack_out,
-        moisture_alarm_out,
-        moisture_unack_out,
-    ] {
-        plant.journaled(point);
-    }
-    plant.connect(fault_ack, &fault_alarm.ack);
-    plant.connect(&fault_alarm.alarm, fault_alarm_out);
-    plant.connect(&fault_alarm.unacknowledged, fault_unack_out);
+    // The pump's three managed alarms — motor fault, thermal contact,
+    // moisture contact — laid out in the alarm region at
+    // `PUMP_ALARM_BASE + 3 * index + offset`, each on its own writable
+    // ack. The fault alarm's `oos` binds the pump's `oos` point — the
+    // same writable maintenance-inhibit point the operator commands —
+    // directly, while its `suppress` reads the pass-through copy a
+    // `digital-input` composes: a component binds each point once, so
+    // the same declared state reaches the second input through the
+    // carrier pair one scan later.
+    let oos_copy = plant.add(DigitalInputSpec::new(parameters([(
+        "invert",
+        Value::Bool(false),
+    )])));
+    let fault_sup = plant.internal_output::<bool>(PointId(base + 30), false);
+    let fault_sup_in = plant.internal_input::<bool>(PointId(base + 31), false, false);
+    plant.connect(oos, &oos_copy.input);
+    plant.connect(&oos_copy.out, fault_sup);
+    plant.connect(fault_sup_in, fault_sup);
+    signal(
+        plant,
+        PointId(base + 30),
+        &format!("{tag}-fault-sup"),
+        "",
+        "Out-of-service state delivered to the fault alarm's suppression",
+        &group_name,
+    );
+    signal(
+        plant,
+        PointId(base + 31),
+        &format!("{tag}-fault-sup-in"),
+        "",
+        "The fault alarm's suppression condition",
+        &group_name,
+    );
+    let fault_alarm_layout = pump_alarm(
+        plant,
+        PUMP_ALARM_BASE + 3 * i,
+        fault_alarm.id,
+        &fault_alarm.ack,
+        &fault_alarm.managed,
+        &fault_alarm.alarm,
+        &fault_alarm.unacknowledged,
+        oos,
+        fault_sup_in,
+        &format!("{tag}-fault"),
+        &group_name,
+    );
+    plant.connect(fault_alarm_in, &fault_alarm.input);
+    let thermal_alarm_layout = pump_alarm(
+        plant,
+        PUMP_ALARM_BASE + 3 * i + 1,
+        thermal_alarm.id,
+        &thermal_alarm.ack,
+        &thermal_alarm.managed,
+        &thermal_alarm.alarm,
+        &thermal_alarm.unacknowledged,
+        oos,
+        fault_sup_in,
+        &format!("{tag}-thermal"),
+        &group_name,
+    );
     plant.connect(thermal, &thermal_alarm.input);
-    plant.connect(thermal_ack, &thermal_alarm.ack);
-    plant.connect(&thermal_alarm.alarm, thermal_alarm_out);
-    plant.connect(&thermal_alarm.unacknowledged, thermal_unack_out);
+    let moisture_alarm_layout = pump_alarm(
+        plant,
+        PUMP_ALARM_BASE + 3 * i + 2,
+        moisture_alarm.id,
+        &moisture_alarm.ack,
+        &moisture_alarm.managed,
+        &moisture_alarm.alarm,
+        &moisture_alarm.unacknowledged,
+        oos,
+        fault_sup_in,
+        &format!("{tag}-moisture"),
+        &group_name,
+    );
     plant.connect(moisture, &moisture_alarm.input);
-    plant.connect(moisture_ack, &moisture_alarm.ack);
-    plant.connect(&moisture_alarm.alarm, moisture_alarm_out);
-    plant.connect(&moisture_alarm.unacknowledged, moisture_unack_out);
-    for (point, name, description) in [
-        (
-            base + 15,
-            "fault-ack",
-            "Operator acknowledgment for the motor-fault alarm",
-        ),
-        (base + 16, "fault-alarm", "Standing motor-fault alarm"),
-        (
-            base + 17,
-            "fault-unack",
-            "Motor fault latched until acknowledged",
-        ),
-        (
-            base + 18,
-            "thermal-ack",
-            "Operator acknowledgment for the thermal alarm",
-        ),
-        (
-            base + 19,
-            "thermal-alarm",
-            "Standing thermal-overload alarm",
-        ),
-        (
-            base + 20,
-            "thermal-unack",
-            "Thermal overload latched until acknowledged",
-        ),
-        (
-            base + 21,
-            "moisture-ack",
-            "Operator acknowledgment for the moisture alarm",
-        ),
-        (
-            base + 22,
-            "moisture-alarm",
-            "Standing moisture-ingress alarm",
-        ),
-        (
-            base + 23,
-            "moisture-unack",
-            "Moisture ingress latched until acknowledged",
-        ),
-    ] {
-        signal(
-            plant,
-            PointId(point),
-            &format!("{tag}-{name}"),
-            "",
-            description,
-            &group_name,
-        );
-    }
 
     PumpLayout {
         index: index + 1,
@@ -1399,23 +1717,8 @@ fn wire_pump(
         fault: PointId(base + 12),
         avail: PointId(base + 28),
         motor: motor.id,
-        fault_alarm: AlarmLayout {
-            component: fault_alarm.id,
-            ack: PointId(base + 15),
-            alarm: PointId(base + 16),
-            unacknowledged: PointId(base + 17),
-        },
-        thermal_alarm: AlarmLayout {
-            component: thermal_alarm.id,
-            ack: PointId(base + 18),
-            alarm: PointId(base + 19),
-            unacknowledged: PointId(base + 20),
-        },
-        moisture_alarm: AlarmLayout {
-            component: moisture_alarm.id,
-            ack: PointId(base + 21),
-            alarm: PointId(base + 22),
-            unacknowledged: PointId(base + 23),
-        },
+        fault_alarm: fault_alarm_layout,
+        thermal_alarm: thermal_alarm_layout,
+        moisture_alarm: moisture_alarm_layout,
     }
 }
