@@ -91,6 +91,8 @@ impl PointState {
 struct ElementState {
     element: ProcessElement,
     /// The current output `y`; seeded from the element's `initial`.
+    /// Unused by a [`ProcessElement::Threshold`], whose state is the
+    /// `contact` below.
     y: f64,
     /// The output's rate of change `dy/dt`. Only a
     /// [`ProcessElement::SecondOrderLag`] advances it — the other
@@ -103,6 +105,10 @@ struct ElementState {
     /// The delay line a [`ProcessElement::DeadTime`] advances; `None` for
     /// the scalar elements.
     delay_line: Option<DelayLine>,
+    /// The standing contact a [`ProcessElement::Threshold`] drives,
+    /// seeded from the element's `initial`; the `Float`-output elements
+    /// keep it at its `false` seed.
+    contact: bool,
 }
 
 /// A [`ProcessElement::DeadTime`] element's delay line: a ring of past
@@ -125,8 +131,8 @@ impl ElementState {
     /// `Float` input `u`, returning the new output.
     ///
     /// Serves the `Float` single-input variants only — a `bool_flow`'s
-    /// `Bool` gate and a `flow_sum`'s input list step on `step`'s own
-    /// paths. The lag uses the exact discretization
+    /// `Bool` gate, a `flow_sum`'s input list, and a `threshold`'s
+    /// `Bool` contact step on `step`'s own paths. The lag uses the exact discretization
     /// `y += (1 - e^{-dt/τ})(u - y)`, stable for every non-negative `dt`;
     /// the integrator uses Euler's `y += u·dt`; the second-order lag
     /// applies the exact zero-order-hold update
@@ -179,8 +185,12 @@ impl ElementState {
                 u + element.amplitude * (2.0 * x - 1.0)
             }
             ProcessElement::ScaledFlow(element) => element.gain * u,
-            ProcessElement::BoolFlow(_) | ProcessElement::FlowSum(_) => {
-                unreachable!("bool_flow and flow_sum step on SimDriver::step's own paths")
+            ProcessElement::BoolFlow(_)
+            | ProcessElement::FlowSum(_)
+            | ProcessElement::Threshold(_) => {
+                unreachable!(
+                    "bool_flow, flow_sum, and threshold step on SimDriver::step's own paths"
+                )
             }
         }
     }
@@ -368,10 +378,14 @@ impl SimDriver {
         }
         let mut elements = Vec::with_capacity(map.elements.len());
         for element in map.elements {
-            let y = element.initial();
-            // Validated: element outputs are always bound points.
-            points.get_mut(&element.output()).unwrap().sample =
-                Sample::good(Value::Float(y), Tick::ZERO);
+            let initial = element.initial();
+            // Validated: element outputs are always bound points, and
+            // the initial's kind matches the output's declared kind.
+            points.get_mut(&element.output()).unwrap().sample = Sample::good(initial, Tick::ZERO);
+            let y = match initial {
+                Value::Float(y) => y,
+                _ => 0.0,
+            };
             let delay_line = match &element {
                 ProcessElement::DeadTime(_) => Some(DelayLine {
                     t: 0.0,
@@ -383,12 +397,17 @@ impl SimDriver {
                 ProcessElement::Noise(noise) => noise.seed,
                 _ => 0,
             };
+            let contact = match &element {
+                ProcessElement::Threshold(threshold) => threshold.initial,
+                _ => false,
+            };
             elements.push(ElementState {
                 element,
                 y,
                 v: 0.0,
                 rng,
                 delay_line,
+                contact,
             });
         }
         Ok(Self {
@@ -422,12 +441,14 @@ impl SimDriver {
     ///    draws the next deviation from its generator; a `bool_flow`
     ///    stands its `on_rate` or `off_rate` by its `Bool` gate; a
     ///    `flow_sum` sums its declared `Float` inputs plus `bias`; a
-    ///    `scaled_flow` stands at `gain` times its `Float` input — and
-    ///    stamps `Good`; a non-`Good` input freezes the element's state,
-    ///    delay-line clock and generator included, and propagates its
-    ///    quality to the output sample — a `flow_sum` propagating the
-    ///    worst of its inputs' qualities — mirroring the contract's
-    ///    quality propagation.
+    ///    `scaled_flow` stands at `gain` times its `Float` input; a
+    ///    `threshold` evaluates its `Float` input against the declared
+    ///    `on`/`off` bounds and drives the asserted or released contact
+    ///    onto its `Bool` output — and stamps `Good`; a non-`Good` input
+    ///    freezes the element's state, delay-line clock, generator, and
+    ///    contact included, and propagates its quality to the output
+    ///    sample — a `flow_sum` propagating the worst of its inputs'
+    ///    qualities — mirroring the contract's quality propagation.
     ///
     /// `dt` must be finite and non-negative.
     ///
@@ -485,9 +506,26 @@ impl SimDriver {
                         output.sample = Sample::new(Value::Float(element.y), quality, tick);
                     }
                 }
+                ProcessElement::Threshold(threshold) => {
+                    let input = state.points[&threshold.input].effective_sample();
+                    let output = state.points.get_mut(&threshold.output).unwrap();
+                    if input.quality.is_good() {
+                        let Value::Float(u) = input.value else {
+                            unreachable!("validated threshold inputs are Float points")
+                        };
+                        // The contact's hysteresis is the element's own:
+                        // assert crossing `on`, release crossing back
+                        // strictly past `off`, hold between the bounds.
+                        element.contact = threshold.evaluate(u, element.contact);
+                        output.sample = Sample::good(Value::Bool(element.contact), tick);
+                    } else {
+                        output.sample =
+                            Sample::new(Value::Bool(element.contact), input.quality, tick);
+                    }
+                }
                 _ => {
                     // Every remaining variant reads exactly one `Float`
-                    // input point.
+                    // input point and drives a `Float` output.
                     let Some(input_point) = element.element.input() else {
                         unreachable!("multi-input elements step on their own paths")
                     };
@@ -600,8 +638,10 @@ impl IoDriver for SimDriver {
     ///
     /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
     /// / `.fault` (the last only while a fault is active), and
-    /// `element.{id}` — plus `element.{id}.v` for second-order lags and
-    /// `element.{id}.rng` for noise elements' generator state —
+    /// `element.{id}` — a `Float` accumulator for every variant but a
+    /// `threshold`, whose standing contact captures as a `Bool` — plus
+    /// `element.{id}.v` for second-order lags and `element.{id}.rng` for
+    /// noise elements' generator state —
     /// keyed by the element's driven point id. Loopbacks and element
     /// definitions are map configuration, not state, so they are not
     /// captured. This is what transfers the simulated process to a
@@ -630,7 +670,15 @@ impl IoDriver for SimDriver {
         }
         for element in &state.elements {
             let output = element.element.output().0;
-            captured.insert(format!("element.{output}"), Value::Float(element.y));
+            let field = format!("element.{output}");
+            match &element.element {
+                ProcessElement::Threshold(_) => {
+                    captured.insert(field, Value::Bool(element.contact));
+                }
+                _ => {
+                    captured.insert(field, Value::Float(element.y));
+                }
+            }
             if let ProcessElement::SecondOrderLag(_) = element.element {
                 captured.insert(format!("element.{output}.v"), Value::Float(element.v));
             }
@@ -709,10 +757,18 @@ impl IoDriver for SimDriver {
         for element in &current.elements {
             let output = element.element.output().0;
             let field = format!("element.{output}");
-            let y = state.require_f64(STATE_ELEMENT, &field)?;
-            if !y.is_finite() {
-                return Err(invalid(field, Value::Float(y)));
-            }
+            // A threshold's accumulator is its standing Bool contact;
+            // every other element's is a finite Float.
+            let (y, contact) = match &element.element {
+                ProcessElement::Threshold(_) => (0.0, state.require_bool(STATE_ELEMENT, &field)?),
+                _ => {
+                    let y = state.require_f64(STATE_ELEMENT, &field)?;
+                    if !y.is_finite() {
+                        return Err(invalid(field, Value::Float(y)));
+                    }
+                    (y, false)
+                }
+            };
             known.push(field);
             let mut v = 0.0;
             if let ProcessElement::SecondOrderLag(_) = element.element {
@@ -731,7 +787,7 @@ impl IoDriver for SimDriver {
                 rng = state.require_i64(STATE_ELEMENT, &field)? as u64;
                 known.push(field);
             }
-            ys.push((y, v, rng));
+            ys.push((y, v, rng, contact));
         }
 
         let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
@@ -743,10 +799,11 @@ impl IoDriver for SimDriver {
             point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
             point_state.fault = fault;
         }
-        for (element, (y, v, rng)) in current.elements.iter_mut().zip(ys) {
+        for (element, (y, v, rng, contact)) in current.elements.iter_mut().zip(ys) {
             element.y = y;
             element.v = v;
             element.rng = rng;
+            element.contact = contact;
         }
         Ok(())
     }
@@ -757,7 +814,7 @@ mod tests {
     use super::*;
     use crate::map::{
         BoolFlow, ChannelId, DeadTime, Direction, FirstOrderLag, FlowSum, Integrator, Noise,
-        PointBinding, ScaledFlow, SecondOrderLag,
+        PointBinding, ScaledFlow, SecondOrderLag, Threshold,
     };
     use dcs_core::{Input, Output, QualityReason};
 
@@ -2715,6 +2772,442 @@ mod tests {
                 sim.read(PointId(2)).unwrap()
             );
         }
+    }
+
+    /// A `threshold` element: the Float input on point 1 driving the
+    /// Bool contact on point 2.
+    fn threshold_map(on: f64, off: f64, initial: bool) -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(2),
+                on,
+                off,
+                initial,
+            }))
+    }
+
+    fn contact(sim: &SimDriver) -> Sample {
+        sim.read(PointId(2)).unwrap()
+    }
+
+    #[test]
+    fn threshold_asserts_at_the_on_bound_and_releases_below_the_off_bound() {
+        // on > off declares a high trip: assert at `u >= on`, release
+        // strictly below `off`, hold inside the band.
+        let sim = SimDriver::new(threshold_map(8.0, 7.5, false)).unwrap();
+        // Before the first step the contact holds the declared initial.
+        let sample = contact(&sim);
+        assert_eq!(sample.value, Value::Bool(false));
+        assert_eq!(sample.tick, Tick::ZERO);
+
+        sim.write(PointId(1), Value::Float(7.9)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+
+        // Reaching the bound exactly asserts at that tick boundary.
+        sim.write(PointId(1), Value::Float(8.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(true));
+
+        // Inside the band the contact holds — no chatter.
+        for u in [7.6, 7.5] {
+            sim.write(PointId(1), Value::Float(u)).unwrap();
+            sim.step(1.0);
+            assert_eq!(contact(&sim).value, Value::Bool(true));
+        }
+
+        // Releasing is strictly below `off`: 7.5 held, 7.4 releases.
+        sim.write(PointId(1), Value::Float(7.4)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+
+        // The released contact stays released through the band until
+        // the input reaches `on` again.
+        sim.write(PointId(1), Value::Float(7.9)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+        sim.write(PointId(1), Value::Float(8.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(true));
+    }
+
+    #[test]
+    fn threshold_falling_trip_asserts_at_on_and_releases_above_off() {
+        // on < off declares a low trip: assert at `u <= on`, release
+        // strictly above `off`, hold inside the band.
+        let sim = SimDriver::new(threshold_map(2.0, 2.5, false)).unwrap();
+
+        sim.write(PointId(1), Value::Float(2.1)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(true));
+
+        // 2.5 holds: release is strictly above `off`.
+        for u in [2.4, 2.5] {
+            sim.write(PointId(1), Value::Float(u)).unwrap();
+            sim.step(1.0);
+            assert_eq!(contact(&sim).value, Value::Bool(true));
+        }
+
+        sim.write(PointId(1), Value::Float(2.6)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+
+        // `dt` scales nothing here — the contact is a pure function of
+        // the standing input at each tick boundary.
+        sim.write(PointId(1), Value::Float(2.1)).unwrap();
+        sim.step(0.25);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+        sim.step(3.0);
+        assert_eq!(contact(&sim).value, Value::Bool(false));
+    }
+
+    #[test]
+    fn nan_threshold_input_holds_the_contact() {
+        // NaN satisfies no comparison — neither `>= on` nor `< off` —
+        // so the contact holds like any in-band input.
+        let sim = SimDriver::new(threshold_map(8.0, 7.5, true)).unwrap();
+        sim.write(PointId(1), Value::Float(f64::NAN)).unwrap();
+        sim.step(1.0);
+        let sample = contact(&sim);
+        assert_eq!(sample.value, Value::Bool(true));
+        assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn non_good_threshold_input_holds_the_contact_and_propagates_quality() {
+        let sim = SimDriver::new(threshold_map(8.0, 7.5, false)).unwrap();
+        sim.write(PointId(1), Value::Float(9.0)).unwrap();
+        sim.step(1.0);
+        assert_eq!(contact(&sim).value, Value::Bool(true));
+
+        let quality = Quality::Bad(QualityReason::CommunicationFault);
+        sim.inject_fault(PointId(1), Fault::Quality(quality))
+            .unwrap();
+        // A write behind the fault is stored but not consumed — the
+        // releasing value must not move the frozen contact.
+        sim.write(PointId(1), Value::Float(0.0)).unwrap();
+        for _ in 0..2 {
+            sim.step(1.0);
+            let sample = contact(&sim);
+            // The documented rule: a non-Good input freezes the
+            // contact state and propagates its quality to the
+            // driven Bool point.
+            assert_eq!(sample.value, Value::Bool(true));
+            assert_eq!(sample.quality, quality);
+        }
+
+        // Clearing the fault resumes evaluation on the first Good
+        // step: the stored 0.0 releases the contact.
+        sim.clear_fault(PointId(1)).unwrap();
+        sim.step(1.0);
+        let sample = contact(&sim);
+        assert_eq!(sample.value, Value::Bool(false));
+        assert!(sample.quality.is_good());
+    }
+
+    #[test]
+    fn threshold_rejects_invalid_bounds_and_point_kinds() {
+        // Bounds must be finite; the rejection names the element's
+        // driven point and which declared bound offended.
+        for (bound, value) in [
+            ("on", f64::NAN),
+            ("on", f64::INFINITY),
+            ("off", f64::NEG_INFINITY),
+        ] {
+            let mut threshold = Threshold {
+                input: PointId(1),
+                output: PointId(2),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            };
+            match bound {
+                "on" => threshold.on = value,
+                _ => threshold.off = value,
+            }
+            let map = ChannelMap::new()
+                .with_point(float_point(1, Direction::In))
+                .with_point(binding(2, Direction::In, Value::Bool(false)))
+                .with_element(ProcessElement::Threshold(threshold));
+            assert!(matches!(
+                map.validate().unwrap_err(),
+                ConfigError::InvalidBound {
+                    point: PointId(2),
+                    bound: name,
+                    value: rejected,
+                } if name == bound && !rejected.is_finite()
+            ));
+        }
+
+        // Equal bounds declare no hysteresis band.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(2),
+                on: 7.5,
+                off: 7.5,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::NonPositiveBand {
+                point: PointId(2),
+                on: 7.5,
+                off: 7.5,
+            }
+        );
+
+        // The input must be a Float point.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Bool(false)))
+            .with_point(binding(2, Direction::In, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(2),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+
+        // The driven contact must be a Bool point.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(2),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementContactKind {
+                point: PointId(2),
+                kind: ValueKind::Float,
+            }
+        );
+    }
+
+    #[test]
+    fn threshold_accessors_cover_the_variant() {
+        let element = ProcessElement::Threshold(Threshold {
+            input: PointId(1),
+            output: PointId(2),
+            on: 8.0,
+            off: 7.5,
+            initial: true,
+        });
+        assert_eq!(element.input(), Some(PointId(1)));
+        assert_eq!(element.inputs(), &[PointId(1)]);
+        assert_eq!(element.output(), PointId(2));
+        assert_eq!(element.initial(), Value::Bool(true));
+    }
+
+    #[test]
+    fn threshold_serde_roundtrips() {
+        let map = threshold_map(8.0, 7.5, true);
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"threshold\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelMap>(&json).unwrap(), map);
+    }
+
+    #[test]
+    fn captured_state_restores_threshold_contact_mid_run() {
+        // The element's only state is its standing contact; a captured
+        // run continues identically through a fresh driver.
+        let map = threshold_map(8.0, 7.5, false);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(9.0)).unwrap();
+        sim.step(1.0);
+        let state = sim.capture_state().unwrap();
+        assert_eq!(state.get("element.2"), Some(Value::Bool(true)));
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        // The restored driver holds the asserted contact inside the
+        // band exactly as the original does.
+        sim.write(PointId(1), Value::Float(7.9)).unwrap();
+        fresh.write(PointId(1), Value::Float(7.9)).unwrap();
+        for _ in 0..5 {
+            sim.step(1.0);
+            fresh.step(1.0);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
+    }
+
+    /// The protection loop this element exists for: a `threshold`
+    /// watches the well level and asserts the `sis-active` Bool
+    /// contact, which gates a `bool_flow` emergency draw; a
+    /// `flow_sum` and `integrator` close the level process. The same
+    /// declaration `fixtures/protection_dynamics.json` carries.
+    fn protection_map() -> ChannelMap {
+        ChannelMap::new()
+            .with_point(float_point(10, Direction::In)) // well level
+            .with_point(float_point(11, Direction::In)) // inflow
+            .with_point(float_point(12, Direction::In)) // emergency draw
+            .with_point(float_point(13, Direction::In)) // net flow
+            .with_point(binding(30, Direction::In, Value::Bool(false))) // sis-active
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(30),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            }))
+            .with_element(ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(30),
+                output: PointId(12),
+                on_rate: -20.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            }))
+            .with_element(ProcessElement::FlowSum(FlowSum {
+                inputs: vec![PointId(11), PointId(12)],
+                output: PointId(13),
+                bias: 4.0,
+                initial: 4.0,
+            }))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(13),
+                output: PointId(10),
+                initial: 6.0,
+            }))
+    }
+
+    fn sis_active(sim: &SimDriver) -> bool {
+        let Value::Bool(contact) = sim.read(PointId(30)).unwrap().value else {
+            panic!("the contact point is Bool")
+        };
+        contact
+    }
+
+    #[test]
+    fn the_level_crossing_drives_the_emergency_draw_without_a_script() {
+        let sim = SimDriver::new(protection_map()).unwrap();
+        assert_eq!(level(&sim), 6.0);
+        assert!(!sis_active(&sim));
+
+        // The level climbs on the declared inflow alone; the crossing
+        // asserts the contact at the tick boundary after it, engaging
+        // the draw on the same step.
+        sim.step(1.0);
+        assert_eq!(level(&sim), 10.0);
+        assert!(!sis_active(&sim));
+        sim.step(1.0);
+        assert!(sis_active(&sim));
+        assert_eq!(level(&sim), -6.0);
+
+        // The draw pulls the level back below `off`; the contact
+        // releases cleanly at the next boundary — no chatter, no
+        // scheduled script asserted or cleared it.
+        sim.step(1.0);
+        assert!(!sis_active(&sim));
+        assert_eq!(level(&sim), -2.0);
+    }
+
+    /// One scripted run over the protection loop, returning the
+    /// (level, contact) sequence — the output identical runs and
+    /// restored runs must reproduce.
+    fn protection_run(sim: &SimDriver) -> Vec<(Sample, Sample)> {
+        let mut samples = Vec::new();
+        for inflow in [0.0, 2.0, 0.0, -1.0] {
+            sim.write(PointId(11), Value::Float(inflow)).unwrap();
+            for _ in 0..4 {
+                sim.step(0.5);
+                samples.push((
+                    sim.read(PointId(10)).unwrap(),
+                    sim.read(PointId(30)).unwrap(),
+                ));
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn identical_protection_runs_produce_identical_samples() {
+        let first = protection_run(&SimDriver::new(protection_map()).unwrap());
+        let second = protection_run(&SimDriver::new(protection_map()).unwrap());
+        assert_eq!(first, second);
+        // The run actually asserted and released the contact.
+        assert!(
+            first
+                .iter()
+                .any(|(_, contact)| contact.value == Value::Bool(true))
+        );
+        assert!(
+            first
+                .iter()
+                .any(|(_, contact)| contact.value == Value::Bool(false))
+        );
+    }
+
+    /// The checked-in dynamics document this issue adds: the
+    /// protection loop as declared data, the same file
+    /// `dcs-plant-server --dynamics` and `dcs-sim-bus-device
+    /// --dynamics` merge.
+    const PROTECTION_DYNAMICS: &str = include_str!("../fixtures/protection_dynamics.json");
+
+    #[test]
+    fn the_protection_dynamics_document_declares_the_loop() {
+        let elements: Vec<ProcessElement> = serde_json::from_str(PROTECTION_DYNAMICS)
+            .expect("the document parses as process-element declarations");
+        let [
+            ProcessElement::Threshold(trip),
+            ProcessElement::BoolFlow(draw),
+            ProcessElement::FlowSum(net),
+            ProcessElement::Integrator(well),
+        ] = elements.as_slice()
+        else {
+            panic!("the document is a threshold, a bool_flow, a flow_sum, and an integrator")
+        };
+        assert_eq!((trip.input, trip.output), (PointId(10), PointId(30)));
+        assert_eq!((trip.on, trip.off, trip.initial), (8.0, 7.5, false));
+        assert_eq!((draw.input, draw.output), (PointId(30), PointId(12)));
+        assert_eq!(
+            (net.inputs.as_slice(), net.output),
+            (&[PointId(11), PointId(12)][..], PointId(13))
+        );
+        assert_eq!((well.input, well.output), (PointId(13), PointId(10)));
+
+        // Merged onto the loop's bound points, the document builds the
+        // identical map the coded constructor does.
+        let mut map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(float_point(11, Direction::In))
+            .with_point(float_point(12, Direction::In))
+            .with_point(float_point(13, Direction::In))
+            .with_point(binding(30, Direction::In, Value::Bool(false)));
+        for element in elements {
+            map = map.with_element(element);
+        }
+        assert_eq!(map, protection_map());
+
+        // ...and the merged map runs the loop.
+        let sim = SimDriver::new(map).unwrap();
+        for _ in 0..2 {
+            sim.step(1.0);
+        }
+        assert!(sis_active(&sim));
     }
 
     /// The dosing loop this element exists for: the metering pump's

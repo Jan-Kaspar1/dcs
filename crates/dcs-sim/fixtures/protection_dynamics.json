@@ -1,0 +1,35 @@
+[
+  {
+    "threshold": {
+      "input": 10,
+      "output": 30,
+      "on": 8.0,
+      "off": 7.5,
+      "initial": false
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 30,
+      "output": 12,
+      "on_rate": -20.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [11, 12],
+      "output": 13,
+      "bias": 4.0,
+      "initial": 4.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 10,
+      "initial": 6.0
+    }
+  }
+]

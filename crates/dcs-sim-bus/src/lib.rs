@@ -62,7 +62,7 @@
 //! list of `ProcessElement` declarations — the same serde vocabulary
 //! `dcs-plant-server --dynamics` merges (`first_order_lag`,
 //! `second_order_lag`, `integrator`, `dead_time`, `noise`,
-//! `bool_flow`, `flow_sum`, `scaled_flow`). The recorded binding
+//! `bool_flow`, `flow_sum`, `scaled_flow`, `threshold`). The recorded binding
 //! encoding: an
 //! element's point-valued fields carry register addresses — a
 //! document's `"input": 20` reads register 20. Elements follow the
@@ -167,5 +167,5 @@ pub use server::BusServer;
 // dependency of their own.
 pub use dcs_sim::{
     BoolFlow, DeadTime, FirstOrderLag, FlowSum, Integrator, Noise, ProcessElement, ScaledFlow,
-    SecondOrderLag,
+    SecondOrderLag, Threshold,
 };
