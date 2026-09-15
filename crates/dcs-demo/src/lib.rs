@@ -40,10 +40,17 @@
 //! the same driven scan cycle with the field side fed in lockstep, so the
 //! tests can assert both transports produce identical executor snapshots
 //! and journals.
+//!
+//! The [`station_kinds`] module lands the requirement's real evidence: the
+//! reference pumping station's checked-in model — `io_points`, signals,
+//! components, and connections — bound once to its emitted local `sim-*`
+//! devices and once to a `sim-bus` register-mapped overlay, run through the
+//! same driven scan cycle with identical snapshots and journals.
 
 #![warn(missing_docs)]
 
 pub mod showcase;
+pub mod station_kinds;
 pub mod two_kinds;
 
 use dcs_blocks::{AnalogInput, DigitalOutput, ParameterError, Pid, Scaling};
