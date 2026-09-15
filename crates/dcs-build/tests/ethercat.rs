@@ -103,7 +103,10 @@ fn emitted_declaration_parses_under_the_real_contract() {
 fn emitted_model_assembles_identically_to_the_fixture() {
     // Both documents resolve to the same named failure: the declaration
     // parses, then startup fails because no EtherCAT master exists.
-    for document in [coupler().build().unwrap(), PlantModel::load(ETHERCAT).unwrap()] {
+    for document in [
+        coupler().build().unwrap(),
+        PlantModel::load(ETHERCAT).unwrap(),
+    ] {
         match resolve_drivers(&document, &DriverRegistry::standard()) {
             Err(AssemblyError::DeviceBackend { kind, detail, .. }) => {
                 assert_eq!(kind, "ethercat");

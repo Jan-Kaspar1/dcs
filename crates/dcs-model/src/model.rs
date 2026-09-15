@@ -630,11 +630,7 @@ mod tests {
         assert_eq!(model.version, MODEL_VERSION);
         assert!(model.devices[0].hardware);
         assert_eq!(model.devices[0].kind, "ethercat");
-        assert!(
-            model.validate().is_empty(),
-            "{:?}",
-            model.validate()
-        );
+        assert!(model.validate().is_empty(), "{:?}", model.validate());
 
         let json = serde_json::to_string_pretty(&model).unwrap();
         assert!(json.contains("\"hardware\": true"), "{json}");

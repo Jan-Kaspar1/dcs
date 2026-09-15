@@ -21,5 +21,5 @@
 mod params;
 
 pub use params::{
-    ChannelDecl, DeviceParameters, ImageOffset, StartupPolicy, StationIdentity, DEVICE_KIND,
+    ChannelDecl, DEVICE_KIND, DeviceParameters, ImageOffset, StartupPolicy, StationIdentity,
 };

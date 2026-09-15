@@ -99,9 +99,7 @@ impl ImageOffset {
             (Self::Bit { byte, bit }, ValueKind::Bool) if bit < 8 => {
                 json!({"byte": byte, "bit": bit})
             }
-            (Self::Field { byte, bits }, ValueKind::Int)
-                if matches!(bits, 8 | 16 | 32 | 64) =>
-            {
+            (Self::Field { byte, bits }, ValueKind::Int) if matches!(bits, 8 | 16 | 32 | 64) => {
                 json!({"byte": byte, "bits": bits})
             }
             (Self::Field { byte, bits }, ValueKind::Float) if matches!(bits, 32 | 64) => {
@@ -164,9 +162,7 @@ impl PlantBuilder {
     pub fn ethercat(&mut self, spec: EthercatSpec) -> DeviceId {
         let device = self.device(ETHERCAT_KIND);
         device.hardware = true;
-        device
-            .parameters
-            .insert("bus".to_string(), json!(spec.bus));
+        device.parameters.insert("bus".to_string(), json!(spec.bus));
         device.parameters.insert(
             "identity".to_string(),
             json!({

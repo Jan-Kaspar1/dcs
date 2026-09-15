@@ -18,11 +18,7 @@ const ETHERCAT: &str = include_str!("../fixtures/ethercat.json");
 /// registry — the half of assembly where device-kind factories run.
 fn resolve(fixture: &str) -> Result<dcs_assembly::DriverPlan, AssemblyError> {
     let model = PlantModel::load(fixture).unwrap();
-    assert!(
-        model.validate().is_empty(),
-        "{:?}",
-        model.validate()
-    );
+    assert!(model.validate().is_empty(), "{:?}", model.validate());
     resolve_drivers(&model, &DriverRegistry::standard())
 }
 
@@ -36,7 +32,10 @@ fn with_parameter(key: &str, value: serde_json::Value) -> String {
 /// `fixture` with `device[0].parameters` absent and `hardware` set.
 fn without_hardware() -> String {
     let mut document: serde_json::Value = serde_json::from_str(ETHERCAT).unwrap();
-    document["devices"][0].as_object_mut().unwrap().remove("hardware");
+    document["devices"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("hardware");
     document.to_string()
 }
 
@@ -89,7 +88,10 @@ fn hardware_marker_is_required_for_the_hardware_bound_kind() {
 #[test]
 fn malformed_declarations_are_named_parameter_errors() {
     for (fixture, needle) in [
-        (include_str!("../fixtures/invalid/ethercat_missing_bus.json"), "\"bus\" is required"),
+        (
+            include_str!("../fixtures/invalid/ethercat_missing_bus.json"),
+            "\"bus\" is required",
+        ),
         (
             include_str!("../fixtures/invalid/ethercat_bad_identity.json"),
             "\"revision\" must be a non-negative integer",
@@ -169,5 +171,8 @@ fn the_ethercat_parameters_never_name_a_host_interface() {
             "startup"
         ]
     );
-    assert_eq!(model.devices[0].parameters["bus"], serde_json::json!("ecat0"));
+    assert_eq!(
+        model.devices[0].parameters["bus"],
+        serde_json::json!("ecat0")
+    );
 }

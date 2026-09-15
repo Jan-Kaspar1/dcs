@@ -124,7 +124,8 @@ impl DeviceParameters {
         for name in parameters.keys() {
             if !matches!(
                 name.as_str(),
-                "bus" | "identity"
+                "bus"
+                    | "identity"
                     | "mapping"
                     | "exchange_miss_threshold"
                     | "safe_outputs"
@@ -211,17 +212,13 @@ impl DeviceParameters {
             ));
         };
         if n == 0 {
-            return Err(
-                "parameter \"exchange_miss_threshold\" must be at least 1".to_string()
-            );
+            return Err("parameter \"exchange_miss_threshold\" must be at least 1".to_string());
         }
         Ok(n)
     }
 
     /// The required `"startup"` policy — only `"on_mismatch": "fail"`.
-    fn startup(
-        parameters: &BTreeMap<String, serde_json::Value>,
-    ) -> Result<StartupPolicy, String> {
+    fn startup(parameters: &BTreeMap<String, serde_json::Value>) -> Result<StartupPolicy, String> {
         let startup = required(parameters, "startup")?;
         let Some(object) = startup.as_object() else {
             return Err(format!(
@@ -473,7 +470,9 @@ fn required<'a>(
 /// `value` as a `u32`, or a named-shape error.
 fn u32_of(context: &str, value: &serde_json::Value) -> Result<u32, String> {
     let Some(n) = value.as_u64() else {
-        return Err(format!("{context} must be a non-negative integer, found {value}"));
+        return Err(format!(
+            "{context} must be a non-negative integer, found {value}"
+        ));
     };
     u32::try_from(n).map_err(|_| format!("{context} must fit in 0..=4294967295, found {n}"))
 }
@@ -528,15 +527,11 @@ mod tests {
             ("do1", Direction::Out, ValueKind::Bool),
         ]
         .into_iter()
-        .map(|(name, direction, kind)| {
-            (name.to_string(), ChannelDecl { direction, kind })
-        })
+        .map(|(name, direction, kind)| (name.to_string(), ChannelDecl { direction, kind }))
         .collect()
     }
 
-    fn parse(
-        parameters: &BTreeMap<String, serde_json::Value>,
-    ) -> Result<DeviceParameters, String> {
+    fn parse(parameters: &BTreeMap<String, serde_json::Value>) -> Result<DeviceParameters, String> {
         DeviceParameters::parse(parameters, &channels())
     }
 
@@ -549,10 +544,7 @@ mod tests {
     }
 
     /// Replaces `path` (dot-separated object keys) with `value`.
-    fn with_at(
-        path: &str,
-        value: serde_json::Value,
-    ) -> Result<DeviceParameters, String> {
+    fn with_at(path: &str, value: serde_json::Value) -> Result<DeviceParameters, String> {
         let mut parameters = declaration();
         let mut cursor = parameters
             .get_mut(path.split('.').next().unwrap())
@@ -793,10 +785,7 @@ mod tests {
         );
         // A malformed tagged value is named.
         assert_err(
-            with(
-                "safe_outputs",
-                json!({"do0": true, "do1": {"bool": false}}),
-            ),
+            with("safe_outputs", json!({"do0": true, "do1": {"bool": false}})),
             "is not a tagged Value",
         );
     }
