@@ -96,6 +96,11 @@
 //!   bounds, the vent-based join/departure choreography behind
 //!   min-run and start-interval protection, the declared rotation and
 //!   staging-authority policies, and the `transition` freeze surface.
+//! - [`SurgeGuard`] — the machine-protection demand bound decision 64
+//!   records: a blower's capacity demand bounded against the declared
+//!   flow-versus-pressure (and optional minimum-current) surge region,
+//!   clamping or tripping per the declared response and honoring the
+//!   hardwired proven `surge_trip` unconditionally.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -142,6 +147,7 @@ mod rationalization;
 mod sequencer;
 mod signal_filter;
 mod sr_latch;
+mod surge_guard;
 mod threshold_chain;
 mod timer;
 mod totalizer;
@@ -188,6 +194,7 @@ pub use rationalization::Rationalization;
 pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
 pub use sr_latch::SrLatch;
+pub use surge_guard::{GuardResponse, SurgeGuard, SurgeGuardConfig, SurgeGuardIo};
 pub use threshold_chain::{SetpointTable, ThresholdChain, ThresholdOutputs};
 pub use timer::Timer;
 pub use totalizer::Totalizer;
@@ -238,6 +245,7 @@ pub const KINDS: &[&str] = &[
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
     PhaseMonitor::KIND,
+    SurgeGuard::KIND,
 ];
 
 #[cfg(test)]

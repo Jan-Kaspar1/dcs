@@ -8,12 +8,13 @@ use dcs_blocks::{
     BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
     BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
     DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
-    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
-    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
-    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
-    RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter,
-    SrLatch, StagingAuthority, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    GuardResponse, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock,
+    LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
+    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
+    PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
+    QueuePolicy, QueuedState, RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer,
+    SequencerStep, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
+    SurgeGuardIo, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -524,12 +525,37 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        // The surge guard fully bound — `current` wired since its
+        // instance carries the minimum-amperage proxy.
+        Box::new(
+            SurgeGuard::new(
+                "sg",
+                SurgeGuardIo {
+                    demand: point(&mut specs, 370, Direction::In, ValueKind::Float),
+                    flow: point(&mut specs, 371, Direction::In, ValueKind::Float),
+                    pressure: point(&mut specs, 372, Direction::In, ValueKind::Float),
+                    current: Some(point(&mut specs, 373, Direction::In, ValueKind::Float)),
+                    surge_trip: point(&mut specs, 374, Direction::In, ValueKind::Bool),
+                    out: point(&mut specs, 375, Direction::Out, ValueKind::Float),
+                    guarding: point(&mut specs, 376, Direction::Out, ValueKind::Bool),
+                    tripped: point(&mut specs, 377, Direction::Out, ValueKind::Bool),
+                },
+                SurgeGuardConfig {
+                    min_flow: 50.0,
+                    max_pressure: 30.0,
+                    min_current: 40.0,
+                    on_guard: GuardResponse::Clamp,
+                    trip_value: 0.0,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 30] = [
+const EXPECTED_KINDS: [&str; 31] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -560,6 +586,7 @@ const EXPECTED_KINDS: [&str; 30] = [
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
     PhaseMonitor::KIND,
+    SurgeGuard::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every

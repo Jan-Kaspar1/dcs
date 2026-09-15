@@ -23,7 +23,8 @@ use dcs_build::specs::{
     HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
     ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
     OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
-    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
@@ -947,6 +948,81 @@ fn phase_monitor_rejects_an_out_of_range_mode() {
     ));
 }
 
+/// The `surge-guard` plant the tests wire: scripted channels for
+/// `demand`, `flow`, `pressure`, `current`, and `surge_trip`,
+/// internal carriers for the three outputs. `current` wires only
+/// when the spec declares the port.
+fn surge_guard_plant(parameters_map: dcs_build::Parameters, current: bool) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let demand_raw = plant.channel::<f64>(sim, "demand", Direction::In);
+    let flow_raw = plant.channel::<f64>(sim, "flow", Direction::In);
+    let pressure_raw = plant.channel::<f64>(sim, "pressure", Direction::In);
+    let current_raw = plant.channel::<f64>(sim, "current", Direction::In);
+    let trip_raw = plant.channel::<bool>(sim, "surge-trip", Direction::In);
+
+    let demand = plant.field_input::<f64>(PointId(10), demand_raw, false);
+    let flow = plant.field_input::<f64>(PointId(11), flow_raw, false);
+    let pressure = plant.field_input::<f64>(PointId(12), pressure_raw, false);
+    let surge_trip = plant.field_input::<bool>(PointId(14), trip_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let guarding = plant.internal_output::<bool>(PointId(21), false);
+    let tripped = plant.internal_output::<bool>(PointId(22), false);
+
+    let guard = plant.add(SurgeGuardSpec::new(parameters_map, current));
+    plant.connect(demand, guard.demand);
+    plant.connect(flow, guard.flow);
+    plant.connect(pressure, guard.pressure);
+    if let Some(current_port) = guard.current {
+        let motor_current = plant.field_input::<f64>(PointId(13), current_raw, false);
+        plant.connect(motor_current, current_port);
+    }
+    plant.connect(surge_trip, guard.surge_trip);
+    plant.connect(&guard.out, out);
+    plant.connect(&guard.guarding, guarding);
+    plant.connect(&guard.tripped, tripped);
+    plant
+}
+
+fn surge_guard_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("min_flow", Value::Float(50.0)),
+        ("max_pressure", Value::Float(30.0)),
+        ("min_current", Value::Float(40.0)),
+        ("on_guard", Value::Int(0)),
+        ("trip_value", Value::Float(0.0)),
+    ])
+}
+
+#[test]
+fn surge_guard_spec_emits_an_assembling_document() {
+    // Both forms assemble: `current` bound, and the unwired port
+    // omitted — the "a unit without the signal leaves the port
+    // unbound" half the registry's `get("current")` serves.
+    for current in [true, false] {
+        let model = build_load_assemble(surge_guard_plant(surge_guard_parameters(), current));
+        assert_eq!(model.components[0].kind, SurgeGuardSpec::KIND);
+        assert_eq!(
+            model.components[0].ports.contains_key("current"),
+            current,
+            "the optional port follows the spec flag"
+        );
+    }
+}
+
+#[test]
+fn surge_guard_rejects_an_out_of_range_response() {
+    // `on_guard` declares the binary code range `0..=1`; a code
+    // outside it is `ParameterOutOfRange` at `build`, before the
+    // document exists.
+    let mut parameters_map = surge_guard_parameters();
+    parameters_map.insert("on_guard".to_string(), Value::Int(4));
+    assert!(matches!(
+        surge_guard_plant(parameters_map, true).build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "on_guard"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -1172,6 +1248,7 @@ fn every_registered_kind_has_a_spec() {
         HeaderCoordinatorSpec::KIND,
         BlowerGroupSpec::KIND,
         PhaseMonitorSpec::KIND,
+        SurgeGuardSpec::KIND,
     ]
     .into_iter()
     .collect();

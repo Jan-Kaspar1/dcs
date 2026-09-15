@@ -28,8 +28,8 @@ use dcs_blocks::{
     Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid,
     PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
     RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SetpointTable, SignalFilter, SrLatch, StagingAuthority, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
+    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
@@ -39,7 +39,8 @@ use dcs_build::specs::{
     HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
     ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
     OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
-    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
 use dcs_runtime::Component;
@@ -671,6 +672,37 @@ fn specs_match_registered_kinds_descriptors() {
         )
         .unwrap()
         .describe(),
+    ));
+    // `surge-guard`'s `current` is the optional port — declared only
+    // where bound, so the spec is checked against both instances.
+    let guard_config = SurgeGuardConfig {
+        min_flow: 50.0,
+        max_pressure: 30.0,
+        min_current: 40.0,
+        on_guard: dcs_blocks::GuardResponse::Clamp,
+        trip_value: 0.0,
+    };
+    let guard_io = |current: Option<PointId>| SurgeGuardIo {
+        demand: point(1),
+        flow: point(2),
+        pressure: point(3),
+        current,
+        surge_trip: point(4),
+        out: point(5),
+        guarding: point(6),
+        tripped: point(7),
+    };
+    covered.insert(check(
+        &SurgeGuardSpec::new(Default::default(), true),
+        &SurgeGuard::new("sg", guard_io(Some(point(8))), guard_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &SurgeGuardSpec::new(Default::default(), false),
+        &SurgeGuard::new("sg", guard_io(None), guard_config)
+            .unwrap()
+            .describe(),
     ));
     // `backwash-coordinator`'s per-filter `request_i`/`grant_i`/
     // `position_i` families are instance-dependent — `N` is the spec's

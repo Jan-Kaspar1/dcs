@@ -3343,3 +3343,140 @@ impl Spec for PhaseMonitorSpec {
         }
     }
 }
+
+/// Spec for the `surge-guard` kind: the machine-protection demand
+/// bound architecture decision 64 records — a blower's capacity
+/// demand bounded against the declared two-variable
+/// flow-versus-pressure surge region (plus the optional
+/// minimum-current proxy), clamping or tripping per `on_guard` and
+/// honoring the hardwired proven `surge_trip` unconditionally.
+///
+/// Ports mirror the descriptor: `demand` (`In`, `Float`) — the unit's
+/// capacity demand, conventionally a `blower-group`'s `capacity_i`;
+/// `flow`, `pressure` (`In`, `Float`) — the surge-region
+/// measurements; `current` (`In`, `Float`) — the optional
+/// minimum-amperage proxy, declared only when the spec's `current`
+/// flag is set; `surge_trip` (`In`, `Bool`) — the hardwired
+/// protective device's proven trip; `out` (`Out`, `Float`);
+/// `guarding` and `tripped` (`Out`, `Bool`). Parameters: `min_flow`,
+/// `max_pressure`, `min_current` (required non-negative finite
+/// `Float`s — the declared surge-region bounds), `on_guard`
+/// (required `Int` code `0`/`1` — clamp the demand at the bound /
+/// trip the machine to `trip_value`), and `trip_value` (required
+/// finite `Float` — the demand a trip emits).
+pub struct SurgeGuardSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Whether the instance declares the optional `current` port —
+    /// the minimum-amperage surge proxy. `false` emits an instance
+    /// with no `current` to wire, and the kind guards on flow and
+    /// pressure only.
+    pub current: bool,
+}
+
+/// Typed port handles for a `surge-guard` instance.
+pub struct SurgeGuardInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `demand` port (`In`, `Float`): the capacity demand the guard
+    /// bounds — conventionally wired to a `blower-group`'s
+    /// `capacity_i` source.
+    pub demand: Sink<f64>,
+    /// `flow` port (`In`, `Float`): the unit's discharge airflow —
+    /// the surge region's low-flow edge.
+    pub flow: Sink<f64>,
+    /// `pressure` port (`In`, `Float`): the discharge or header
+    /// pressure — the region's high-pressure edge.
+    pub pressure: Sink<f64>,
+    /// `current` port (`In`, `Float`): the motor current — the
+    /// minimum-amperage proxy — `Some` only when the spec declared
+    /// the port; wiring a handle the emitted instance does not carry
+    /// is `UnknownPort` at `build`.
+    pub current: Option<Sink<f64>>,
+    /// `surge_trip` port (`In`, `Bool`): the hardwired protective
+    /// device's proven-surge status.
+    pub surge_trip: Sink<bool>,
+    /// `out` port (`Out`, `Float`): the guarded demand feeding the
+    /// machine's actuation path.
+    pub out: Source<f64>,
+    /// `guarding` port (`Out`, `Bool`): asserts while a declared
+    /// bound is crossed — the operating point inside the surge
+    /// region.
+    pub guarding: Source<bool>,
+    /// `tripped` port (`Out`, `Bool`): asserts while a proven surge,
+    /// a declared trip response, or an untrusted demand drives
+    /// `trip_value`.
+    pub tripped: Source<bool>,
+}
+
+impl SurgeGuardSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "surge-guard";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("min_flow", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_pressure", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("min_current", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("on_guard", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+        required("trip_value", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `current` selects whether the optional minimum-amperage port
+    /// is declared.
+    pub fn new(parameters: Parameters, current: bool) -> Self {
+        Self {
+            parameters,
+            current,
+        }
+    }
+}
+
+impl Spec for SurgeGuardSpec {
+    type Instance = SurgeGuardInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("demand", Direction::In, ValueKind::Float),
+            port("flow", Direction::In, ValueKind::Float),
+            port("pressure", Direction::In, ValueKind::Float),
+        ];
+        if self.current {
+            ports.push(port("current", Direction::In, ValueKind::Float));
+        }
+        ports.extend([
+            port("surge_trip", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Float),
+            port("guarding", Direction::Out, ValueKind::Bool),
+            port("tripped", Direction::Out, ValueKind::Bool),
+        ]);
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        SurgeGuardInstance {
+            id,
+            demand: Sink::port(id, "demand"),
+            flow: Sink::port(id, "flow"),
+            pressure: Sink::port(id, "pressure"),
+            current: self.current.then(|| Sink::port(id, "current")),
+            surge_trip: Sink::port(id, "surge_trip"),
+            out: Source::port(id, "out"),
+            guarding: Source::port(id, "guarding"),
+            tripped: Source::port(id, "tripped"),
+        }
+    }
+}
