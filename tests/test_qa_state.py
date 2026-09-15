@@ -71,13 +71,56 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.st.attempts_for(SHA_A), 1)
 
     def test_started_today_budget(self):
+        from datetime import datetime, timezone
+        noon = datetime(2026, 9, 15, 12, 0,
+                        tzinfo=timezone.utc).timestamp()
         self.assertEqual(self.st.started_today('2026-09-15'), 0)
         self.enqueue(SHA_A, 'qa-1', day='2026-09-15')
-        self.st.begin('qa-1', 1, 1.0)
+        self.st.begin('qa-1', 1, noon)
         self.assertEqual(self.st.started_today('2026-09-15'), 1)
         # queued runs do not consume the budget
         self.enqueue(SHA_B, 'qa-2', day='2026-09-15')
         self.assertEqual(self.st.started_today('2026-09-15'), 1)
+
+    def test_budget_counts_execution_day_not_dispatch_day(self):
+        # A run dispatched at 23:55 but started after midnight counts
+        # against the day it actually executed.
+        from datetime import datetime, timezone
+        late = datetime(2026, 9, 15, 23, 55,
+                        tzinfo=timezone.utc).timestamp()
+        after = datetime(2026, 9, 16, 0, 30,
+                         tzinfo=timezone.utc).timestamp()
+        self.enqueue(SHA_A, 'qa-1', now=late, day='2026-09-15')
+        self.st.begin('qa-1', 1, after)
+        self.assertEqual(self.st.started_today('2026-09-15'), 0)
+        self.assertEqual(self.st.started_today('2026-09-16'), 1)
+
+    def test_cleanup_ledger_and_preserve(self):
+        self.st.record_cleanup_error('cleanup-network-abc', 'rm failed',
+                                     now=10.0)
+        self.st.record_cleanup_error('cleanup-network-abc', 'still bad',
+                                     now=20.0)
+        errors = self.st.cleanup_errors()
+        self.assertEqual(errors['cleanup-network-abc']['first_seen'],
+                         10.0)
+        self.assertEqual(errors['cleanup-network-abc']['last_seen'],
+                         20.0)
+        self.st.clear_cleanup_error('cleanup-network-abc')
+        self.assertEqual(self.st.cleanup_errors(), {})
+        self.st.set_preserve('run', 'qa-7', True)
+        self.st.set_preserve('sha', SHA_A, True)
+        self.assertEqual(self.st.preserved(),
+                         {'runs': ['qa-7'], 'shas': [SHA_A]})
+        self.st.set_preserve('run', 'qa-7', False)
+        self.assertEqual(self.st.preserved()['runs'], [])
+
+    def test_blocked_outcome_does_not_suppress_sha(self):
+        # A storage/policy-blocked run never attempted the revision —
+        # last_attempted_sha must not suppress its redispatch.
+        self.enqueue(SHA_A, 'qa-1')
+        self.st.begin('qa-1', 1, 1.0)
+        self.st.finish('qa-1', 'blocked', None, '/r.json', 2.0)
+        self.assertIsNone(self.st.last_attempted_sha())
 
     def test_last_attempted_sha(self):
         self.assertIsNone(self.st.last_attempted_sha())

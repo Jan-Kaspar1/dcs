@@ -1,63 +1,50 @@
-//! # `dcs-ethercat` — the EtherCAT device kind
+//! The `ethercat` device kind: the field-facing contract half of the
+//! cyclic field-I/O decision, and the model's entry point to the real
+//! bus.
 //!
-//! A cyclic [`IoDriver`] backend over EtherCrab: the `ethercat` device
-//! kind declared in the plant model resolves to a point-facing
-//! [`EthercatDevice`] that serves one logical point's read from the
-//! bus's latched input image and stages its writes into the bus's
-//! pending output image — exactly the cyclic-I/O contract the runtime
-//! executor turns once per scan, never per point.
+//! An `ethercat` model device is *hardware-bound*: it declares one
+//! physical station on a logical bus — its `identity`, the process-
+//! image `mapping` of its channels, its `safe_outputs`, and the
+//! `exchange_miss_threshold` reads escalate against — plus the
+//! `"hardware": true` marker the assembly layer requires. The device
+//! resolves through the `DriverRegistry` seam like any other kind, but
+//! its backend is [`EthercatDevice`]: a synchronous [`IoDriver`]
+//! surface over a shared [`BusMaster`] — the staged output image, the
+//! latched input image, miss accounting, and exchange diagnostics of
+//! one logical bus.
 //!
-//! ## The two halves
+//! One [`BusMaster`] per logical bus sits over a [`BusTransport`]:
+//! production binds [`EthercrabTransport`] — an EtherCrab master
+//! running on its own dedicated thread per bus, keeping every async
+//! surface (the `tx_rx_task` socket pump, the state-transition
+//! futures, the periodic exchange) off `dcs-runtime`'s synchronous
+//! executor — while contract tests substitute a scripted
+//! [`testing::FakeTransport`] as the fake PDU loop, no hardware
+//! required.
 //!
-//! - [`BusMaster`] is the contract half — synchronous, transport-
-//!   agnostic, and fully exercisable without hardware: the staged and
-//!   latched images, the miss accounting that escalates held reads to
-//!   `IoError::Disconnected` at the declared `exchange_miss_threshold`,
-//!   the working-counter shortfall attribution, and the
-//!   [`DriverDiagnostics`] the monitoring surface consumes.
-//! - [`EthercrabTransport`] is the hardware half — one background
-//!   thread per logical bus owning EtherCrab's async socket pump and
-//!   the master session (`init` with a declared-profile filter,
-//!   `into_pre_op_pdi`, `into_safe_op`/`into_op`, per-scan `tx_rx`).
-//!   No async runtime reaches `dcs-runtime`; the transport's callers
-//!   wait on plain `std::sync::mpsc` replies.
+//! Deployment binds logical bus names to host interfaces through
+//! [`EthercatBuses`]: the model owns the logical name, the deployment
+//! owns the interface. A bus opens when its first device attaches —
+//! discovery runs, the device's declared `identity` binds one
+//! discovered station, its `mapping` is verified against the
+//! discovered process-data layout, the staged output image seeds with
+//! the declared safe outputs, and the bus enters PRE-OP → SAFE-OP → OP
+//! — each mismatch a startup failure before outputs enable. A second
+//! logical bus claiming one interface fails; a bus with no deployment
+//! binding fails honestly rather than substituting simulation.
 //!
-//! [`testing::FakeTransport`] implements the same [`BusTransport`]
-//! seam against a scripted PDU loop, so every contract behavior —
-//! startup identity and layout verification, exchange success and
-//! failure sequences, staged-output retention, recovery re-entry —
-//! runs without a rig.
-//!
-//! ## Deployment wiring
-//!
-//! The model carries the *logical* bus: the `bus` name, the expected
-//! station profile, and the channel-to-process-image layout (see
-//! [`params`]). The deployment supplies the binding between that
-//! logical name and a host interface — [`EthercatBuses::new`] takes a
-//! `{"bus": "enp2s0"}` map, and the interface name is the only thing
-//! the real path opens. Two model devices on one logical bus share
-//! one [`BusMaster`] — and therefore one socket, one thread, one
-//! exchange per scan — while a second logical bus claiming an
-//! already-bound interface is a startup failure.
-//!
-//! Register the kind onto a deployment's [`DriverRegistry`] with
-//! [`EthercatBuses::register`]:
-//!
-//! ```no_run
-//! use dcs_assembly::DriverRegistry;
-//! use dcs_ethercat::EthercatBuses;
-//!
-//! let mut registry = DriverRegistry::standard();
-//! let buses = EthercatBuses::new([("bus_a".to_string(), "enp2s0".to_string())].into());
-//! buses.register(&mut registry);
-//! ```
-//!
-//! The kind is `field_facing` (the field steps itself — no `StepHook`)
-//! and keeps `claim` `None`: without a real single-writer arbitration
-//! for the field, automatic failover stays honestly off for hardware
-//! models.
+//! Failover is honest: the kind exposes `claim: None`, so redundant
+//! instances never arbitrate a single-writer field bus they cannot
+//! fence.
 
-#![warn(missing_docs)]
+pub use ethercrab_transport::EthercrabTransport;
+pub use master::{AttachError, BusMaster, BusPoint, EthercatDevice};
+pub use params::{
+    ChannelDecl, DEVICE_KIND, DeviceParameters, ImageOffset, StartupPolicy, StationIdentity,
+};
+pub use transport::{
+    BusTransport, CycleOutcome, DiscoveredStation, OpenRequest, Opener, TransportError,
+};
 
 mod ethercrab_transport;
 mod master;
@@ -65,166 +52,142 @@ pub mod params;
 pub mod testing;
 pub mod transport;
 
-pub use ethercrab_transport::EthercrabTransport;
-pub use master::{BusMaster, EthercatDevice};
-pub use params::{ChannelLayout, DEVICE_KIND, DeviceParameters, StationProfile};
-pub use transport::{
-    BusTransport, CycleOutcome, DiscoveredStation, OpenRequest, Opener, TransportError,
-};
-
-use dcs_assembly::{DeviceBackend, DeviceDriver, DeviceError, DeviceSpec, DriverRegistry};
-use std::any::Any;
-use std::collections::HashMap;
+use dcs_model::DeviceId;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// The set of logical EtherCAT buses a deployment runs — the seam
-/// where the plant model's logical `bus` names meet the deployment's
-/// host-interface bindings.
+/// The deployment seam between the model's logical bus names and the
+/// host's interfaces — decision 47's split: the model names `ecat0`,
+/// the deployment says which NIC that is.
 ///
-/// One `EthercatBuses` owns the mapping for one controller's driver
-/// resolution: the first `ethercat` device on a logical bus opens it
-/// (spawning its EtherCrab thread on the bound interface), every
-/// device on that bus shares the resulting [`BusMaster`], and a bus
-/// name the deployment did not bind — or an interface a second bus
-/// tries to claim — is a `DeviceError::Backend` naming the device.
+/// One `EthercatBuses` is shared by every `ethercat` device the
+/// registry resolves: attaching a device opens its declared logical
+/// bus on first use — one opener call, one [`BusMaster`] — and every
+/// later device on the same bus attaches to the same master. The
+/// `claimed` map rejects a second logical bus bound to one interface.
+///
+/// The default opener is [`EthercrabTransport::open`];
+/// [`with_opener`](Self::with_opener) substitutes a fake transport for
+/// simulation and contract tests — the only hardware-free path, since
+/// the kind otherwise requires its bus.
 #[derive(Clone)]
 pub struct EthercatBuses {
-    shared: Arc<Mutex<BusSet>>,
-}
-
-/// The buses' resolved state: the deployment's bindings, the opener
-/// (real or injected), the live masters by logical name, and which
-/// interface each live master claimed.
-struct BusSet {
-    /// Deployment-supplied `logical bus → host interface` bindings.
-    bindings: HashMap<String, String>,
-    /// How a logical bus opens — [`EthercrabTransport::open`] by
-    /// default, a fake in tests.
+    /// Logical bus name → bound host interface, from deployment config.
+    bindings: Arc<BTreeMap<String, String>>,
+    /// The transport constructor — EtherCrab in production, a fake in
+    /// tests.
     opener: Opener,
-    /// Live masters by logical bus name.
-    buses: HashMap<String, Arc<BusMaster>>,
-    /// Bound interface → the logical bus that claimed it — the
-    /// single-writer fact for a host interface.
-    claimed: HashMap<String, String>,
+    /// Interface → logical bus already bound to it.
+    claimed: Arc<Mutex<BTreeMap<String, String>>>,
+    /// Logical bus name → its live master.
+    masters: Arc<Mutex<BTreeMap<String, Arc<BusMaster>>>>,
 }
 
 impl EthercatBuses {
-    /// Buses bound to real interfaces: `bindings` maps each logical
-    /// `bus` parameter value to the host interface EtherCrab opens.
-    /// The model never names interfaces — this map is the whole of
-    /// decision-47's deployment ownership for the kind.
-    pub fn new(bindings: HashMap<String, String>) -> Self {
-        Self::with_opener(
-            bindings,
-            Arc::new(|request: &OpenRequest<'_>| {
+    /// Buses over the real EtherCrab transport, with the deployment's
+    /// logical-bus → interface bindings.
+    pub fn new(bindings: BTreeMap<String, String>) -> Self {
+        Self {
+            bindings: Arc::new(bindings),
+            opener: Arc::new(|request| {
                 EthercrabTransport::open(request)
                     .map(|transport| Box::new(transport) as Box<dyn BusTransport>)
             }),
-        )
-    }
-
-    /// Buses whose transports the given opener produces — the seam
-    /// simulations and contract tests inject fake PDU loops through.
-    /// The opener receives the logical name, the bound interface, and
-    /// the declared station profile, exactly like the real path.
-    pub fn with_opener(bindings: HashMap<String, String>, opener: Opener) -> Self {
-        Self {
-            shared: Arc::new(Mutex::new(BusSet {
-                bindings,
-                opener,
-                buses: HashMap::new(),
-                claimed: HashMap::new(),
-            })),
+            claimed: Arc::new(Mutex::new(BTreeMap::new())),
+            masters: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
-    /// Registers the `ethercat` device kind onto `registry` — the
-    /// decision-29 seam: every `ethercat` model device resolves
-    /// through this set's shared masters.
-    pub fn register(&self, registry: &mut DriverRegistry) {
-        let buses = self.clone();
-        registry.register(DEVICE_KIND, move |spec: &DeviceSpec<'_>| buses.device(spec));
+    /// The same buses over a test opener — the simulation path.
+    pub fn with_opener(bindings: BTreeMap<String, String>, opener: Opener) -> Self {
+        Self {
+            opener,
+            ..Self::new(bindings)
+        }
     }
 
-    /// Builds one model device's driver contribution: parses and
-    /// validates its declared profile and layout, attaches it to its
-    /// logical bus's shared master — opening the bus first if this is
-    /// the first device on it — and returns the point-facing
-    /// [`EthercatDevice`] as a [`DeviceBackend`]. [`register`](Self::register)
-    /// installs this as the kind's factory; it is public so tests and
-    /// bespoke assembly paths can drive the same resolution.
-    pub fn device(&self, spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
-        let params = DeviceParameters::parse(spec.parameters, spec.channels)
-            .map_err(DeviceError::parameters)?;
-        let mut set = self.shared.lock().unwrap();
-        let mut fresh_interface = None;
-        let master = match set.buses.get(&params.bus) {
-            Some(master) => Arc::clone(master),
-            None => {
-                let interface = set.bindings.get(&params.bus).cloned().ok_or_else(|| {
-                    DeviceError::backend(format!(
-                        "logical bus {:?} has no deployment interface binding",
+    /// Attaches one model device to its declared logical bus: opens
+    /// the bus on first attach (one opener call per bus, the interface
+    /// claim taken then), binds the device's `identity` to a
+    /// discovered station, verifies its `mapping` against the
+    /// discovered layout, and — for the bus's first device — runs the
+    /// one-shot OP entry. Failures are [`AttachError`]s the registered
+    /// factory maps onto the assembly's device error.
+    pub fn attach(
+        &self,
+        device: DeviceId,
+        params: &DeviceParameters,
+        points: &[BusPoint],
+    ) -> Result<Arc<EthercatDevice>, AttachError> {
+        let (master, fresh) = {
+            let mut masters = self.masters.lock().unwrap();
+            if let Some(master) = masters.get(&params.bus) {
+                (Arc::clone(master), false)
+            } else {
+                let Some(interface) = self.bindings.get(&params.bus) else {
+                    return Err(AttachError::backend(format!(
+                        "logical bus {:?} has no interface binding in this deployment",
                         params.bus
-                    ))
-                })?;
-                if let Some(other) = set.claimed.get(&interface) {
-                    return Err(DeviceError::backend(format!(
-                        "interface {interface:?} is already claimed by logical bus {other:?}"
+                    )));
+                };
+                let mut claimed = self.claimed.lock().unwrap();
+                if let Some(other) = claimed.get(interface) {
+                    return Err(AttachError::backend(format!(
+                        "interface {interface:?} is already bound to logical bus {other:?}; \
+                         one interface serves one EtherCAT segment"
                     )));
                 }
-                let transport = (set.opener)(&OpenRequest {
+                let transport = (self.opener)(&OpenRequest {
                     bus: &params.bus,
-                    interface: &interface,
-                    expected: &params.stations,
+                    interface,
+                    expected: std::slice::from_ref(&params.identity),
                 })
                 .map_err(|error| {
-                    DeviceError::backend(format!(
-                        "bus {:?} on interface {interface:?}: {error}",
-                        params.bus
-                    ))
+                    AttachError::backend(format!("bus {:?} failed to open: {error}", params.bus))
                 })?;
+                claimed.insert(interface.clone(), params.bus.clone());
                 let master = Arc::new(BusMaster::new(&params.bus, transport));
-                set.claimed.insert(interface.clone(), params.bus.clone());
-                set.buses.insert(params.bus.clone(), Arc::clone(&master));
-                fresh_interface = Some(interface);
-                master
+                masters.insert(params.bus.clone(), Arc::clone(&master));
+                (master, true)
             }
         };
-        // Attaching or the first OP entry failing must not leave a
-        // half-claimed bus behind — a fresh master is evicted so the
-        // interface binding frees again.
-        let evict_fresh = |set: &mut BusSet| {
-            if let Some(interface) = &fresh_interface {
-                set.buses.remove(&params.bus);
-                set.claimed.remove(interface);
-            }
-        };
-        let attachment = match master.attach(spec.id, &params, &spec.points) {
+        let attachment = match master.attach(device, params, points) {
             Ok(attachment) => attachment,
             Err(error) => {
-                evict_fresh(&mut set);
+                // A failed first attach must not poison the interface
+                // claim — a later correct device still opens the bus.
+                if fresh {
+                    self.masters.lock().unwrap().remove(&params.bus);
+                    if let Some(interface) = self.bindings.get(&params.bus) {
+                        self.claimed.lock().unwrap().remove(interface);
+                    }
+                }
                 return Err(error);
             }
         };
         if attachment.first
             && let Err(error) = master.enter_op()
         {
-            evict_fresh(&mut set);
-            return Err(DeviceError::backend(format!(
+            // Same eviction: OP entry refused, the fresh master and
+            // its claim release for a later attempt.
+            let mut masters = self.masters.lock().unwrap();
+            masters.remove(&params.bus);
+            if let Some(interface) = self.bindings.get(&params.bus) {
+                self.claimed.lock().unwrap().remove(interface);
+            }
+            return Err(AttachError::backend(format!(
                 "bus {:?} refused OP entry: {error}",
                 params.bus
             )));
         }
-        Ok(DeviceDriver::Backend(DeviceBackend {
-            io: attachment.device,
-            // The field steps itself — no StepHook.
-            step: None,
-            // No single-writer arbitration exists for the bus, so the
-            // claim hook stays off and failover fencing honestly
-            // reports these devices as unfenced.
-            claim: None,
-            inspect: Some(master as Arc<dyn Any + Send + Sync>),
-            field_facing: true,
-        }))
+        Ok(attachment.device)
+    }
+}
+
+impl std::fmt::Debug for EthercatBuses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthercatBuses")
+            .field("bindings", &self.bindings)
+            .finish()
     }
 }

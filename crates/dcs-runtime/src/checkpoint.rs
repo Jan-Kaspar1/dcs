@@ -15,7 +15,9 @@
 //! switchover its next scan produces what the active would have produced.
 //! The `components`, `outputs`, and `internal` sections transfer verbatim —
 //! they are controller-side state: `outputs` carries the image's `Out`
-//! samples and `internal` the image-carried `In` samples. The `driver`
+//! samples and `internal` the image-carried `In` samples. So does the
+//! `receipts` log — the run's command audit, so `GET /receipts` answers
+//! identically on a peer that adopted the checkpoint. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -23,7 +25,9 @@
 //! `driver` empty and the restore skips it.
 
 use crate::executor::WiringError;
-use dcs_core::{ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
+use dcs_core::{
+    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -121,6 +125,17 @@ pub struct Checkpoint {
     /// checkpoints written before forces existed; defaults to empty.
     #[serde(default)]
     pub forces: BTreeMap<PointId, Value>,
+    /// The command receipt log at capture: every submitted command's
+    /// receipt in submission order — the run's command audit, served
+    /// as `GET /receipts`. Restoring it converges the tracking peer's
+    /// log to the active's, so the pair presents one continuous audit
+    /// trail across a switchover; entries still `Accepted` at capture
+    /// re-queue on the restoring run, so a command taken over between
+    /// its submission boundary and its applying scan is not lost.
+    /// Absent from checkpoints written before the section existed;
+    /// defaults to empty.
+    #[serde(default)]
+    pub receipts: Vec<CommandReceipt>,
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.

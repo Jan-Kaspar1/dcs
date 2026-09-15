@@ -3,8 +3,10 @@
 //!
 //! [`EthercrabTransport::open`] spawns the bus thread, which owns
 //! everything async: the `tx_rx_task` socket pump and the master
-//! session — `MainDevice::init` with a group filter that rejects
-//! unprofiled SubDevices as `Error::UnknownSubDevice`, the
+//! session — `MainDevice::init` accepting every discovered SubDevice
+//! into the one group (each device verifies its declared `identity`
+//! against the measurement at attach — the model declares identity per
+//! device, so the complete expected set is unknowable at open), the
 //! `into_pre_op_pdi` image configuration, and the station measurement
 //! that becomes [`BusTransport::discovered`]. From then on the thread
 //! services a request queue: [`enter_op`](BusTransport::enter_op) and
@@ -20,7 +22,6 @@
 //! exposed. Hardware is required only at `open` — every simulation and
 //! contract path substitutes [`testing::FakeTransport`](crate::testing).
 
-use crate::params::StationProfile;
 use crate::transport::{
     BusTransport, CycleOutcome, DiscoveredStation, OpenRequest, TransportError,
 };
@@ -132,20 +133,14 @@ impl fmt::Debug for EthercrabTransport {
 
 impl EthercrabTransport {
     /// Opens a logical bus: binds the deployment-named interface,
-    /// spawns the bus thread, runs `MainDevice::init` with the
-    /// declared-profile filter, configures the group process image,
-    /// and answers with the measured station list. Any failure — the
-    /// interface refusing, a station the profile does not expect, a
-    /// dead thread — is a `TransportError` the caller reports as the
-    /// device's startup failure before OP.
+    /// spawns the bus thread, runs `MainDevice::init` over the whole
+    /// segment — EtherCrab's `MAX_SUBDEVICES` ceiling rejects a bus
+    /// beyond it — configures the group process image, and answers
+    /// with the measured station list the caller's devices verify
+    /// their declared identities against. Any failure — the interface
+    /// refusing, a dead thread — is a `TransportError` the caller
+    /// reports as the device's startup failure before OP.
     pub fn open(request: &OpenRequest<'_>) -> Result<Self, TransportError> {
-        if request.expected.len() > MAX_SUBDEVICES {
-            return Err(TransportError::internal(format!(
-                "bus {:?} declares {} stations, the master supports at most {MAX_SUBDEVICES}",
-                request.bus,
-                request.expected.len()
-            )));
-        }
         let (request_tx, request_rx) = async_channel::unbounded::<BusRequest>();
         let (ready_tx, ready_rx) = mpsc::channel();
         let alive = Arc::new(AtomicBool::new(true));
@@ -153,9 +148,8 @@ impl EthercrabTransport {
             .name(format!("dcs-ethercat-{}", request.bus))
             .spawn({
                 let interface = request.interface.to_string();
-                let expected = request.expected.to_vec();
                 let alive = Arc::clone(&alive);
-                move || run(interface, expected, request_rx, ready_tx, alive)
+                move || run(interface, request_rx, ready_tx, alive)
             })
             .map_err(|error| {
                 TransportError::internal(format!("cannot spawn the bus thread: {error}"))
@@ -251,7 +245,6 @@ impl Drop for EthercrabTransport {
 /// run the master session — whichever ends first ends the bus.
 fn run(
     interface: String,
-    expected: Vec<StationProfile>,
     requests: async_channel::Receiver<BusRequest>,
     ready: mpsc::Sender<Result<Vec<DiscoveredStation>, String>>,
     alive: Arc<AtomicBool>,
@@ -283,7 +276,7 @@ fn run(
             End::Pump
         };
         let session = async {
-            session(&maindevice, &expected, requests, ready).await;
+            session(&maindevice, requests, ready).await;
             End::Session
         };
         future::race(pump, session).await;
@@ -291,12 +284,17 @@ fn run(
     alive.store(false, Ordering::Release);
 }
 
-/// The master session on the bus thread: init with the declared-
-/// profile filter, image configuration, station measurement, then the
-/// request loop.
+/// The master session on the bus thread: init with full discovery —
+/// the model declares identity per *device*, so the complete expected
+/// station set is unknowable when the bus opens and the group filter
+/// accepts every discovered station into the one group — image
+/// configuration, station measurement, then the request loop. Each
+/// device's declared `identity` and `mapping` is verified against this
+/// measurement at attach under the `fail` startup policy — the
+/// `Error::UnknownSubDevice` rejection the filter could perform is
+/// covered per device there.
 async fn session(
     maindevice: &MainDevice<'static>,
-    expected: &[StationProfile],
     requests: async_channel::Receiver<BusRequest>,
     ready: mpsc::Sender<Result<Vec<DiscoveredStation>, String>>,
 ) {
@@ -306,57 +304,17 @@ async fn session(
             return;
         }};
     }
-    // A filter rejection names the offending station in this detail —
-    // `Error::UnknownSubDevice` carries nothing.
-    let detail = std::cell::RefCell::new(String::new());
-    let mut position = 0usize;
     let groups = Groups {
         group: SubDeviceGroup::default(),
     };
     let groups = match maindevice
-        .init::<MAX_SUBDEVICES, _>(ethercat_now, groups, |groups: &Groups, subdevice| {
-            let identity = subdevice.identity();
-            let matches = expected.get(position).is_some_and(|want| {
-                want.vendor_id == identity.vendor_id
-                    && want.product_id == identity.product_id
-                    && want.revision == identity.revision
-                    && want.name.as_deref().is_none_or(|name| name == subdevice.name())
-            });
-            if matches {
-                position += 1;
-                Ok(&groups.group)
-            } else {
-                *detail.borrow_mut() = match expected.get(position) {
-                    Some(want) => format!(
-                        "station {position} {:?} ({identity}) does not match the declared profile {:?}/{:#010x}/{:#010x}",
-                        subdevice.name(),
-                        want.name.as_deref().unwrap_or("-"),
-                        want.product_id,
-                        want.revision
-                    ),
-                    None => format!(
-                        "station {position} {:?} ({identity}) is beyond the {} declared stations",
-                        subdevice.name(),
-                        expected.len()
-                    ),
-                };
-                Err(Error::UnknownSubDevice)
-            }
+        .init::<MAX_SUBDEVICES, _>(ethercat_now, groups, |groups: &Groups, _subdevice| {
+            Ok(&groups.group)
         })
         .await
     {
         Ok(groups) => groups,
-        Err(error) => {
-            let detail = detail.into_inner();
-            fail!(
-                "bus init failed: {error}{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {detail}")
-                }
-            );
-        }
+        Err(error) => fail!("bus init failed: {error}"),
     };
     let group = match groups.group.into_pre_op_pdi(maindevice).await {
         Ok(group) => group,

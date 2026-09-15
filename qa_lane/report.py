@@ -5,9 +5,10 @@ The schema is deliberately close to agent_pool.review's report contract:
 stable keys, bounded fields, explicit outcomes, and validation that raises
 ValueError on any violation. Reports are untrusted data until validated.
 
-Schema version 1, top-level fields:
+Schema version 2, top-level fields (v1 documents remain valid input; the
+only v2 addition is the optional verifications channel):
 
-  schema_version           int, must equal SCHEMA_VERSION
+  schema_version           int, 1 or 2 (runners emit SCHEMA_VERSION)
   run_id                   stable run key: ^[a-z0-9][a-z0-9-]{0,79}$
   attempted_sha            40-hex main revision the run was launched against
   completed_sha            40-hex revision whose assessment completed, or
@@ -29,6 +30,12 @@ Schema version 1, top-level fields:
                            commit range this run's verdict covers when
                            queuing skipped intermediate revisions
   scenarios                per-case results (see SCENARIO_FIELDS)
+  verifications            fix-verification results (schema v2 only; see
+                           VERIFICATION_FIELDS) — a verification run
+                           replays one finding's original reproduction
+                           case on a revision proven to contain its merged
+                           fix and records the ancestry check, the verdict,
+                           and the evidence here
   capability_limitations   [{"key","detail","blocking"}] known product gaps
                            that bounded this run (e.g. no EtherCAT driver)
   infrastructure_failures  [{"key","detail","phase"}] rig/build/credential/
@@ -41,15 +48,20 @@ Consistency rules enforced beyond field shape:
   - outcome "passed" requires every scenario passed
   - outcome "failed" requires at least one failed scenario
   - completed_sha must equal attempted_sha for passed/failed outcomes
+  - a passed/failed verification entry requires tested_sha ==
+    completed_sha: a fix verdict applies only to the revision actually
+    tested, and only to runs that completed an assessment of it
 """
 import json
 import re
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMAS = (1, 2)
 MAX_FIELD = 12000
 MAX_SCENARIOS = 40
+MAX_VERIFICATIONS = 40
 MAX_TIMELINE = 200
 MAX_OBSERVATIONS = 40
 MAX_EVIDENCE = 20
@@ -62,17 +74,26 @@ IMAGE_DIGEST = re.compile(r'^sha256:[0-9a-f]{64}$')
 
 RUN_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive', 'interrupted')
 CASE_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive')
+VERIFICATION_OUTCOMES = ('passed', 'failed', 'inconclusive')
 EVIDENCE_KINDS = ('file', 'endpoint', 'log', 'metric')
 
 TOP_LEVEL = {'schema_version', 'run_id', 'attempted_sha', 'completed_sha',
              'image', 'started_at', 'finished_at', 'outcome', 'attempt',
-             'host', 'changed_range', 'scenarios', 'capability_limitations',
-             'infrastructure_failures', 'timeline', 'notes'}
-REQUIRED_TOP = TOP_LEVEL - {'attempt', 'host', 'changed_range', 'notes'}
+             'host', 'changed_range', 'scenarios', 'verifications',
+             'capability_limitations', 'infrastructure_failures', 'timeline',
+             'notes'}
+REQUIRED_TOP = TOP_LEVEL - {'attempt', 'host', 'changed_range',
+                            'verifications', 'notes'}
 
 SCENARIO_FIELDS = {'key', 'title', 'expected', 'outcome', 'observations',
                    'evidence', 'detail'}
 REQUIRED_SCENARIO = SCENARIO_FIELDS - {'evidence', 'detail'}
+
+VERIFICATION_FIELDS = {'finding_key', 'case', 'fix_sha', 'tested_sha',
+                       'outcome', 'fix_ancestry', 'evidence', 'detail'}
+REQUIRED_VERIFICATION = {'finding_key', 'case', 'fix_sha', 'tested_sha',
+                         'outcome'}
+ANCESTRY_FIELDS = {'checked', 'contained', 'method', 'detail'}
 
 
 def _bounded_text(value, field, limit=MAX_FIELD):
@@ -161,6 +182,62 @@ def validate_scenario(item):
     return item
 
 
+def validate_verification(item):
+    """One fix-verification result recorded by a verification run.
+
+    finding_key names the finding the run certifies; case is the original
+    reproduction's case identity (the scenario key that produced the
+    finding). fix_sha is the merged fix commit; tested_sha the revision
+    the case actually ran against. fix_ancestry records the runner's
+    containment check (git merge-base --is-ancestor) so a verdict is
+    never claimed on an untested or non-containing revision.
+    """
+    if not isinstance(item, dict) or not set(item) <= VERIFICATION_FIELDS:
+        raise ValueError('Invalid verification fields')
+    missing = REQUIRED_VERIFICATION - set(item)
+    if missing:
+        raise ValueError('Verification missing fields: '
+                         + ','.join(sorted(missing)))
+    for field in ('finding_key', 'case'):
+        if not isinstance(item[field], str) or not KEY.match(item[field]):
+            raise ValueError('Invalid verification ' + field)
+    _git_sha(item['fix_sha'], 'verification.fix_sha')
+    _git_sha(item['tested_sha'], 'verification.tested_sha')
+    if item['outcome'] not in VERIFICATION_OUTCOMES:
+        raise ValueError('Invalid verification outcome')
+    ancestry = item.get('fix_ancestry')
+    if ancestry is not None:
+        if not isinstance(ancestry, dict) \
+                or not set(ancestry) <= ANCESTRY_FIELDS:
+            raise ValueError('Invalid verification fix_ancestry')
+        if 'checked' in ancestry and type(ancestry['checked']) is not bool:
+            raise ValueError('fix_ancestry.checked must be boolean')
+        if 'contained' in ancestry \
+                and ancestry['contained'] is not None and type(ancestry['contained']) is not bool:
+            raise ValueError('fix_ancestry.contained must be boolean')
+        if ancestry.get('method') is not None:
+            _bounded_text(ancestry['method'], 'fix_ancestry.method', 200)
+        if ancestry.get('detail') is not None:
+            _bounded_text(ancestry['detail'], 'fix_ancestry.detail', 2000)
+    evidence = item.get('evidence')
+    if evidence is not None:
+        if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
+            raise ValueError('Invalid verification evidence')
+        for entry in evidence:
+            if isinstance(entry, str):
+                _bounded_text(entry, 'verification.evidence', 2000)
+                continue
+            if not isinstance(entry, dict) \
+                    or not {'detail'} <= set(entry) <= {'detail', 'source'}:
+                raise ValueError('Invalid verification evidence entry')
+            _bounded_text(entry['detail'], 'verification.evidence', 2000)
+            if entry.get('source') is not None:
+                _bounded_text(entry['source'], 'evidence.source', 500)
+    if 'detail' in item:
+        _bounded_text(item['detail'], 'verification.detail', 4000)
+    return item
+
+
 def validate_report(text, run_id=None, attempted_sha=None):
     """Parse and validate a run report; raise ValueError on any violation.
 
@@ -174,8 +251,10 @@ def validate_report(text, run_id=None, attempted_sha=None):
         raise ValueError('Report is not JSON: ' + str(exc))
     if not isinstance(data, dict) or not REQUIRED_TOP <= set(data) <= TOP_LEVEL:
         raise ValueError('Invalid report top-level fields')
-    if data['schema_version'] != SCHEMA_VERSION:
+    if data['schema_version'] not in SUPPORTED_SCHEMAS:
         raise ValueError('Unsupported report schema version')
+    if data['schema_version'] < 2 and 'verifications' in data:
+        raise ValueError('verifications require report schema version 2')
     if not isinstance(data['run_id'], str) or not KEY.match(data['run_id']):
         raise ValueError('Invalid run_id')
     if run_id is not None and data['run_id'] != run_id:
@@ -244,6 +323,21 @@ def validate_report(text, run_id=None, attempted_sha=None):
         raise ValueError('failed outcome requires a failed scenario')
     if outcome in ('passed', 'failed') and completed != data['attempted_sha']:
         raise ValueError('passed/failed requires completed_sha == attempted_sha')
+
+    verifications = data.get('verifications') or []
+    if not isinstance(verifications, list) \
+            or len(verifications) > MAX_VERIFICATIONS:
+        raise ValueError('Invalid verifications list')
+    seen = set()
+    for item in verifications:
+        validate_verification(item)
+        if item['finding_key'] in seen:
+            raise ValueError('Duplicate verification finding_key')
+        seen.add(item['finding_key'])
+        if item['outcome'] in ('passed', 'failed') \
+                and item['tested_sha'] != completed:
+            raise ValueError('passed/failed verification requires '
+                           'tested_sha == completed_sha')
 
     limitations = data['capability_limitations']
     if not isinstance(limitations, list) or len(limitations) > MAX_LIMITATIONS:

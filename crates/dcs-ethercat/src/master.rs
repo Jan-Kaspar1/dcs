@@ -4,15 +4,17 @@
 //! [`BusTransport`](crate::transport::BusTransport); [`EthercatDevice`]
 //! is the per-device [`IoDriver`] surface one model device receives.
 //!
-//! Everything here is synchronous and transport-agnostic — the
+//! The model's `ethercat` device declares *one* station: its
+//! `identity` binds to a discovered station on the bus at attach, and
+//! its `mapping` places each channel inside that station's process
+//! image. Everything here is synchronous and transport-agnostic — the
 //! [`CyclicIoDriver`] semantics are proven against
 //! [`testing::FakeTransport`](crate::testing::FakeTransport) without
 //! hardware, and the same code path drives
 //! [`EthercrabTransport`](crate::EthercrabTransport) on a rig.
 
-use crate::params::{ChannelLayout, DeviceParameters, StationProfile};
+use crate::params::{DeviceParameters, ImageOffset, StationIdentity};
 use crate::transport::{BusTransport, CycleOutcome, DiscoveredStation, TransportError};
-use dcs_assembly::{DeviceError, DevicePoint};
 use dcs_core::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
     LinkState, PointId, Sample, Tick, Value, ValueKind,
@@ -22,10 +24,67 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
-/// A bound point's place in a bus image: its station, its bit range
-/// within that direction's bus image, and its declared kind.
+/// One bound I/O point a factory hands [`BusMaster::attach`] — the
+/// device's point-facing half of an `io_point`, free of the assembly
+/// crate's own type so this crate stays a leaf.
+#[derive(Debug, Clone)]
+pub struct BusPoint {
+    /// The logical point.
+    pub point: PointId,
+    /// The bound channel's name on the device.
+    pub channel: String,
+    /// The point's declared direction — the model guarantees it agrees
+    /// with the channel's.
+    pub direction: Direction,
+    /// The point's declared value kind — likewise guaranteed to agree
+    /// with the channel's.
+    pub kind: ValueKind,
+}
+
+/// Why [`EthercatBuses::attach`](crate::EthercatBuses::attach) could
+/// not bind a device — the attach-time half of the `DeviceError`
+/// vocabulary, mapped onto it by the registered factory so a failure
+/// surfaces as the assembly error naming the device.
+#[derive(Debug)]
+pub enum AttachError {
+    /// The declaration is inconsistent against the live bus — e.g. two
+    /// devices claiming overlapping output bits, or a bound channel the
+    /// mapping does not place.
+    Parameters(String),
+    /// The bus could not be opened, the device's identity matched no
+    /// unclaimed discovered station, a channel's declared offset
+    /// exceeds the discovered process-data layout, or OP entry was
+    /// refused.
+    Backend(String),
+}
+
+impl AttachError {
+    /// An [`AttachError::Parameters`] with the given detail.
+    pub fn parameters(detail: impl Into<String>) -> Self {
+        Self::Parameters(detail.into())
+    }
+
+    /// An [`AttachError::Backend`] with the given detail.
+    pub fn backend(detail: impl Into<String>) -> Self {
+        Self::Backend(detail.into())
+    }
+}
+
+impl fmt::Display for AttachError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parameters(detail) => write!(f, "invalid device parameters: {detail}"),
+            Self::Backend(detail) => write!(f, "device backend unusable: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for AttachError {}
+
+/// A bound point's place in a bus image: its station's bus position,
+/// its bit range within that direction's bus image, and its declared
+/// kind.
 #[derive(Debug, Clone)]
 struct PointMap {
     direction: Direction,
@@ -59,6 +118,9 @@ struct BusState {
     /// Output-image bit ranges claimed by attached devices — a second
     /// device may not map an output channel onto claimed bits.
     out_claimed: Vec<Range<usize>>,
+    /// Bus positions already bound to an attached device — each model
+    /// device owns exactly one discovered station.
+    claimed_stations: HashSet<usize>,
     /// Consecutive uncompleted exchanges — compared against each
     /// device's declared `exchange_miss_threshold` on read.
     misses: u64,
@@ -75,8 +137,6 @@ struct BusState {
     missed_deadlines: u64,
     last_exchange_tick: Option<Tick>,
     last_error: Option<String>,
-    /// The strictest exchange deadline any attached device declared.
-    deadline: Option<std::time::Duration>,
     /// Attached devices in attach order — the first is the bus's cyclic
     /// and diagnostics owner.
     attached: Vec<DeviceId>,
@@ -85,12 +145,12 @@ struct BusState {
 /// One logical EtherCAT bus: the images, the transport, and the failure
 /// record every attached `ethercat` device shares.
 ///
-/// Created when the bus's first device resolves — the opener has
-/// already run discovery, so [`attach`](Self::attach) verifies the
-/// declared station profile and [`enter_op`](Self::enter_op) performs
-/// the one-shot PRE-OP → SAFE-OP → OP entry. `exchange` then turns the
-/// process image exactly once per call; `read`/`write` touch only the
-/// images.
+/// Created when the bus's first device attaches — the opener has
+/// already run discovery, so [`attach`](Self::attach) binds each
+/// device's declared `identity` to a discovered station and
+/// [`enter_op`](Self::enter_op) performs the one-shot PRE-OP → SAFE-OP
+/// → OP entry. `exchange` then turns the process image exactly once
+/// per call; `read`/`write` touch only the images.
 pub struct BusMaster {
     /// The logical bus name — diagnostics and error text.
     bus: String,
@@ -150,7 +210,7 @@ fn decode(kind: ValueKind, image: &[u8], bits: &Range<usize>) -> Value {
             match bits.len() / 8 {
                 4 => Value::Float(f32::from_le_bytes(bytes.try_into().unwrap()) as f64),
                 8 => Value::Float(f64::from_le_bytes(bytes.try_into().unwrap())),
-                _ => unreachable!("layout validation allows only 4- or 8-byte floats"),
+                _ => unreachable!("the grammar admits only 32- or 64-bit floats"),
             }
         }
     }
@@ -181,93 +241,49 @@ fn encode(image: &mut [u8], bits: &Range<usize>, value: Value) {
                 4 => image[bits.start / 8..bits.end / 8]
                     .copy_from_slice(&(value as f32).to_le_bytes()),
                 8 => image[bits.start / 8..bits.end / 8].copy_from_slice(&value.to_le_bytes()),
-                _ => unreachable!("layout validation allows only 4- or 8-byte floats"),
+                _ => unreachable!("the grammar admits only 32- or 64-bit floats"),
             }
         }
     }
 }
 
-/// A channel's station-relative layout projected onto the bus image of
-/// its direction: station areas concatenate in position order —
-/// EtherCrab's `IIIIOOOO` group PDI, mirrored on the fake side.
+/// The bus position of the station `identity` declares: the first
+/// unclaimed discovered station matching vendor, product, and
+/// revision. Devices declaring identical identities bind in attach
+/// order to matching stations in bus order — the grammar's only
+/// discriminator.
+fn find_station(
+    discovered: &[DiscoveredStation],
+    claimed: &HashSet<usize>,
+    identity: &StationIdentity,
+) -> Option<usize> {
+    discovered.iter().position(|station| {
+        !claimed.contains(&station.position)
+            && station.vendor_id == identity.vendor
+            && station.product_id == identity.product
+            && station.revision == identity.revision
+    })
+}
+
+/// A channel's station-relative [`ImageOffset`] projected onto the bus
+/// image of its direction: station areas concatenate in position
+/// order — EtherCrab's `IIIIOOOO` group PDI, mirrored on the fake side.
 fn image_bits(
-    layout: &ChannelLayout,
+    offset: &ImageOffset,
     direction: Direction,
-    stations: &[StationProfile],
+    position: usize,
+    discovered: &[DiscoveredStation],
 ) -> Range<usize> {
-    let base: usize = stations[..layout.station]
+    let base: u64 = discovered[..position]
         .iter()
         .map(|station| match direction {
             Direction::In => station.input_bytes,
             Direction::Out => station.output_bytes,
-        })
-        .sum::<usize>()
+        } as u64)
+        .sum::<u64>()
         * 8;
-    base + layout.bits.start..base + layout.bits.end
-}
-
-/// The startup verification: the transport's discovered stations
-/// against the device's declared profile — count, identity, and
-/// per-station process-data layout must match exactly, in position
-/// order.
-fn verify_profile(
-    bus: &str,
-    discovered: &[DiscoveredStation],
-    declared: &[StationProfile],
-) -> Result<(), String> {
-    if discovered.len() != declared.len() {
-        return Err(format!(
-            "bus {bus:?} discovered {} stations, the device declares {}",
-            discovered.len(),
-            declared.len()
-        ));
-    }
-    for (want, got) in declared.iter().zip(discovered) {
-        let station = want.position;
-        let name = match want.name.as_deref() {
-            Some(name) => format!("{name:?}"),
-            None => format!("{:?}", got.name),
-        };
-        if got.vendor_id != want.vendor_id {
-            return Err(format!(
-                "bus {bus:?} station {station} {name} reports vendor {:#010x}, the device declares {:#010x}",
-                got.vendor_id, want.vendor_id
-            ));
-        }
-        if got.product_id != want.product_id {
-            return Err(format!(
-                "bus {bus:?} station {station} {name} reports product {:#010x}, the device declares {:#010x}",
-                got.product_id, want.product_id
-            ));
-        }
-        if got.revision != want.revision {
-            return Err(format!(
-                "bus {bus:?} station {station} {name} reports revision {}, the device declares {}",
-                got.revision, want.revision
-            ));
-        }
-        if let Some(expected) = &want.name
-            && got.name != *expected
-        {
-            return Err(format!(
-                "bus {bus:?} station {station} reports name {:?}, the device declares {expected:?}",
-                got.name
-            ));
-        }
-        if got.input_bytes != want.input_bytes {
-            return Err(format!(
-                "bus {bus:?} station {station} {name} presents {} input bytes, the device declares {}",
-                got.input_bytes, want.input_bytes
-            ));
-        }
-        if got.output_bytes != want.output_bytes {
-            return Err(format!(
-                "bus {bus:?} station {station} {name} presents {} output bytes, the device declares {}",
-                got.output_bytes, want.output_bytes
-            ));
-        }
-    }
-    Ok(())
+    (base + offset.bit_offset) as usize
+        ..(base + offset.bit_offset + u64::from(offset.bits)) as usize
 }
 
 impl BusMaster {
@@ -285,6 +301,7 @@ impl BusMaster {
                 latched: BTreeMap::new(),
                 points: BTreeMap::new(),
                 out_claimed: Vec::new(),
+                claimed_stations: HashSet::new(),
                 misses: 0,
                 short_stations: HashSet::new(),
                 bus_degraded: false,
@@ -294,48 +311,86 @@ impl BusMaster {
                 missed_deadlines: 0,
                 last_exchange_tick: None,
                 last_error: None,
-                deadline: None,
                 attached: Vec::new(),
             }),
         }
     }
 
-    /// Attaches one model device to the bus: verifies its declared
-    /// station profile against discovery, registers its points' image
-    /// locations, seeds the staged output image with the declared safe
-    /// state, and latches neutral `Tick::ZERO` input samples — the
-    /// pre-first-exchange held image.
+    /// Attaches one model device to the bus: binds its declared
+    /// `identity` to an unclaimed discovered station, verifies every
+    /// bound channel's declared offset fits the discovered process-data
+    /// layout, registers its points' image locations, seeds the staged
+    /// output image with the declared safe outputs, and latches
+    /// neutral `Tick::ZERO` input samples — the pre-first-exchange
+    /// held image.
     ///
     /// The first attacher owns the bus's cyclic surface and
     /// diagnostics; `first` tells the caller to run
-    /// [`enter_op`](Self::enter_op) before the bus serves scans.
+    /// [`enter_op`](Self::enter_op) before the bus serves scans. Every
+    /// check runs before any mutation: a mismatch leaves the bus
+    /// exactly as it was, a hard startup failure before OP per the
+    /// `fail` startup policy.
     pub(crate) fn attach(
         self: &Arc<Self>,
         device: DeviceId,
         params: &DeviceParameters,
-        points: &[DevicePoint],
-    ) -> Result<Attachment, DeviceError> {
+        points: &[BusPoint],
+    ) -> Result<Attachment, AttachError> {
         let mut state = self.state.lock().unwrap();
-        // Verification before mutation: a mismatch leaves the bus
-        // exactly as it was.
-        verify_profile(&self.bus, state.transport.discovered(), &params.stations)
-            .map_err(DeviceError::backend)?;
+        let position = find_station(
+            state.transport.discovered(),
+            &state.claimed_stations,
+            &params.identity,
+        )
+        .ok_or_else(|| {
+            AttachError::backend(format!(
+                "bus {:?} discovered {} station(s), none unclaimed matching the declared identity \
+                 (vendor {:#010x}, product {:#010x}, revision {})",
+                self.bus,
+                state.transport.discovered().len(),
+                params.identity.vendor,
+                params.identity.product,
+                params.identity.revision
+            ))
+        })?;
+        let station = &state.transport.discovered()[position];
         let mut mapped = Vec::with_capacity(points.len());
         let mut claiming = state.out_claimed.clone();
         for point in points {
-            let Some(layout) = params.layout.get(&point.channel) else {
-                return Err(DeviceError::parameters(format!(
-                    "io point {} binds channel {:?} the layout does not map",
+            let image = match point.direction {
+                Direction::In => &params.inputs,
+                Direction::Out => &params.outputs,
+            };
+            let Some(offset) = image.get(&point.channel) else {
+                return Err(AttachError::parameters(format!(
+                    "io point {} binds channel {:?} the mapping does not place",
                     point.point.0, point.channel
                 )));
             };
-            let bits = image_bits(layout, point.direction, &params.stations);
+            let (area, area_name) = match point.direction {
+                Direction::In => (station.input_bytes, "input"),
+                Direction::Out => (station.output_bytes, "output"),
+            };
+            let end = offset.bit_offset + u64::from(offset.bits);
+            if end > area as u64 * 8 {
+                return Err(AttachError::backend(format!(
+                    "bus {:?} station {position}: channel {:?} maps bits {}..{end} beyond the \
+                     discovered {area_name} area of {area} bytes",
+                    self.bus, point.channel, offset.bit_offset
+                )));
+            }
+            let bits = image_bits(
+                offset,
+                point.direction,
+                position,
+                state.transport.discovered(),
+            );
             if point.direction == Direction::Out {
                 if let Some(other) = claiming
                     .iter()
                     .find(|range| range.start < bits.end && bits.start < range.end)
                 {
-                    return Err(DeviceError::parameters(format!(
+                    return Err(AttachError::parameters(format!(
                         "channel {:?} output bits {}..{} overlap bits {}..{} another device claimed",
                         point.channel, bits.start, bits.end, other.start, other.end
                     )));
@@ -348,7 +403,7 @@ impl BusMaster {
                 PointMap {
                     direction: point.direction,
                     kind: point.kind,
-                    station: layout.station,
+                    station: position,
                     bits,
                 },
             ));
@@ -362,7 +417,7 @@ impl BusMaster {
                 }
                 Direction::Out => {
                     let seed = params
-                        .safe_state
+                        .safe_outputs
                         .get(&channel)
                         .copied()
                         .unwrap_or_else(|| neutral(map.kind));
@@ -372,10 +427,7 @@ impl BusMaster {
             state.points.insert(point, map);
         }
         state.out_claimed = claiming;
-        state.deadline = match (state.deadline, params.deadline) {
-            (Some(held), Some(fresh)) => Some(held.min(fresh)),
-            (held, fresh) => held.or(fresh),
-        };
+        state.claimed_stations.insert(position);
         let first = state.attached.is_empty();
         state.attached.push(device);
         Ok(Attachment {
@@ -384,7 +436,7 @@ impl BusMaster {
                 bus: self.bus.clone(),
                 master: Arc::clone(self),
                 points: points.iter().map(|point| point.point).collect(),
-                miss_threshold: params.miss_threshold,
+                miss_threshold: params.exchange_miss_threshold,
                 owner: first,
             }),
             first,
@@ -423,7 +475,6 @@ impl BusMaster {
                 }
             }
         }
-        let started = Instant::now();
         let outcome = {
             // Disjoint field borrows — the guard hides them.
             let state = &mut *state;
@@ -495,14 +546,6 @@ impl BusMaster {
                     }
                 }
             }
-        }
-        // A completed cycle past the declared deadline counts as a
-        // missed deadline — `Late` already counted itself.
-        if outcome != CycleOutcome::Late
-            && let Some(deadline) = state.deadline
-            && started.elapsed() > deadline
-        {
-            state.missed_deadlines += 1;
         }
         Ok(())
     }

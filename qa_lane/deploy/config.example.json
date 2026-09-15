@@ -5,6 +5,16 @@
   "max_attempts_per_sha": 2,
   "hard_timeout_seconds": 7200,
   "min_free_bytes": 10737418240,
+  "qa_storage_max_bytes": 64424509440,
+  "run_headroom_bytes": 8589934592,
+  "runs_keep": 20,
+  "src_keep": 2,
+  "images_keep": 3,
+  "reports_orphan_days": 30,
+  "cargo_cache_max_bytes": 8589934592,
+  "build_cache_max_bytes": 21474836480,
+  "docker_build_cache_max_bytes": 4294967296,
+  "egress_required": true,
   "active_port": 18080,
   "standby_port": 18081,
   "plant_port": 9001,
@@ -19,5 +29,6 @@
   "builder_timeout": 5400,
   "monitor_timeout": 90,
   "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
-  "dynamics_fixture": "crates/dcs-demo/fixtures/pump_station_dynamics.json"
+  "dynamics_fixture": "crates/dcs-demo/fixtures/pump_station_dynamics.json",
+  "git_dir": "/srv/dcs-hwtest/repo.git"
 }

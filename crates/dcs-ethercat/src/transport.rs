@@ -175,18 +175,20 @@ pub trait BusTransport: Send {
 }
 
 /// What an [`Opener`] receives to bind one logical bus: the interface
-/// the deployment bound it to and the station profile the first
-/// attaching device declared — available to the transport so discovery
-/// can reject unrecognized stations during init.
+/// the deployment bound it to and the station identities registered on
+/// the bus so far — the first attaching device's at open time. The
+/// model declares identity per device, so the complete expected set is
+/// unknowable when the bus opens; per-device identity and layout
+/// verification happens at attach under the `fail` startup policy.
 pub struct OpenRequest<'a> {
     /// The logical bus name from the device parameters.
     pub bus: &'a str,
     /// The host interface the deployment bound the bus to (e.g. a NIC
     /// name such as `enx00e04c751f7c`).
     pub interface: &'a str,
-    /// The station profile the first attaching device declared, in bus
-    /// position order.
-    pub expected: &'a [crate::params::StationProfile],
+    /// The station identities registered on the bus so far, in attach
+    /// order.
+    pub expected: &'a [crate::params::StationIdentity],
 }
 
 /// The transport-construction seam: production uses

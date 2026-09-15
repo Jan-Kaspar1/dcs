@@ -5,13 +5,15 @@
 //! counter attribution, boundary recovery, and diagnostics — without
 //! hardware.
 
-use dcs_assembly::{DeviceDriver, DeviceError, DevicePoint, DeviceSpec};
 use dcs_core::{Direction, IoDriver, IoError, LinkState, PointId, Tick, Value, ValueKind};
 use dcs_ethercat::testing::{FakeCycle, FakeLog, FakeTransport};
-use dcs_ethercat::{DEVICE_KIND, DiscoveredStation, EthercatBuses, OpenRequest, TransportError};
-use dcs_model::{Channel, DeviceId};
+use dcs_ethercat::{
+    AttachError, BusPoint, ChannelDecl, DeviceParameters, DiscoveredStation, EthercatBuses,
+    EthercatDevice, OpenRequest, TransportError,
+};
+use dcs_model::DeviceId;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,36 +30,38 @@ fn discovered() -> Vec<DiscoveredStation> {
     }]
 }
 
-/// The device's declared parameters — the station profile matching
-/// [`discovered`], a miss threshold of 2, and the channel layout:
+/// The declared identity matching [`discovered`]'s station.
+fn identity() -> serde_json::Value {
+    json!({"vendor": 0xad, "product": 950, "revision": 2})
+}
+
+/// The device's declared parameters — the identity matching
+/// [`discovered`], a miss threshold of 2, and the channel mapping:
 /// `di-1` at input bit 0, `ai-1` at input bytes 1..5, `do-1` at output
 /// bit 0, `ao-1` at output byte 1. The safe state stages `do-1` high
 /// and `ao-1` at 7.
 fn parameters(bus: &str) -> BTreeMap<String, serde_json::Value> {
     serde_json::from_value(json!({
         "bus": bus,
-        "exchange_miss_threshold": 2,
-        "stations": [{
-            "position": 0,
-            "vendor_id": "0xad",
-            "product_id": 950,
-            "revision": 2,
-            "name": "st0",
-            "input_bytes": 8,
-            "output_bytes": 2
-        }],
-        "layout": {
-            "di-1": {"station": 0, "offset": 0, "bit": 0},
-            "ai-1": {"station": 0, "offset": 1, "width": 4},
-            "do-1": {"station": 0, "offset": 0, "bit": 0},
-            "ao-1": {"station": 0, "offset": 1, "width": 1}
+        "identity": identity(),
+        "mapping": {
+            "inputs": {
+                "di-1": {"byte": 0, "bit": 0},
+                "ai-1": {"byte": 1, "bits": 32}
+            },
+            "outputs": {
+                "do-1": {"byte": 0, "bit": 0},
+                "ao-1": {"byte": 1, "bits": 8}
+            }
         },
-        "safe_state": {"do-1": {"bool": true}, "ao-1": {"int": 7}}
+        "exchange_miss_threshold": 2,
+        "safe_outputs": {"do-1": {"bool": true}, "ao-1": {"int": 7}},
+        "startup": {"on_mismatch": "fail"}
     }))
     .unwrap()
 }
 
-fn channels() -> BTreeMap<String, Channel> {
+fn channels() -> BTreeMap<String, ChannelDecl> {
     [
         ("di-1", Direction::In, ValueKind::Bool),
         ("ai-1", Direction::In, ValueKind::Float),
@@ -65,19 +69,11 @@ fn channels() -> BTreeMap<String, Channel> {
         ("ao-1", Direction::Out, ValueKind::Int),
     ]
     .into_iter()
-    .map(|(name, direction, value_type)| {
-        (
-            name.to_string(),
-            Channel {
-                direction,
-                value_type,
-            },
-        )
-    })
+    .map(|(name, direction, kind)| (name.to_string(), ChannelDecl { direction, kind }))
     .collect()
 }
 
-fn points() -> Vec<DevicePoint> {
+fn points() -> Vec<BusPoint> {
     [
         (10, "di-1", Direction::In, ValueKind::Bool),
         (11, "ai-1", Direction::In, ValueKind::Float),
@@ -85,7 +81,7 @@ fn points() -> Vec<DevicePoint> {
         (13, "ao-1", Direction::Out, ValueKind::Int),
     ]
     .into_iter()
-    .map(|(point, channel, direction, kind)| DevicePoint {
+    .map(|(point, channel, direction, kind)| BusPoint {
         point: PointId(point),
         channel: channel.to_string(),
         direction,
@@ -101,28 +97,33 @@ struct Rig {
     log: Arc<Mutex<FakeLog>>,
     opens: Arc<AtomicUsize>,
     parameters: BTreeMap<String, serde_json::Value>,
-    channels: BTreeMap<String, Channel>,
-    points: Vec<DevicePoint>,
+    channels: BTreeMap<String, ChannelDecl>,
+    points: Vec<BusPoint>,
 }
 
 impl Rig {
-    /// Resolves one model device onto the rig's bus.
-    fn device(&self, id: u64) -> Result<DeviceDriver, DeviceError> {
-        self.buses.device(&DeviceSpec {
-            id: DeviceId(id),
-            kind: DEVICE_KIND,
-            parameters: &self.parameters,
-            channels: &self.channels,
-            points: self.points.clone(),
-        })
+    /// Attaches one model device onto the rig's bus with explicit
+    /// declarations — multi-device tests pass each device's own.
+    fn attach(
+        &self,
+        id: u64,
+        parameters: &BTreeMap<String, serde_json::Value>,
+        channels: &BTreeMap<String, ChannelDecl>,
+        points: &[BusPoint],
+    ) -> Result<Arc<EthercatDevice>, AttachError> {
+        let parsed = DeviceParameters::parse(parameters, channels).unwrap();
+        self.buses.attach(DeviceId(id), &parsed, points)
     }
 
-    /// The device's [`IoDriver`] surface.
-    fn driver(&self, id: u64) -> Arc<dyn IoDriver + Send + Sync> {
-        match self.device(id).unwrap() {
-            DeviceDriver::Backend(backend) => backend.io,
-            DeviceDriver::Sim(_) => panic!("ethercat devices are backends"),
-        }
+    /// Attaches one device with the rig's shared declarations.
+    fn device(&self, id: u64) -> Result<Arc<EthercatDevice>, AttachError> {
+        self.attach(id, &self.parameters, &self.channels, &self.points)
+    }
+
+    /// The rig's shared declarations, attached — most tests drive one
+    /// device.
+    fn driver(&self, id: u64) -> Arc<EthercatDevice> {
+        self.device(id).unwrap()
     }
 }
 
@@ -144,14 +145,17 @@ fn rig_fakes(
     let script = Arc::new(Mutex::new(Some(VecDeque::from(script))));
     let setup = Mutex::new(Some(setup));
     let buses =
-        EthercatBuses::with_opener(HashMap::from([("b0".to_string(), "eth0".to_string())]), {
+        EthercatBuses::with_opener(BTreeMap::from([("b0".to_string(), "eth0".to_string())]), {
             let log = Arc::clone(&log);
             let opens = Arc::clone(&opens);
             Arc::new(move |request: &OpenRequest<'_>| {
                 opens.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(request.bus, "b0");
                 assert_eq!(request.interface, "eth0");
-                assert_eq!(request.expected.len(), stations.len());
+                // The open request carries the first attacher's
+                // declared identity — the only station the model has
+                // named so far.
+                assert_eq!(request.expected.len(), 1);
                 let mut fake = FakeTransport::with_log(
                     stations.to_vec(),
                     script.lock().unwrap().take().unwrap_or_default(),
@@ -190,7 +194,7 @@ fn identity_mismatch_fails_before_op() {
     wrong[0].vendor_id = 0xbeef;
     let rig = rig_fakes(wrong, vec![], |_| {});
     let error = rig.device(1).err().unwrap();
-    assert!(matches!(error, DeviceError::Backend(_)), "{error:?}");
+    assert!(matches!(error, AttachError::Backend(_)), "{error:?}");
     assert!(error.to_string().contains("vendor"), "{error}");
     // Verification ran before OP entry — no cyclic surface opened.
     let log = rig.log.lock().unwrap();
@@ -204,8 +208,8 @@ fn layout_mismatch_fails_before_op() {
     wrong[0].input_bytes = 4;
     let rig = rig_fakes(wrong, vec![], |_| {});
     let error = rig.device(1).err().unwrap();
-    assert!(matches!(error, DeviceError::Backend(_)), "{error:?}");
-    assert!(error.to_string().contains("input bytes"), "{error}");
+    assert!(matches!(error, AttachError::Backend(_)), "{error:?}");
+    assert!(error.to_string().contains("input area"), "{error}");
     assert_eq!(rig.log.lock().unwrap().enter_ops, 0);
 }
 
@@ -215,7 +219,7 @@ fn op_entry_refusal_is_a_backend_failure_and_frees_the_bus() {
         fake.fail_enter_op(TransportError::State("station 0 refused OP".to_string()));
     });
     let error = rig.device(1).err().unwrap();
-    assert!(matches!(error, DeviceError::Backend(_)), "{error:?}");
+    assert!(matches!(error, AttachError::Backend(_)), "{error:?}");
     assert!(error.to_string().contains("OP"), "{error}");
     // The failed open released the interface claim: a retry opens the
     // bus again rather than poisoning the binding.
@@ -360,20 +364,11 @@ fn recovery_reenters_at_the_exchange_boundary_only() {
     assert_eq!(driver.read(PointId(10)).unwrap().value, Value::Bool(true));
 }
 
-#[test]
-fn a_short_exchange_degrades_only_the_named_station() {
-    // Two stations: the device's channels span both, so a shortfall on
-    // station 1 must not escalate station 0's points.
+/// A two-station rig helper: `st0` (8in/2out, matching [`identity`])
+/// plus `st1` (4in/1out, product 951) — one station per model device.
+fn two_station_rig(script: Vec<FakeCycle>) -> Rig {
     let stations = vec![
-        DiscoveredStation {
-            position: 0,
-            name: "st0".to_string(),
-            vendor_id: 0xad,
-            product_id: 950,
-            revision: 2,
-            input_bytes: 4,
-            output_bytes: 1,
-        },
+        discovered()[0].clone(),
         DiscoveredStation {
             position: 1,
             name: "st1".to_string(),
@@ -384,72 +379,88 @@ fn a_short_exchange_degrades_only_the_named_station() {
             output_bytes: 1,
         },
     ];
-    let rig = rig_fakes(
-        stations,
-        vec![
-            FakeCycle::short(Some(1), vec![0b1, 0, 0, 0, 0, 0, 0, 0]),
-            FakeCycle::complete(vec![0b1, 0, 0, 0, 0b1, 0, 0, 0]),
-        ],
-        |_| {},
-    );
-    let parameters = serde_json::from_value::<BTreeMap<String, serde_json::Value>>(json!({
+    rig_fakes(stations, script, |_| {})
+}
+
+/// A one-input-channel device declaration: `channel` at its station's
+/// input image bit 0, bound to the `product`/`revision` identity —
+/// each device's offsets are station-relative.
+fn di_parameters(
+    product: u32,
+    revision: u32,
+    channel: &str,
+) -> BTreeMap<String, serde_json::Value> {
+    serde_json::from_value(json!({
         "bus": "b0",
+        "identity": {"vendor": 0xad, "product": product, "revision": revision},
+        "mapping": {
+            "inputs": {channel: {"byte": 0, "bit": 0}}
+        },
         "exchange_miss_threshold": 2,
-        "stations": [
-            {"position":0,"vendor_id":"0xad","product_id":950,"revision":2,"input_bytes":4,"output_bytes":1},
-            {"position":1,"vendor_id":"0xad","product_id":951,"revision":1,"input_bytes":4,"output_bytes":1}
-        ],
-        "layout": {
-            "di-1": {"station":0,"offset":0,"bit":0},
-            "di-2": {"station":1,"offset":0,"bit":0}
-        }
+        "startup": {"on_mismatch": "fail"}
     }))
-    .unwrap();
-    let channels: BTreeMap<String, Channel> = [("di-1", Direction::In), ("di-2", Direction::In)]
+    .unwrap()
+}
+
+fn di_only(channel: &str, point: u64) -> (BTreeMap<String, ChannelDecl>, Vec<BusPoint>) {
+    (
+        [(
+            channel.to_string(),
+            ChannelDecl {
+                direction: Direction::In,
+                kind: ValueKind::Bool,
+            },
+        )]
         .into_iter()
-        .map(|(name, direction)| {
-            (
-                name.to_string(),
-                Channel {
-                    direction,
-                    value_type: ValueKind::Bool,
-                },
-            )
-        })
-        .collect();
-    let rig = Rig {
-        parameters,
-        channels,
-        points: vec![
-            DevicePoint {
-                point: PointId(10),
-                channel: "di-1".to_string(),
-                direction: Direction::In,
-                kind: ValueKind::Bool,
-            },
-            DevicePoint {
-                point: PointId(20),
-                channel: "di-2".to_string(),
-                direction: Direction::In,
-                kind: ValueKind::Bool,
-            },
-        ],
-        ..rig
-    };
-    let driver = rig.driver(1);
-    let cyclic = driver.cyclic().unwrap();
+        .collect(),
+        vec![BusPoint {
+            point: PointId(point),
+            channel: channel.to_string(),
+            direction: Direction::In,
+            kind: ValueKind::Bool,
+        }],
+    )
+}
+
+#[test]
+fn a_short_exchange_degrades_only_the_named_station() {
+    // Two devices, one per station: a shortfall on station 1 must not
+    // escalate station 0's points.
+    let rig = two_station_rig(vec![
+        FakeCycle::short(Some(1), vec![0b1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        FakeCycle::complete(vec![0b1, 0, 0, 0, 0, 0, 0, 0, 0b1, 0, 0, 0]),
+    ]);
+    let (channels_one, points_one) = di_only("di-1", 10);
+    let (channels_two, points_two) = di_only("di-2", 20);
+    let first = rig
+        .attach(
+            1,
+            &di_parameters(950, 2, "di-1"),
+            &channels_one,
+            &points_one,
+        )
+        .unwrap();
+    let second = rig
+        .attach(
+            2,
+            &di_parameters(951, 1, "di-2"),
+            &channels_two,
+            &points_two,
+        )
+        .unwrap();
+    let cyclic = first.cyclic().unwrap();
     cyclic.exchange(Tick(1)).unwrap();
     // Station 0 latched at the tick; station 1's point escalates.
-    let kept = driver.read(PointId(10)).unwrap();
+    let kept = first.read(PointId(10)).unwrap();
     assert_eq!(kept.value, Value::Bool(true));
     assert_eq!(kept.tick, Tick(1));
     assert_eq!(
-        driver.read(PointId(20)),
+        second.read(PointId(20)),
         Err(IoError::Disconnected(PointId(20)))
     );
     // A clean exchange clears the attribution.
     cyclic.exchange(Tick(2)).unwrap();
-    assert_eq!(driver.read(PointId(20)).unwrap().value, Value::Bool(true));
+    assert_eq!(second.read(PointId(20)).unwrap().value, Value::Bool(true));
 }
 
 #[test]
@@ -471,17 +482,10 @@ fn an_unattributable_shortfall_degrades_the_whole_bus() {
 
 #[test]
 fn late_exchanges_count_as_missed_deadlines() {
-    // A zero-length deadline makes any completed cycle late-free only
-    // when the transport itself reports `Late` — here it does.
-    let mut parameters = parameters("b0");
-    parameters.insert("exchange_deadline_ms".to_string(), serde_json::json!(5.0));
-    let rig = Rig {
-        parameters,
-        ..rig(vec![
-            FakeCycle::late(input_image(true, 0.0)),
-            FakeCycle::complete(input_image(true, 0.0)),
-        ])
-    };
+    let rig = rig(vec![
+        FakeCycle::late(input_image(true, 0.0)),
+        FakeCycle::complete(input_image(true, 0.0)),
+    ]);
     let driver = rig.driver(1);
     let cyclic = driver.cyclic().unwrap();
     cyclic.exchange(Tick(1)).unwrap();
@@ -549,59 +553,62 @@ fn kind_and_point_checks_happen_locally() {
 
 #[test]
 fn a_second_device_shares_the_bus_without_its_cyclic_surface() {
-    let rig = rig(vec![FakeCycle::complete(input_image(true, 1.0))]);
-    // A second device on the same bus and station, mapping disjoint
-    // bits.
-    let parameters = serde_json::from_value::<BTreeMap<String, serde_json::Value>>(json!({
+    // A second device declaring the second station's identity, mapping
+    // `di-2`/`do-2` inside its own station image.
+    let rig = two_station_rig(vec![FakeCycle::complete({
+        let mut image = input_image(true, 1.0);
+        image.extend([0b1, 0, 0, 0]);
+        image
+    })]);
+    let parameters_two = serde_json::from_value::<BTreeMap<String, serde_json::Value>>(json!({
         "bus": "b0",
+        "identity": {"vendor": 0xad, "product": 951, "revision": 1},
+        "mapping": {
+            "inputs": {"di-2": {"byte": 0, "bit": 0}},
+            "outputs": {"do-2": {"byte": 0, "bit": 0}}
+        },
         "exchange_miss_threshold": 2,
-        "stations": [{
-            "position":0,"vendor_id":"0xad","product_id":950,"revision":2,
-            "name":"st0","input_bytes":8,"output_bytes":2
-        }],
-        "layout": {
-            "di-2": {"station":0,"offset":0,"bit":1},
-            "do-2": {"station":0,"offset":0,"bit":1}
-        }
+        "safe_outputs": {"do-2": {"bool": false}},
+        "startup": {"on_mismatch": "fail"}
     }))
     .unwrap();
-    let channels: BTreeMap<String, Channel> = [("di-2", Direction::In), ("do-2", Direction::Out)]
-        .into_iter()
-        .map(|(name, direction)| {
-            (
-                name.to_string(),
-                Channel {
-                    direction,
-                    value_type: ValueKind::Bool,
-                },
-            )
-        })
-        .collect();
-    let first = rig.driver(1);
-    let spec = DeviceSpec {
-        id: DeviceId(2),
-        kind: DEVICE_KIND,
-        parameters: &parameters,
-        channels: &channels,
-        points: vec![
-            DevicePoint {
-                point: PointId(20),
-                channel: "di-2".to_string(),
+    let channels_two: BTreeMap<String, ChannelDecl> = [
+        (
+            "di-2",
+            ChannelDecl {
                 direction: Direction::In,
                 kind: ValueKind::Bool,
             },
-            DevicePoint {
-                point: PointId(21),
-                channel: "do-2".to_string(),
+        ),
+        (
+            "do-2",
+            ChannelDecl {
                 direction: Direction::Out,
                 kind: ValueKind::Bool,
             },
-        ],
-    };
-    let second = match rig.buses.device(&spec).unwrap() {
-        DeviceDriver::Backend(backend) => backend.io,
-        DeviceDriver::Sim(_) => panic!(),
-    };
+        ),
+    ]
+    .into_iter()
+    .map(|(name, decl)| (name.to_string(), decl))
+    .collect();
+    let points_two = vec![
+        BusPoint {
+            point: PointId(20),
+            channel: "di-2".to_string(),
+            direction: Direction::In,
+            kind: ValueKind::Bool,
+        },
+        BusPoint {
+            point: PointId(21),
+            channel: "do-2".to_string(),
+            direction: Direction::Out,
+            kind: ValueKind::Bool,
+        },
+    ];
+    let first = rig.driver(1);
+    let second = rig
+        .attach(2, &parameters_two, &channels_two, &points_two)
+        .unwrap();
     // The bus opened once; only the first attacher carries the cyclic
     // surface and diagnostics.
     assert_eq!(rig.opens.load(Ordering::SeqCst), 1);
@@ -616,4 +623,16 @@ fn a_second_device_shares_the_bus_without_its_cyclic_surface() {
     drop(log);
     let held = second.read(PointId(20)).unwrap();
     assert_eq!(held.tick, Tick(9));
+    assert_eq!(held.value, Value::Bool(true));
+}
+
+#[test]
+fn a_second_device_claiming_the_same_station_is_refused() {
+    // Identical identities bind in attach order — the second device
+    // finds no unclaimed matching station.
+    let rig = rig(vec![]);
+    rig.driver(1);
+    let error = rig.device(2).err().unwrap();
+    assert!(matches!(error, AttachError::Backend(_)), "{error:?}");
+    assert!(error.to_string().contains("unclaimed"), "{error}");
 }

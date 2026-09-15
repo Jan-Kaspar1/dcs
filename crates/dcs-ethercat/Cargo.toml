@@ -1,12 +1,12 @@
 [package]
 name = "dcs-ethercat"
+description = "EtherCAT device kind for the DCS plant model: field-bus identity, process-image mapping, startup policy contract, and the EtherCrab-backed cyclic master"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-dcs-assembly = { path = "../dcs-assembly" }
 dcs-core = { path = "../dcs-core" }
 dcs-model = { path = "../dcs-model" }
 # The EtherCAT master stack, pinned exactly per the stack evaluation:
@@ -21,4 +21,7 @@ futures-lite = "2.6.0"
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 
 [dev-dependencies]
-dcs-runtime = { path = "../dcs-runtime" }
+# The registry/assembly integration tests drive `resolve_drivers` and
+# `FanoutDriver`; `dcs-assembly` depends on this crate's parameter
+# contract, so the cycle is dev-only — permitted for test targets.
+dcs-assembly = { path = "../dcs-assembly" }

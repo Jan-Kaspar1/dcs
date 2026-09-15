@@ -327,6 +327,7 @@ version = "0.1.0"
 dependencies = [
  "dcs-blocks",
  "dcs-core",
+ "dcs-ethercat",
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
@@ -354,6 +355,7 @@ dependencies = [
  "dcs-assembly",
  "dcs-controller",
  "dcs-core",
+ "dcs-ethercat",
  "dcs-model",
  "dcs-monitor",
  "dcs-runtime",
@@ -411,7 +413,6 @@ dependencies = [
  "dcs-assembly",
  "dcs-core",
  "dcs-model",
- "dcs-runtime",
  "ethercrab",
  "futures-lite",
  "serde_json",

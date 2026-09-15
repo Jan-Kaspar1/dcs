@@ -15,8 +15,10 @@
 //! `sim*` prefix (local simulated devices), [`SIM_TCP_KIND`]
 //! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`),
 //! [`SIM_BUS_KIND`] (`sim-bus`, the register-mapped simulated fieldbus
-//! device of `dcs-sim-bus`), and [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
-//! the tick-indexed playback driver of `dcs-sim`). New device
+//! device of `dcs-sim-bus`), [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
+//! the tick-indexed playback driver of `dcs-sim`), and
+//! [`ETHERCAT_KIND`] (`ethercat`, the hardware-bound field-bus contract
+//! of `dcs-ethercat`). New device
 //! integrations register their own kind against the same [`DeviceSpec`]
 //! contract — registering a device integration is what "adding a new
 //! device" means.
@@ -27,6 +29,7 @@ use dcs_core::{
     CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
     Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
+use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
     ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
@@ -111,6 +114,44 @@ pub const SIM_SCRIPTED_KIND: &str = "sim-scripted";
 /// two ends cannot diverge.
 pub const SIM_BUS_KIND: &str = dcs_sim_bus::DEVICE_KIND;
 
+/// The EtherCAT device kind: a hardware-bound cyclic field-bus device —
+/// an EtherCAT coupler or remote-I/O station — declared through
+/// `Device.hardware` and the kind's `parameters`.
+///
+/// The kind is *hardware-bound*: the device must carry `"hardware":
+/// true`, and the factory rejects the declaration without it — the
+/// marker is the model's evidence that no simulated backend may serve
+/// the device. Its `parameters` declare the field-bus contract the
+/// master validates at startup (the full grammar is
+/// `dcs-ethercat`'s [`params`](dcs_ethercat) contract):
+///
+/// - `"bus"` (required string): the *logical* bus name — deployment
+///   configuration binds it to a host interface outside the model
+///   (decision 47); the document never names an interface;
+/// - `"identity"` (required object): the expected station identity —
+///   `{"vendor": <u32>, "product": <u32>, "revision": <u32>}`;
+/// - `"mapping"` (required object): `{"inputs": {...}, "outputs":
+///   {...}}` placing every declared channel in the image matching its
+///   direction — `{"byte", "bit"}` for a `bool` channel, a byte-aligned
+///   `{"byte", "bits"}` field for `int`/`float` — with no overlapping
+///   bit ranges;
+/// - `"exchange_miss_threshold"` (required integer ≥ 1): the cyclic
+///   contract's `Disconnected` escalation threshold (decision 78);
+/// - `"safe_outputs"` (object, required when the device declares `out`
+///   channels): each `out` channel's declared safe state staged into
+///   the output image before the first exchange;
+/// - `"startup"` (required object): `{"on_mismatch": "fail"}` — the only
+///   admitted policy: a station identity or layout mismatch is a hard
+///   startup failure.
+///
+/// A malformed declaration is [`DeviceError::Parameters`], surfacing as
+/// [`AssemblyError::InvalidDeviceParameters`]. Until the EtherCAT
+/// master integration lands (the Lenovo HQ-4 lane), a well-formed
+/// declaration still fails assembly — [`DeviceError::Backend`] — since
+/// no bus can be initialized: a hardware-bound kind is never silently
+/// substituted by simulation.
+pub const ETHERCAT_KIND: &str = dcs_ethercat::DEVICE_KIND;
+
 /// One `io_point` bound to a channel on the device under construction.
 #[derive(Debug, Clone)]
 pub struct DevicePoint {
@@ -135,6 +176,12 @@ pub struct DeviceSpec<'m> {
     /// The kind string the model declares — under a prefix registration,
     /// the device's actual kind, not the prefix it matched.
     pub kind: &'m str,
+    /// The model's `hardware` marker: `true` declares the device
+    /// hardware-bound. The factory owns the marker's meaning for its
+    /// kind — a hardware-bound kind requires it, a simulated kind
+    /// rejects it, so the flag stays honest evidence rather than a hint
+    /// a backend can ignore.
+    pub hardware: bool,
     /// The device's kind-specific parameters, as declared in the model.
     pub parameters: &'m BTreeMap<String, serde_json::Value>,
     /// The channels the model declares on the device.
@@ -303,13 +350,16 @@ impl DriverRegistry {
     /// The built-in registry: the `sim*` prefix served by local
     /// simulated devices, [`SIM_TCP_KIND`] (`sim-tcp`) served by the
     /// remote simulated driver, [`SIM_BUS_KIND`] (`sim-bus`) served by
-    /// the register-mapped fieldbus driver, and [`SIM_SCRIPTED_KIND`]
-    /// (`sim-scripted`) served by the scripted playback driver.
+    /// the register-mapped fieldbus driver, [`SIM_SCRIPTED_KIND`]
+    /// (`sim-scripted`) served by the scripted playback driver, and
+    /// [`ETHERCAT_KIND`] (`ethercat`) served by the hardware-bound
+    /// field-bus contract.
     pub fn standard() -> Self {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
             .with(SIM_BUS_KIND, sim_bus_device)
             .with(SIM_SCRIPTED_KIND, scripted_device)
+            .with(ETHERCAT_KIND, ethercat_device)
             .with_prefix(crate::SIM_DEVICE_PREFIX, sim_device)
     }
 
@@ -358,6 +408,18 @@ impl DriverRegistry {
         self
     }
 
+    /// Binds [`ETHERCAT_KIND`] to this deployment's EtherCAT buses —
+    /// replaces the validating stub [`standard`](Self::standard)
+    /// installs. `buses` carries the deployment's logical-bus →
+    /// host-interface bindings (the model names the bus, the deployment
+    /// names the NIC); a deployment without EtherCAT hardware keeps the
+    /// stub and its honest startup failure.
+    pub fn with_ethercat_buses(mut self, buses: &EthercatBuses) -> Self {
+        let buses = buses.clone();
+        self.register(ETHERCAT_KIND, move |spec| ethercat_backend(spec, &buses));
+        self
+    }
+
     /// The factory serving `kind`: the exact registration, else the
     /// first matching prefix in registration order.
     fn factory(&self, kind: &str) -> Option<&Factory> {
@@ -370,11 +432,26 @@ impl DriverRegistry {
     }
 }
 
+/// The simulated kinds reject the `hardware` marker: it declares a
+/// hardware-bound kind a simulated factory cannot serve, so a model
+/// carrying it on a `sim*` device is an assembly error, keeping the
+/// marker honest in both directions.
+fn require_simulated(spec: &DeviceSpec<'_>) -> Result<(), DeviceError> {
+    if spec.hardware {
+        return Err(DeviceError::parameters(format!(
+            "the {:?} kind is simulated; \"hardware\": true declares a hardware-bound device",
+            spec.kind
+        )));
+    }
+    Ok(())
+}
+
 /// The local simulated device factory: every bound `io_point` becomes a
 /// [`PointBinding`] in a [`ChannelMap`] fragment carrying the device's
 /// id. The kind takes no parameters — a `sim*` device declaring any is
 /// [`DeviceError::Parameters`].
 pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     if let Some(unknown) = spec.parameters.keys().next() {
         return Err(DeviceError::parameters(format!(
             "the {:?} kind takes no parameters, found {unknown:?}",
@@ -400,6 +477,7 @@ pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceEr
 /// connects to the plant server, and probes that it serves every
 /// declared point with the declared value kind.
 fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     for name in spec.parameters.keys() {
         if name != "address" && name != "timeout_ms" {
             return Err(DeviceError::parameters(format!(
@@ -501,6 +579,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
 /// and probes that it serves every mapped register with the declared
 /// value kind.
 fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     let channels: BTreeMap<String, ValueKind> = spec
         .channels
         .iter()
@@ -581,6 +660,97 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 })
         })),
         inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+/// The [`ETHERCAT_KIND`] factory: validates the field-bus declaration —
+/// the `hardware` marker plus the `dcs-ethercat` parameter grammar —
+/// then fails the build because this image carries no EtherCAT master.
+///
+/// Both halves are deliberate: a model declaring a hardware kind must
+/// fail startup when the hardware cannot initialize (no silent
+/// simulation fallback), and a declaration's shape must be a named
+/// parameter error before that backend check is even reached — exactly
+/// what the master integration's own startup sequence will enforce
+/// against the answering station's identity and layout.
+fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    Err(DeviceError::backend(format!(
+        "logical bus {:?} cannot initialize: no EtherCAT master is available in this build — \
+         a hardware-bound kind is never silently substituted by simulation",
+        declaration.bus
+    )))
+}
+
+/// The [`ETHERCAT_KIND`] validation both factories share: the
+/// `hardware` marker plus the `dcs-ethercat` parameter grammar against
+/// the device's declared channels — a declaration's shape is a named
+/// parameter error before any backend check is reached.
+fn ethercat_declaration(
+    spec: &DeviceSpec<'_>,
+) -> Result<dcs_ethercat::DeviceParameters, DeviceError> {
+    if !spec.hardware {
+        return Err(DeviceError::parameters(format!(
+            "the {ETHERCAT_KIND:?} kind is hardware-bound; the device must declare \
+             \"hardware\": true — a simulated backend may not serve it"
+        )));
+    }
+    let channels: BTreeMap<String, ChannelDecl> = spec
+        .channels
+        .iter()
+        .map(|(name, channel)| {
+            (
+                name.clone(),
+                ChannelDecl {
+                    direction: channel.direction,
+                    kind: channel.value_type,
+                },
+            )
+        })
+        .collect();
+    dcs_ethercat::DeviceParameters::parse(spec.parameters, &channels)
+        .map_err(DeviceError::parameters)
+}
+
+/// The deployment-bound [`ETHERCAT_KIND`] factory
+/// [`with_ethercat_buses`](DriverRegistry::with_ethercat_buses)
+/// installs: the same declaration checks as the stub, then the device
+/// attaches to its logical bus over the deployment's bindings — one
+/// shared master per bus, identity and process-image layout verified
+/// against discovery, safe outputs staged, OP entry, all before the
+/// device serves a scan.
+///
+/// The backend observes the field: `field_facing` so promotion fencing
+/// counts it, `step: None` because the field advances itself, and
+/// `claim: None` because no single-writer arbitration exists — which
+/// keeps automatic failover honestly off for the hardware model.
+fn ethercat_backend(
+    spec: &DeviceSpec<'_>,
+    buses: &EthercatBuses,
+) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    let points: Vec<BusPoint> = spec
+        .points
+        .iter()
+        .map(|point| BusPoint {
+            point: point.point,
+            channel: point.channel.clone(),
+            direction: point.direction,
+            kind: point.kind,
+        })
+        .collect();
+    let device = buses
+        .attach(spec.id, &declaration, &points)
+        .map_err(|error| match error {
+            AttachError::Parameters(detail) => DeviceError::parameters(detail),
+            AttachError::Backend(detail) => DeviceError::backend(detail),
+        })?;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: device.clone(),
+        step: None,
+        claim: None,
+        inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
 }
@@ -685,6 +855,7 @@ fn scripted_entry(
 /// scripted driver itself, so [`FanoutDriver::inspect`] reaches its
 /// recorded-write log.
 fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     for name in spec.parameters.keys() {
         if name != "script" {
             return Err(DeviceError::parameters(format!(
@@ -928,6 +1099,7 @@ pub fn resolve_drivers(
         let spec = DeviceSpec {
             id: device.id,
             kind: &device.kind,
+            hardware: device.hardware,
             parameters: &device.parameters,
             channels: &device.channels,
             points: points_by_device.remove(&device.id).unwrap_or_default(),

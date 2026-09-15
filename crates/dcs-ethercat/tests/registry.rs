@@ -11,59 +11,64 @@ use dcs_ethercat::testing::{FakeCycle, FakeLog, FakeTransport};
 use dcs_ethercat::{DiscoveredStation, EthercatBuses, OpenRequest};
 use dcs_model::{DeviceId, PlantModel};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-fn station() -> DiscoveredStation {
-    DiscoveredStation {
-        position: 0,
-        name: "st0".to_string(),
-        vendor_id: 0xad,
-        product_id: 950,
-        revision: 2,
-        input_bytes: 8,
-        output_bytes: 2,
-    }
+/// The fake segment: `st0` (product 950) and `st1` (product 951) — one
+/// station per model device.
+fn stations() -> Vec<DiscoveredStation> {
+    vec![
+        DiscoveredStation {
+            position: 0,
+            name: "st0".to_string(),
+            vendor_id: 0xad,
+            product_id: 950,
+            revision: 2,
+            input_bytes: 8,
+            output_bytes: 2,
+        },
+        DiscoveredStation {
+            position: 1,
+            name: "st1".to_string(),
+            vendor_id: 0xad,
+            product_id: 951,
+            revision: 1,
+            input_bytes: 4,
+            output_bytes: 1,
+        },
+    ]
 }
 
-/// The declared station profile both devices share.
-fn stations() -> serde_json::Value {
-    json!([{
-        "position": 0,
-        "vendor_id": "0xad",
-        "product_id": 950,
-        "revision": 2,
-        "name": "st0",
-        "input_bytes": 8,
-        "output_bytes": 2
-    }])
-}
-
-/// Device 1's parameters: input bit 0 in, output bit 0 out.
+/// Device 1's parameters: `st0`'s identity, `di-1` in and `do-1` out
+/// at its image's bit 0.
 fn parameters_one(bus: &str) -> serde_json::Value {
     json!({
         "bus": bus,
+        "identity": {"vendor": 0xad, "product": 950, "revision": 2},
+        "mapping": {
+            "inputs": {"di-1": {"byte": 0, "bit": 0}},
+            "outputs": {"do-1": {"byte": 0, "bit": 0}}
+        },
         "exchange_miss_threshold": 2,
-        "stations": stations(),
-        "layout": {
-            "di-1": {"station": 0, "offset": 0, "bit": 0},
-            "do-1": {"station": 0, "offset": 0, "bit": 0}
-        }
+        "safe_outputs": {"do-1": {"bool": false}},
+        "startup": {"on_mismatch": "fail"}
     })
 }
 
-/// Device 2's parameters: input bit 1 in, output bit 1 out — the
-/// output ranges must not overlap device 1's claim.
+/// Device 2's parameters: `st1`'s identity, `di-2` in and `do-2` out
+/// at its own station-relative image's bit 0.
 fn parameters_two(bus: &str) -> serde_json::Value {
     json!({
         "bus": bus,
+        "identity": {"vendor": 0xad, "product": 951, "revision": 1},
+        "mapping": {
+            "inputs": {"di-2": {"byte": 0, "bit": 0}},
+            "outputs": {"do-2": {"byte": 0, "bit": 0}}
+        },
         "exchange_miss_threshold": 2,
-        "stations": stations(),
-        "layout": {
-            "di-2": {"station": 0, "offset": 0, "bit": 1},
-            "do-2": {"station": 0, "offset": 0, "bit": 1}
-        }
+        "safe_outputs": {"do-2": {"bool": false}},
+        "startup": {"on_mismatch": "fail"}
     })
 }
 
@@ -75,6 +80,7 @@ fn device(
     json!({
         "id": id,
         "kind": "ethercat",
+        "hardware": true,
         "channels": channels,
         "parameters": parameters
     })
@@ -124,30 +130,36 @@ fn registry(
         bindings
             .iter()
             .map(|(bus, interface)| (bus.to_string(), interface.to_string()))
-            .collect::<HashMap<_, _>>(),
+            .collect::<BTreeMap<_, _>>(),
         {
             let log = Arc::clone(&log);
             let opens = Arc::clone(&opens);
             Arc::new(move |_request: &OpenRequest<'_>| {
                 opens.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(FakeTransport::with_log(
-                    vec![station()],
+                    stations(),
                     script.lock().unwrap().take().unwrap_or_default(),
                     Arc::clone(&log),
                 )) as Box<dyn dcs_ethercat::BusTransport>)
             })
         },
     );
-    let mut registry = DriverRegistry::standard();
-    buses.register(&mut registry);
-    (registry, log, opens)
+    (
+        DriverRegistry::standard().with_ethercat_buses(&buses),
+        log,
+        opens,
+    )
 }
 
 #[test]
 fn the_kind_resolves_and_exchanges_through_the_fanout() {
     let (registry, log, opens) = registry(
         &[("b0", "eth0")],
-        vec![FakeCycle::complete(vec![0b11, 0, 0, 0, 0, 0, 0, 0])],
+        // The bus input image is st0's 8 bytes then st1's 4: di-1 at
+        // byte 0 bit 0, di-2 at byte 8 bit 0.
+        vec![FakeCycle::complete(vec![
+            0b1, 0, 0, 0, 0, 0, 0, 0, 0b1, 0, 0, 0,
+        ])],
     );
     let model = two_device_model("b0", "b0");
     let driver = resolve_drivers(&model, &registry).unwrap().build().unwrap();
@@ -191,7 +203,7 @@ fn a_second_claim_on_one_interface_is_a_named_failure() {
     match error {
         AssemblyError::DeviceBackend { device, detail, .. } => {
             assert_eq!(device, DeviceId(2));
-            assert!(detail.contains("already claimed"), "{detail}");
+            assert!(detail.contains("already bound"), "{detail}");
         }
         other => panic!("expected DeviceBackend, got {other:?}"),
     }
@@ -207,10 +219,7 @@ fn an_unbound_logical_bus_is_a_named_failure() {
     match error {
         AssemblyError::DeviceBackend { device, detail, .. } => {
             assert_eq!(device, DeviceId(1));
-            assert!(
-                detail.contains("no deployment interface binding"),
-                "{detail}"
-            );
+            assert!(detail.contains("no interface binding"), "{detail}");
         }
         other => panic!("expected DeviceBackend, got {other:?}"),
     }
@@ -224,7 +233,9 @@ fn the_cyclic_surface_is_optional_across_mixed_kinds() {
     // carrying the only cyclic surface.
     let (registry, log, _) = registry(
         &[("b0", "eth0")],
-        vec![FakeCycle::complete(vec![0b1, 0, 0, 0, 0, 0, 0, 0])],
+        vec![FakeCycle::complete(vec![
+            0b1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])],
     );
     let model = PlantModel::load(
         &json!({

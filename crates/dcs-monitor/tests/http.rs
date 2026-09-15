@@ -2,16 +2,16 @@
 //! in-process `MonitorClient`.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, DriverDiagnostics,
-    ForcedPoint, IoDriver, IoError, IoFault, JournalEvent, LinkState, PointId, Quality,
-    QualityReason, Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
+    DriverDiagnostics, ExchangeDiagnostics, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
+    JournalEvent, LinkState, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -80,6 +80,186 @@ impl IoDriver for StubDriver {
     }
 }
 
+/// What the stub's next `exchange` does — the scripted transport.
+#[derive(Clone, Copy)]
+enum Exchange {
+    /// A clean exchange: the staged output image publishes and the
+    /// input image latches at the exchange's tick.
+    Complete,
+    /// Complete but past its deadline: the exchange succeeds and counts
+    /// a missed deadline.
+    Late,
+    /// Completed short of the working counter: the image still latches
+    /// and the shortfall counts a mismatch.
+    Short,
+    /// Did not complete: nothing publishes or latches, the staged image
+    /// is retained, and the miss counts once at the read boundary.
+    Failed,
+}
+
+/// A minimal scripted [`CyclicIoDriver`] — the smallest carrier of the
+/// exchange-diagnostics surface the I/O-health pane renders. `exchange`
+/// is the only call touching the simulated field: `read` serves the
+/// input image the last completed exchange latched and `write` stages
+/// the pending output image, per the cyclic contract.
+struct CyclicStub {
+    /// Every point the process image covers, with its declared kind.
+    points: HashMap<PointId, ValueKind>,
+    state: Mutex<CyclicState>,
+}
+
+/// The stub's mutable bus and counters.
+struct CyclicState {
+    /// The simulated field — the only data `exchange` may move.
+    field: HashMap<PointId, Sample>,
+    /// The held input image the last completed exchange latched.
+    latched: HashMap<PointId, Sample>,
+    /// The pending output image `write` stages.
+    staged: HashMap<PointId, Value>,
+    /// The scripted exchange outcomes, consumed in order; an exhausted
+    /// script completes cleanly.
+    script: VecDeque<Exchange>,
+    /// Consecutive uncompleted exchanges — while any stands, the link
+    /// reports disconnected.
+    misses: u64,
+    /// The exchange counters `diagnostics` reports.
+    attempted: u64,
+    succeeded: u64,
+    mismatches: u64,
+    missed_deadlines: u64,
+    last_exchange_tick: Option<Tick>,
+    last_error: Option<String>,
+}
+
+impl CyclicStub {
+    fn new(points: &[(u64, ValueKind)], script: &[Exchange]) -> Self {
+        let points: HashMap<PointId, ValueKind> = points
+            .iter()
+            .map(|&(point, kind)| (PointId(point), kind))
+            .collect();
+        // The input image starts as the field's initial contents — as a
+        // pre-run exchange would leave it.
+        let field: HashMap<PointId, Sample> = points
+            .keys()
+            .map(|&point| (point, Sample::good(Value::Float(0.0), Tick::ZERO)))
+            .collect();
+        Self {
+            points,
+            state: Mutex::new(CyclicState {
+                latched: field.clone(),
+                field,
+                staged: HashMap::new(),
+                script: script.iter().copied().collect(),
+                misses: 0,
+                attempted: 0,
+                succeeded: 0,
+                mismatches: 0,
+                missed_deadlines: 0,
+                last_exchange_tick: None,
+                last_error: None,
+            }),
+        }
+    }
+}
+
+impl IoDriver for CyclicStub {
+    /// Serves the held input image — never the transport.
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        self.state
+            .lock()
+            .unwrap()
+            .latched
+            .get(&point)
+            .copied()
+            .ok_or(IoError::UnknownPoint(point))
+    }
+
+    /// Stages the pending output image — never the transport; the
+    /// `UnknownPoint`/`TypeMismatch` semantics are unchanged.
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        let kind = *self
+            .points
+            .get(&point)
+            .ok_or(IoError::UnknownPoint(point))?;
+        if value.kind() != kind {
+            return Err(IoError::TypeMismatch {
+                point,
+                expected: kind,
+                found: value,
+            });
+        }
+        self.state.lock().unwrap().staged.insert(point, value);
+        Ok(())
+    }
+
+    /// The cyclic half of the I/O-health surface: the exchange counters
+    /// and the link state — disconnected while a miss stands, with the
+    /// last shortfall or failure's description.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        let state = self.state.lock().unwrap();
+        Some(DriverDiagnostics {
+            link: if state.misses > 0 {
+                LinkState::Disconnected
+            } else {
+                LinkState::Connected
+            },
+            last_error: state.last_error.clone(),
+            exchange: Some(ExchangeDiagnostics {
+                attempted: state.attempted,
+                succeeded: state.succeeded,
+                working_counter_mismatches: state.mismatches,
+                last_exchange_tick: state.last_exchange_tick,
+                missed_deadlines: state.missed_deadlines,
+            }),
+        })
+    }
+
+    /// The stub carries the cyclic surface.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        Some(self)
+    }
+}
+
+impl CyclicIoDriver for CyclicStub {
+    /// One scripted exchange for `tick`: a completed outcome publishes
+    /// the staged output image and latches the field into the input
+    /// image stamped at `tick`; `Failed` moves nothing and counts the
+    /// miss the executor records once at the boundary.
+    fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        let mut state = self.state.lock().unwrap();
+        state.attempted += 1;
+        match state.script.pop_front().unwrap_or(Exchange::Complete) {
+            Exchange::Failed => {
+                state.misses += 1;
+                state.last_error = Some("the exchange did not complete".to_string());
+                Err(IoError::Disconnected(
+                    *self.points.keys().min().expect("a nonempty image"),
+                ))
+            }
+            outcome => {
+                let staged = std::mem::take(&mut state.staged);
+                for (point, value) in staged {
+                    state.field.insert(point, Sample::good(value, tick));
+                }
+                state.latched = state.field.clone();
+                state.misses = 0;
+                state.succeeded += 1;
+                state.last_exchange_tick = Some(tick);
+                match outcome {
+                    Exchange::Late => state.missed_deadlines += 1,
+                    Exchange::Short => {
+                        state.mismatches += 1;
+                        state.last_error =
+                            Some("answered short of its working counter".to_string());
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Reads `In` point 10 and drives `Out` point 20 at gain 2; point 30 is a
 /// mapped `Out` point no component writes.
 struct Scale;
@@ -145,6 +325,193 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
         result
     });
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The same rig over a scripted cyclic driver — the fixture whose
+/// served snapshot carries the `driver.exchange` diagnostics the
+/// I/O-health pane renders.
+fn with_cyclic_monitor<T>(script: &[Exchange], body: impl FnOnce(&MonitorClient) -> T) -> T {
+    let driver = CyclicStub::new(
+        &[
+            (10, ValueKind::Float),
+            (20, ValueKind::Float),
+            (30, ValueKind::Float),
+        ],
+        script,
+    );
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    let executor = Executor::new(&driver, map, vec![Box::new(Scale)]).unwrap();
+    let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
+    let result = thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&client)));
+        monitor.shutdown();
+        result
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The pane's rows and verdict, mirroring the page's `renderIoHealth`
+/// over a landed snapshot's `io_health`: the driver's link and — for a
+/// cyclic driver — exchange counters beside the executor's boundary
+/// counters, the attributed last fault, and the overrun count; troubled
+/// on link degradation, any boundary failure, exchange mismatches or
+/// missed deadlines, an attributed fault, or overruns. The fault row's
+/// text stands in for the page's describeIoError/pointName rendering —
+/// the row's presence, not its exact wording, is the contract here.
+fn io_health_pane(health: &IoHealth) -> (Vec<(String, String)>, bool) {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut troubled = false;
+    if let Some(driver) = &health.driver {
+        rows.push((
+            "link".to_string(),
+            serde_json::to_value(driver.link)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
+        ));
+        if driver.link != LinkState::Connected {
+            troubled = true;
+        }
+        if let Some(error) = &driver.last_error {
+            rows.push(("last link failure".to_string(), error.clone()));
+        }
+        if let Some(exchange) = &driver.exchange {
+            rows.push((
+                "exchanges attempted/succeeded".to_string(),
+                format!("{}/{}", exchange.attempted, exchange.succeeded),
+            ));
+            rows.push((
+                "working-counter mismatches".to_string(),
+                exchange.working_counter_mismatches.to_string(),
+            ));
+            rows.push((
+                "missed exchange deadlines".to_string(),
+                exchange.missed_deadlines.to_string(),
+            ));
+            rows.push((
+                "last exchange tick".to_string(),
+                exchange
+                    .last_exchange_tick
+                    .map(|tick| tick.0.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            ));
+            if exchange.working_counter_mismatches > 0 || exchange.missed_deadlines > 0 {
+                troubled = true;
+            }
+        }
+    }
+    rows.push(("failed reads".to_string(), health.failed_reads.to_string()));
+    rows.push((
+        "failed writes".to_string(),
+        health.failed_writes.to_string(),
+    ));
+    let exchange_reported = health
+        .driver
+        .as_ref()
+        .is_some_and(|driver| driver.exchange.is_some());
+    if health.failed_exchanges > 0 || exchange_reported {
+        rows.push((
+            "failed exchanges".to_string(),
+            health.failed_exchanges.to_string(),
+        ));
+        if health.failed_exchanges > 0 {
+            troubled = true;
+        }
+    }
+    rows.push((
+        "consecutive failures".to_string(),
+        health.consecutive_failures.to_string(),
+    ));
+    if health.failed_reads > 0 || health.failed_writes > 0 {
+        troubled = true;
+    }
+    if let Some(fault) = &health.last_error {
+        rows.push((
+            "last I/O fault".to_string(),
+            format!(
+                "{} — {} boundary, point {}, tick {}",
+                fault.error,
+                if fault.direction == Direction::In {
+                    "read"
+                } else {
+                    "write"
+                },
+                fault.point.0,
+                fault.tick.0
+            ),
+        ));
+        troubled = true;
+    }
+    if health.scan_overruns > 0 {
+        rows.push((
+            "scan overruns".to_string(),
+            health.scan_overruns.to_string(),
+        ));
+        troubled = true;
+    }
+    (rows, troubled)
+}
+
+/// The pair card's I/O-health line for a landed snapshot, mirroring the
+/// page's `ioHealthLine`: the pane's troubled rule reduced to one
+/// line's worth of named troubles.
+fn io_health_card_line(health: &IoHealth) -> (String, bool) {
+    let mut troubles = Vec::new();
+    if let Some(driver) = &health.driver
+        && driver.link != LinkState::Connected
+    {
+        troubles.push(format!(
+            "link {}",
+            serde_json::to_value(driver.link).unwrap().as_str().unwrap()
+        ));
+    }
+    if health.failed_reads > 0 || health.failed_writes > 0 {
+        troubles.push(format!(
+            "{} failed read(s), {} failed write(s)",
+            health.failed_reads, health.failed_writes
+        ));
+    }
+    if health.failed_exchanges > 0 {
+        troubles.push(format!("{} failed exchange(s)", health.failed_exchanges));
+    }
+    if let Some(exchange) = health
+        .driver
+        .as_ref()
+        .and_then(|driver| driver.exchange.as_ref())
+    {
+        if exchange.working_counter_mismatches > 0 {
+            troubles.push(format!(
+                "{} working-counter mismatch(es)",
+                exchange.working_counter_mismatches
+            ));
+        }
+        if exchange.missed_deadlines > 0 {
+            troubles.push(format!(
+                "{} missed exchange deadline(s)",
+                exchange.missed_deadlines
+            ));
+        }
+    }
+    if let Some(fault) = &health.last_error {
+        troubles.push(format!(
+            "last fault {} at tick {}",
+            fault.error, fault.tick.0
+        ));
+    }
+    if health.scan_overruns > 0 {
+        troubles.push(format!("{} scan overrun(s)", health.scan_overruns));
+    }
+    if troubles.is_empty() {
+        ("I/O healthy".to_string(), false)
+    } else {
+        (format!("I/O degraded: {}", troubles.join("; ")), true)
+    }
 }
 
 fn point_value(snapshot: &dcs_core::TelemetrySnapshot, point: u64) -> Option<Value> {
@@ -525,7 +892,9 @@ fn page_serves_trend_and_journal_markup() {
         // The I/O-health pane: the snapshot's io_health section rendered
         // as its own surface beside the pair reporting — and the
         // link-degradation display rule that shows a dead transport as
-        // link health, distinct from the per-point quality column.
+        // link health, distinct from the per-point quality column. The
+        // cyclic contract's half: the pane's exchange rows and boundary
+        // count, and the pair card's named exchange troubles.
         for needle in [
             "id=\"health\"",
             "id=\"io-health\"",
@@ -533,6 +902,16 @@ fn page_serves_trend_and_journal_markup() {
             "snapshot.io_health",
             "health.driver.link !== \"connected\"",
             "scan overruns",
+            "health.driver.exchange",
+            "health.failed_exchanges",
+            "exchanges attempted/succeeded",
+            "working-counter mismatches",
+            "missed exchange deadlines",
+            "last exchange tick",
+            "failed exchanges",
+            " failed exchange(s)",
+            "working-counter mismatch(es)",
+            "missed exchange deadline(s)",
         ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
@@ -723,6 +1102,167 @@ fn the_health_panes_fields_ride_the_served_snapshot() {
             serde_json::from_str::<dcs_core::IoHealth>(&json).unwrap(),
             health.clone()
         );
+    });
+}
+
+#[test]
+fn the_pane_renders_the_cyclic_exchange_surface() {
+    // A driver carrying the cyclic contract: the script's one failed
+    // exchange counts once at the executor's boundary while the late
+    // frame counts a missed deadline under succeeded — both halves of
+    // the surface land in the served snapshot.
+    with_cyclic_monitor(
+        &[
+            Exchange::Complete,
+            Exchange::Failed,
+            Exchange::Late,
+            Exchange::Complete,
+        ],
+        |client| {
+            client.advance(4).unwrap();
+            let health = client.snapshot().unwrap().io_health;
+
+            // The executor's boundary count and the driver's exchange
+            // counters — the fields the pane's new rows read.
+            assert_eq!(health.failed_exchanges, 1);
+            let exchange = health
+                .driver
+                .as_ref()
+                .and_then(|driver| driver.exchange.as_ref())
+                .expect("the cyclic driver reports its exchange counters");
+            assert_eq!(
+                *exchange,
+                ExchangeDiagnostics {
+                    attempted: 4,
+                    succeeded: 3,
+                    working_counter_mismatches: 0,
+                    last_exchange_tick: Some(Tick(4)),
+                    missed_deadlines: 1,
+                }
+            );
+
+            // The pane renders the exchange rows beside the boundary
+            // counters and reads degraded.
+            let (rows, troubled) = io_health_pane(&health);
+            let rendered: HashMap<&str, &str> = rows
+                .iter()
+                .map(|(label, value)| (label.as_str(), value.as_str()))
+                .collect();
+            assert_eq!(rendered["exchanges attempted/succeeded"], "4/3");
+            assert_eq!(rendered["working-counter mismatches"], "0");
+            assert_eq!(rendered["missed exchange deadlines"], "1");
+            assert_eq!(rendered["last exchange tick"], "4");
+            assert_eq!(rendered["failed exchanges"], "1");
+            assert!(troubled, "the pane reads degraded: {rows:?}");
+
+            // The pair card's line names the troubles.
+            let (line, bad) = io_health_card_line(&health);
+            assert!(bad);
+            assert!(line.contains("1 failed exchange(s)"), "{line}");
+            assert!(line.contains("1 missed exchange deadline(s)"), "{line}");
+
+            // Identical scripted snapshots render identically — a serde
+            // roundtrip produces the same rows and verdict.
+            let again: IoHealth =
+                serde_json::from_str(&serde_json::to_string(&health).unwrap()).unwrap();
+            assert_eq!(io_health_pane(&again), io_health_pane(&health));
+        },
+    );
+}
+
+#[test]
+fn the_troubled_rule_reads_the_exchange_counters() {
+    // A clean run — every attempted exchange succeeded with no
+    // shortfall and no missed deadline — stays healthy even though the
+    // exchange rows render.
+    with_cyclic_monitor(&[Exchange::Complete, Exchange::Complete], |client| {
+        client.advance(2).unwrap();
+        let health = client.snapshot().unwrap().io_health;
+        let exchange = health
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.exchange.as_ref())
+            .unwrap();
+        assert_eq!(exchange.succeeded, exchange.attempted);
+        let (rows, troubled) = io_health_pane(&health);
+        assert!(
+            rows.iter()
+                .any(|(label, _)| label == "exchanges attempted/succeeded"),
+            "the exchange surface renders even while healthy: {rows:?}"
+        );
+        assert!(!troubled, "clean exchanges read healthy: {rows:?}");
+        let (line, bad) = io_health_card_line(&health);
+        assert_eq!((line.as_str(), bad), ("I/O healthy", false));
+    });
+
+    // A completed exchange can still degrade the field: the late frame
+    // counted under succeeded — succeeded == attempted — yet its missed
+    // deadline trips the rule.
+    with_cyclic_monitor(&[Exchange::Complete, Exchange::Late], |client| {
+        client.advance(2).unwrap();
+        let health = client.snapshot().unwrap().io_health;
+        let exchange = health
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.exchange.as_ref())
+            .unwrap();
+        assert_eq!(exchange.succeeded, exchange.attempted);
+        assert_eq!(exchange.missed_deadlines, 1);
+        assert_eq!(health.failed_exchanges, 0);
+        let (_, troubled) = io_health_pane(&health);
+        assert!(troubled, "a missed deadline reads degraded");
+        let (line, bad) = io_health_card_line(&health);
+        assert!(bad);
+        assert!(line.contains("missed exchange deadline"), "{line}");
+    });
+
+    // The working-counter shortfall likewise: the exchange completed
+    // and counted under succeeded, but the named shortfall trips the
+    // rule.
+    with_cyclic_monitor(&[Exchange::Complete, Exchange::Short], |client| {
+        client.advance(2).unwrap();
+        let health = client.snapshot().unwrap().io_health;
+        let exchange = health
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.exchange.as_ref())
+            .unwrap();
+        assert_eq!(exchange.succeeded, exchange.attempted);
+        assert_eq!(exchange.working_counter_mismatches, 1);
+        assert_eq!(health.failed_exchanges, 0);
+        let (_, troubled) = io_health_pane(&health);
+        assert!(troubled, "a working-counter shortfall reads degraded");
+        let (line, bad) = io_health_card_line(&health);
+        assert!(bad);
+        assert!(line.contains("working-counter mismatch"), "{line}");
+    });
+}
+
+#[test]
+fn a_point_wise_driver_renders_no_exchange_rows() {
+    // The absent-field convention: a driver without the cyclic surface
+    // serializes no `exchange` field and the pane renders exactly as
+    // before — no exchange rows, no failed-exchanges counter, and the
+    // verdict untouched.
+    with_monitor(|_driver, client| {
+        client.advance(1).unwrap();
+        let health = client.snapshot().unwrap().io_health;
+        assert_eq!(health.failed_exchanges, 0);
+        assert!(
+            health
+                .driver
+                .as_ref()
+                .is_none_or(|driver| driver.exchange.is_none()),
+            "a point-wise driver reports no exchange section"
+        );
+        let (rows, troubled) = io_health_pane(&health);
+        assert!(
+            !rows.iter().any(|(label, _)| label.contains("exchange")),
+            "no exchange row may render for a non-cyclic driver: {rows:?}"
+        );
+        assert!(!troubled);
+        let (line, bad) = io_health_card_line(&health);
+        assert_eq!((line.as_str(), bad), ("I/O healthy", false));
     });
 }
 

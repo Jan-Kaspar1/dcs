@@ -106,6 +106,49 @@ fn invalid_expectations() -> std::collections::BTreeMap<&'static str, (bool, boo
             "crates/dcs-assembly/fixtures/invalid/duplicate_channel.json",
             (true, true),
         ),
+        // The `ethercat` corpus: the kind-conditional `then` rejects the
+        // shape violations it can see — a missing `hardware` marker, a
+        // missing `bus`, a mistyped identity field, a non-`fail` startup
+        // policy — while the channel-table-dependent rules (offset
+        // collisions, wrong-image placement, unmapped channels,
+        // safe-output coverage) and the marker-on-sim honesty check stay
+        // schema-accepted for the factory to reject at assembly.
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_bad_identity.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_bad_startup.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_bus.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_hardware.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_safe_output.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_offset_collision.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_unmapped_channel.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_wrong_image.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/hardware_marked_sim.json",
+            (true, true),
+        ),
         (
             "crates/dcs-assembly/fixtures/invalid/port_bound_twice.json",
             (true, true),
@@ -347,6 +390,88 @@ fn schema_pins_the_alarm_rationalization_obligation() {
             "{kind}: empty consequence unexpectedly valid"
         );
     }
+}
+
+#[test]
+fn schema_pins_the_ethercat_declaration() {
+    // The `ethercat` kind-conditional: a hardware-bound device declares
+    // `hardware: true` plus the `bus`/`identity`/`mapping`/
+    // `exchange_miss_threshold`/`startup` parameter shapes. The schema
+    // pins the shapes; the channel-table-dependent halves stay with the
+    // factory.
+    let schema = PlantModel::json_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let model = |device: serde_json::Value| {
+        serde_json::json!({
+            "version": 1, "devices": [device], "io_points": [], "signals": [],
+            "components": [], "connections": []
+        })
+    };
+    let declaration = serde_json::json!({
+        "bus": "ecat0",
+        "identity": {"vendor": 21, "product": 750354, "revision": 1},
+        "mapping": {
+            "inputs": {"di0": {"byte": 0, "bit": 0}},
+            "outputs": {"do0": {"byte": 0, "bit": 0}}
+        },
+        "exchange_miss_threshold": 3,
+        "safe_outputs": {"do0": {"bool": false}},
+        "startup": {"on_mismatch": "fail"}
+    });
+    let channels = serde_json::json!({
+        "di0": {"direction": "in", "value_type": "bool"},
+        "do0": {"direction": "out", "value_type": "bool"}
+    });
+
+    // A well-formed declaration validates…
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "hardware": true, "parameters": declaration
+    }))));
+
+    // …the hardware marker is required…
+    assert!(!validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "parameters": declaration
+    }))));
+    assert!(!validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "hardware": false, "parameters": declaration
+    }))));
+
+    let mutated = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+        let mut parameters = declaration.as_object().unwrap().clone();
+        edit(&mut parameters);
+        model(serde_json::json!({
+            "id": 1, "kind": "ethercat", "channels": channels,
+            "hardware": true, "parameters": parameters
+        }))
+    };
+
+    // …a missing bus…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p.remove("bus");
+    })));
+    // …a mistyped identity field…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["identity"]["vendor"] = serde_json::json!("wago");
+    })));
+    // …a zero miss threshold…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["exchange_miss_threshold"] = serde_json::json!(0);
+    })));
+    // …a startup policy other than fail…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["startup"]["on_mismatch"] = serde_json::json!("simulate");
+    })));
+    // …a host interface — there is no such parameter; an unknown key…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p.insert("interface".to_string(), serde_json::json!("eth0"));
+    })));
+    // …and a bit index past a byte.
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["mapping"]["inputs"]["di0"] = serde_json::json!({"byte": 0, "bit": 8});
+    })));
 }
 
 #[test]

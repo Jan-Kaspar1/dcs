@@ -1,0 +1,18 @@
+[Unit]
+Description=DCS QA lane host egress policy (iptables DOCKER-USER rules for dcsqa bridges)
+# Docker must be up so the DOCKER-USER chain exists. Rules live in
+# the reserved operator chain and survive docker.service restarts, so
+# a single boot-time apply is enough; every dcs-hwtest cycle
+# re-verifies (and self-heals via sudo) before it may start a run.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/homelab/dcs-hwtest
+Environment=QA_LANE_CONFIG=/srv/homelab/dcs-hwtest/config.json
+ExecStart=/usr/bin/python3 -m qa_lane netpolicy apply
+
+[Install]
+WantedBy=multi-user.target
