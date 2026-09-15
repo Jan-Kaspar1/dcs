@@ -18,8 +18,8 @@ use std::collections::BTreeSet;
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
-    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec,
-    DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DemandFallbackSpec, DeviationMonitorSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
     HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
     ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
     OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
@@ -1023,6 +1023,53 @@ fn surge_guard_rejects_an_out_of_range_response() {
     ));
 }
 
+/// The `demand-fallback` plant the tests wire: scripted channels for
+/// `in` and `pv`, internal carriers for the two outputs.
+fn demand_fallback_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let demand_raw = plant.channel::<f64>(sim, "demand", Direction::In);
+    let pv_raw = plant.channel::<f64>(sim, "pv", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), demand_raw, false);
+    let pv = plant.field_input::<f64>(PointId(11), pv_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let fallback_active = plant.internal_output::<bool>(PointId(21), false);
+
+    let fallback = plant.add(DemandFallbackSpec::new(parameters_map));
+    plant.connect(input, fallback.input);
+    plant.connect(pv, fallback.pv);
+    plant.connect(&fallback.out, out);
+    plant.connect(&fallback.fallback_active, fallback_active);
+    plant
+}
+
+fn demand_fallback_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("on_bad", Value::Int(0)),
+        ("fallback_flow", Value::Float(25.0)),
+        ("safe_flow", Value::Float(5.0)),
+    ])
+}
+
+#[test]
+fn demand_fallback_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(demand_fallback_plant(demand_fallback_parameters()));
+    assert_eq!(model.components[0].kind, DemandFallbackSpec::KIND);
+}
+
+#[test]
+fn demand_fallback_rejects_an_out_of_range_response() {
+    // `on_bad` declares the code range `0..=2`; a code outside it is
+    // `ParameterOutOfRange` at `build`, before the document exists.
+    let mut parameters_map = demand_fallback_parameters();
+    parameters_map.insert("on_bad".to_string(), Value::Int(4));
+    assert!(matches!(
+        demand_fallback_plant(parameters_map).build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "on_bad"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -1249,6 +1296,7 @@ fn every_registered_kind_has_a_spec() {
         BlowerGroupSpec::KIND,
         PhaseMonitorSpec::KIND,
         SurgeGuardSpec::KIND,
+        DemandFallbackSpec::KIND,
     ]
     .into_iter()
     .collect();

@@ -101,6 +101,10 @@
 //!   flow-versus-pressure (and optional minimum-current) surge region,
 //!   clamping or tripping per the declared response and honoring the
 //!   hardwired proven `surge_trip` unconditionally.
+//! - [`DemandFallback`] — the declared all-measurements-bad demand
+//!   response decision 65 records: while the selected `pv` reads
+//!   `Good` the demand passes; a non-`Good` `pv` engages the declared
+//!   hold/fixed/safe response with `fallback_active` asserted.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -121,6 +125,7 @@ mod blower_group;
 mod bool_gate;
 mod bool_latching_alarm;
 mod counter;
+mod demand_fallback;
 pub mod describe;
 mod deviation_monitor;
 mod digital_input;
@@ -167,6 +172,9 @@ pub use blower_group::{
 pub use bool_gate::{BoolGate, GateOperation};
 pub use bool_latching_alarm::BoolLatchingAlarm;
 pub use counter::Counter;
+pub use demand_fallback::{
+    DemandFallback, DemandFallbackConfig, DemandFallbackIo, FallbackResponse,
+};
 pub use deviation_monitor::DeviationMonitor;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
@@ -246,6 +254,7 @@ pub const KINDS: &[&str] = &[
     BlowerGroup::KIND,
     PhaseMonitor::KIND,
     SurgeGuard::KIND,
+    DemandFallback::KIND,
 ];
 
 #[cfg(test)]

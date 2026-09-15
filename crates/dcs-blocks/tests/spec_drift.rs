@@ -21,21 +21,22 @@ use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
     BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
     BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
-    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
-    FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, HeaderCoordinator,
-    HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmConfig,
-    ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter,
-    Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid,
-    PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
-    RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
-    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    DemandFallback, DemandFallbackConfig, DemandFallbackIo, DeviationMonitor, DigitalInput,
+    DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
+    FlowPacedRatioConfig, GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig,
+    HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo,
+    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
+    OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig,
+    PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs,
+    Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SetpointTable,
+    SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo,
+    ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
-    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec,
-    DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DemandFallbackSpec, DeviationMonitorSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
     HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
     ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
     OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
@@ -703,6 +704,25 @@ fn specs_match_registered_kinds_descriptors() {
         &SurgeGuard::new("sg", guard_io(None), guard_config)
             .unwrap()
             .describe(),
+    ));
+    covered.insert(check(
+        &DemandFallbackSpec::new(Default::default()),
+        &DemandFallback::new(
+            "dfb",
+            DemandFallbackIo {
+                input: point(1),
+                pv: point(2),
+                out: point(3),
+                fallback_active: point(4),
+            },
+            DemandFallbackConfig {
+                on_bad: dcs_blocks::FallbackResponse::Hold,
+                fallback_flow: 25.0,
+                safe_flow: 5.0,
+            },
+        )
+        .unwrap()
+        .describe(),
     ));
     // `backwash-coordinator`'s per-filter `request_i`/`grant_i`/
     // `position_i` families are instance-dependent — `N` is the spec's

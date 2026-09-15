@@ -7,14 +7,15 @@ use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
     BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
     BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
-    GuardResponse, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock,
-    LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
-    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
-    QueuePolicy, QueuedState, RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer,
-    SequencerStep, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
-    SurgeGuardIo, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
+    DemandFallback, DemandFallbackConfig, DemandFallbackIo, DigitalInput, DigitalOutput, Edge,
+    EdgeTrigger, FallbackResponse, FilterIo, GateOperation, GroupOutputs, GuardResponse,
+    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
+    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
+    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
+    RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter,
+    SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer, Totalizer,
+    UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -550,12 +551,29 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            DemandFallback::new(
+                "dfb",
+                DemandFallbackIo {
+                    input: point(&mut specs, 380, Direction::In, ValueKind::Float),
+                    pv: point(&mut specs, 381, Direction::In, ValueKind::Float),
+                    out: point(&mut specs, 382, Direction::Out, ValueKind::Float),
+                    fallback_active: point(&mut specs, 383, Direction::Out, ValueKind::Bool),
+                },
+                DemandFallbackConfig {
+                    on_bad: FallbackResponse::Hold,
+                    fallback_flow: 25.0,
+                    safe_flow: 5.0,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 31] = [
+const EXPECTED_KINDS: [&str; 32] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -587,6 +605,7 @@ const EXPECTED_KINDS: [&str; 31] = [
     BlowerGroup::KIND,
     PhaseMonitor::KIND,
     SurgeGuard::KIND,
+    DemandFallback::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
