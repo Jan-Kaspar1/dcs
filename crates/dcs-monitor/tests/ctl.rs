@@ -136,6 +136,7 @@ fn signal_index() -> SignalIndex {
             entry(PLAIN_OUT, Direction::Out, ValueKind::Float, false),
             entry(PLAIN_IN, Direction::In, ValueKind::Float, false),
         ],
+        components: vec![],
     }
 }
 

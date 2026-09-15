@@ -271,6 +271,17 @@ pub struct ComponentInstance {
     pub ports: BTreeMap<String, Port>,
 }
 
+impl ComponentInstance {
+    /// The instance's diagnostic name — `"<kind>:<id>"`, e.g.
+    /// `"managed-latching-alarm:1"` — the identity the assembled
+    /// component reports as `ComponentDescriptor.name` and
+    /// `ComponentDiagnostics.name`, so served per-instance records join
+    /// against the snapshot's descriptors by this name.
+    pub fn name(&self) -> String {
+        format!("{}:{}", self.kind, self.id.0)
+    }
+}
+
 /// A named component port with a fixed direction and value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Port {
