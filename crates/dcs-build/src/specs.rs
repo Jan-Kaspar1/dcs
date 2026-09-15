@@ -2224,3 +2224,92 @@ impl Spec for FlowPacedRatioSpec {
         }
     }
 }
+
+/// Spec for the `deviation-monitor` kind: the dose-confirmation check
+/// architecture decision 53 records — the commanded and measured
+/// chemical rates or totals accumulated over a declared window, the
+/// window's relative deviation tripping `deviating` past the declared
+/// limit.
+///
+/// Ports mirror the descriptor: `expected` (`In`, `Float`) — the
+/// commanded rate or total; `measured` (`In`, `Float`) — the measured
+/// consumption; `deviation` (`Out`, `Float`) — the last completed
+/// window's relative deviation; `deviating` (`Out`, `Bool`) — the
+/// dose-not-confirmed condition the alarm set consumes. Parameters:
+/// `deviation_limit` (required non-negative finite `Float`) and
+/// `window_ticks` (required `Int` in `1..=i64::MAX`).
+pub struct DeviationMonitorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `deviation-monitor` instance.
+pub struct DeviationMonitorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `expected` port (`In`, `Float`): the commanded chemical rate or
+    /// total — conventionally the ratio kind's `demand` or a
+    /// `totalizer`'s commanded total.
+    pub expected: Sink<f64>,
+    /// `measured` port (`In`, `Float`): the measured consumption —
+    /// a discharge flow or drawdown-derived rate, or a measured total.
+    pub measured: Sink<f64>,
+    /// `deviation` port (`Out`, `Float`): the last completed window's
+    /// relative deviation.
+    pub deviation: Source<f64>,
+    /// `deviating` port (`Out`, `Bool`): the dose-not-confirmed
+    /// condition — wire it into a `bool-latching-alarm` for the skid's
+    /// alarm set.
+    pub deviating: Source<bool>,
+}
+
+impl DeviationMonitorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "deviation-monitor";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("deviation_limit", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("window_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for DeviationMonitorSpec {
+    type Instance = DeviationMonitorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("expected", Direction::In, ValueKind::Float),
+            port("measured", Direction::In, ValueKind::Float),
+            port("deviation", Direction::Out, ValueKind::Float),
+            port("deviating", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        DeviationMonitorInstance {
+            id,
+            expected: Sink::port(id, "expected"),
+            measured: Sink::port(id, "measured"),
+            deviation: Source::port(id, "deviation"),
+            deviating: Source::port(id, "deviating"),
+        }
+    }
+}

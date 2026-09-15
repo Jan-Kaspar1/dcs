@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "expected": [
+            { "tick": 0, "value": 10.0 },
+            { "tick": 25, "value": 10.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 30, "value": 10.0 },
+            { "tick": 45, "value": 10.0, "quality": "uncertain", "reason": "stale" },
+            { "tick": 50, "value": 10.0 }
+          ],
+          "measured": [
+            { "tick": 0, "value": 10.0 },
+            { "tick": 10, "value": 12.0 },
+            { "tick": 20, "value": 10.0 },
+            { "tick": 30, "value": 8.0 },
+            { "tick": 31, "value": 12.0 },
+            { "tick": 32, "value": 8.0 },
+            { "tick": 33, "value": 12.0 },
+            { "tick": 34, "value": 10.0 },
+            { "tick": 35, "value": 8.0 },
+            { "tick": 36, "value": 12.0 },
+            { "tick": 37, "value": 8.0 },
+            { "tick": 38, "value": 12.0 },
+            { "tick": 39, "value": 10.0 },
+            { "tick": 40, "value": 6.0 },
+            { "tick": 50, "value": 10.0 }
+          ]
+        }
+      },
+      "channels": {
+        "expected": { "direction": "in", "value_type": "float" },
+        "measured": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "expected" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "measured" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "commanded-chemical-rate",
+      "source": 10,
+      "unit": "L/h",
+      "description": "Commanded chemical rate — the ratio kind's demand"
+    },
+    {
+      "id": 101,
+      "name": "measured-consumption",
+      "source": 11,
+      "unit": "L/h",
+      "description": "Measured chemical consumption — discharge flow or drawdown-derived rate"
+    },
+    {
+      "id": 102,
+      "name": "dose-deviation",
+      "source": 20,
+      "description": "Windowed relative deviation of measured against commanded"
+    },
+    {
+      "id": 103,
+      "name": "dose-not-confirmed",
+      "source": 21,
+      "description": "Deviation verdict feeding the skid's dose-not-confirmed alarm"
+    },
+    {
+      "id": 104,
+      "name": "dose-deviation-instant",
+      "source": 22,
+      "description": "Per-scan relative deviation of the window-1 instance"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "deviation-monitor",
+      "parameters": {
+        "deviation_limit": { "float": 0.1 },
+        "window_ticks": { "int": 5 }
+      },
+      "ports": {
+        "expected": { "direction": "in", "value_type": "float" },
+        "measured": { "direction": "in", "value_type": "float" },
+        "deviation": { "direction": "out", "value_type": "float" },
+        "deviating": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "deviation-monitor",
+      "parameters": {
+        "deviation_limit": { "float": 0.1 },
+        "window_ticks": { "int": 1 }
+      },
+      "ports": {
+        "expected": { "direction": "in", "value_type": "float" },
+        "measured": { "direction": "in", "value_type": "float" },
+        "deviation": { "direction": "out", "value_type": "float" },
+        "deviating": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "expected" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "measured" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "expected" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 2, "name": "measured" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "deviation" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "deviating" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "deviation" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "deviating" } },
+      "to": { "point": 23 }
+    }
+  ]
+}

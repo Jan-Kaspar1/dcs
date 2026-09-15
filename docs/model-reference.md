@@ -341,6 +341,35 @@ the declared fixed answer to a failed pacing signal.
 composition — three instances covering each `on_bad_flow` response,
 one trim-bound; per-port semantics live beside `FlowPacedRatio::KIND`.
 
+The dose-confirmation kind architecture decision 53 records adds one
+fixed-arity kind. `deviation-monitor` reads `expected` (`in`, `Float`)
+— the commanded chemical rate or total — and `measured` (`in`,
+`Float`) — the measured consumption — and drives `deviation` (`out`,
+`Float`), the last completed window's relative deviation, and
+`deviating` (`out`, `Bool`), the dose-not-confirmed verdict the
+decision-55 alarm set consumes. The `parameters` are
+`deviation_limit` (non-negative finite `Float`, the tolerated relative
+deviation) and `window_ticks` (`Int`, `1`–`i64::MAX`, the scans each
+window accumulates); both are `SetParameter`-tunable. Each scan where
+both inputs read `Good` banks the pair into the running window; a
+non-`Good` reading on either input freezes the window — no bank, no
+verdict change — while both outputs hold their last completed values
+under the merged worst-of input qualities. At `window_ticks` banked
+pairs the window closes: `deviation` updates to the accumulated
+relative error, `deviating` asserts while `|deviation|` exceeds
+`deviation_limit`, and the accumulators reset for the next window —
+so a slow drawdown trend is judged on its windowed total rather than
+instantaneously, and recovery clears the verdict at the next closed
+window. The running sums, position, and standing verdict are run
+state under decision 20's checkpoint rule. Where no measured-
+consumption signal exists the model simply does not instantiate the
+kind — commanded `totalizer` integration alone claims no
+dose-confirmed verdict.
+`crates/dcs-assembly/fixtures/deviation_monitor.json` is the recorded
+composition — a windowed instance beside a window-1 instantaneous
+instance over one scripted expected/measured pair; per-port semantics
+live beside `DeviationMonitor::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
