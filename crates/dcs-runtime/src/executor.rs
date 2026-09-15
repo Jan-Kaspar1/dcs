@@ -13,9 +13,9 @@ use crate::component::{Component, ComponentIo, IoRequirement};
 use crate::revision::CarryoverError;
 use dcs_core::{
     CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt,
-    ComponentDiagnostics, ComponentParameters, Direction, DroppedElement, ForcedPoint, IoDriver,
-    IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason,
-    Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
+    ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
+    ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry,
+    Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -532,31 +532,47 @@ enum Resolved {
 /// 2. applies every queued operator [`Command`] in submission order —
 ///    this is the documented point where commands submitted between scans
 ///    take effect, each updating its receipt to the final outcome;
-/// 3. refreshes the image's `In` points: every field `In` point is read
-///    from the driver, stamping the new tick — a failed read keeps the
-///    last known value marked [`Quality::Bad`] rather than aborting the
-///    scan, and a `stale_after_ticks` budget on the point merges
+/// 3. runs the cyclic exchange when the driver implements the
+///    [`CyclicIoDriver`](dcs_core::CyclicIoDriver) contract — detected at
+///    wiring through [`IoDriver::cyclic`](dcs_core::IoDriver::cyclic) —
+///    one call per scan at the read boundary, publishing the output
+///    image the last write phase (and this scan's applied command
+///    writes) staged and latching the returned input image atomically.
+///    A failed exchange is counted once under `failed_exchanges` and
+///    never aborts the scan — the driver's held image still answers the
+///    reads that follow. Non-cyclic drivers skip the phase entirely;
+/// 4. refreshes the image's `In` points: every field `In` point is read
+///    from the driver — the latched image under the cyclic contract —
+///    stamping the new tick — a failed read keeps the last known value
+///    marked [`Quality::Bad`] rather than aborting the scan, and a
+///    `stale_after_ticks` budget on the point merges
 ///    [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` onto a sample
 ///    whose driver-stamped tick lags the scan tick past the budget —
+///    over a cyclic driver that stamp is the producing exchange's
+///    acquisition tick, so the budget measures exchange freshness —
 ///    and every internal link routes its `Out` point's image
 ///    sample onto its `In` point, so a port-to-port carrier delivers the
 ///    value one scan after it was written;
-/// 4. steps the components in scan order, each seeing a [`ComponentIo`]
+/// 5. steps the components in scan order, each seeing a [`ComponentIo`]
 ///    scoped to its declared points — a failing step is recorded and the
 ///    scan continues;
-/// 5. writes the image's field `Out` points to the driver — points a
+/// 6. writes the image's field `Out` points to the driver — points a
 ///    component never wrote keep their last output, so a failed step
-///    holds outputs.
+///    holds outputs. Under the cyclic contract each write stages the
+///    pending output image, publishing on the next scan's exchange —
+///    the contract's one-scan actuation delay.
 ///
-/// The driver-boundary failures of phases 3 and 5 are also counted into
+/// The driver-boundary failures of phases 3, 4, and 6 are also counted
+/// into
 /// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
-/// read and write increments its named counter and the
+/// read, write, or exchange increments its named counter and the
 /// consecutive-failure streak — which any successful boundary operation
 /// resets — and is attributed to its tick and point as the section's
 /// `last_error`. The command path's own driver rejections instead settle
 /// their receipts as [`CommandError::DriverRejected`], and a driver's
 /// volunteered [`IoDriver::diagnostics`] rides the same section, so the
-/// snapshot separates link-level degradation from per-point faults.
+/// snapshot separates link-level degradation from per-point faults — a
+/// cyclic driver's exchange counters included.
 ///
 /// Internal points — declared in the map via
 /// [`PointMap::with_internal`] — are served by the image alone: the
@@ -614,6 +630,12 @@ enum Resolved {
 /// scans produces identical samples on every host.
 pub struct Executor<'d> {
     driver: &'d (dyn IoDriver + Sync),
+    /// The driver's cyclic-exchange surface when it implements the
+    /// [`CyclicIoDriver`] contract — detected at wiring so
+    /// [`scan`](Executor::scan) calls `exchange` once per scan at the
+    /// read boundary. `None` keeps the per-point driver semantics every
+    /// existing driver kind has.
+    cyclic: Option<&'d (dyn CyclicIoDriver + Sync)>,
     map: PointMap,
     components: Vec<Entry>,
     image: RefCell<HashMap<PointId, Sample>>,
@@ -746,6 +768,7 @@ impl<'d> Executor<'d> {
         }
         Ok(Self {
             driver,
+            cyclic: driver.cyclic(),
             map,
             components: entries,
             image,
@@ -1054,6 +1077,7 @@ impl<'d> Executor<'d> {
         let tick = self.tick;
 
         self.apply_commands(tick);
+        self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
         self.write_outputs()?;
@@ -1706,6 +1730,38 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// The cyclic exchange at the read boundary: when the driver
+    /// implemented [`CyclicIoDriver`] at wiring, one `exchange` call —
+    /// after command application, so a command-staged write publishes in
+    /// the same exchange, and before the per-point input reads that then
+    /// serve the image it latched. A failed exchange is counted once —
+    /// under `failed_exchanges`, the consecutive-failure streak, and
+    /// `last_error`, attributed `In` because it opens the input phase —
+    /// and never aborts the scan: the driver's held input image still
+    /// answers the reads that follow, aging under each point's declared
+    /// `stale_after_ticks` budget until the driver's declared
+    /// `exchange_miss_threshold` escalates its reads to ordinary
+    /// per-point failures. A driver without a cyclic surface skips the
+    /// phase entirely.
+    fn exchange_image(&mut self, tick: Tick) {
+        let Some(cyclic) = self.cyclic else {
+            return;
+        };
+        match cyclic.exchange(tick) {
+            Ok(()) => self.io_health.consecutive_failures = 0,
+            Err(error) => {
+                self.io_health.failed_exchanges += 1;
+                self.io_health.consecutive_failures += 1;
+                self.io_health.last_error = Some(IoFault {
+                    tick,
+                    point: error.point(),
+                    direction: Direction::In,
+                    error,
+                });
+            }
+        }
+    }
+
     /// Refreshes the image's `In` points for the scan: every field `In`
     /// point is read from the driver, stamping `tick` — a failed read
     /// keeps the last known value, a neutral one if none, marked `Bad`,
@@ -1868,8 +1924,8 @@ mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
     use dcs_core::{
-        ComponentDescriptor, DriverDiagnostics, Input, LinkState, Output, ParameterDescriptor,
-        ParameterRange, PortDescriptor, PortRole,
+        ComponentDescriptor, DriverDiagnostics, ExchangeDiagnostics, Input, LinkState, Output,
+        ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2875,6 +2931,7 @@ mod tests {
             report: Mutex::new(Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("no live connection to the plant server".to_string()),
+                exchange: None,
             })),
         };
         let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
@@ -2890,6 +2947,7 @@ mod tests {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("no live connection to the plant server".to_string()),
+                exchange: None,
             })
         );
     }
@@ -5788,5 +5846,791 @@ mod tests {
         .unwrap();
         assert_eq!(restored.tick(), Tick(3));
         assert_eq!(restored.checkpoint().model_fingerprint, Some(fingerprint));
+    }
+
+    // ── The cyclic field-I/O exchange contract ──────────────────────────
+
+    /// What the stub's next `exchange` does — the scripted transport.
+    #[derive(Clone, Copy)]
+    enum Exchange {
+        /// A clean exchange: the staged output image publishes and the
+        /// input image latches atomically at the exchange's tick.
+        Complete,
+        /// The frame returned complete but past its deadline: the
+        /// exchange succeeds and counts a missed deadline.
+        Late,
+        /// The exchange completed short — a working-counter shortfall
+        /// naming the station: its points escalate to `Disconnected`
+        /// until a clean exchange; the rest of the image latches.
+        Short(u64),
+        /// The exchange did not complete: nothing publishes or latches,
+        /// the staged output image is retained, and the miss counts.
+        Failed,
+    }
+
+    /// A scripted [`CyclicIoDriver`] stub proving the cyclic exchange
+    /// contract. `exchange` is the only call allowed to touch the
+    /// simulated field — `read` serves the input image the last
+    /// completed exchange latched and `write` stages the pending output
+    /// image — and the instrumentation counters prove per-point access
+    /// never transports.
+    struct CyclicStub {
+        /// Every point the process image covers, by station.
+        points: HashMap<PointId, CyclicPoint>,
+        state: Mutex<CyclicState>,
+    }
+
+    /// A point's bus-side identity: its declared value kind and the
+    /// station the image attributes it to.
+    #[derive(Clone, Copy)]
+    struct CyclicPoint {
+        kind: ValueKind,
+        station: u64,
+    }
+
+    /// The stub's mutable bus and instrumentation state.
+    struct CyclicState {
+        /// The simulated field — the only data `exchange` may move.
+        field: HashMap<PointId, Sample>,
+        /// The held input image: the field snapshot the last completed
+        /// exchange latched, stamped with the producing exchange's tick.
+        latched: HashMap<PointId, Sample>,
+        /// The pending output image `write` stages — retained across a
+        /// failed exchange, published by the next completed one.
+        staged: HashMap<PointId, Value>,
+        /// The scripted exchange outcomes, consumed in order; an
+        /// exhausted script completes cleanly.
+        script: VecDeque<Exchange>,
+        /// Consecutive uncompleted exchanges — the miss count the
+        /// declared `exchange_miss_threshold` compares against.
+        misses: u64,
+        /// The stub's `exchange_miss_threshold` device parameter: reads
+        /// escalate to [`IoError::Disconnected`] once `misses` reaches
+        /// it.
+        miss_threshold: u64,
+        /// The stations a working-counter shortfall last named — their
+        /// points escalate to `Disconnected` until a clean exchange.
+        short_stations: HashSet<u64>,
+        /// The exchange counters `diagnostics` reports.
+        attempted: u64,
+        completed: u64,
+        shortfalls: u64,
+        missed_deadlines: u64,
+        last_exchange_tick: Option<Tick>,
+        last_error: Option<String>,
+        /// Calls into the simulated transport — `exchange` is the only
+        /// one permitted; per-point `read`/`write` must never add one.
+        transport_calls: u64,
+        /// Per-point access counts — evidence the reads and writes ran.
+        reads: u64,
+        writes: u64,
+        /// The boundary call log — `exchange@tick`, `read@point`,
+        /// `write@point` — ordering evidence for the contract tests.
+        calls: Vec<String>,
+    }
+
+    impl CyclicStub {
+        /// A stub over `(point id, station id)` pairs — every point
+        /// `Float`, field-seeded at `0.0` — with the declared
+        /// `exchange_miss_threshold` and the scripted exchange outcomes.
+        fn new(points: &[(u64, u64)], miss_threshold: u64, script: &[Exchange]) -> Self {
+            assert!(
+                miss_threshold >= 1,
+                "a miss threshold under 1 escalates every read"
+            );
+            let points: HashMap<PointId, CyclicPoint> = points
+                .iter()
+                .map(|&(point, station)| {
+                    (
+                        PointId(point),
+                        CyclicPoint {
+                            kind: ValueKind::Float,
+                            station,
+                        },
+                    )
+                })
+                .collect();
+            // The input image is seeded with the field's initial
+            // contents — as a pre-run exchange would leave it — so a
+            // declared point has a defined held sample at Tick::ZERO.
+            let field: HashMap<PointId, Sample> = points
+                .keys()
+                .map(|&point| (point, Sample::good(Value::Float(0.0), Tick::ZERO)))
+                .collect();
+            Self {
+                points,
+                state: Mutex::new(CyclicState {
+                    latched: field.clone(),
+                    field,
+                    staged: HashMap::new(),
+                    script: script.iter().copied().collect(),
+                    misses: 0,
+                    miss_threshold,
+                    short_stations: HashSet::new(),
+                    attempted: 0,
+                    completed: 0,
+                    shortfalls: 0,
+                    missed_deadlines: 0,
+                    last_exchange_tick: None,
+                    last_error: None,
+                    transport_calls: 0,
+                    reads: 0,
+                    writes: 0,
+                    calls: Vec::new(),
+                }),
+            }
+        }
+
+        /// Plants `value` on the field alone — what a device asserts
+        /// between exchanges. The held input image only sees it once an
+        /// exchange latches it.
+        fn field_seed(&self, point: u64, value: f64) {
+            self.state.lock().unwrap().field.insert(
+                PointId(point),
+                Sample::good(Value::Float(value), Tick::ZERO),
+            );
+        }
+
+        /// The sample the simulated field currently carries for `point`
+        /// — the published output side, for test observation only.
+        fn field_sample(&self, point: u64) -> Option<Sample> {
+            self.state
+                .lock()
+                .unwrap()
+                .field
+                .get(&PointId(point))
+                .copied()
+        }
+
+        /// The transport-call count — `exchange` is the only increment.
+        fn transport_calls(&self) -> u64 {
+            self.state.lock().unwrap().transport_calls
+        }
+
+        /// The per-point `(reads, writes)` counts.
+        fn point_accesses(&self) -> (u64, u64) {
+            let state = self.state.lock().unwrap();
+            (state.reads, state.writes)
+        }
+
+        /// The boundary call log.
+        fn calls(&self) -> Vec<String> {
+            self.state.lock().unwrap().calls.clone()
+        }
+
+        /// The exchange counters `diagnostics` reports.
+        fn exchange_counters(&self) -> ExchangeDiagnostics {
+            self.diagnostics().unwrap().exchange.unwrap()
+        }
+    }
+
+    impl IoDriver for CyclicStub {
+        /// Serves the held input image — never the transport. Once the
+        /// miss count reaches the declared `exchange_miss_threshold`, or
+        /// a working-counter shortfall named the point's station, the
+        /// read escalates to `Disconnected`.
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            let mut state = self.state.lock().unwrap();
+            state.reads += 1;
+            state.calls.push(format!("read@{}", point.0));
+            let spec = *self
+                .points
+                .get(&point)
+                .ok_or(IoError::UnknownPoint(point))?;
+            if state.misses >= state.miss_threshold || state.short_stations.contains(&spec.station)
+            {
+                return Err(IoError::Disconnected(point));
+            }
+            state
+                .latched
+                .get(&point)
+                .copied()
+                .ok_or(IoError::UnknownPoint(point))
+        }
+
+        /// Stages the pending output image — never the transport.
+        /// `UnknownPoint`/`TypeMismatch` semantics are the same as any
+        /// point-wise driver's.
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            let mut state = self.state.lock().unwrap();
+            state.writes += 1;
+            state.calls.push(format!("write@{}", point.0));
+            let spec = *self
+                .points
+                .get(&point)
+                .ok_or(IoError::UnknownPoint(point))?;
+            if value.kind() != spec.kind {
+                return Err(IoError::TypeMismatch {
+                    point,
+                    expected: spec.kind,
+                    found: value,
+                });
+            }
+            state.staged.insert(point, value);
+            Ok(())
+        }
+
+        /// The exchange counters and the link state a cyclic driver
+        /// reports: `Disconnected` while any miss stands, with the last
+        /// failure's description.
+        fn diagnostics(&self) -> Option<DriverDiagnostics> {
+            let state = self.state.lock().unwrap();
+            Some(DriverDiagnostics {
+                link: if state.misses > 0 {
+                    LinkState::Disconnected
+                } else {
+                    LinkState::Connected
+                },
+                last_error: state.last_error.clone(),
+                exchange: Some(ExchangeDiagnostics {
+                    attempted: state.attempted,
+                    succeeded: state.completed,
+                    working_counter_mismatches: state.shortfalls,
+                    last_exchange_tick: state.last_exchange_tick,
+                    missed_deadlines: state.missed_deadlines,
+                }),
+            })
+        }
+
+        /// The stub implements the cyclic contract.
+        fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+            Some(self)
+        }
+    }
+
+    impl CyclicIoDriver for CyclicStub {
+        /// One process-image exchange for `tick`: the staged output
+        /// image publishes, then the returned input image latches
+        /// atomically at `tick` — the acquisition stamp a
+        /// `stale_after_ticks` budget measures. The scripted outcome
+        /// decides whether anything moves at all.
+        fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+            let mut guard = self.state.lock().unwrap();
+            let state = &mut *guard;
+            state.transport_calls += 1;
+            state.attempted += 1;
+            state.calls.push(format!("exchange@{}", tick.0));
+            match state.script.pop_front().unwrap_or(Exchange::Complete) {
+                Exchange::Failed => {
+                    // Nothing publishes or latches — the held input
+                    // image serves the reads that follow and the staged
+                    // output image is retained for the next exchange.
+                    state.misses += 1;
+                    state.last_error = Some("the exchange did not complete".to_string());
+                    Err(IoError::Disconnected(
+                        *self.points.keys().min().expect("nonempty image"),
+                    ))
+                }
+                outcome => {
+                    // Publish the staged output image, then latch the
+                    // answering stations' data into the input image at
+                    // the acquisition stamp — atomically, so a scan
+                    // never reads a half-moved image.
+                    let short = match outcome {
+                        Exchange::Short(station) => Some(station),
+                        _ => None,
+                    };
+                    for (&point, &value) in &state.staged {
+                        state.field.insert(point, Sample::good(value, tick));
+                    }
+                    state.staged.clear();
+                    for (&point, &sample) in &state.field {
+                        if short.is_none_or(|station| self.points[&point].station != station) {
+                            state.latched.insert(point, Sample { tick, ..sample });
+                        }
+                    }
+                    state.short_stations = short.into_iter().collect();
+                    state.misses = 0;
+                    state.completed += 1;
+                    state.last_exchange_tick = Some(tick);
+                    match outcome {
+                        Exchange::Late => state.missed_deadlines += 1,
+                        Exchange::Short(station) => {
+                            state.shortfalls += 1;
+                            state.last_error = Some(format!(
+                                "station {station} answered short of its working counter"
+                            ));
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Writes `value` to `output` on its first step only — so a later
+    /// exchange publishing it proves the staged image survived, not a
+    /// restage.
+    struct WriteOnce {
+        output: PointId,
+        value: f64,
+        done: bool,
+    }
+
+    impl Component for WriteOnce {
+        fn name(&self) -> &str {
+            "once"
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![IoRequirement::output::<f64>("out", self.output)]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            if !self.done {
+                self.done = true;
+                io.write_typed(self.output, self.value)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cyclic_exchange_runs_once_per_scan_at_the_read_boundary() {
+        let driver = CyclicStub::new(&[(10, 1), (11, 1), (20, 1)], 3, &[]);
+        let map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_writable_point(PointId(11), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap();
+
+        // A command submitted between scans applies at the next scan's
+        // boundary — its driver write stages into the output image
+        // before the exchange runs.
+        executor.submit_command(write_value(11, ValueKind::Float, Value::Float(3.0)));
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+
+        // Exactly one exchange per scan, stamped with the scan's tick —
+        // after the boundary's command write stages, before the
+        // per-point reads serve the latched image, before the write
+        // phase stages the scan's outputs.
+        assert_eq!(
+            driver.calls(),
+            vec![
+                "write@11",   // the queued command applies …
+                "exchange@1", // … then the exchange turns the image …
+                "read@10",
+                "read@11",  // … then the input phase reads it …
+                "write@20", // … and the write phase stages the output
+                "exchange@2",
+                "read@10",
+                "read@11",
+                "write@20",
+            ]
+        );
+    }
+
+    #[test]
+    fn cyclic_point_access_never_touches_the_transport() {
+        let driver = CyclicStub::new(&[(10, 1), (20, 1)], 3, &[]);
+        let map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap();
+
+        executor.run(3).unwrap();
+
+        // Three scans read the input and wrote the output every cycle —
+        // yet the only transport calls are the three exchanges: under
+        // the cyclic contract `read` serves the latched input image and
+        // `write` stages the pending output image, neither touching the
+        // bus.
+        assert_eq!(driver.point_accesses(), (3, 3));
+        assert_eq!(driver.transport_calls(), 3);
+    }
+
+    #[test]
+    fn cyclic_held_image_ages_to_stale_then_escalates_past_threshold() {
+        // Miss threshold 3, stale budget 1: a held input keeps serving
+        // while misses accumulate, aging under its budget, until the
+        // third miss escalates its reads to `Disconnected`.
+        let driver = CyclicStub::new(
+            &[(10, 1)],
+            3,
+            &[
+                Exchange::Complete,
+                Exchange::Failed,
+                Exchange::Failed,
+                Exchange::Failed,
+                Exchange::Failed,
+                Exchange::Complete,
+            ],
+        );
+        driver.field_seed(10, 7.0);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 1),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The first exchange latches the field image at its tick.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(7.0), Tick(1))
+        );
+
+        // The field moved on — the held image cannot see it until an
+        // exchange latches again.
+        driver.field_seed(10, 9.0);
+
+        // The first miss: the exchange failed — counted once at the
+        // boundary and surfaced as a disconnected link — but the held
+        // image still serves; the acquisition stamp lags by one, inside
+        // the budget.
+        executor.scan().unwrap();
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_exchanges, 1);
+        assert_eq!(health.failed_reads, 0);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(10),
+                direction: Direction::In,
+                error: IoError::Disconnected(PointId(10)),
+            })
+        );
+        assert_eq!(
+            health.driver.as_ref().unwrap().link,
+            LinkState::Disconnected
+        );
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(7.0), Tick(2))
+        );
+
+        // The second miss ages the held sample past its budget — the
+        // latched acquisition stamp still reads tick 1.
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));
+
+        // The third miss reaches the declared threshold: reads escalate
+        // to `Disconnected` — an ordinary boundary failure degrading the
+        // held value to `Bad`.
+        executor.scan().unwrap();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.value, Value::Float(7.0));
+        assert_eq!(
+            sample.quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        let health = executor.snapshot().io_health;
+        assert_eq!(health.failed_exchanges, 3);
+        assert_eq!(health.failed_reads, 1);
+        assert_eq!(
+            health.driver.unwrap(),
+            DriverDiagnostics {
+                link: LinkState::Disconnected,
+                last_error: Some("the exchange did not complete".to_string()),
+                exchange: Some(ExchangeDiagnostics {
+                    attempted: 4,
+                    succeeded: 1,
+                    working_counter_mismatches: 0,
+                    last_exchange_tick: Some(Tick(1)),
+                    missed_deadlines: 0,
+                }),
+            }
+        );
+
+        // The fourth miss keeps the escalation; the sixth scan's
+        // completed exchange relatches — misses reset, the link
+        // recovers, and the field's asserted value lands fresh.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(9.0), Tick(6))
+        );
+        assert_eq!(
+            executor.snapshot().io_health.driver.unwrap().link,
+            LinkState::Connected
+        );
+    }
+
+    #[test]
+    fn cyclic_output_image_is_retained_across_a_failed_exchange() {
+        let driver = CyclicStub::new(
+            &[(20, 1)],
+            3,
+            &[Exchange::Complete, Exchange::Failed, Exchange::Complete],
+        );
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(WriteOnce {
+                output: PointId(20),
+                value: 9.0,
+                done: false,
+            })],
+        )
+        .unwrap();
+
+        // Scan 1's write phase staged the value — the field carries the
+        // initial sample until the next exchange publishes it.
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO))
+        );
+
+        // Scan 2's exchange fails: nothing publishes, and the staged
+        // image is retained — no component write follows to restage it.
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO))
+        );
+
+        // Scan 3's completed exchange publishes the retained staged
+        // image — the value lands stamped with the exchange's tick.
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(9.0), Tick(3)))
+        );
+    }
+
+    #[test]
+    fn cyclic_actuation_delay_is_one_scan() {
+        // The documented delay: a value a component writes in scan `t`
+        // stages into the output image and publishes in scan `t + 1`'s
+        // exchange — never inside the scan that wrote it.
+        let driver = CyclicStub::new(&[(20, 1)], 3, &[]);
+        let map: PointMap = [(PointId(20), Direction::Out, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Constant {
+                name: "const",
+                output: PointId(20),
+                value: 9.0,
+            })],
+        )
+        .unwrap();
+
+        // Scan 1: the exchange ran before the write phase staged
+        // anything, so the field still carries its initial value while
+        // the executor's image already reports the staged output.
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO))
+        );
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(9.0), Tick(1)))
+        );
+
+        // Scan 2's exchange publishes the staged image — one scan after
+        // the write.
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(9.0), Tick(2)))
+        );
+    }
+
+    #[test]
+    fn cyclic_short_exchange_degrades_only_the_named_station() {
+        // Station 1 serves point 10, station 2 point 11: a
+        // working-counter shortfall naming station 1 escalates its
+        // points alone while the rest of the image latched fresh.
+        let driver = CyclicStub::new(
+            &[(10, 1), (11, 2)],
+            3,
+            &[Exchange::Complete, Exchange::Short(1), Exchange::Complete],
+        );
+        driver.field_seed(10, 7.0);
+        driver.field_seed(11, 8.0);
+        let map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(11), Direction::In, ValueKind::Float);
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+
+        executor.scan().unwrap();
+
+        // The short exchange completed — the boundary counts no
+        // exchange failure — but station 1's point escalates to
+        // `Disconnected` while station 2's serves the freshly latched
+        // image.
+        executor.scan().unwrap();
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.io_health.failed_exchanges, 0);
+        assert_eq!(snapshot.io_health.failed_reads, 1);
+        assert_eq!(
+            snapshot.io_health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(10),
+                direction: Direction::In,
+                error: IoError::Disconnected(PointId(10)),
+            })
+        );
+        assert_eq!(
+            snapshot.points[0].sample.unwrap().quality,
+            Quality::Bad(QualityReason::CommunicationFault)
+        );
+        assert_eq!(
+            snapshot.points[1].sample.unwrap(),
+            Sample::good(Value::Float(8.0), Tick(2))
+        );
+
+        // The bus link stayed connected — the completed exchange named
+        // its shortfall — and the exchange section counts the mismatch.
+        let diagnostics = snapshot.io_health.driver.unwrap();
+        assert_eq!(diagnostics.link, LinkState::Connected);
+        assert_eq!(
+            diagnostics.last_error,
+            Some("station 1 answered short of its working counter".to_string())
+        );
+        assert_eq!(diagnostics.exchange.unwrap().working_counter_mismatches, 1);
+
+        // A clean exchange clears the shortfall: both stations serve
+        // fresh data again.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(7.0), Tick(3))
+        );
+    }
+
+    #[test]
+    fn cyclic_diagnostics_report_exchange_counters_and_link() {
+        let driver = CyclicStub::new(
+            &[(10, 1)],
+            3,
+            &[
+                Exchange::Complete,
+                Exchange::Late,
+                Exchange::Failed,
+                Exchange::Complete,
+            ],
+        );
+        let mut executor = Executor::new(&driver, stale_map(PointId(10), 2), Vec::new()).unwrap();
+
+        executor.run(4).unwrap();
+
+        // Three of four exchanges completed — the failed one counted
+        // once at the boundary — and the late frame reported its missed
+        // deadline while still latching.
+        let health = executor.snapshot().io_health;
+        assert_eq!(health.failed_exchanges, 1);
+        let diagnostics = health.driver.unwrap();
+        assert_eq!(
+            diagnostics.exchange.unwrap(),
+            ExchangeDiagnostics {
+                attempted: 4,
+                succeeded: 3,
+                working_counter_mismatches: 0,
+                last_exchange_tick: Some(Tick(4)),
+                missed_deadlines: 1,
+            }
+        );
+        // The recovered link reports connected again.
+        assert_eq!(diagnostics.link, LinkState::Connected);
+        assert_eq!(
+            driver.exchange_counters().attempted,
+            driver.transport_calls()
+        );
+    }
+
+    #[test]
+    fn closed_gate_still_exchanges_but_quiesces_staging() {
+        // The gate covers writes, not the exchange: a quiesced standby's
+        // cyclic backend keeps latching fresh inputs — and the writes it
+        // dropped never staged, so nothing it computed publishes.
+        let driver = CyclicStub::new(&[(10, 1), (20, 1)], 3, &[]);
+        let gate = crate::WriteGate::closed(&driver);
+        let map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &gate,
+            map,
+            vec![Box::new(Constant {
+                name: "const",
+                output: PointId(20),
+                value: 9.0,
+            })],
+        )
+        .unwrap();
+
+        executor.run(2).unwrap();
+
+        // Both scans exchanged — the gate passed the cyclic surface
+        // through — while the quiesced writes never reached the staged
+        // image, so the published field stays at its initial value.
+        assert_eq!(driver.transport_calls(), 2);
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO))
+        );
+        // The standby's own image still reports what the run computes.
+        assert_eq!(
+            executor.sample(PointId(20)),
+            Some(Sample::good(Value::Float(9.0), Tick(2)))
+        );
+
+        // Opening the gate lets the next write stage — and the next
+        // exchange publish.
+        gate.open();
+        executor.scan().unwrap();
+        executor.scan().unwrap();
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(9.0), Tick(4)))
+        );
+    }
+
+    #[test]
+    fn non_cyclic_driver_skips_the_exchange_phase() {
+        // A driver without the cyclic surface never sees `exchange`:
+        // the counter the cyclic path would increment stays zero.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        executor.run(3).unwrap();
+        assert_eq!(executor.snapshot().io_health.failed_exchanges, 0);
+        assert_eq!(executor.snapshot().io_health.driver, None);
     }
 }

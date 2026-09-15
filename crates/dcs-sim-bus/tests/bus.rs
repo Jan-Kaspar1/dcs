@@ -360,6 +360,7 @@ fn a_live_link_reports_connected_health_with_no_last_error() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
 
@@ -379,6 +380,7 @@ fn a_live_link_reports_connected_health_with_no_last_error() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
     });
@@ -418,6 +420,7 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("no live connection to the device server".to_string()),
+                exchange: None,
             })
         );
     });
@@ -444,6 +447,7 @@ fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
         Some(DriverDiagnostics {
             link: LinkState::Disconnected,
             last_error: Some("device server did not answer in time".to_string()),
+            exchange: None,
         })
     );
     drop(listener);

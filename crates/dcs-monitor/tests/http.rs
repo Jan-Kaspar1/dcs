@@ -685,6 +685,7 @@ fn the_health_panes_fields_ride_the_served_snapshot() {
         *driver.report.lock().unwrap() = Some(DriverDiagnostics {
             link: LinkState::Disconnected,
             last_error: Some("no live connection to the plant server".to_string()),
+            exchange: None,
         });
         driver.faults.lock().unwrap().insert(PointId(10));
         driver.faults.lock().unwrap().insert(PointId(20));
@@ -711,6 +712,7 @@ fn the_health_panes_fields_ride_the_served_snapshot() {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("no live connection to the plant server".to_string()),
+                exchange: None,
             })
         );
         assert_eq!(health.scan_overruns, 0);

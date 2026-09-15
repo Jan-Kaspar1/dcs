@@ -381,6 +381,8 @@ impl IoDriver for RemoteDriver {
                 LinkState::Disconnected
             },
             last_error: connection.last_error.clone(),
+            // A point-wise driver has no cyclic exchange surface.
+            exchange: None,
         })
     }
 }
