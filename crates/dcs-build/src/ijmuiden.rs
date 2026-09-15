@@ -100,6 +100,7 @@ use crate::specs::{
     ManagedAlarmHandles, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
     ManualStationSpec, SignalFilterSpec, ThresholdChainSpec, ValveSpec,
 };
+pub use crate::station::ManagedAlarmLayout;
 use crate::station::{AlarmLayout, rationalization};
 use crate::{
     BuildError, Direction, PlantBuilder, PointId, SignalId, Sink, Source, Value, parameters,
@@ -294,34 +295,6 @@ impl IjmuidenConfig {
             lah_max_shelve_ticks: 6,
         }
     }
-}
-
-/// One managed alarm's place in the emitted document — the two-flag
-/// surface plus the decision-71 managed status points, and the
-/// declared lifecycle inputs where bound.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedAlarmLayout {
-    /// The alarm component instance's id.
-    pub component: ComponentId,
-    /// The writable internal `In` point the operator ack lands on.
-    pub ack: PointId,
-    /// The writable internal `In` point carrying the shelve request —
-    /// `Some` only where the instance declares the `shelve` port.
-    pub shelve: Option<PointId>,
-    /// The writable internal `In` point carrying the out-of-service
-    /// command — `Some` only where the instance declares the `oos`
-    /// port.
-    pub oos: Option<PointId>,
-    /// The internal `Out` point carrying the standing `alarm` output.
-    pub alarm: PointId,
-    /// The internal `Out` point carrying the `unacknowledged` latch.
-    pub unacknowledged: PointId,
-    /// The internal `Out` point carrying the `shelved` status.
-    pub shelved: PointId,
-    /// The internal `Out` point carrying the `suppressed` status.
-    pub suppressed: PointId,
-    /// The internal `Out` point carrying the `out_of_service` status.
-    pub out_of_service: PointId,
 }
 
 /// Where everything the composition declares landed — the ids the
