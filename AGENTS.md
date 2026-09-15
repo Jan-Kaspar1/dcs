@@ -11,6 +11,8 @@ The library should encapsulate the difficult parts: communication, diagnostics, 
 
 Adding a new device should follow the same model. Once its device integration and library component exist, I can instantiate it in the plant model, connect its I/O, and automatically obtain the corresponding control behavior, monitoring information, diagnostics, and UI representation without engineering each layer separately.
 
+Customer plant code is a consumer of this platform, not part of the platform implementation. A plant project must be able to live in its own repository, depend only on versioned DCS release artifacts, compose its model from the supported engineering API, and deploy that model with the generic controller runtime. Platform-owned fixtures may remain in this repository for conformance testing, but they are not the customer-project boundary and must not be the only proof that the public interfaces work.
+
 ## Agent workflow
 
 - For product direction, market requirements, library scope, or roadmap work, read `docs/product-strategy.md`, then the applicable file under `docs/requirements/` and its linked evidence under `docs/research/`. Water and wastewater is the first market; batch control is a later expansion.

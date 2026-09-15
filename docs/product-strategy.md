@@ -11,13 +11,15 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 ## Delivery sequence
 
 1. **Validate the foundation through a reference application.** Prove the plant model, UI/control contracts, hardware abstraction, deterministic execution, redundancy, diagnostics, commands, alarm management, and engineering workflow together in a simulated duty/standby pumping station. Alarm behavior is part of the UI/control contract: water operators must see consequential mode changes, abnormal equipment state, worsening process conditions, bad or stale data, and the response expected before the condition becomes hazardous.
-2. **Build the water and wastewater library.** Add reusable equipment modules and process assemblies in response to accepted requirements. Every component includes control behavior, modes, diagnostics, alarms, state persistence, descriptors, and faceplate behavior where applicable.
-3. **Reach pilot readiness.** Make configuration, deployment, commissioning, backup and restore, upgrades, troubleshooting, and operator workflows suitable for a first customer plant.
-4. **Expand by market evidence.** Add batch control for pharmaceutical and chemical plants after a separate requirements baseline and representative batch application exist.
+2. **Prove the customer-owned plant boundary.** Build and run a plant from an independent repository using only versioned DCS release artifacts: the engineering API and schema, the generic controller/runtime image, and documented deployment inputs. Finish already-started reference slices, but do not continue broad component growth while the only working plant projects depend on workspace paths or private repository structure.
+3. **Build the water and wastewater library.** Add reusable equipment modules and process assemblies in response to accepted requirements. Every component includes control behavior, modes, diagnostics, alarms, state persistence, descriptors, and faceplate behavior where applicable.
+4. **Reach pilot readiness.** Make configuration, deployment, commissioning, backup and restore, upgrades, troubleshooting, and operator workflows suitable for a first customer plant.
+5. **Expand by market evidence.** Add batch control for pharmaceutical and chemical plants after a separate requirements baseline and representative batch application exist.
 
 ## Product principles
 
 - The unified plant model is the contract between engineering, controller runtime, monitoring, and UI.
+- The DCS platform and each customer plant have separate ownership and release lifecycles. Customer plant source lives outside the platform repository and depends on documented, versioned release interfaces rather than workspace paths or platform internals.
 - A reusable component is complete only when its control behavior, operator interaction, diagnostics, and lifecycle behavior work together.
 - Alarm management is foundation work for water and wastewater. An alarm is actionable operator guidance with priority, state, context, history, and a defined response; it is not only a Boolean flag. Alarm handling does not replace an independent automatic protection function where hazard analysis requires one.
 - Representative applications validate shared contracts before the library grows broadly.
@@ -28,4 +30,4 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 
 Every product issue cites one or more stable requirement IDs from `docs/requirements/`. A pure enabler may use `ENABLER`, but its scope must state which requirement or milestone it unlocks. If a requirement lacks enough evidence to write observable acceptance criteria, the planner creates a research issue first. Research issues update `docs/research/` and the applicable requirements file; implementation follows in a later planning pass.
 
-The planner keeps the sequence above visible in `docs/plan.md`, checks current code and issues before proposing work, and favors a narrow vertical slice through the reference application over disconnected library breadth.
+The planner keeps the sequence above visible in `docs/plan.md`, checks current code and issues before proposing work, and favors a narrow vertical slice through the reference application over disconnected library breadth. Until `WW-ENG-003` is implemented, it treats the independent customer-project proof as the next product gate ahead of new library breadth, while allowing already-started slices and concrete reliability or hardware prerequisites to finish.

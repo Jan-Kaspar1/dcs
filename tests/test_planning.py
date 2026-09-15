@@ -47,6 +47,10 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('documentation-only research issue first', text)
         self.assertIn('WW-ALM-001', text)
         self.assertIn('IJmuiden mode-change/unsafe-position/rising-level scenario', text)
+        self.assertIn('`WW-ENG-003` as the immediate product-boundary gate', text)
+        self.assertIn('independently owned pumping-station repository or template', text)
+        self.assertIn('no path dependencies into this workspace', text)
+        self.assertIn('Platform fixtures are conformance evidence', text)
         self.assertIn('batch control as deferred', text)
 
 if __name__ == '__main__': unittest.main()
