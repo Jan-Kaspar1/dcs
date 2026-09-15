@@ -64,21 +64,18 @@
 //!   `sis-fault`, `sis-trip`, `sis-proof-test`, and the
 //!   operator-writable `sis-bypass` (the receipted attributed path the
 //!   plant exposes — the lint's one named `WritableFieldPoint`
-//!   finding). `sis-active` is the actuation contact the dynamics
-//!   document's `bool_flow` gates on — the emergency draw acts on the
-//!   process every plant step, whether or not the controller scans.
-//!   The layer's trip *decision* is a level-triggered threshold —
-//!   expressed by the `threshold` process element (#309), the
-//!   vocabulary's Float→Bool shape — but this composition predates its
-//!   adoption: rewiring the contact from the declared schedule tick to
-//!   the level crossing is a follow-on ticket, so the reference
-//!   scenario still asserts the contact on the declared
-//!   `schedule::SIS_TRIP` tick, the same tick the scripted `sis-trip`
-//!   report plays back: the layer's declared behavior stands on the
-//!   schedule, its action remains the dynamics' own. Trip, bypass, and
-//!   fault annunciate through `bool-latching-alarm`s grouped under the
-//!   `protection` signal group with the states themselves, all
-//!   `journaled`.
+//!   finding). The layer's trip *decision* is the dynamics document's
+//!   own: the `threshold` process element (#309's Float→Bool shape)
+//!   reads the canal `level` and drives `sis-active`, the actuation
+//!   contact the `bool_flow` emergency draw gates on — `on` at the
+//!   declared high-high bound [`SIS_HIGH_HIGH`], `off` at the declared
+//!   hysteresis release [`SIS_RELEASE`]. The draw acts on the process
+//!   every plant step, whether or not the controller scans, and the
+//!   scripted `sis-trip` report plays back the scan the level crosses
+//!   the bound: the layer reports what its own decision did. Trip,
+//!   bypass, and fault annunciate through `bool-latching-alarm`s
+//!   grouped under the `protection` signal group with the states
+//!   themselves, all `journaled`.
 //!
 //! ## The declared point-id scheme
 //!
@@ -136,7 +133,8 @@ pub mod points {
     /// The gate position demand (`Float`, `Out`).
     pub const GATE_CMD: PointId = PointId(20);
     /// The protection layer's actuation contact (`Bool`, `In`) — the
-    /// plant-side action the dynamics gate on, `journaled`.
+    /// dynamics' `threshold` output the `bool_flow` emergency draw
+    /// gates on, `journaled`.
     pub const SIS_ACTIVE: PointId = PointId(30);
     /// The field-reported gate-control mode (`Bool`, `In`,
     /// `journaled`) — `false` automatic, `true` local manual.
@@ -204,10 +202,18 @@ pub mod schedule {
     pub const REMOTE_LAST_UPDATE: u64 = 10;
     /// The remote repeater's comms recover.
     pub const REMOTE_RECOVERY: u64 = 30;
-    /// The independent high-high layer trips — its reported `sis-trip`
-    /// state asserts and the scenario drives `sis-active` the same
-    /// scan so the dynamics' relief acts.
+    /// The independent high-high layer trips — the scripted inflow
+    /// carries the canal `level` across the declared
+    /// [`SIS_HIGH_HIGH`](crate::ijmuiden::SIS_HIGH_HIGH) bound this
+    /// tick, the dynamics' `threshold` asserts `sis-active`, and the
+    /// scripted `sis-trip` report plays back the same scan: the layer
+    /// reports what its own decision did.
     pub const SIS_TRIP: u64 = 24;
+    /// The actuation contact releases — the draw the asserted contact
+    /// gated pulls the canal `level` back below the declared
+    /// [`SIS_RELEASE`](crate::ijmuiden::SIS_RELEASE) bound this tick,
+    /// the `threshold`'s hysteresis crossing.
+    pub const SIS_CLEAR: u64 = 28;
     /// The protection layer's reported fault asserts.
     pub const SIS_FAULT_ON: u64 = 34;
     /// The protection layer's reported fault clears.
@@ -229,6 +235,17 @@ const PARKED_LIMIT: f64 = 1.0e9;
 /// The remote repeater's declared freshness budget — three scans past
 /// the last scripted update the image sample lands `Uncertain(Stale)`.
 const REMOTE_STALE_AFTER: u64 = 3;
+
+/// The independent high-high layer's declared trip bound, in metres —
+/// the `threshold` element's `on`: the canal `level` reaching it
+/// asserts the `sis-active` actuation contact.
+pub const SIS_HIGH_HIGH: f64 = 6.0;
+
+/// The independent layer's declared hysteresis release, in metres —
+/// the `threshold` element's `off`: the canal `level` falling
+/// strictly below it releases `sis-active`, the band that keeps a
+/// hovering level from chattering the contact.
+pub const SIS_RELEASE: f64 = 5.0;
 
 /// The scenario's tunable contract — level setpoints, filter and
 /// verification constants, and the shelving bound.

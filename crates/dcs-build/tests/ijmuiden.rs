@@ -37,11 +37,14 @@
 //!   declared schedule's) — `level-remote` presents `Uncertain(Stale)`
 //!   past its `stale_after_ticks` budget, and the `Bad` primary flips
 //!   the failover onto it;
-//! - the independent layer trips at scan 24: `sis-trip` reports, and
-//!   the scenario drives `sis-active` — the dynamics' relief acts on
-//!   the process whether or not the controller scans, and the
-//!   discrepancy alarm's declared `suppress` holds its standing truth
-//!   out of the annunciation while the layer owns the hazard;
+//! - the independent layer trips at scan 24: the scripted inflow
+//!   carries the canal level across the declared high-high bound, the
+//!   dynamics' `threshold` element asserts `sis-active` — no field
+//!   write touches the contact — `sis-trip` reports the same scan,
+//!   and the dynamics' relief acts on the process whether or not the
+//!   controller scans; the discrepancy alarm's declared `suppress`
+//!   holds its standing truth out of the annunciation while the layer
+//!   owns the hazard;
 //! - the shelving bound, the manual unshelve, and the out-of-service
 //!   path all run on the high-level alarm;
 //! - the operator's `sis-bypass` write rides the receipted,
@@ -50,7 +53,8 @@
 
 use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_build::ijmuiden::{
-    Ijmuiden, IjmuidenConfig, IjmuidenLayout, ManagedAlarmLayout, ijmuiden, points, schedule,
+    Ijmuiden, IjmuidenConfig, IjmuidenLayout, ManagedAlarmLayout, SIS_HIGH_HIGH, SIS_RELEASE,
+    ijmuiden, points, schedule,
 };
 use dcs_build::station::AlarmLayout;
 use dcs_build::{PointId, Value};
@@ -357,25 +361,27 @@ fn run() -> Run {
                         ValueKind::Float,
                         Value::Float(0.0),
                     ),
-                    // The primary level transmitter goes Bad — the
-                    // failover switches to the frozen remote repeater —
-                    // and the high-level trip is acknowledged.
+                    // The primary level transmitter drops off the DCS's
+                    // I/O — the failover switches to the frozen remote
+                    // repeater — and the high-level trip is
+                    // acknowledged. The fault is the channel's
+                    // disconnect: the controller's read lands
+                    // `Bad(CommunicationFault)` while the physical
+                    // level — and the independent layer's own view of
+                    // it — keeps moving.
                     21 => {
-                        sim.inject_fault(
-                            points::LEVEL,
-                            Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
-                        )
-                        .unwrap();
+                        sim.inject_fault(points::LEVEL, Fault::Disconnected)
+                            .unwrap();
                         ack(&client, lah);
                     }
                     22 => release_ack(&client, lah),
-                    // The independent high-high layer trips: its
-                    // reported `sis-trip` plays back this scan, and the
-                    // scenario drives the actuation contact the
-                    // dynamics' relief is gated on — plant-side action,
-                    // decision 77's boundary.
+                    // The independent high-high layer trips: the
+                    // scripted inflow carried the level across the
+                    // declared bound, the dynamics' `threshold` asserted
+                    // the actuation contact on its own, and the
+                    // reported `sis-trip` plays back this scan — the
+                    // layer reports what it did, decision 77's boundary.
                     schedule::SIS_TRIP => {
-                        sim.write(points::SIS_ACTIVE, Value::Bool(true)).unwrap();
                         ack_unmanaged(&client, &layout.sis_trip_alarm);
                         ack_unmanaged(&client, &layout.rate_of_rise_alarm);
                     }
@@ -403,13 +409,12 @@ fn run() -> Run {
                         ValueKind::Bool,
                         Value::Bool(false),
                     ),
-                    // The trip's consequence has passed: the actuation
-                    // contact drops, releasing the designed
-                    // suppression, and the operator bypasses the layer
-                    // for its proof-test window — the receipted
+                    // The trip's consequence has passed: the draw has
+                    // pulled the level back through the hysteresis
+                    // release, and the operator bypasses the layer for
+                    // its proof-test window — the receipted
                     // writable-point path.
                     41 => {
-                        sim.write(points::SIS_ACTIVE, Value::Bool(false)).unwrap();
                         write(
                             &client,
                             points::SIS_BYPASS,
@@ -713,11 +718,57 @@ fn dynamics_document_loads_through_the_dynamics_merge() {
 }
 
 #[test]
+fn dynamics_document_declares_the_level_threshold() {
+    // The issue-#320 wiring: the checked-in dynamics declaration's
+    // `threshold` element reads the canal `level` and drives
+    // `sis-active` — `on` at the declared high-high bound, `off` at
+    // the declared hysteresis release, `initial` deasserted — beside
+    // the unchanged four flow elements the document already carried.
+    let elements = dynamics();
+    let threshold = elements
+        .iter()
+        .find_map(|element| match element {
+            ProcessElement::Threshold(threshold) => Some(threshold),
+            _ => None,
+        })
+        .expect("the dynamics document declares no threshold element");
+    assert_eq!(threshold.input, points::LEVEL);
+    assert_eq!(threshold.output, points::SIS_ACTIVE);
+    assert_eq!(threshold.on, SIS_HIGH_HIGH);
+    assert_eq!(threshold.off, SIS_RELEASE);
+    assert!(!threshold.initial);
+    let others: Vec<&ProcessElement> = elements
+        .iter()
+        .filter(|element| !matches!(element, ProcessElement::Threshold(_)))
+        .collect();
+    let [
+        ProcessElement::ScaledFlow(scaled),
+        ProcessElement::BoolFlow(flow),
+        ProcessElement::FlowSum(sum),
+        ProcessElement::Integrator(integrator),
+    ] = others.as_slice()
+    else {
+        panic!("the dynamics document's other content changed: {others:?}")
+    };
+    assert_eq!(scaled.input, points::GATE_FB);
+    assert_eq!(scaled.output, points::GATE_FLOW);
+    // The emergency draw still gates on `sis-active` unchanged — the
+    // element replaces only the decision.
+    assert_eq!(flow.input, points::SIS_ACTIVE);
+    assert_eq!(flow.output, points::SIS_DRAW);
+    assert_eq!(sum.output, points::NET_FLOW);
+    assert_eq!(integrator.input, points::NET_FLOW);
+    assert_eq!(integrator.output, points::LEVEL);
+}
+
+#[test]
 fn the_protection_layer_acts_without_a_scan() {
     // Decision 77's boundary made observable: with no executor at all,
-    // driving the actuation contact moves the process — the relief
-    // draw gates on, the level integrator falls. The protective
-    // function is the dynamics', never the controller's.
+    // the scripted inflow carrying the level across the declared bound
+    // asserts the actuation contact — the `threshold` element's own
+    // decision, no field write to the contact — the relief draw gates
+    // on, and the level integrator falls. The protective function is
+    // the dynamics', never the controller's.
     let model = fixture_model();
     let driver = build_driver(&model);
     let sim = driver.sim().unwrap();
@@ -728,14 +779,53 @@ fn the_protection_layer_acts_without_a_scan() {
     let rising = float(before) - 3.0;
     assert!(rising > 0.0, "the tide forcing must push the level up");
 
-    sim.write(points::SIS_ACTIVE, Value::Bool(true)).unwrap();
+    let mut tripped_at = None;
+    for _ in 0..schedule::SIS_CLEAR {
+        driver.step(DT).unwrap();
+        if bool_(sim.read(points::SIS_ACTIVE).unwrap()) {
+            tripped_at = Some(float(sim.read(points::LEVEL).unwrap()));
+            break;
+        }
+    }
+    let tripped_at = tripped_at.expect("the level crossing must assert the contact on its own");
+    assert!(
+        tripped_at >= SIS_HIGH_HIGH,
+        "the contact asserted before the declared bound: {tripped_at}"
+    );
+    // The draw lags the contact by one step — `bool_flow` evaluates
+    // ahead of `threshold` in the declaration order — so the next
+    // plant step is the first the relief shows on.
     driver.step(DT).unwrap();
-    let during = float(sim.read(points::SIS_DRAW).unwrap());
-    assert!(during < 0.0, "the relief draw must gate on the contact");
+    let draw = float(sim.read(points::SIS_DRAW).unwrap());
+    assert!(draw < 0.0, "the relief draw must gate on the contact");
     let after = float(sim.read(points::LEVEL).unwrap());
     assert!(
-        after < float(before),
-        "the layer's action must draw the level down with no scan run: {before:?} -> {after}"
+        after < tripped_at,
+        "the layer's action must draw the level down with no scan run: {tripped_at} -> {after}"
+    );
+
+    // The hysteresis release is the element's own too: the draw pulls
+    // the level back through the declared release bound and the
+    // contact drops — no chatter, no field write.
+    let mut released_at = None;
+    for _ in 0..schedule::SIS_CLEAR {
+        driver.step(DT).unwrap();
+        if !bool_(sim.read(points::SIS_ACTIVE).unwrap()) {
+            released_at = Some(float(sim.read(points::LEVEL).unwrap()));
+            break;
+        }
+    }
+    let released_at =
+        released_at.expect("the draw's pull-back must release the contact on its own");
+    assert!(
+        released_at < SIS_RELEASE,
+        "the contact released outside the hysteresis band: {released_at}"
+    );
+    driver.step(DT).unwrap();
+    assert_eq!(
+        float(sim.read(points::SIS_DRAW).unwrap()),
+        0.0,
+        "the draw must drop with the contact"
     );
 }
 
@@ -840,11 +930,15 @@ fn scripted_run_shows_the_consequential_annunciation() {
             .any(|scan| scan.backup_alarm && scan.backup_unack)
     );
 
-    // The independent high-high layer (decision 77): its scripted
-    // states report on schedule — trip, the fault window, the proof
-    // test — while its actuation moves the process: the level peaks
-    // and turns down the step the contact lands, independently of
+    // The independent high-high layer (decision 77): the dynamics'
+    // `threshold` asserts the actuation contact off the canal `level`
+    // itself — the scripted inflow carries it across the declared
+    // high-high bound at SIS_TRIP with no field write to the contact,
+    // and the scripted `sis-trip` report plays back the same scan:
+    // the layer reports what its own decision did, independently of
     // anything the controller computed.
+    assert!(!at(schedule::SIS_TRIP - 1).sis_active);
+    assert!(at(schedule::SIS_TRIP).sis_active);
     assert!(at(schedule::SIS_TRIP).sis_trip);
     assert!(scans.iter().any(|scan| scan.trip_alarm && scan.trip_unack));
     assert!(
@@ -852,20 +946,50 @@ fn scripted_run_shows_the_consequential_annunciation() {
             .iter()
             .all(|scan| scan.sis_trip)
     );
-    let peak = scans
-        .iter()
-        .map(|scan| scan.level)
-        .fold(f64::NEG_INFINITY, f64::max);
-    assert!(peak >= 5.5, "the level must reach the trip region: {peak}");
-    let peak_at = scans.iter().position(|scan| scan.level == peak).unwrap() as u64 + 1;
-    assert!(peak_at >= schedule::SIS_TRIP, "peak at {peak_at}");
+    // The draw gates on the computed contact — it stands while the
+    // contact stands — and the hysteresis release drops it once the
+    // draw has pulled the level back below the declared release bound.
+    assert!(at(schedule::SIS_CLEAR - 1).sis_active);
+    assert!(!at(schedule::SIS_CLEAR).sis_active);
     assert!(
-        scans[peak_at as usize..peak_at as usize + 4]
-            .windows(2)
-            .all(|window| window[1].level < window[0].level),
-        "the layer's draw must turn the level down"
+        at(schedule::SIS_CLEAR).level < SIS_RELEASE,
+        "the contact released before the level left the hysteresis band: {:?}",
+        at(schedule::SIS_CLEAR)
     );
-    assert!(scans[25..].iter().any(|scan| scan.sis_draw < 0.0));
+    assert!(
+        scans[schedule::SIS_TRIP as usize..schedule::SIS_CLEAR as usize]
+            .iter()
+            .all(|scan| scan.sis_draw < 0.0),
+        "the draw must follow the computed contact"
+    );
+    // The layer keeps its own hold on the hazard: every later bound
+    // crossing re-asserts the contact and every release lands below
+    // the declared release — the element's own decision each time.
+    // (The first assert's image reads are legitimately frozen by the
+    // transmitter fault window, so its bound check is the reconciled
+    // `SIS_TRIP` tick itself.)
+    let mut stood = false;
+    for (index, scan) in scans.iter().enumerate() {
+        let tick = index as u64 + 1;
+        match (stood, scan.sis_active) {
+            (false, true) if tick != schedule::SIS_TRIP => assert!(
+                scan.level >= SIS_HIGH_HIGH - 1e-9,
+                "the contact asserted off the declared bound at {tick}: {scan:?}"
+            ),
+            (true, false) => assert!(
+                scan.level < SIS_RELEASE,
+                "the contact released inside the hysteresis band at {tick}: {scan:?}"
+            ),
+            _ => {}
+        }
+        stood = scan.sis_active;
+    }
+    assert!(
+        scans[schedule::SIS_CLEAR as usize..]
+            .iter()
+            .any(|scan| scan.sis_active),
+        "the next bound crossing must re-assert the contact"
+    );
     // Its reported fault and proof-test windows and the operator's
     // bypass all land on their alarmed and journaled surfaces.
     assert!(
@@ -890,22 +1014,23 @@ fn scripted_run_shows_the_consequential_annunciation() {
             .any(|scan| scan.bypass_alarm && scan.bypass_unack)
     );
 
-    // The designed suppression (decisions 73/76): while the layer's
-    // actuation stands, the standing discrepancy is the trip's
-    // consequence — `suppressed` asserts and `unacknowledged` holds
-    // clear — while `alarm` keeps reporting the mismatch's truth.
-    // The contact is driven at scan 24's boundary and released at
-    // 41's, so `suppressed` stands scans 25 through 41.
+    // The designed suppression (decisions 73/76) rides the computed
+    // contact now: while the layer's actuation stands, the standing
+    // discrepancy is the trip's consequence — `suppressed` asserts
+    // with the contact and `unacknowledged` holds clear — while
+    // `alarm` keeps reporting the mismatch's truth. Each hysteresis
+    // release re-annunciates the standing condition as a fresh latch;
+    // the later crossings suppress it again until the scan-43 ack.
     assert!(
-        scans[24..41].iter().all(|scan| scan.disc_suppressed),
+        scans[23..27].iter().all(|scan| scan.disc_suppressed),
         "the suppression must stand while the layer acts"
     );
-    assert!(scans[24..41].iter().all(|scan| !scan.disc_unack));
+    assert!(!at(28).disc_suppressed);
+    assert!(scans[36..40].iter().all(|scan| scan.disc_suppressed));
+    assert!(scans[23..27].iter().all(|scan| !scan.disc_unack));
     assert!(scans[25..40].iter().any(|scan| scan.disc_alarm));
-    // Releasing the actuation re-annunciates the standing condition as
-    // a fresh trip until the scan-43 ack applies.
-    assert!(!at(42).disc_suppressed);
-    assert!(scans[41..44].iter().any(|scan| scan.disc_unack));
+    assert!(scans[27..36].iter().all(|scan| scan.disc_unack));
+    assert!(scans[40..43].iter().all(|scan| scan.disc_unack));
     assert!(scans[44..].iter().all(|scan| !scan.disc_unack));
 
     // The shelve bound and its expiry: the request standing past

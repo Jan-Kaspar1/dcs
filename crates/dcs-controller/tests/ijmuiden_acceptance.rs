@@ -55,12 +55,15 @@
 //!    quality transitions journal as `QualityChanged` entries.
 //! 6. **The protection boundary (decision 77)** — the layer's reported
 //!    states (`sis-available`/`sis-fault`/`sis-trip`/`sis-proof-test`)
-//!    land on schedule; the scenario drives the `sis-active` actuation
-//!    contact the dynamics' emergency draw gates on, and the plant
-//!    demonstrably moves with no controller scan running — the
-//!    protective action is the dynamics' own. The states and their
-//!    alarms sit in the signal index's `protection` group, distinct
-//!    from the ordinary `alarms` group, and every transition journals.
+//!    land on schedule; the dynamics' `threshold` element drives the
+//!    `sis-active` actuation contact off the canal `level` — the
+//!    scripted inflow carries it across the declared high-high bound
+//!    with no field write to the contact — the `sis-trip` report plays
+//!    back the same scan, and the plant demonstrably moves with no
+//!    controller scan running — the protective action is the dynamics'
+//!    own. The states and their alarms sit in the signal index's
+//!    `protection` group, distinct from the ordinary `alarms` group,
+//!    and every transition journals.
 //! 7. **Designed suppression (decisions 73/76)** — the discrepancy
 //!    alarm's `suppressed` stands while the actuation stands,
 //!    withholding `unacknowledged` while `alarm` keeps reporting the
@@ -99,7 +102,8 @@
 //! ```
 
 use dcs_build::ijmuiden::{
-    IjmuidenConfig, IjmuidenLayout, ManagedAlarmLayout, ijmuiden, points, schedule,
+    IjmuidenConfig, IjmuidenLayout, ManagedAlarmLayout, SIS_HIGH_HIGH, SIS_RELEASE, ijmuiden,
+    points, schedule,
 };
 use dcs_build::station::AlarmLayout;
 use dcs_core::{
@@ -970,6 +974,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     // The plant-side demonstration that the protection layer's action
     // moves the process with no controller scan running.
     let mut no_scan_steps: Vec<serde_json::Value> = Vec::new();
+    let mut demonstrated = false;
     let row = last_row;
     let f64_of = |row: &serde_json::Value, key: &str| row[key].as_f64().unwrap();
     let bool_of = |row: &serde_json::Value, key: &str| row[key].as_bool().unwrap();
@@ -1026,25 +1031,26 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 ValueKind::Float,
                 Value::Float(0.0),
             )),
-            // The primary level transmitter goes Bad — the failover
-            // switches to the frozen remote repeater — and the
-            // high-level trip is acknowledged.
+            // The primary level transmitter drops off the DCS's I/O —
+            // the failover switches to the frozen remote repeater —
+            // and the high-level trip is acknowledged. The fault is
+            // the channel's disconnect: the controller's read lands
+            // `Bad(CommunicationFault)` while the physical level — and
+            // the independent layer's own view of it — keeps moving.
             21 => {
                 field
-                    .inject_fault(
-                        points::LEVEL,
-                        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
-                    )
+                    .inject_fault(points::LEVEL, Fault::Disconnected)
                     .unwrap();
                 issued.push(ack(&active, &layout.high_level_alarm));
             }
             22 => issued.push(release(&active, &layout.high_level_alarm)),
-            // The independent high-high layer trips: its reported
-            // `sis-trip` plays back this scan, and the scenario drives
-            // the actuation contact the dynamics' relief is gated on —
-            // plant-side action, decision 77's boundary.
+            // The independent high-high layer trips: the scripted
+            // inflow carried the level across the declared bound, the
+            // dynamics' `threshold` asserted the actuation contact on
+            // its own, and the reported `sis-trip` plays back this
+            // scan — the layer reports what it did, decision 77's
+            // boundary.
             schedule::SIS_TRIP => {
-                field.write(points::SIS_ACTIVE, Value::Bool(true)).unwrap();
                 issued.push(ack_unmanaged(&active, &layout.sis_trip_alarm));
                 issued.push(ack_unmanaged(&active, &layout.rate_of_rise_alarm));
             }
@@ -1072,13 +1078,12 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 ValueKind::Bool,
                 Value::Bool(false),
             )),
-            // The trip's consequence has passed: the actuation contact
-            // drops, releasing the designed suppression, and the
+            // The trip's consequence has passed: the draw has pulled
+            // the level back through the hysteresis release, and the
             // operator bypasses the layer for its proof-test window —
             // the receipted writable-point path — while the high-level
             // alarm goes out of service.
             41 => {
-                field.write(points::SIS_ACTIVE, Value::Bool(false)).unwrap();
                 issued.push(command(
                     &active,
                     points::SIS_BYPASS,
@@ -1133,13 +1138,20 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             39 => issued.push(ack_unmanaged(&active, &layout.sis_fault_alarm)),
             _ => {}
         }
-        if scan == 30 {
-            // Decision 77's boundary made observable: with the pair
-            // parked between scans, the independent layer's actuation
-            // still moves the process — the relief draw gates on the
-            // contact and the level integrator falls. The protective
-            // function is the dynamics', never the controller's.
-            let before = float(field.read(points::LEVEL).unwrap());
+        // Decision 77's boundary made observable: the first scan the
+        // computed contact stands with the level legible, the pair
+        // parked between scans, the independent layer's actuation
+        // still moves the process — the relief draw gates on the
+        // contact and the level integrator falls. The protective
+        // function is the dynamics', never the controller's. (The
+        // first window's early scans cannot demonstrate it: the
+        // transmitter fault makes the level's own read fail.)
+        if !demonstrated
+            && bool_of(row(&trace), "sis_active")
+            && let Ok(level) = field.read(points::LEVEL)
+        {
+            let contact = bool_(field.read(points::SIS_ACTIVE).unwrap());
+            let before = float(level);
             field.step(1.0).unwrap();
             let draw = float(field.read(points::SIS_DRAW).unwrap());
             let after = float(field.read(points::LEVEL).unwrap());
@@ -1152,15 +1164,21 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 "the layer's action must draw the level down with no scan run: {before} -> {after}"
             );
             no_scan_steps.push(serde_json::json!({
-                "sis_active": bool_(field.read(points::SIS_ACTIVE).unwrap()),
+                "sis_active": contact,
                 "sis_draw": draw,
                 "level_before": before,
                 "level_after": after,
             }));
+            demonstrated = true;
         }
         // What the pane's managed-state lists show at the incident's
-        // named moments.
-        if scan == 34 {
+        // named moments. The mid-incident capture lands the first scan
+        // the designed suppression and the bound shelve stand together —
+        // the computed contact's window, not a scripted one.
+        if !operator_view.iter().any(|(name, _)| name == "mid-incident")
+            && alarm_pair(row(&trace), "disc", 3)
+            && alarm_pair(row(&trace), "lah", 2)
+        {
             operator_view.push((
                 "mid-incident".to_string(),
                 managed_lists(&index, &active.snapshot().unwrap(), &layout),
@@ -1319,12 +1337,16 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             .any(|row| alarm_pair(row, "backup", 0) && alarm_pair(row, "backup", 1))
     );
 
-    // The independent high-high layer (decision 77): its declared
-    // states report on schedule — trip, the fault window, the proof
-    // test — while its actuation moved the process without a scan (the
-    // demonstration above): the level peaks and turns down the step
-    // the contact lands, independently of anything the controller
-    // computed.
+    // The independent high-high layer (decision 77): the dynamics'
+    // `threshold` asserts the actuation contact off the canal `level`
+    // itself — the scripted inflow carried it across the declared
+    // high-high bound at SIS_TRIP with no field write to the contact,
+    // and the scripted `sis-trip` report plays back the same scan:
+    // the layer reports what its own decision did. Its actuation moved
+    // the process without a scan (the demonstration above),
+    // independently of anything the controller computed.
+    assert!(!bool_of(at(&trace, schedule::SIS_TRIP - 1), "sis_active"));
+    assert!(bool_of(at(&trace, schedule::SIS_TRIP), "sis_active"));
     assert!(bool_of(at(&trace, schedule::SIS_TRIP), "sis_trip"));
     assert!(
         trace
@@ -1336,24 +1358,61 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             .iter()
             .all(|row| bool_of(row, "sis_trip"))
     );
-    let peak = trace
+    // The draw gates on the computed contact — it stands while the
+    // contact stands — and the hysteresis release drops it once the
+    // draw has pulled the level back below the declared release. The
+    // first row the contact reads dropped is the release crossing —
+    // the demonstration's own step may produce it, so the edge is
+    // located dynamically rather than asserted against a schedule tick.
+    let release_row = trace[schedule::SIS_TRIP as usize..]
         .iter()
-        .map(|row| f64_of(row, "level"))
-        .fold(f64::NEG_INFINITY, f64::max);
-    assert!(peak >= 5.5, "the level must reach the trip region: {peak}");
-    let peak_at = trace
-        .iter()
-        .position(|row| f64_of(row, "level") == peak)
-        .unwrap() as u64
-        + 1;
-    assert!(peak_at >= schedule::SIS_TRIP, "peak at {peak_at}");
+        .position(|row| !bool_of(row, "sis_active"))
+        .map(|index| index + schedule::SIS_TRIP as usize + 1)
+        .expect("the contact must release after its assert");
     assert!(
-        trace[peak_at as usize..peak_at as usize + 4]
-            .windows(2)
-            .all(|window| f64_of(&window[1], "level") < f64_of(&window[0], "level")),
-        "the layer's draw must turn the level down"
+        bool_of(at(&trace, release_row as u64 - 1), "sis_active"),
+        "the contact must stand through the hysteresis band"
     );
-    assert!(trace[25..].iter().any(|row| f64_of(row, "sis_draw") < 0.0));
+    assert!(
+        f64_of(at(&trace, release_row as u64), "level") < SIS_RELEASE,
+        "the contact released outside the hysteresis band: {:?}",
+        at(&trace, release_row as u64)
+    );
+    assert!(
+        trace[schedule::SIS_TRIP as usize..release_row]
+            .iter()
+            .all(|row| f64_of(row, "sis_draw") < 0.0),
+        "the draw must follow the computed contact"
+    );
+    // The layer keeps its own hold on the hazard: every later bound
+    // crossing re-asserts the contact and every release lands below
+    // the declared release — the element's own decision each time.
+    // (The first assert's field reads are legitimately failed by the
+    // transmitter fault window, so its bound check is the reconciled
+    // `SIS_TRIP` tick itself.)
+    let mut stood = false;
+    for (index, row) in trace.iter().enumerate() {
+        let scan = index as u64 + 1;
+        let active = bool_of(row, "sis_active");
+        match (stood, active) {
+            (false, true) if scan != schedule::SIS_TRIP => assert!(
+                f64_of(row, "level") >= SIS_HIGH_HIGH - 1e-9,
+                "the contact asserted off the declared bound at {scan}: {row:?}"
+            ),
+            (true, false) => assert!(
+                f64_of(row, "level") < SIS_RELEASE,
+                "the contact released inside the hysteresis band at {scan}: {row:?}"
+            ),
+            _ => {}
+        }
+        stood = active;
+    }
+    assert!(
+        trace[schedule::SIS_CLEAR as usize..]
+            .iter()
+            .any(|row| bool_of(row, "sis_active")),
+        "the next bound crossing must re-assert the contact"
+    );
     // Its reported fault and proof-test windows and the operator's
     // bypass all land on their alarmed and journaled surfaces.
     assert!(
@@ -1378,25 +1437,36 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             .any(|row| alarm_pair(row, "bypass", 0) && alarm_pair(row, "bypass", 1))
     );
 
-    // The designed suppression (decisions 73/76): while the layer's
-    // actuation stands, the standing discrepancy is the trip's
-    // consequence — `suppressed` asserts and `unacknowledged` holds
-    // clear — while `alarm` keeps reporting the mismatch's truth. The
-    // contact is driven at scan 24's boundary and released at 41's, so
-    // `suppressed` stands scans 25 through 41.
+    // The designed suppression (decisions 73/76) rides the computed
+    // contact now: while the layer's actuation stands, the standing
+    // discrepancy is the trip's consequence — `suppressed` asserts
+    // with the contact and `unacknowledged` holds clear — while
+    // `alarm` keeps reporting the mismatch's truth. Each hysteresis
+    // release re-annunciates the standing condition as a fresh latch;
+    // the later crossings suppress it again until the scan-43 ack.
     assert!(
-        trace[24..41].iter().all(|row| alarm_pair(row, "disc", 3)),
+        trace[23..release_row - 1]
+            .iter()
+            .all(|row| alarm_pair(row, "disc", 3)),
         "the suppression must stand while the layer acts"
     );
-    assert!(trace[24..41].iter().all(|row| !alarm_pair(row, "disc", 1)));
+    assert!(!alarm_pair(at(&trace, release_row as u64), "disc", 3));
+    assert!(trace[35..39].iter().all(|row| alarm_pair(row, "disc", 3)));
+    assert!(
+        trace[23..release_row - 1]
+            .iter()
+            .all(|row| !alarm_pair(row, "disc", 1))
+    );
     assert!(
         trace[25..40].iter().any(|row| alarm_pair(row, "disc", 0)),
         "the alarm must keep reporting the standing mismatch under suppression"
     );
-    // Releasing the actuation re-annunciates the standing condition as
-    // a fresh trip until the scan-43 ack applies.
-    assert!(!alarm_pair(at(&trace, 42), "disc", 3));
-    assert!(trace[41..44].iter().any(|row| alarm_pair(row, "disc", 1)));
+    assert!(
+        trace[release_row - 1..35]
+            .iter()
+            .all(|row| alarm_pair(row, "disc", 1))
+    );
+    assert!(trace[39..43].iter().all(|row| alarm_pair(row, "disc", 1)));
     assert!(
         trace[44..SCRIPTED_SCANS as usize]
             .iter()
@@ -1639,11 +1709,19 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         matches!(report.sync, Some(StandbySync::Tracking { .. })),
         "the resumed active's checkpoints must keep the standby tracking: {report:?}"
     );
-    assert_eq!(
-        standby.snapshot().unwrap(),
-        image,
-        "the pair is one controller across the restart"
-    );
+    // The pair is one controller across the restart: the tracked
+    // image, component state, descriptors, forces, and parameters all
+    // match. `io_health` alone is excluded — the driver-boundary
+    // counters are attachment-local diagnostics no checkpoint carries:
+    // the owner's reads genuinely failed through the transmitter's
+    // disconnect while the tracking peer never scanned the field.
+    let tracked = standby.snapshot().unwrap();
+    assert_eq!(tracked.tick, image.tick);
+    assert_eq!(tracked.points, image.points);
+    assert_eq!(tracked.components, image.components);
+    assert_eq!(tracked.descriptors, image.descriptors);
+    assert_eq!(tracked.forces, image.forces);
+    assert_eq!(tracked.parameters, image.parameters);
     issued.push(command(
         &active,
         layout.high_level_alarm.shelve.unwrap(),
@@ -2198,6 +2276,76 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
 #[test]
 fn the_ijmuiden_scenario_walks_every_named_behavior_in_one_scripted_run() {
     run_ijmuiden("once");
+}
+
+/// The second `--dynamics` consumer: `dcs-sim-bus-device` merges the
+/// same checked-in document over its register bank — the device-side
+/// seam `dcs-plant-server --dynamics` mirrors — and the level
+/// threshold asserts the contact register off the crossing alone.
+#[test]
+fn the_dynamics_document_merges_and_acts_through_the_register_bank() {
+    use dcs_sim_bus::{RegisterBank, RegisterDecl};
+
+    // The device's declared register surface: the field points the
+    // document's elements read and drive, kind-matched.
+    let decls = [
+        (10u16, Value::Float(0.0)),
+        (11, Value::Float(0.0)),
+        (12, Value::Float(0.0)),
+        (13, Value::Float(0.0)),
+        (14, Value::Float(0.0)),
+        (15, Value::Float(0.0)),
+        (16, Value::Float(0.0)),
+        (20, Value::Float(0.0)),
+        (30, Value::Bool(false)),
+    ]
+    .into_iter()
+    .map(|(register, initial)| RegisterDecl { register, initial })
+    .collect::<Vec<_>>();
+    // The document parsed exactly as `dcs-sim-bus-device --dynamics`
+    // parses it, then merged through the bank's validating seam.
+    let elements: Vec<dcs_sim::ProcessElement> =
+        serde_json::from_str(&std::fs::read_to_string(PLANT_DYNAMICS).unwrap()).unwrap();
+    let bank = RegisterBank::with_dynamics(decls, elements).unwrap();
+
+    // The scripted inflow and confirmed-open gate drive the same
+    // crossing the plant server shows: the integrator climbs, the
+    // threshold asserts register 30 off the declared bound, and the
+    // gated draw turns the level back through the hysteresis release.
+    bank.write(12, Value::Float(0.08)).unwrap();
+    bank.write(16, Value::Float(1.0)).unwrap();
+    let mut asserted = None;
+    for _ in 0..schedule::SIS_CLEAR {
+        bank.step(1.0);
+        if bank.read(30).unwrap().value == Value::Bool(true) {
+            asserted = Some(bank.read(10).unwrap().value);
+            break;
+        }
+    }
+    let asserted = asserted.expect("the level crossing must assert register 30 on its own");
+    match asserted {
+        Value::Float(level) => assert!(
+            level >= SIS_HIGH_HIGH,
+            "the contact asserted below the declared bound: {level}"
+        ),
+        other => panic!("register 10 reads {other:?}, not a level"),
+    }
+    let mut released = None;
+    for _ in 0..schedule::SIS_CLEAR {
+        bank.step(1.0);
+        if bank.read(30).unwrap().value == Value::Bool(false) {
+            released = Some(bank.read(10).unwrap().value);
+            break;
+        }
+    }
+    let released = released.expect("the draw's pull-back must release register 30 on its own");
+    match released {
+        Value::Float(level) => assert!(
+            level < SIS_RELEASE,
+            "the contact released outside the hysteresis band: {level}"
+        ),
+        other => panic!("register 10 reads {other:?}, not a level"),
+    }
 }
 
 #[test]
