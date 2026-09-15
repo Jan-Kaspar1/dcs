@@ -1081,6 +1081,84 @@ impl Spec for LatchingAlarmSpec {
     }
 }
 
+/// Spec for the `bool-latching-alarm` kind: the two-flag alarm
+/// lifecycle for Bool-sourced conditions — `latching-alarm`'s Bool
+/// sibling, where `alarm` follows `in` and `unacknowledged` latches a
+/// fresh assertion until `ack` reads `true`.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
+/// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
+/// The kind declares no parameters.
+pub struct BoolLatchingAlarmSpec {
+    /// The instance's parameter map — the kind declares no parameters,
+    /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
+    /// at `build`.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `bool-latching-alarm` instance.
+pub struct BoolLatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Bool`): the Bool alarm condition.
+    pub input: Sink<bool>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// `alarm` port (`Out`, `Bool`): the standing condition state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// asserted-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl BoolLatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "bool-latching-alarm";
+
+    /// The declared parameter set: the kind takes none.
+    pub const PARAMETERS: &'static [ParamDecl] = &[];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for BoolLatchingAlarmSpec {
+    type Instance = BoolLatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Bool),
+            port("ack", Direction::In, ValueKind::Bool),
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BoolLatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
 /// Spec for the `manual-station` kind: operator-selectable source on an
 /// analog output with a slew-bounded bumpless transfer.
 ///

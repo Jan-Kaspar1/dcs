@@ -1,6 +1,7 @@
-//! The nine kind specs that completed coverage — `latching-alarm`,
+//! The kind specs that completed coverage — `latching-alarm`,
 //! `manual-station`, `signal-filter`, `median-voter`, `totalizer`,
-//! `sequencer`, `bool-gate`, `sr-latch`, `edge-trigger` — each
+//! `sequencer`, `bool-gate`, `sr-latch`, `edge-trigger`,
+//! `bool-latching-alarm` — each
 //! composes into a plant that builds, loads, validates, and assembles
 //! through the standard registry (`dcs_controller::registry()`), the
 //! same path a hand-written document takes.
@@ -16,11 +17,11 @@ use std::collections::BTreeSet;
 
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, CounterSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, InterlockSpec,
-    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
-    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
-    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmSpec,
+    CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec,
+    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
+    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
+    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -62,6 +63,54 @@ fn latching_alarm_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, LatchingAlarmSpec::KIND);
+}
+
+#[test]
+fn bool_latching_alarm_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let power_fail = plant.channel::<bool>(sim, "power-fail", Direction::In);
+
+    let input = plant.field_input::<bool>(PointId(10), power_fail, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(12), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
+
+    let bal = plant.add(BoolLatchingAlarmSpec::new(Default::default()));
+    plant.connect(input, bal.input);
+    plant.connect(ack, bal.ack);
+    plant.connect(&bal.alarm, alarm);
+    plant.connect(&bal.unacknowledged, unacknowledged);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, BoolLatchingAlarmSpec::KIND);
+    assert!(model.components[0].parameters.is_empty());
+}
+
+#[test]
+fn bool_latching_alarm_rejects_an_undeclared_parameter() {
+    // The kind declares no parameters: a stray key — a `latching-alarm`
+    // tunable carried onto the Bool sibling, say — is `UnknownParameter`
+    // naming the key at `build`, before the document exists.
+    let mut plant = PlantBuilder::new();
+    let input = plant.internal_input::<bool>(PointId(10), false, true);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(12), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
+
+    let bal = plant.add(BoolLatchingAlarmSpec::new(parameters([(
+        "hysteresis",
+        Value::Float(0.5),
+    )])));
+    plant.connect(input, bal.input);
+    plant.connect(ack, bal.ack);
+    plant.connect(&bal.alarm, alarm);
+    plant.connect(&bal.unacknowledged, unacknowledged);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::UnknownParameter { ref parameter, .. }) if parameter == "hysteresis"
+    ));
 }
 
 #[test]
@@ -502,6 +551,7 @@ fn every_registered_kind_has_a_spec() {
         DigitalOutputSpec::KIND,
         AlarmMonitorSpec::KIND,
         LatchingAlarmSpec::KIND,
+        BoolLatchingAlarmSpec::KIND,
         InterlockSpec::KIND,
         OverrideSelectSpec::KIND,
         ValveSpec::KIND,
