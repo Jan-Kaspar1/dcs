@@ -290,6 +290,20 @@ not — and `threshold-chain.demand` onto `pump-group.demand` likewise.
 composition, manual-takeover gates included; per-port semantics live
 beside `ThresholdChain::KIND` and `FailoverSelect::KIND`.
 
+The Bool-input latching sibling architecture decision 43 records adds
+one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
+`in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
+`Bool`: `alarm` follows the input directly — no hysteresis and no
+standing-limit parameter, so `parameters` stays empty — and
+`unacknowledged` latches the input's false-to-true edge, clearing while
+the model-wired writable `ack` point reads `true` under the same
+level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
+latch). Both outputs carry the worst of the two inputs' qualities.
+`crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
+composition — a `motor`'s `fault` output carried through a declared
+internal point pair into `in`; per-port semantics live beside
+`BoolLatchingAlarm::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is

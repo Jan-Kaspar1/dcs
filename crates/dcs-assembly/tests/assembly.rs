@@ -8,9 +8,9 @@ use dcs_assembly::{
     sim_driver,
 };
 use dcs_blocks::{
-    AnalogInput, AnalogOutput, BoolGate, Counter, DigitalOutput, EdgeTrigger, LatchingAlarm,
-    ManualStation, MedianVoter, Pid, RateLimiter, Sequencer, SignalFilter, SrLatch, Timer,
-    Totalizer,
+    AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter, DigitalOutput, EdgeTrigger,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, Pid, RateLimiter, Sequencer, SignalFilter,
+    SrLatch, Timer, Totalizer,
 };
 use dcs_core::{Command, CommandOutcome, Direction, IoDriver, PointId, Tick, Value, ValueKind};
 use dcs_model::{ComponentId, Connection, Endpoint, PlantModel, PortRef, ValidationError};
@@ -40,6 +40,10 @@ const SEQUENCER: &str = include_str!("../fixtures/sequencer.json");
 /// The logic-vocabulary fixture: a three-input `bool-gate`, an
 /// `sr-latch`, and an `edge-trigger`.
 const LOGIC: &str = include_str!("../fixtures/logic.json");
+/// The bool-latching-alarm fixture: a motor's `fault` output carried
+/// through a declared internal point pair into a `bool-latching-alarm`'s
+/// `in`, with field-side `alarm`/`unack` outputs.
+const BOOL_LATCHING_ALARM: &str = include_str!("../fixtures/bool_latching_alarm.json");
 
 const SETPOINT: PointId = PointId(10);
 const LEVEL_RAW: PointId = PointId(11);
@@ -70,6 +74,17 @@ const ALARM_PV: PointId = PointId(10);
 const ALARM_ACK: PointId = PointId(11);
 const ALARM_OUT: PointId = PointId(20);
 const UNACK_OUT: PointId = PointId(21);
+
+// `bool_latching_alarm.json`: the field run feedback, the internal
+// operator command/ack points, the internal fault carrier pair, and the
+// three field-side outputs.
+const RUN_FEEDBACK: PointId = PointId(10);
+const MOTOR_CMD: PointId = PointId(11);
+const FAULT_ACK: PointId = PointId(12);
+const MOTOR_FAULT: PointId = PointId(13);
+const MOTOR_OUT: PointId = PointId(20);
+const FAULT_ALARM: PointId = PointId(21);
+const FAULT_UNACK: PointId = PointId(22);
 
 // `operator.json`: the field-side points the fixture's components drive.
 const CV: PointId = PointId(10);
@@ -299,6 +314,26 @@ fn registry() -> ComponentRegistry {
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("out")?,
+                spec.parameters,
+            ))
+        })
+        .with(Motor::KIND, |spec| {
+            boxed(Motor::from_parameters(
+                spec.name.as_str(),
+                spec.require("cmd")?,
+                spec.require("out")?,
+                spec.require("run")?,
+                spec.require("fault")?,
+                spec.parameters,
+            ))
+        })
+        .with(BoolLatchingAlarm::KIND, |spec| {
+            boxed(BoolLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
                 spec.parameters,
             ))
         })
@@ -554,6 +589,114 @@ fn latching_alarm_fixture_trips_latches_and_acknowledges() {
             .iter()
             .all(|component| component.step_errors == 0)
     );
+}
+
+#[test]
+fn bool_latching_alarm_fixture_latches_a_motor_fault() {
+    let model = model(BOOL_LATCHING_ALARM);
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = assemble(&model, &registry(), &driver).unwrap();
+
+    // The registry built both declared kinds: the motor and the Bool
+    // sibling of `latching-alarm` wired to its `fault` output through
+    // the declared internal carrier pair.
+    let snapshot = executor.snapshot();
+    let kinds: Vec<&str> = snapshot
+        .descriptors
+        .iter()
+        .map(|descriptor| descriptor.kind.as_str())
+        .collect();
+    assert_eq!(kinds, [Motor::KIND, BoolLatchingAlarm::KIND]);
+    assert_eq!(
+        executor.sample(FAULT_ACK).unwrap().value,
+        Value::Bool(false)
+    );
+
+    // The operator starts the motor; the run feedback never follows, so
+    // `fault` asserts on the first disagreeing scan (fault_ticks=0) and
+    // lands on the internal carrier — a fail-to-start.
+    let receipt = executor.submit_command(Command::WriteValue {
+        point: MOTOR_CMD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    });
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    executor.scan().unwrap();
+    assert_eq!(driver.read(MOTOR_OUT).unwrap().value, Value::Bool(true));
+    assert_eq!(
+        executor.sample(MOTOR_FAULT).unwrap().value,
+        Value::Bool(true)
+    );
+    // The internal link delivers the fault to the alarm's `in` one scan
+    // later — the same boundary a field loopback crosses.
+    assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(false));
+
+    executor.scan().unwrap();
+    assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(true));
+    assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(true));
+
+    // Acknowledging while the alarm stands clears the latch only.
+    executor.submit_command(Command::WriteValue {
+        point: FAULT_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    });
+    executor.scan().unwrap();
+    assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(true));
+
+    // The feedback recovering clears the motor's fault; `alarm` follows
+    // it down a scan later and the already-acknowledged latch stays down.
+    executor.submit_command(Command::WriteValue {
+        point: FAULT_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(false),
+    });
+    driver.write(RUN_FEEDBACK, Value::Bool(true)).unwrap();
+    executor.scan().unwrap();
+    assert_eq!(
+        executor.sample(MOTOR_FAULT).unwrap().value,
+        Value::Bool(false)
+    );
+    executor.scan().unwrap();
+    assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(false));
+    assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(false));
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0)
+    );
+}
+
+#[test]
+fn bool_latching_alarm_fixture_runs_deterministically() {
+    let model = model(BOOL_LATCHING_ALARM);
+    let run = || {
+        let driver = sim_driver(&model).unwrap();
+        let mut executor = assemble(&model, &registry(), &driver).unwrap();
+        executor.submit_command(Command::WriteValue {
+            point: MOTOR_CMD,
+            kind: ValueKind::Bool,
+            value: Value::Bool(true),
+        });
+        for _ in 0..3 {
+            executor.scan().unwrap();
+        }
+        executor.submit_command(Command::WriteValue {
+            point: FAULT_ACK,
+            kind: ValueKind::Bool,
+            value: Value::Bool(true),
+        });
+        driver.write(RUN_FEEDBACK, Value::Bool(true)).unwrap();
+        for _ in 0..3 {
+            executor.scan().unwrap();
+        }
+        serde_json::to_string(&executor.snapshot()).unwrap()
+    };
+    assert_eq!(run(), run());
 }
 
 #[test]

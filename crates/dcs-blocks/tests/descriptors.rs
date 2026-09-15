@@ -4,11 +4,11 @@
 //! `TelemetrySnapshot` serde-roundtrips.
 
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput,
-    DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig,
-    PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
-    Timer, Totalizer, Valve,
+    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter,
+    DigitalInput, DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock,
+    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep,
+    SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -309,12 +309,19 @@ fn rig() -> Rig {
             point(&mut specs, 221, Direction::Out, ValueKind::Bool),
             Edge::Rising,
         )),
+        Box::new(BoolLatchingAlarm::new(
+            "bal",
+            point(&mut specs, 250, Direction::In, ValueKind::Bool),
+            point(&mut specs, 251, Direction::In, ValueKind::Bool),
+            point(&mut specs, 252, Direction::Out, ValueKind::Bool),
+            point(&mut specs, 253, Direction::Out, ValueKind::Bool),
+        )),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 23] = [
+const EXPECTED_KINDS: [&str; 24] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -338,6 +345,7 @@ const EXPECTED_KINDS: [&str; 23] = [
     PumpGroup::KIND,
     SrLatch::KIND,
     EdgeTrigger::KIND,
+    BoolLatchingAlarm::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
@@ -402,8 +410,9 @@ fn snapshot_reports_every_kind_descriptor_in_scan_order() {
         .filter(|descriptor| !descriptor.parameters.is_empty())
         .map(|descriptor| descriptor.name.as_str())
         .collect();
-    // OverrideSelect and SrLatch are the parameterless kinds.
-    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 2);
+    // OverrideSelect, SrLatch, and BoolLatchingAlarm are the rig's
+    // parameterless kinds.
+    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 3);
 }
 
 #[test]
@@ -442,14 +451,17 @@ fn reported_parameters_match_each_kinds_declared_set() {
         let reported: BTreeSet<&str> = parameters.values.keys().map(String::as_str).collect();
         assert_eq!(reported, declared, "{}", descriptor.name);
     }
-    // OverrideSelect and SrLatch declare no parameters and report an
-    // empty set.
+    // OverrideSelect, SrLatch, and BoolLatchingAlarm declare no
+    // parameters and report an empty set.
     let ovr = &snapshot.parameters[7];
     assert_eq!(ovr.name, "ovr");
     assert!(ovr.values.is_empty());
     let srl = &snapshot.parameters[21];
     assert_eq!(srl.name, "srl");
     assert!(srl.values.is_empty());
+    let bal = &snapshot.parameters[23];
+    assert_eq!(bal.name, "bal");
+    assert!(bal.values.is_empty());
 }
 
 #[test]

@@ -13,10 +13,10 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, Counter, DigitalInput, DigitalOutput,
-    EdgeTrigger, FailoverSelect, GroupOutputs, Interlock, LatchingAlarm, ManualStation,
-    MedianVoter, Motor, OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter, Sequencer,
-    SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter, DigitalInput,
+    DigitalOutput, EdgeTrigger, FailoverSelect, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PumpGroup, PumpIo, RateLimiter,
+    Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -117,6 +117,16 @@ pub fn registry() -> ComponentRegistry {
         })
         .with(LatchingAlarm::KIND, |spec| {
             boxed(LatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("ack")?,
+                spec.require("alarm")?,
+                spec.require("unacknowledged")?,
+                spec.parameters,
+            ))
+        })
+        .with(BoolLatchingAlarm::KIND, |spec| {
+            boxed(BoolLatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("ack")?,
