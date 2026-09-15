@@ -10,7 +10,7 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 
 ## Delivery sequence
 
-1. **Validate the foundation through a reference application.** Prove the plant model, UI/control contracts, hardware abstraction, deterministic execution, redundancy, diagnostics, commands, and engineering workflow together in a simulated duty/standby pumping station.
+1. **Validate the foundation through a reference application.** Prove the plant model, UI/control contracts, hardware abstraction, deterministic execution, redundancy, diagnostics, commands, alarm management, and engineering workflow together in a simulated duty/standby pumping station. Alarm behavior is part of the UI/control contract: water operators must see consequential mode changes, abnormal equipment state, worsening process conditions, bad or stale data, and the response expected before the condition becomes hazardous.
 2. **Build the water and wastewater library.** Add reusable equipment modules and process assemblies in response to accepted requirements. Every component includes control behavior, modes, diagnostics, alarms, state persistence, descriptors, and faceplate behavior where applicable.
 3. **Reach pilot readiness.** Make configuration, deployment, commissioning, backup and restore, upgrades, troubleshooting, and operator workflows suitable for a first customer plant.
 4. **Expand by market evidence.** Add batch control for pharmaceutical and chemical plants after a separate requirements baseline and representative batch application exist.
@@ -19,6 +19,7 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 
 - The unified plant model is the contract between engineering, controller runtime, monitoring, and UI.
 - A reusable component is complete only when its control behavior, operator interaction, diagnostics, and lifecycle behavior work together.
+- Alarm management is foundation work for water and wastewater. An alarm is actionable operator guidance with priority, state, context, history, and a defined response; it is not only a Boolean flag. Alarm handling does not replace an independent automatic protection function where hazard analysis requires one.
 - Representative applications validate shared contracts before the library grows broadly.
 - Research supplies evidence and alternatives. Architecture decisions define this product's semantics; vendor behavior is inspiration rather than a compatibility target.
 - Customer evidence outranks vendor feature breadth. Record assumptions that still need an operator, integrator, or plant owner to validate.
