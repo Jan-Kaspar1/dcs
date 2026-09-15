@@ -20,7 +20,7 @@ def main():
     base = home / '.local/share/dcs-agents'
     release = base / 'releases' / revision
     release.mkdir(parents=True, exist_ok=True)
-    for directory in ('agent_pool', 'scripts'):
+    for directory in ('agent_pool', 'qa_lane', 'scripts'):
         shutil.copytree(source / directory, release / directory, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__'))
     (release / 'REVISION').write_text(revision + '\n')
     current = base / 'current'

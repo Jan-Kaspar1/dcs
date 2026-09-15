@@ -383,7 +383,9 @@ fn poll_pair_card(pair: &PairSpec) -> CardPoll {
 }
 
 /// The card's I/O-health line, mirroring the page's `ioHealthLine`:
-/// link degradation, boundary failures, the attributed last fault,
+/// link degradation, boundary failures (including failed cyclic
+/// exchanges), a cyclic driver's working-counter mismatches and missed
+/// deadlines, the attributed last fault,
 /// scan overruns — read from the source peer's snapshot. A card with
 /// no landed snapshot reports the fetch's failure, or waits out its
 /// first poll, instead of inventing health.
@@ -407,6 +409,27 @@ fn io_health_line(poll: &CardPoll) -> (String, bool) {
             "{} failed read(s), {} failed write(s)",
             health.failed_reads, health.failed_writes
         ));
+    }
+    if health.failed_exchanges > 0 {
+        troubles.push(format!("{} failed exchange(s)", health.failed_exchanges));
+    }
+    if let Some(exchange) = health
+        .driver
+        .as_ref()
+        .and_then(|driver| driver.exchange.as_ref())
+    {
+        if exchange.working_counter_mismatches > 0 {
+            troubles.push(format!(
+                "{} working-counter mismatch(es)",
+                exchange.working_counter_mismatches
+            ));
+        }
+        if exchange.missed_deadlines > 0 {
+            troubles.push(format!(
+                "{} missed exchange deadline(s)",
+                exchange.missed_deadlines
+            ));
+        }
     }
     if let Some(fault) = &health.last_error {
         troubles.push(format!(

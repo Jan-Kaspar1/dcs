@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "ethercat",
+      "channels": {
+        "ai0": {
+          "direction": "in",
+          "value_type": "int"
+        },
+        "di0": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "di1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "do0": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "do1": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      },
+      "parameters": {
+        "bus": "ecat0",
+        "exchange_miss_threshold": 3,
+        "identity": {
+          "product": 750354,
+          "revision": 1,
+          "vendor": 21
+        },
+        "mapping": {
+          "inputs": {
+            "ai0": {
+              "bits": 16,
+              "byte": 1
+            },
+            "di0": {
+              "bit": 0,
+              "byte": 0
+            },
+            "di1": {
+              "bit": 1,
+              "byte": 0
+            }
+          },
+          "outputs": {
+            "do0": {
+              "bit": 0,
+              "byte": 0
+            },
+            "do1": {
+              "bit": 1,
+              "byte": 0
+            }
+          }
+        },
+        "safe_outputs": {
+          "do0": {
+            "bool": false
+          },
+          "do1": {
+            "bool": false
+          }
+        },
+        "startup": {
+          "on_mismatch": "fail"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 1,
+      "direction": "in",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "ai0"
+      }
+    },
+    {
+      "id": 2,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "di0"
+      }
+    },
+    {
+      "id": 3,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "di1"
+      }
+    },
+    {
+      "id": 4,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "do0"
+      }
+    },
+    {
+      "id": 5,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "do1"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 10,
+      "name": "level-raw",
+      "source": 1,
+      "unit": "mm"
+    },
+    {
+      "id": 11,
+      "name": "pump-fault",
+      "source": 2
+    },
+    {
+      "id": 12,
+      "name": "valve-closed",
+      "source": 3
+    },
+    {
+      "id": 13,
+      "name": "inlet-valve",
+      "source": 4
+    },
+    {
+      "id": 14,
+      "name": "drain-valve",
+      "source": 5
+    }
+  ],
+  "components": [],
+  "connections": []
+}

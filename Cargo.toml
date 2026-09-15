@@ -5,6 +5,7 @@ members = [
     "crates/dcs-build",
     "crates/dcs-controller",
     "crates/dcs-core",
+    "crates/dcs-ethercat",
     "crates/dcs-demo",
     "crates/dcs-model",
     "crates/dcs-monitor",

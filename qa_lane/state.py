@@ -2,6 +2,12 @@
 stdlib SQLite, WAL, JSON values in a settings table, and a runs table
 whose records survive process death so reconciliation can complete
 interrupted runs on the next start.
+
+Budget semantics: a run's `day` is the UTC date on which it actually
+begins executing — stamped by begin(), not by enqueue(). A run queued
+at 23:55 that the supervisor starts at 00:30 counts once, against the
+date it started. The day stored at enqueue time is only a hint for
+queued records and is overwritten when the run begins.
 """
 import json
 import sqlite3
@@ -16,6 +22,15 @@ from pathlib import Path
 #   superseded - a queued run replaced by a newer queued revision
 RUN_STATUSES = ('queued', 'running', 'finished', 'interrupted', 'superseded')
 ACTIVE_STATUSES = ('running',)
+
+# settings keys owned by the resource-bounds machinery:
+#   cleanup_errors - {key: {detail, first_seen, last_seen}} named
+#                    teardown/reclaim failures, cleared on success
+#   preserve       - {'runs': [run_id], 'shas': [sha]} retention pins
+#                    set by the findings/verification lane so evidence
+#                    tied to unresolved findings is never reaped
+#   blocked        - {reason, detail, since} while the lane refuses to
+#                    start runs (fail-closed), cleared when gates pass
 
 
 class State:
@@ -104,6 +119,20 @@ class State:
                 (run_id, sha, 'queued', attempt, day, now, range_first))
         return self.run(run_id)
 
+    def queue_verification(self, run_id, sha, now, day):
+        """Queue a dedicated fix-verification run (run ids 'qav-*').
+
+        Unlike enqueue() this never supersedes queued assessment runs:
+        verification work is additive and is dispatched ahead of the
+        newest-SHA assessment by the cycle.
+        """
+        with self.db:
+            self.db.execute(
+                'INSERT INTO runs(run_id,attempted_sha,status,attempt,day,'
+                "created) VALUES(?,?, 'queued', 1, ?, ?)",
+                (run_id, sha, day, now))
+        return self.run(run_id)
+
     def next_queued(self):
         queued = self.runs(('queued',))
         return queued[-1] if queued else None
@@ -122,10 +151,15 @@ class State:
         return row[0]
 
     def begin(self, run_id, pid, now):
+        """Mark a queued run executing. `day` is restamped to the UTC
+        execution date so the daily budget counts the day a run
+        actually ran, not the day it was dispatched."""
+        day = time.strftime('%Y-%m-%d', time.gmtime(now))
         with self.db:
             self.db.execute(
-                "UPDATE runs SET status='running', pid=?, started=? "
-                "WHERE run_id=? AND status='queued'", (pid, now, run_id))
+                "UPDATE runs SET status='running', pid=?, started=?, "
+                "day=? WHERE run_id=? AND status='queued'",
+                (pid, now, day, run_id))
         return self.run(run_id)
 
     def finish(self, run_id, outcome, completed_sha, report, now):
@@ -151,5 +185,61 @@ class State:
                 (path, now, run_id))
 
     def last_attempted_sha(self):
-        rows = self.runs(('queued', 'running', 'finished', 'interrupted'))
+        """The newest revision the lane was asked to test. 'blocked'
+        runs never attempted the revision, so they do not suppress
+        redispatch of the same SHA."""
+        rows = [r for r in
+                self.runs(('queued', 'running', 'finished', 'interrupted'))
+                if r['outcome'] != 'blocked']
         return rows[-1]['attempted_sha'] if rows else None
+
+    # -- cleanup-failure ledger -------------------------------------------
+    # Failures are keyed so a later success clears exactly the failure it
+    # resolved. The ledger is the durable record: run reports and status
+    # surface it, and the cycle fails closed while teardown leftovers
+    # remain.
+
+    def cleanup_errors(self):
+        return self.get('cleanup_errors', {})
+
+    def record_cleanup_error(self, key, detail, now=None):
+        """Record a named cleanup failure (idempotent per key)."""
+        now = time.time() if now is None else now
+        errors = self.cleanup_errors()
+        entry = errors.get(key, {})
+        entry['detail'] = detail[:500]
+        entry.setdefault('first_seen', now)
+        entry['last_seen'] = now
+        errors[key] = entry
+        self.set('cleanup_errors', errors)
+
+    def clear_cleanup_error(self, key):
+        errors = self.cleanup_errors()
+        if key in errors:
+            del errors[key]
+            self.set('cleanup_errors', errors)
+
+    # -- retention pins -----------------------------------------------------
+
+    def preserved(self):
+        preserve = self.get('preserve', {})
+        return {'runs': list(preserve.get('runs', [])),
+                'shas': list(preserve.get('shas', []))}
+
+    def set_preserve(self, kind, value, on=True):
+        """Pin ('run'/'sha') or unpin evidence for retention. The
+        findings/verification lane calls `qa_lane preserve` to keep
+        run dirs, reports, source trees, and images alive while a
+        finding or fix verification remains unresolved."""
+        if kind not in ('run', 'sha'):
+            raise ValueError('preserve kind must be run or sha')
+        plural = kind + 's'
+        preserve = self.get('preserve', {})
+        entries = list(preserve.get(plural, []))
+        if on and value not in entries:
+            entries.append(value)
+        elif not on:
+            entries = [e for e in entries if e != value]
+        preserve[plural] = entries
+        self.set('preserve', preserve)
+        return self.preserved()
