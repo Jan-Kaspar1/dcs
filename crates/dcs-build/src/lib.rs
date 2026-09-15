@@ -111,6 +111,7 @@
 #![warn(missing_docs)]
 
 mod builder;
+pub mod dosing;
 mod endpoint;
 mod spec;
 pub mod specs;
