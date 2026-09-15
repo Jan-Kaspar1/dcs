@@ -511,20 +511,31 @@ def _redispatch(state, github, cfg, finding, report, log, reason):
     return number
 
 
+INGEST_SENTINEL = 'ingesting'
+
+
 def ingest_report(state, github, cfg, report, issues, log):
     """Validate, deduplicate, and route one report. Returns a summary dict.
 
     Assumes validate_report already ran. The report row is recorded before
-    routing so a mid-route failure leaves findings 'recorded' for the next
-    sweep instead of re-ingesting the file.
+    routing with the INGEST_SENTINEL summary, then rewritten with the real
+    summary once the findings/verification loop completes. A row still
+    holding the sentinel is an interrupted ingest, not a duplicate: every
+    step below is idempotent (finding upserts refresh evidence, routing
+    reconciles by marker, apply_verification gates on lifecycle state), so
+    the pass resumes and finishes instead of stranding unapplied
+    verifications behind dedup.
     """
-    if state.qa_report(report['run_id']):
+    prior = state.qa_report(report['run_id'])
+    if prior and prior.get('summary') != INGEST_SENTINEL:
         return {'run_id': report['run_id'], 'result': 'duplicate'}
+    if prior:
+        log('QA report %s: resuming interrupted ingest' % report['run_id'])
     routing = cfg['enabled'] and cfg['mode'] == 'route' and report['status'] == 'completed'
     summary = {'run_id': report['run_id'], 'routed': routing,
                'findings': {}, 'verifications': {}}
     state.record_qa_report(report['run_id'], report['sha'], report.get('outcome') or report['status'],
-                           len(report['findings']), 'ingesting')
+                           len(report['findings']), INGEST_SENTINEL)
     created = 0
     for finding in report['findings']:
         existing = state.qa_finding(finding['key'])

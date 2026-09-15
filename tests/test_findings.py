@@ -504,6 +504,28 @@ class RoutingTests(LaneFixture):
         self.poll(qa={'max_issues_per_report': 5, 'max_open': 99})
         self.assertEqual(self.github.created, 7)
 
+    def test_interrupted_ingest_resumes_routing(self):
+        doc = internal(run_id='qa-20990101-020',
+                       items=[finding('scan-restamp')])
+
+        def flaky(*args, **kw):
+            raise RuntimeError('mid-route crash')
+
+        with unittest.mock.patch.object(findings, '_route', flaky):
+            with self.assertRaises(RuntimeError):
+                self.ingest(doc)
+        # The crash leaves the sentinel row — not a completed ingest.
+        self.assertEqual(
+            self.state.qa_report('qa-20990101-020')['summary'],
+            findings.INGEST_SENTINEL)
+        summary = self.ingest(doc)
+        self.assertEqual(summary['findings']['scan-restamp'], 'issue-open')
+        self.assertEqual(self.github.created, 1)
+        self.assertTrue(any('resuming' in line for line in self.logs))
+        # Once complete, re-delivery dedups exactly like before.
+        self.assertEqual(self.ingest(doc)['result'], 'duplicate')
+        self.assertEqual(self.github.created, 1)
+
 
 class VerificationChainTests(LaneFixture):
     """Verification results have no schema-v1 wire channel; they are ingested
@@ -574,6 +596,31 @@ class VerificationChainTests(LaneFixture):
         self.assertIn('not-awaiting-verification', report_row['summary'])
         self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
                          'issue-open')
+
+    def test_interrupted_ingest_resumes_verification(self):
+        self.seed()
+        self.merge_finding()
+        doc = internal(run_id='qa-20990101-010',
+                       verifications=[verification()])
+        # A crash after the report mark but before apply_verification
+        # leaves the finding fix-merged; the row's sentinel must let the
+        # next pass resume rather than dedup into 'duplicate'.
+        with unittest.mock.patch.object(
+                findings, 'apply_verification',
+                side_effect=RuntimeError('mid-ingest crash')):
+            with self.assertRaises(RuntimeError):
+                self.ingest(doc)
+        self.assertEqual(
+            self.state.qa_report('qa-20990101-010')['summary'],
+            findings.INGEST_SENTINEL)
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'fix-merged')
+        summary = self.ingest(doc)
+        self.assertEqual(summary['verifications']['scan-restamp'],
+                         'verified')
+        self.assertEqual(self.state.qa_finding('scan-restamp')['status'],
+                         'verified')
+        self.assertEqual(self.ingest(doc)['result'], 'duplicate')
 
     def test_verified_finding_regression_redispatches(self):
         self.seed()

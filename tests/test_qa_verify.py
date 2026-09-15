@@ -284,5 +284,53 @@ class RunTests(Fixture):
         self.assertIsNone(verify.case_function('no-such-case'))
 
 
+class PreserveTests(Fixture):
+    """Retention pins track the live queue: pending verifications keep
+    their run evidence and tested revisions; settled items release."""
+
+    def test_empty_queue_pins_nothing(self):
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertEqual(self.st.preserved(), {'runs': [], 'shas': []})
+
+    def test_pending_item_pins_target_before_dispatch(self):
+        write_queue(self.cfg, [item()])
+        self.st.enqueue('qa-1', SHA_A, 1.0, DAY)
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertEqual(self.st.preserved()['shas'], [SHA_A])
+
+    def test_dispatched_run_and_tested_sha_pinned(self):
+        write_queue(self.cfg, [item()])
+        self.st.queue_verification('qav-1', SHA_A, 1.0, DAY)
+        self.spec('qav-1', item())
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        preserved = self.st.preserved()
+        self.assertEqual(preserved['runs'], ['qav-1'])
+        self.assertEqual(preserved['shas'], [SHA_A])
+        # A reported mark keeps the tested revision pinned as well.
+        verify._mark_reported(self.st, 'standby-tracking', FIX, SHA_B,
+                              'qav-1', 'passed')
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertIn(SHA_B, self.st.preserved()['shas'])
+
+    def test_settled_item_releases_only_lane_pins(self):
+        write_queue(self.cfg, [item()])
+        self.st.queue_verification('qav-1', SHA_A, 1.0, DAY)
+        self.spec('qav-1', item())
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertEqual(self.st.preserved()['runs'], ['qav-1'])
+        # A manual pin alongside the lane's is never released.
+        self.st.set_preserve('sha', FIX, True)
+        write_queue(self.cfg, [])
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertEqual(self.st.preserved(), {'runs': [], 'shas': [FIX]})
+
+    def test_unrelated_qav_run_not_pinned(self):
+        write_queue(self.cfg, [item()])
+        self.st.queue_verification('qav-9', SHA_B, 1.0, DAY)
+        self.spec('qav-9', item('other-finding'))
+        verify.sync_preserves(self.st, self.cfg, log=lambda m: None)
+        self.assertEqual(self.st.preserved()['runs'], [])
+
+
 if __name__ == '__main__':
     unittest.main()

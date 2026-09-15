@@ -621,6 +621,10 @@ def cycle(cfg, log=print):
         now = time.time()
         reconcile(st, cfg, log)
         block = ownership_block(st, log)
+        # Pending-verification evidence pins must be in place before the
+        # retention reconciler runs; settled items release their pins.
+        from . import verify
+        verify.sync_preserves(st, cfg, log)
         reclaim(st, cfg, log, docker_ok=block is None)
         day = _utcnow().strftime('%Y-%m-%d')
         _maybe_retry(st, cfg, now, day)
@@ -632,7 +636,6 @@ def cycle(cfg, log=print):
         # Pending fix verifications dispatch ahead of the newest-SHA
         # assessment: a merged fix is re-verified on a revision proven to
         # contain it before the lane spends a run on fresh exploration.
-        from . import verify
         record = verify.next_run(st, cfg, now, log)
         queued = record if record is not None else st.next_queued()
         if queued is None:
