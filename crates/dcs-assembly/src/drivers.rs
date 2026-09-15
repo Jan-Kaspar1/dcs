@@ -29,7 +29,7 @@ use dcs_core::{
     CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
     Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
-use dcs_ethercat::ChannelDecl;
+use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
     ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
@@ -408,6 +408,18 @@ impl DriverRegistry {
         self
     }
 
+    /// Binds [`ETHERCAT_KIND`] to this deployment's EtherCAT buses —
+    /// replaces the validating stub [`standard`](Self::standard)
+    /// installs. `buses` carries the deployment's logical-bus →
+    /// host-interface bindings (the model names the bus, the deployment
+    /// names the NIC); a deployment without EtherCAT hardware keeps the
+    /// stub and its honest startup failure.
+    pub fn with_ethercat_buses(mut self, buses: &EthercatBuses) -> Self {
+        let buses = buses.clone();
+        self.register(ETHERCAT_KIND, move |spec| ethercat_backend(spec, &buses));
+        self
+    }
+
     /// The factory serving `kind`: the exact registration, else the
     /// first matching prefix in registration order.
     fn factory(&self, kind: &str) -> Option<&Factory> {
@@ -663,6 +675,21 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
 /// what the master integration's own startup sequence will enforce
 /// against the answering station's identity and layout.
 fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    Err(DeviceError::backend(format!(
+        "logical bus {:?} cannot initialize: no EtherCAT master is available in this build — \
+         a hardware-bound kind is never silently substituted by simulation",
+        declaration.bus
+    )))
+}
+
+/// The [`ETHERCAT_KIND`] validation both factories share: the
+/// `hardware` marker plus the `dcs-ethercat` parameter grammar against
+/// the device's declared channels — a declaration's shape is a named
+/// parameter error before any backend check is reached.
+fn ethercat_declaration(
+    spec: &DeviceSpec<'_>,
+) -> Result<dcs_ethercat::DeviceParameters, DeviceError> {
     if !spec.hardware {
         return Err(DeviceError::parameters(format!(
             "the {ETHERCAT_KIND:?} kind is hardware-bound; the device must declare \
@@ -682,13 +709,50 @@ fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             )
         })
         .collect();
-    let declaration = dcs_ethercat::DeviceParameters::parse(spec.parameters, &channels)
-        .map_err(DeviceError::parameters)?;
-    Err(DeviceError::backend(format!(
-        "logical bus {:?} cannot initialize: no EtherCAT master is available in this build — \
-         a hardware-bound kind is never silently substituted by simulation",
-        declaration.bus
-    )))
+    dcs_ethercat::DeviceParameters::parse(spec.parameters, &channels)
+        .map_err(DeviceError::parameters)
+}
+
+/// The deployment-bound [`ETHERCAT_KIND`] factory
+/// [`with_ethercat_buses`](DriverRegistry::with_ethercat_buses)
+/// installs: the same declaration checks as the stub, then the device
+/// attaches to its logical bus over the deployment's bindings — one
+/// shared master per bus, identity and process-image layout verified
+/// against discovery, safe outputs staged, OP entry, all before the
+/// device serves a scan.
+///
+/// The backend observes the field: `field_facing` so promotion fencing
+/// counts it, `step: None` because the field advances itself, and
+/// `claim: None` because no single-writer arbitration exists — which
+/// keeps automatic failover honestly off for the hardware model.
+fn ethercat_backend(
+    spec: &DeviceSpec<'_>,
+    buses: &EthercatBuses,
+) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    let points: Vec<BusPoint> = spec
+        .points
+        .iter()
+        .map(|point| BusPoint {
+            point: point.point,
+            channel: point.channel.clone(),
+            direction: point.direction,
+            kind: point.kind,
+        })
+        .collect();
+    let device = buses
+        .attach(spec.id, &declaration, &points)
+        .map_err(|error| match error {
+            AttachError::Parameters(detail) => DeviceError::parameters(detail),
+            AttachError::Backend(detail) => DeviceError::backend(detail),
+        })?;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: device.clone(),
+        step: None,
+        claim: None,
+        inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
+        field_facing: true,
+    }))
 }
 
 /// A [`QualityReason`] wire name, as a script entry's `"reason"` — the
