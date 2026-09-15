@@ -1,0 +1,452 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "request-1": [
+            { "tick": 0, "value": true },
+            { "tick": 13, "value": false }
+          ],
+          "request-2": [
+            { "tick": 3, "value": true },
+            { "tick": 16, "value": false }
+          ],
+          "request-3": [
+            { "tick": 2, "value": true },
+            { "tick": 19, "value": false }
+          ],
+          "supply-ok": [
+            { "tick": 0, "value": true },
+            { "tick": 5, "value": false },
+            { "tick": 8, "value": true, "quality": "uncertain", "reason": "substituted" },
+            { "tick": 11, "value": true }
+          ],
+          "waste-ok": [{ "tick": 0, "value": true }],
+          "flow-ok": [{ "tick": 0, "value": true }],
+          "request-b1": [
+            { "tick": 0, "value": true },
+            { "tick": 15, "value": false }
+          ],
+          "request-b2": [
+            { "tick": 1, "value": true },
+            { "tick": 18, "value": false }
+          ],
+          "supply-ok-b": [{ "tick": 0, "value": true }],
+          "waste-ok-b": [{ "tick": 0, "value": true }],
+          "flow-ok-b": [{ "tick": 0, "value": true }]
+        }
+      },
+      "channels": {
+        "request-1": { "direction": "in", "value_type": "bool" },
+        "request-2": { "direction": "in", "value_type": "bool" },
+        "request-3": { "direction": "in", "value_type": "bool" },
+        "supply-ok": { "direction": "in", "value_type": "bool" },
+        "waste-ok": { "direction": "in", "value_type": "bool" },
+        "flow-ok": { "direction": "in", "value_type": "bool" },
+        "request-b1": { "direction": "in", "value_type": "bool" },
+        "request-b2": { "direction": "in", "value_type": "bool" },
+        "supply-ok-b": { "direction": "in", "value_type": "bool" },
+        "waste-ok-b": { "direction": "in", "value_type": "bool" },
+        "flow-ok-b": { "direction": "in", "value_type": "bool" },
+        "grant-1": { "direction": "out", "value_type": "bool" },
+        "grant-2": { "direction": "out", "value_type": "bool" },
+        "grant-3": { "direction": "out", "value_type": "bool" },
+        "position-1": { "direction": "out", "value_type": "int" },
+        "position-2": { "direction": "out", "value_type": "int" },
+        "position-3": { "direction": "out", "value_type": "int" },
+        "active-a": { "direction": "out", "value_type": "int" },
+        "queued-a": { "direction": "out", "value_type": "int" },
+        "blocked-a": { "direction": "out", "value_type": "bool" },
+        "grant-b1": { "direction": "out", "value_type": "bool" },
+        "grant-b2": { "direction": "out", "value_type": "bool" },
+        "position-b1": { "direction": "out", "value_type": "int" },
+        "position-b2": { "direction": "out", "value_type": "int" },
+        "active-b": { "direction": "out", "value_type": "int" },
+        "queued-b": { "direction": "out", "value_type": "int" },
+        "blocked-b": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "supply-ok" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "waste-ok" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "flow-ok" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "supply-ok-b" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "waste-ok-b" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "flow-ok-b" }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-1" }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-2" }
+    },
+    {
+      "id": 22,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-3" }
+    },
+    {
+      "id": 23,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-b1" }
+    },
+    {
+      "id": 24,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-b2" }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "int",
+      "initial": { "int": 0 },
+      "writable": true
+    },
+    {
+      "id": 40,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-1" }
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-2" }
+    },
+    {
+      "id": 42,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-3" }
+    },
+    {
+      "id": 50,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "position-1" }
+    },
+    {
+      "id": 51,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "position-2" }
+    },
+    {
+      "id": 52,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "position-3" }
+    },
+    {
+      "id": 53,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "active-a" }
+    },
+    {
+      "id": 54,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "queued-a" }
+    },
+    {
+      "id": 55,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "blocked-a" }
+    },
+    {
+      "id": 60,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b1" }
+    },
+    {
+      "id": 61,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b2" }
+    },
+    {
+      "id": 70,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "position-b1" }
+    },
+    {
+      "id": 71,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "position-b2" }
+    },
+    {
+      "id": 72,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "active-b" }
+    },
+    {
+      "id": 73,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "queued-b" }
+    },
+    {
+      "id": 74,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "blocked-b" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "filter-1-backwash-request",
+      "source": 20,
+      "description": "Filter 1 armed backwash request"
+    },
+    {
+      "id": 101,
+      "name": "filter-2-backwash-request",
+      "source": 21,
+      "description": "Filter 2 armed backwash request"
+    },
+    {
+      "id": 102,
+      "name": "filter-3-backwash-request",
+      "source": 22,
+      "description": "Filter 3 armed backwash request"
+    },
+    {
+      "id": 103,
+      "name": "backwash-active",
+      "source": 53,
+      "description": "Filter holding the exclusive backwash supply grant"
+    },
+    {
+      "id": 104,
+      "name": "backwash-queued",
+      "source": 54,
+      "description": "Backwash requests pending in the queue"
+    },
+    {
+      "id": 105,
+      "name": "backwash-resource-blocked",
+      "source": 55,
+      "description": "A queued backwash request blocked by a failed grant permissive"
+    },
+    {
+      "id": 106,
+      "name": "backwash-reorder",
+      "source": 30,
+      "description": "Operator standing reorder instruction for the managed bank"
+    }
+  ],
+  "components": [
+    {
+      "id": 10,
+      "kind": "backwash-coordinator",
+      "parameters": {
+        "queue_policy": { "int": 0 },
+        "queued_state": { "int": 0 }
+      },
+      "ports": {
+        "supply_ok": { "direction": "in", "value_type": "bool" },
+        "waste_ok": { "direction": "in", "value_type": "bool" },
+        "flow_ok": { "direction": "in", "value_type": "bool" },
+        "request_1": { "direction": "in", "value_type": "bool" },
+        "grant_1": { "direction": "out", "value_type": "bool" },
+        "position_1": { "direction": "out", "value_type": "int" },
+        "request_2": { "direction": "in", "value_type": "bool" },
+        "grant_2": { "direction": "out", "value_type": "bool" },
+        "position_2": { "direction": "out", "value_type": "int" },
+        "request_3": { "direction": "in", "value_type": "bool" },
+        "grant_3": { "direction": "out", "value_type": "bool" },
+        "position_3": { "direction": "out", "value_type": "int" },
+        "active": { "direction": "out", "value_type": "int" },
+        "queued": { "direction": "out", "value_type": "int" },
+        "resource_blocked": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "backwash-coordinator",
+      "parameters": {
+        "queue_policy": { "int": 2 },
+        "queued_state": { "int": 1 }
+      },
+      "ports": {
+        "supply_ok": { "direction": "in", "value_type": "bool" },
+        "waste_ok": { "direction": "in", "value_type": "bool" },
+        "flow_ok": { "direction": "in", "value_type": "bool" },
+        "reorder": { "direction": "in", "value_type": "int" },
+        "request_1": { "direction": "in", "value_type": "bool" },
+        "grant_1": { "direction": "out", "value_type": "bool" },
+        "position_1": { "direction": "out", "value_type": "int" },
+        "request_2": { "direction": "in", "value_type": "bool" },
+        "grant_2": { "direction": "out", "value_type": "bool" },
+        "position_2": { "direction": "out", "value_type": "int" },
+        "active": { "direction": "out", "value_type": "int" },
+        "queued": { "direction": "out", "value_type": "int" },
+        "resource_blocked": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 10, "name": "supply_ok" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 10, "name": "waste_ok" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 10, "name": "flow_ok" } }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 10, "name": "request_1" } }
+    },
+    {
+      "from": { "point": 21 },
+      "to": { "port": { "component": 10, "name": "request_2" } }
+    },
+    {
+      "from": { "point": 22 },
+      "to": { "port": { "component": 10, "name": "request_3" } }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "grant_1" } },
+      "to": { "point": 40 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "grant_2" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "grant_3" } },
+      "to": { "point": 42 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "position_1" } },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "position_2" } },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "position_3" } },
+      "to": { "point": 52 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "active" } },
+      "to": { "point": 53 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "queued" } },
+      "to": { "point": 54 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "resource_blocked" } },
+      "to": { "point": 55 }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 11, "name": "supply_ok" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 11, "name": "waste_ok" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 11, "name": "flow_ok" } }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 11, "name": "reorder" } }
+    },
+    {
+      "from": { "point": 23 },
+      "to": { "port": { "component": 11, "name": "request_1" } }
+    },
+    {
+      "from": { "point": 24 },
+      "to": { "port": { "component": 11, "name": "request_2" } }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "grant_1" } },
+      "to": { "point": 60 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "grant_2" } },
+      "to": { "point": 61 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "position_1" } },
+      "to": { "point": 70 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "position_2" } },
+      "to": { "point": 71 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "active" } },
+      "to": { "point": 72 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "queued" } },
+      "to": { "point": 73 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "resource_blocked" } },
+      "to": { "point": 74 }
+    }
+  ]
+}

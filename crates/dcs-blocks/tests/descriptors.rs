@@ -4,11 +4,13 @@
 //! `TelemetrySnapshot` serde-roundtrips.
 
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, GateOperation, GroupOutputs, Interlock,
-    LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, RateLimiter, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SignalFilter, SrLatch, Timer, Totalizer, Valve,
+    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
+    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
+    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
+    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
+    Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
+    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer,
+    Valve,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -316,12 +318,45 @@ fn rig() -> Rig {
             point(&mut specs, 252, Direction::Out, ValueKind::Bool),
             point(&mut specs, 253, Direction::Out, ValueKind::Bool),
         )),
+        Box::new(
+            BackwashCoordinator::new(
+                "bwc",
+                PermissiveInputs {
+                    supply_ok: point(&mut specs, 260, Direction::In, ValueKind::Bool),
+                    waste_ok: point(&mut specs, 261, Direction::In, ValueKind::Bool),
+                    flow_ok: point(&mut specs, 262, Direction::In, ValueKind::Bool),
+                },
+                Some(point(&mut specs, 263, Direction::In, ValueKind::Int)),
+                vec![
+                    FilterIo {
+                        request: point(&mut specs, 264, Direction::In, ValueKind::Bool),
+                        grant: point(&mut specs, 265, Direction::Out, ValueKind::Bool),
+                        position: point(&mut specs, 266, Direction::Out, ValueKind::Int),
+                    },
+                    FilterIo {
+                        request: point(&mut specs, 267, Direction::In, ValueKind::Bool),
+                        grant: point(&mut specs, 268, Direction::Out, ValueKind::Bool),
+                        position: point(&mut specs, 269, Direction::Out, ValueKind::Int),
+                    },
+                ],
+                CoordinatorOutputs {
+                    active: point(&mut specs, 270, Direction::Out, ValueKind::Int),
+                    queued: point(&mut specs, 271, Direction::Out, ValueKind::Int),
+                    resource_blocked: point(&mut specs, 272, Direction::Out, ValueKind::Bool),
+                },
+                BackwashCoordinatorConfig {
+                    queue_policy: QueuePolicy::Fifo,
+                    queued_state: QueuedState::KeepFiltering,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 24] = [
+const EXPECTED_KINDS: [&str; 25] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -346,6 +381,7 @@ const EXPECTED_KINDS: [&str; 24] = [
     SrLatch::KIND,
     EdgeTrigger::KIND,
     BoolLatchingAlarm::KIND,
+    BackwashCoordinator::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
