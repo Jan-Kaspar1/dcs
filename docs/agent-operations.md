@@ -68,6 +68,20 @@ Reviewer guidance is pinned in `agent_pool/resources/architecture/` (project pol
 
 Rollout: install the pinned upgrade, keep `enabled` at `false` to stage, then set `enabled`/`mode` per the table. `mode: report` with `auto_promote` exercises the staged path — one validated report promotes to `pilot` (planner ingestion for at most one active improvement), and a confirmed post-merge assessment of that pilot improvement promotes to `full` — without a manual report-inspection gate. A rejected assessment rolls back to `report`.
 
+## QA findings lane
+
+The supervisor ingests Lenovo QA run reports from `<state_root>/qa/reports/` and is the sole GitHub publisher for QA findings: reproduced defects become managed issues (severity maps to P1-P3, never P0; the affected module is the concurrency group), missing capabilities become planner candidates, and rig/build/credential/agent failures stay operational records. Merged fixes chain finding -> issue -> fix SHA -> verification; a failed fix yields a linked follow-up issue bounded by `max_fix_cycles`, never a bare reopen. See `docs/qa-findings-ingestion.md` for the report contract, lifecycle, and seeded-defect demo.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `qa.enabled` | `false` | Ingest QA reports each cycle. |
+| `qa.mode` | `record` | `record` validates/records only; `route` publishes issues, candidates, and follow-ups. |
+| `qa.dashboard` | `false` | Publish `qa/findings.json` to the Pi dashboard (content-hashed, tolerant of outages). Keep off until the Pi view exists. |
+| `qa.report_dir` | `<state_root>/qa/reports` | Report inbox; processed and rejected files move beside it. |
+| `qa.max_open` / `qa.max_issues_per_report` / `qa.max_fix_cycles` | `20` / `5` / `2` | Open-finding bound, per-pass issue cap, and fix-attempt bound. |
+
+`dcs-agents status` reports `qa` lane counts, pending verifications, and the last publication error. The lane is fail-safe: a malformed report is quarantined to `qa/rejected/` and never wedges the dispatch loop.
+
 ## Recovery and upgrades
 
 Inspect `status`, the invocation receipt, and its output before retrying a failed job. When a job blocks, the supervisor records a recovery state (branch, original checkout, last known commit, and whether preserved work exists) and commits dirty work-in-progress onto the issue branch while its checkout is still assigned. `retry` then recovers under an exclusive clone lease: an idle original checkout is switched back to the job branch; a busy one is bypassed by fetching the preserved ref into a free worker clone; and a fresh branch from current main is created only after every checkout, quarantine, and the remote prove no work exists. Recovery failures retain the recorded state and report a specific error rather than implying no work exists. A dirty managed clone is renamed with a `-quarantine-` suffix before replacement; recovery also surveys quarantines for preserved refs. Do not delete quarantines or reset a worker checkout merely to clear an error. If a process ownership record is inconsistent, stop the service and resolve the recorded process/workspace state before resuming.
