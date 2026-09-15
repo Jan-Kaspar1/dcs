@@ -3,9 +3,10 @@
 # docs/architecture.md). It declares as data the same topology
 # docs/packaging.md documents as commands: one dcs-plant-server
 # container and a redundant dcs-controller pair attaching to its
-# listener, the checked-in model and dynamics documents mounted
-# read-only (decision 46 — deployment-supplied paths, never content
-# over the wire), and the standby wired to the active's monitor.
+# listener, the checked-in reference-station model and dynamics
+# documents mounted read-only (decision 46 — deployment-supplied
+# paths, never content over the wire), and the standby wired to the
+# active's monitor.
 #
 # `docker compose config` statically checks the file;
 # `docker compose build` produces the same dcs-controller and
@@ -28,8 +29,8 @@ services:
     networks:
       - dcs-rig
     volumes:
-      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
-      - ./crates/dcs-plant/fixtures/tank_loop_dynamics.json:/model/dynamics.json:ro
+      - ./crates/dcs-demo/fixtures/pump_station.json:/model/plant.json:ro
+      - ./crates/dcs-demo/fixtures/pump_station_dynamics.json:/model/dynamics.json:ro
     command:
       - /model/plant.json
       - --dynamics
@@ -62,7 +63,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
+      - ./crates/dcs-demo/fixtures/pump_station.json:/model/plant.json:ro
     command:
       - /model/plant.json
       - --remote
@@ -88,7 +89,7 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ./crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro
+      - ./crates/dcs-demo/fixtures/pump_station.json:/model/plant.json:ro
     command:
       - /model/plant.json
       - --remote
