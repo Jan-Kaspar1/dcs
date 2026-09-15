@@ -35,6 +35,7 @@ QUEUE_SCHEMA = 'qa-verifications/1'
 RUN_PREFIX = 'qav'
 REPORTED_KEY = 'verification:reported'
 SPEC_PREFIX = 'verification:spec:'
+PINS_KEY = 'verification:pins'
 
 KEY = qa_report.KEY
 SHA = qa_report.GIT_SHA
@@ -146,6 +147,59 @@ def _target_sha(st):
     if queued is not None:
         return queued['attempted_sha']
     return st.last_attempted_sha()
+
+
+def sync_preserves(st, cfg, log=print):
+    """Reconcile retention pins with the live verification queue.
+
+    While a finding still sits in the supervisor's pending queue, the
+    evidence that proves its verdict stays pinned against reclaim(): the
+    qav run dirs (the relay may not have pulled the report yet, and a
+    retry may need the case evidence) and the tested revision's source
+    tree/images. Once the item leaves the queue — the verdict was
+    certified or the finding moved on — the pins release and ordinary
+    retention applies. Only pins this lane took (recorded under
+    PINS_KEY) are ever released; manual `qa_lane preserve` pins are
+    never touched.
+    """
+    pending = {item['finding_key'] for item in load_queue(cfg)}
+    marks = reported(st)
+    want_runs, want_shas = set(), set()
+    if pending:
+        # The next dispatched run tests the current target; keep its
+        # source/images alive even before the run record exists.
+        target = _target_sha(st)
+        if target:
+            want_shas.add(target)
+    for key in pending:
+        mark = marks.get(key)
+        if mark and mark.get('tested_sha'):
+            want_shas.add(mark['tested_sha'])
+    for record in st.runs():
+        run_id = record['run_id']
+        if not run_id.startswith(RUN_PREFIX + '-'):
+            continue
+        spec = st.get(SPEC_PREFIX + run_id) or {}
+        item = spec.get('item') or {}
+        if item.get('finding_key') not in pending:
+            continue
+        want_runs.add(run_id)
+        if record.get('attempted_sha'):
+            want_shas.add(record['attempted_sha'])
+    prev = st.get(PINS_KEY, {'runs': [], 'shas': []})
+    for run_id in want_runs - set(prev['runs']):
+        st.set_preserve('run', run_id, True)
+    for sha in want_shas - set(prev['shas']):
+        st.set_preserve('sha', sha, True)
+    for run_id in set(prev['runs']) - want_runs:
+        st.set_preserve('run', run_id, False)
+    for sha in set(prev['shas']) - want_shas:
+        st.set_preserve('sha', sha, False)
+    now = {'runs': sorted(want_runs), 'shas': sorted(want_shas)}
+    if now != prev:
+        st.set(PINS_KEY, now)
+        log('verification preserves: %d run(s), %d sha(s) pinned'
+            % (len(want_runs), len(want_shas)))
 
 
 def _teardown(run_id, timeline):
