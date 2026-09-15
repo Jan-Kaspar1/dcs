@@ -456,6 +456,7 @@ mod tests {
             id: ComponentId(1),
             kind: "analog-input".to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut ai =

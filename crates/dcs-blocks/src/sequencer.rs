@@ -875,6 +875,7 @@ mod tests {
             id: ComponentId(11),
             kind: Sequencer::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block =

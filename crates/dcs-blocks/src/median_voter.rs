@@ -616,6 +616,7 @@ mod tests {
             id: ComponentId(17),
             kind: MedianVoter::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = MedianVoter::from_parameters(

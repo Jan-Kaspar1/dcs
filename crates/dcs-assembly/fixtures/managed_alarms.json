@@ -386,6 +386,11 @@
         "class": { "int": 2 },
         "response_ticks": { "int": 30 }
       },
+      "rationalization": {
+        "consequence": "The wet well leaves its limits unnoticed",
+        "required_action": "Acknowledge and respond to the level excursion",
+        "reference": "level-alarm"
+      },
       "ports": {
         "in": { "direction": "in", "value_type": "float" },
         "ack": { "direction": "in", "value_type": "bool" },
@@ -408,6 +413,11 @@
         "class": { "int": 1 },
         "response_ticks": { "int": 20 }
       },
+      "rationalization": {
+        "consequence": "The pump fault stands unnoticed",
+        "required_action": "Acknowledge and clear the pump fault",
+        "reference": "fault-alarm"
+      },
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "ack": { "direction": "in", "value_type": "bool" },
@@ -429,6 +439,11 @@
         "priority": { "int": 1 },
         "class": { "int": 1 },
         "response_ticks": { "int": 10 }
+      },
+      "rationalization": {
+        "consequence": "Station power is lost while the plant must run",
+        "required_action": "Switch to backup power and investigate the supply",
+        "reference": "power-alarm"
       },
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },

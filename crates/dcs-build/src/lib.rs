@@ -127,4 +127,4 @@ pub use spec::{
 // The contract vocabulary a composition speaks: re-exported so a
 // `dcs-build` consumer needs no other crate's imports.
 pub use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
-pub use dcs_model::{ChannelRef, ComponentId, DeviceId, Endpoint, PortRef};
+pub use dcs_model::{ChannelRef, ComponentId, DeviceId, Endpoint, PortRef, Rationalization};

@@ -522,6 +522,7 @@ mod tests {
             id: ComponentId(2),
             kind: Pid::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let pid = Pid::from_parameters("pid", SP, PV, OUT, &instance.parameters).unwrap();

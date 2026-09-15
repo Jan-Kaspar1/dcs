@@ -1,8 +1,9 @@
 //! The component-kind registry: model `kind` strings to constructors.
 
 use crate::BuildError;
+use crate::error::MissingRationalization;
 use dcs_core::{PointId, Value, ValueKind};
-use dcs_model::ComponentId;
+use dcs_model::{ComponentId, Rationalization};
 use dcs_runtime::{Component, PointMap};
 use std::collections::BTreeMap;
 
@@ -14,7 +15,11 @@ use std::collections::BTreeMap;
 /// Which port names a kind requires is the kind's contract, mirroring its
 /// declared logical I/O. `points` is the resolved driver point map, so a
 /// kind with type-parameterized variants can pick one from the bound
-/// point's value kind.
+/// point's value kind. `rationalization` is the instance's declared
+/// decision-70 alarm record, if it carries one — the alarm kinds'
+/// constructors require it through
+/// [`require_rationalization`](Self::require_rationalization), assembly
+/// being where kind and instance meet.
 pub struct ComponentSpec<'m> {
     /// The instance's diagnostic name — `"<kind>:<id>"`, e.g. `"pid:1"` —
     /// carried into executor diagnostics.
@@ -27,9 +32,12 @@ pub struct ComponentSpec<'m> {
     pub ports: &'m BTreeMap<String, PointId>,
     /// The resolved point map: every served point's direction and kind.
     pub points: &'m PointMap,
+    /// The instance's `rationalization` block — the decision-70 alarm
+    /// prose — or `None` for an instance that carries none.
+    pub rationalization: Option<&'m Rationalization>,
 }
 
-impl ComponentSpec<'_> {
+impl<'m> ComponentSpec<'m> {
     /// The point bound to `port`, or [`BuildError::UnboundPort`] when the
     /// model wires no port of that name.
     pub fn require(&self, port: &str) -> Result<PointId, BuildError> {
@@ -52,6 +60,34 @@ impl ComponentSpec<'_> {
     /// from the bound point's kind.
     pub fn point_kind(&self, point: PointId) -> Option<ValueKind> {
         self.points.get(point).map(|spec| spec.kind)
+    }
+
+    /// The instance's alarm rationalization record, or the
+    /// [`BuildError`] naming the missing element — `"rationalization"`
+    /// when the instance declares no block, else the empty field's name
+    /// (`"consequence"`, `"required_action"`, or `"reference"`).
+    ///
+    /// The alarm kinds' registry constructors call this so an alarm
+    /// instance without a complete record fails construction — the
+    /// decision-70 rejection surfacing as
+    /// [`AssemblyError::Component`](crate::AssemblyError::Component)
+    /// through `assemble` and `dcs-controller --check`.
+    pub fn require_rationalization(&self) -> Result<&'m Rationalization, BuildError> {
+        let record = self.rationalization.ok_or_else(|| {
+            BuildError::other(MissingRationalization {
+                element: "rationalization",
+            })
+        })?;
+        for (element, prose) in [
+            ("consequence", &record.consequence),
+            ("required_action", &record.required_action),
+            ("reference", &record.reference),
+        ] {
+            if prose.trim().is_empty() {
+                return Err(BuildError::other(MissingRationalization { element }));
+            }
+        }
+        Ok(record)
     }
 
     /// The bound members of the `prefix`-indexed port family — the ports
@@ -202,6 +238,7 @@ mod tests {
             parameters: &PARAMETERS,
             ports,
             points: &POINTS,
+            rationalization: None,
         }
     }
 
@@ -211,6 +248,51 @@ mod tests {
             .iter()
             .map(|(name, point)| (name.to_string(), PointId(*point)))
             .collect()
+    }
+
+    /// `require_rationalization` is the decision-70 construction seam:
+    /// an absent block names `"rationalization"`, an empty prose field
+    /// names the field, and a complete record is returned.
+    #[test]
+    fn require_rationalization_names_the_missing_element() {
+        let ports = BTreeMap::new();
+        // No block.
+        match spec(&ports).require_rationalization() {
+            Err(BuildError::Other(error)) => assert_eq!(
+                error.downcast_ref::<MissingRationalization>(),
+                Some(&MissingRationalization {
+                    element: "rationalization"
+                })
+            ),
+            other => panic!("expected MissingRationalization, got {other:?}"),
+        }
+
+        // An empty prose field names the field.
+        let record = Rationalization {
+            consequence: "The wet well overflows".to_string(),
+            required_action: " ".to_string(),
+            reference: "station-high-level".to_string(),
+        };
+        let mut with_record = spec(&ports);
+        with_record.rationalization = Some(&record);
+        match with_record.require_rationalization() {
+            Err(BuildError::Other(error)) => assert_eq!(
+                error.downcast_ref::<MissingRationalization>(),
+                Some(&MissingRationalization {
+                    element: "required_action"
+                })
+            ),
+            other => panic!("expected MissingRationalization, got {other:?}"),
+        }
+
+        // A complete record is returned.
+        let complete = Rationalization {
+            consequence: "The wet well overflows".to_string(),
+            required_action: "Start the standby pump".to_string(),
+            reference: "station-high-level".to_string(),
+        };
+        with_record.rationalization = Some(&complete);
+        assert_eq!(with_record.require_rationalization().unwrap(), &complete);
     }
 
     /// `indexed` orders the family by numeric suffix: across the

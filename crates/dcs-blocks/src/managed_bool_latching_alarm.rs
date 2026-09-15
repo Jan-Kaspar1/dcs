@@ -952,6 +952,7 @@ mod tests {
             id: ComponentId(13),
             kind: ManagedBoolLatchingAlarm::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block =

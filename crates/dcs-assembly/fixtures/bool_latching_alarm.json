@@ -125,7 +125,16 @@
     {
       "id": 2,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "priority": { "int": 1 },
+        "class": { "int": 2 },
+        "response_ticks": { "int": 30 }
+      },
+      "rationalization": {
+        "consequence": "The motor fault stands unnoticed",
+        "required_action": "Acknowledge and clear the motor fault",
+        "reference": "fault-alarm"
+      },
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "ack": { "direction": "in", "value_type": "bool" },

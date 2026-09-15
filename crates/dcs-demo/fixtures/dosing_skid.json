@@ -2894,6 +2894,9 @@
       "id": 14,
       "kind": "latching-alarm",
       "parameters": {
+        "class": {
+          "int": 1
+        },
         "high_limit": {
           "float": 1000000000.0
         },
@@ -2902,7 +2905,18 @@
         },
         "low_limit": {
           "float": 150.0
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
         }
+      },
+      "rationalization": {
+        "consequence": "The chemical tank runs low and dosing capacity narrows",
+        "required_action": "Arrange a chemical refill before the tank empties",
+        "reference": "tank-low-alarm"
       },
       "ports": {
         "ack": {
@@ -2927,6 +2941,9 @@
       "id": 15,
       "kind": "latching-alarm",
       "parameters": {
+        "class": {
+          "int": 1
+        },
         "high_limit": {
           "float": 1000000000.0
         },
@@ -2935,7 +2952,18 @@
         },
         "low_limit": {
           "float": 60.0
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
         }
+      },
+      "rationalization": {
+        "consequence": "The chemical tank is empty and dosing stops",
+        "required_action": "Refill the tank and confirm the permissive clears",
+        "reference": "tank-empty-alarm"
       },
       "ports": {
         "ack": {
@@ -2959,7 +2987,22 @@
     {
       "id": 16,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "Dosing runs un-paced against the fallback demand",
+        "required_action": "Check the process flowmeter and the pacing source",
+        "reference": "pacing-lost-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2982,7 +3025,22 @@
     {
       "id": 17,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "A chemical spill floods the bund unannounced",
+        "required_action": "Inspect the skid and clear the bund",
+        "reference": "bund-flood-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3005,7 +3063,22 @@
     {
       "id": 18,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "An external inhibit holds dosing off unnoticed",
+        "required_action": "Trace the external inhibit contact",
+        "reference": "external-inhibit-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3028,7 +3101,22 @@
     {
       "id": 19,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The delivered dose deviates from the demand unnoticed",
+        "required_action": "Check the pump delivery and the dose calculation",
+        "reference": "dose-deviation-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3244,7 +3332,22 @@
     {
       "id": 28,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot dose while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p201-fault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3267,7 +3370,22 @@
     {
       "id": 29,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump runs without proven discharge",
+        "required_action": "Check the pump's discharge path and fault contact",
+        "reference": "p201-pfault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3483,7 +3601,22 @@
     {
       "id": 38,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot dose while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p202-fault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -3506,7 +3639,22 @@
     {
       "id": 39,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump runs without proven discharge",
+        "required_action": "Check the pump's discharge path and fault contact",
+        "reference": "p202-pfault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",

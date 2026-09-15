@@ -95,7 +95,7 @@ use crate::specs::{
     LatchingAlarmInstance, LatchingAlarmSpec, ManualStationSpec, MotorSpec, PumpGroupInstance,
     PumpGroupSpec, ThresholdChainSpec, TotalizerSpec,
 };
-use crate::station::AlarmLayout;
+use crate::station::{AlarmLayout, rationalization};
 use crate::{
     BuildError, ChannelRef, Direction, OutPoint, PlantBuilder, PointId, SignalId, Sink, Source,
     Value, parameters,
@@ -1163,21 +1163,87 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
     ])));
 
     // The decision-55 alarm set — each latching on its condition and
-    // its own writable ack point.
-    let low_alarm = plant.add(LatchingAlarmSpec::new(parameters([
-        ("low_limit", Value::Float(config.tank_low)),
-        ("high_limit", Value::Float(PARKED_LIMIT)),
-        ("hysteresis", Value::Float(config.tank_hysteresis)),
-    ])));
-    let empty_alarm = plant.add(LatchingAlarmSpec::new(parameters([
-        ("low_limit", Value::Float(config.tank_empty)),
-        ("high_limit", Value::Float(PARKED_LIMIT)),
-        ("hysteresis", Value::Float(config.tank_hysteresis)),
-    ])));
-    let pacing_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let bund_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let external_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let deviation_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
+    // its own writable ack point. The decision-70 codes are declared
+    // data — the site priority/class vocabulary and response budgets
+    // stay an open customer assumption.
+    let low_alarm = plant.add(LatchingAlarmSpec::new(
+        parameters([
+            ("low_limit", Value::Float(config.tank_low)),
+            ("high_limit", Value::Float(PARKED_LIMIT)),
+            ("hysteresis", Value::Float(config.tank_hysteresis)),
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The chemical tank runs low and dosing capacity narrows",
+            "Arrange a chemical refill before the tank empties",
+            "tank-low-alarm",
+        ),
+    ));
+    let empty_alarm = plant.add(LatchingAlarmSpec::new(
+        parameters([
+            ("low_limit", Value::Float(config.tank_empty)),
+            ("high_limit", Value::Float(PARKED_LIMIT)),
+            ("hysteresis", Value::Float(config.tank_hysteresis)),
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The chemical tank is empty and dosing stops",
+            "Refill the tank and confirm the permissive clears",
+            "tank-empty-alarm",
+        ),
+    ));
+    let pacing_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "Dosing runs un-paced against the fallback demand",
+            "Check the process flowmeter and the pacing source",
+            "pacing-lost-alarm",
+        ),
+    ));
+    let bund_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "A chemical spill floods the bund unannounced",
+            "Inspect the skid and clear the bund",
+            "bund-flood-alarm",
+        ),
+    ));
+    let external_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "An external inhibit holds dosing off unnoticed",
+            "Trace the external inhibit contact",
+            "external-inhibit-alarm",
+        ),
+    ));
+    let deviation_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The delivered dose deviates from the demand unnoticed",
+            "Check the pump delivery and the dose calculation",
+            "dose-deviation-alarm",
+        ),
+    ));
 
     // ---------- the ratio demand and the permissive chain ----------
     // The operator dose rides the writable internal point; `demand`,
@@ -1764,8 +1830,30 @@ fn wire_pump(
         "preset",
         Value::Int(config.stroke_preset),
     )])));
-    let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let pfault_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
+    let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(60)),
+        ]),
+        rationalization(
+            "The pump cannot dose while its fault stands",
+            "Clear the motor fault and reset the pump",
+            &format!("{tag}-fault-alarm"),
+        ),
+    ));
+    let pfault_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(60)),
+        ]),
+        rationalization(
+            "The pump runs without proven discharge",
+            "Check the pump's discharge path and fault contact",
+            &format!("{tag}-pfault-alarm"),
+        ),
+    ));
 
     // avail_i = remote-selected and in-service and pump-fault contact
     // healthy — the decision-52 availability wiring.

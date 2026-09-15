@@ -289,6 +289,7 @@ order.
 | `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
 | `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
+|| `rationalization` | object: `consequence`/`required_action`/`reference` strings | Optional; absent serializes to nothing. The decision-70 prose half of an alarm instance's rationalization record — the consequence of inaction, the required operator action, and the display/procedure reference. The model stores it uninterpreted; the alarm kinds' construction requires it (see below). |
 
 The model does not validate `parameters` contents or that a `kind`
 exists: kind resolution and parameter checking are assembly's, because
@@ -338,7 +339,7 @@ The Bool-input latching sibling architecture decision 43 records adds
 one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
-standing-limit parameter, so `parameters` stays empty — and
+standing-limit parameter — and
 `unacknowledged` latches the input's false-to-true edge, clearing while
 the model-wired writable `ack` point reads `true` under the same
 level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
@@ -347,6 +348,29 @@ latch). Both outputs carry the worst of the two inputs' qualities.
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
 `BoolLatchingAlarm::KIND`.
+
+The alarm rationalization record architecture decision 70 records
+makes the model the master alarm database. An alarm's identity is the
+component instance plus the `Signal` on its standing `alarm` point —
+no separate alarm tag — and its rationalization data lands in two
+halves. The numeric half is three declared parameters every alarm
+kind carries — `latching-alarm`, `bool-latching-alarm`, and the
+managed siblings below: `priority`, `class`, and `response_ticks`,
+all required non-negative `Int`s served live through the snapshot's
+parameter section, tunable through `SetParameter`, and checkpointed
+like any declared parameter. The site vocabulary the codes name —
+priority levels, class rules — is an open customer assumption the
+model carries as data, not meaning. The prose half is the optional
+`rationalization` block on `ComponentInstance`: `consequence` (of
+inaction), `required_action`, and `reference` (the display/procedure
+the operator consults) — stored uninterpreted and absent serializing
+to nothing, so documents predating it load unchanged. Enforcement
+lands where kind and instance meet — construction of a declared
+alarm kind rejects an instance missing any of the three parameters
+or carrying no complete non-empty prose record, the failure naming
+the element through `AssemblyError::Component` and surfacing through
+`dcs-controller --check`. The emitted JSON Schema pins the same
+kind-conditional obligation where expressible.
 
 The managed alarm lifecycle architecture decisions 71–73 record adds
 two fixed-arity kinds, one managed sibling per latching kind.

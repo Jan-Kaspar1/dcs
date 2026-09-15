@@ -275,6 +275,7 @@ mod tests {
             id: ComponentId(8),
             kind: OverrideSelect::KIND.to_string(),
             parameters: Parameters::new(),
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block = OverrideSelect::from_parameters(

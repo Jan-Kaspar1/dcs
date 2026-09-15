@@ -222,6 +222,7 @@ fn registry() -> ComponentRegistry {
             ))
         })
         .with(LatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             boxed(LatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -318,6 +319,7 @@ fn registry() -> ComponentRegistry {
             ))
         })
         .with(BoolLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             boxed(BoolLatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,

@@ -2078,6 +2078,9 @@
       "id": 5,
       "kind": "latching-alarm",
       "parameters": {
+        "class": {
+          "int": 1
+        },
         "high_limit": {
           "float": 4.0
         },
@@ -2086,7 +2089,18 @@
         },
         "low_limit": {
           "float": -1000000000.0
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
         }
+      },
+      "rationalization": {
+        "consequence": "The wet well overflows the bench",
+        "required_action": "Start a pump and investigate why the demand did not call one",
+        "reference": "lah-alarm"
       },
       "ports": {
         "ack": {
@@ -2111,6 +2125,9 @@
       "id": 6,
       "kind": "latching-alarm",
       "parameters": {
+        "class": {
+          "int": 1
+        },
         "high_limit": {
           "float": 1000000000.0
         },
@@ -2119,7 +2136,18 @@
         },
         "low_limit": {
           "float": 0.5
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
         }
+      },
+      "rationalization": {
+        "consequence": "The wet well pumps dry and the running pumps cavitate",
+        "required_action": "Stop the running pumps and investigate the low level",
+        "reference": "lal-alarm"
       },
       "ports": {
         "ack": {
@@ -2143,7 +2171,22 @@
     {
       "id": 7,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The backup level instrument carries the station unnoticed",
+        "required_action": "Check the primary level instrument",
+        "reference": "backup-active-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2166,7 +2209,22 @@
     {
       "id": 8,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "Demand stands with no pump available to meet it",
+        "required_action": "Restore a pump to service or clear its faults",
+        "reference": "none-available-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2189,7 +2247,22 @@
     {
       "id": 9,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "Every pump is faulted; the station cannot pump",
+        "required_action": "Dispatch maintenance to clear the pump faults",
+        "reference": "all-faulted-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2212,7 +2285,22 @@
     {
       "id": 10,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "Station power is lost; the pumps cannot run",
+        "required_action": "Switch to backup power and investigate the supply",
+        "reference": "power-fail-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2465,7 +2553,22 @@
     {
       "id": 21,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot run while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p101-fault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2488,7 +2591,22 @@
     {
       "id": 22,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The motor overheats and the pump trips out",
+        "required_action": "Investigate the thermal overload and reset the contact",
+        "reference": "p101-thermal-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2511,7 +2629,22 @@
     {
       "id": 23,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 3
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "Water ingress degrades the motor insulation",
+        "required_action": "Schedule a seal inspection for the pump",
+        "reference": "p101-moisture-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2764,7 +2897,22 @@
     {
       "id": 34,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot run while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p102-fault-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2787,7 +2935,22 @@
     {
       "id": 35,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The motor overheats and the pump trips out",
+        "required_action": "Investigate the thermal overload and reset the contact",
+        "reference": "p102-thermal-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",
@@ -2810,7 +2973,22 @@
     {
       "id": 36,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 3
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "Water ingress degrades the motor insulation",
+        "required_action": "Schedule a seal inspection for the pump",
+        "reference": "p102-moisture-alarm"
+      },
       "ports": {
         "ack": {
           "direction": "in",

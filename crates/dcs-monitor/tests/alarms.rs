@@ -7,7 +7,7 @@
 //! point writable — all driven over TCP through the in-process
 //! `MonitorClient`.
 
-use dcs_blocks::{AlarmLimits, LatchingAlarm};
+use dcs_blocks::{AlarmLimits, LatchingAlarm, Rationalization};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, ComponentDescriptor, Direction,
     IoDriver, IoError, JournalEvent, PointId, PortDescriptor, PortRole, Quality, QualityReason,
@@ -96,6 +96,15 @@ fn limits() -> AlarmLimits {
     }
 }
 
+/// The decision-70 codes both rig components declare.
+fn codes() -> Rationalization {
+    Rationalization {
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    }
+}
+
 /// The model fixture behind the monitor: its `io_points` and `signals`
 /// give the rig's points names and carry the `writable` mark the ack
 /// affordance gates on — `ACK1` marked, `ACK2` unmarked.
@@ -135,8 +144,12 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
         &driver,
         map,
         vec![
-            Box::new(LatchingAlarm::new("lal-1", PV1, ACK1, ALARM1, UNACK1, limits()).unwrap()),
-            Box::new(LatchingAlarm::new("lal-2", PV2, ACK2, ALARM2, UNACK2, limits()).unwrap()),
+            Box::new(
+                LatchingAlarm::new("lal-1", PV1, ACK1, ALARM1, UNACK1, limits(), codes()).unwrap(),
+            ),
+            Box::new(
+                LatchingAlarm::new("lal-2", PV2, ACK2, ALARM2, UNACK2, limits(), codes()).unwrap(),
+            ),
         ],
     )
     .unwrap();

@@ -392,6 +392,7 @@ mod tests {
             id: ComponentId(4),
             kind: DigitalInput::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block = DigitalInput::from_parameters("di", IN, OUT, &instance.parameters).unwrap();

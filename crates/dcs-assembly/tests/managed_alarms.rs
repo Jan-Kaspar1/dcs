@@ -83,8 +83,11 @@ fn registry() -> ComponentRegistry {
         })
 }
 
-/// The shared port binding both managed kinds' constructors take.
+/// The shared port binding both managed kinds' constructors take —
+/// plus the decision-70 seam: the instance's rationalization record is
+/// required at construction, mirroring the standard registry.
 fn managed_io(spec: &dcs_assembly::ComponentSpec<'_>) -> Result<ManagedAlarmIo, BuildError> {
+    spec.require_rationalization()?;
     Ok(ManagedAlarmIo {
         input: spec.require("in")?,
         ack: spec.require("ack")?,

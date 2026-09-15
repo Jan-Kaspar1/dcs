@@ -25,9 +25,9 @@ use dcs_blocks::{
     HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
     ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
-    Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
-    ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, Rationalization,
+    RotationPolicy, Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch,
+    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
@@ -108,6 +108,19 @@ fn specs_match_registered_kinds_descriptors() {
         high: 90.0,
         hysteresis: 5.0,
     };
+    // The decision-70 pair: the codes the components carry and the
+    // prose record the specs require — the parameter check compares
+    // only the declared vocabulary.
+    let codes = Rationalization {
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+    let record = dcs_build::Rationalization {
+        consequence: "c".to_string(),
+        required_action: "a".to_string(),
+        reference: "r".to_string(),
+    };
     let mut covered = BTreeSet::new();
 
     // Analog kinds are type-parameterized on the raw channel's value
@@ -170,14 +183,14 @@ fn specs_match_registered_kinds_descriptors() {
             .describe(),
     ));
     covered.insert(check(
-        &LatchingAlarmSpec::new(Default::default()),
-        &LatchingAlarm::new("lal", point(1), point(2), point(3), point(4), limits)
+        &LatchingAlarmSpec::new(Default::default(), record.clone()),
+        &LatchingAlarm::new("lal", point(1), point(2), point(3), point(4), limits, codes)
             .unwrap()
             .describe(),
     ));
     covered.insert(check(
-        &BoolLatchingAlarmSpec::new(Default::default()),
-        &BoolLatchingAlarm::new("bal", point(1), point(2), point(3), point(4)).describe(),
+        &BoolLatchingAlarmSpec::new(Default::default(), record.clone()),
+        &BoolLatchingAlarm::new("bal", point(1), point(2), point(3), point(4), codes).describe(),
     ));
     // The managed siblings' `shelve`/`oos`/`suppress` inputs are
     // optional — declared only where bound — so each spec is checked
@@ -212,23 +225,31 @@ fn specs_match_registered_kinds_descriptors() {
         suppress: true,
     };
     covered.insert(check(
-        &ManagedLatchingAlarmSpec::new(Default::default(), all_managed),
+        &ManagedLatchingAlarmSpec::new(Default::default(), all_managed, record.clone()),
         &ManagedLatchingAlarm::new("mlal", managed_io(1), limits, managed_config)
             .unwrap()
             .describe(),
     ));
     covered.insert(check(
-        &ManagedLatchingAlarmSpec::new(Default::default(), ManagedInputs::default()),
+        &ManagedLatchingAlarmSpec::new(
+            Default::default(),
+            ManagedInputs::default(),
+            record.clone(),
+        ),
         &ManagedLatchingAlarm::new("mlal", unmanaged_io(1), limits, managed_config)
             .unwrap()
             .describe(),
     ));
     covered.insert(check(
-        &ManagedBoolLatchingAlarmSpec::new(Default::default(), all_managed),
+        &ManagedBoolLatchingAlarmSpec::new(Default::default(), all_managed, record.clone()),
         &ManagedBoolLatchingAlarm::new("mbal", managed_io(1), managed_config).describe(),
     ));
     covered.insert(check(
-        &ManagedBoolLatchingAlarmSpec::new(Default::default(), ManagedInputs::default()),
+        &ManagedBoolLatchingAlarmSpec::new(
+            Default::default(),
+            ManagedInputs::default(),
+            record.clone(),
+        ),
         &ManagedBoolLatchingAlarm::new("mbal", unmanaged_io(1), managed_config).describe(),
     ));
     covered.insert(check(

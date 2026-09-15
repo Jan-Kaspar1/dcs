@@ -512,6 +512,7 @@ mod tests {
             id: ComponentId(30),
             kind: BoolGate::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block =

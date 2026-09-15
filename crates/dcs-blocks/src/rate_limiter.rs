@@ -456,6 +456,7 @@ mod tests {
             id: ComponentId(11),
             kind: RateLimiter::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = RateLimiter::from_parameters("rl", IN, OUT, &instance.parameters).unwrap();

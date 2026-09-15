@@ -119,6 +119,9 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(LatchingAlarm::KIND, |spec| {
+            // Decision 70: the alarm's rationalization record is required
+            // at construction — assembly is where kind and instance meet.
+            spec.require_rationalization()?;
             boxed(LatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -129,6 +132,7 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(BoolLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             boxed(BoolLatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -139,6 +143,7 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(ManagedLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             // `shelve`, `oos`, and `suppress` are the optional managed
             // inputs — bound only where the model wires them
             // (`ComponentSpec::get`); an unbound port declares no
@@ -161,6 +166,7 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(ManagedBoolLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             boxed(ManagedBoolLatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 ManagedAlarmIo {

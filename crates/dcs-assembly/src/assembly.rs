@@ -361,6 +361,7 @@ pub fn assemble<'d>(
             parameters: &instance.parameters,
             ports: resolved.bindings.get(&instance.id).unwrap_or(&NO_PORTS),
             points: &resolved.point_map,
+            rationalization: instance.rationalization.as_ref(),
         };
         let component = constructor(&spec).map_err(|error| match error {
             BuildError::UnboundPort { port } => AssemblyError::UnboundPort {

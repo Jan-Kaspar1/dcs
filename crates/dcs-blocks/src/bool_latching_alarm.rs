@@ -3,7 +3,10 @@
 
 use crate::describe;
 use crate::params::{ParameterError, Parameters};
-use dcs_core::{ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value};
+use crate::rationalization::Rationalization;
+use dcs_core::{
+    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick, Value,
+};
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 
 /// A Bool latching alarm: reads a boolean `in` point and a boolean
@@ -41,13 +44,17 @@ use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepErr
 /// Declared I/O: `in` (`In`, `Bool`), `ack` (`In`, `Bool`), `alarm`
 /// (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
 ///
-/// The kind declares no parameters: the Bool analogue of the standing
-/// limit state has no limits and no hysteresis to tune.
+/// Parameters: the decision-70 rationalization codes `priority`,
+/// `class`, and `response_ticks` — required non-negative `Int`s. The
+/// Bool analogue of the standing limit state has no limits and no
+/// hysteresis to tune; the instance's `rationalization` prose block is
+/// a separate obligation the registry checks where kind and instance
+/// meet.
 ///
 /// **Recorded choice (decision 43):** the Bool sibling is its own
 /// kind, not a `point_kind`-dispatched `latching-alarm` variant —
 /// the sibling's contract differs in the `in` port's value kind *and*
-/// carries no parameter set, so one kind string would name two
+/// carries no limit parameters, so one kind string would name two
 /// different port signatures and parameter vocabularies. A dedicated
 /// kind keeps each `kind` naming exactly one contract, keeps the
 /// spec↔descriptor drift guard one-to-one, and lets `dcs-build` check
@@ -59,6 +66,9 @@ pub struct BoolLatchingAlarm {
     ack: PointId,
     alarm: PointId,
     unacknowledged: PointId,
+    /// The declared rationalization codes — decision 70's
+    /// `priority`/`class`/`response_ticks`.
+    rationalization: Rationalization,
     /// The `in` level observed on the previous scan — the edge the
     /// latch arms on. `false` before the first scan, so a `true`
     /// first read is a fresh assertion — the same convention
@@ -74,14 +84,16 @@ impl BoolLatchingAlarm {
     /// this type's constructor.
     pub const KIND: &'static str = "bool-latching-alarm";
 
-    /// Builds the component from explicit points; the latch starts
-    /// cleared and the tracked `in` level starts `false`.
+    /// Builds the component from explicit points and the declared
+    /// rationalization codes; the latch starts cleared and the tracked
+    /// `in` level starts `false`.
     pub fn new(
         name: impl Into<String>,
         input: PointId,
         ack: PointId,
         alarm: PointId,
         unacknowledged: PointId,
+        rationalization: Rationalization,
     ) -> Self {
         Self {
             name: name.into(),
@@ -89,24 +101,32 @@ impl BoolLatchingAlarm {
             ack,
             alarm,
             unacknowledged,
+            rationalization,
             state: false,
             latched: false,
         }
     }
 
-    /// Builds the component from a plant-model parameter map; the kind
-    /// declares no parameters, so the map is unread — an unexpected key
-    /// is the `dcs-build` spec's `UnknownParameter` case at composition,
-    /// not a construction failure.
+    /// Builds the component from a plant-model parameter map, reading
+    /// the required rationalization codes the type's docs list.
     pub fn from_parameters(
         name: impl Into<String>,
         input: PointId,
         ack: PointId,
         alarm: PointId,
         unacknowledged: PointId,
-        _parameters: &Parameters,
+        parameters: &Parameters,
     ) -> Result<Self, ParameterError> {
-        Ok(Self::new(name, input, ack, alarm, unacknowledged))
+        let name = name.into();
+        let rationalization = Rationalization::from_parameters(&name, parameters)?;
+        Ok(Self::new(
+            name,
+            input,
+            ack,
+            alarm,
+            unacknowledged,
+            rationalization,
+        ))
     }
 }
 
@@ -145,7 +165,7 @@ impl Component for BoolLatchingAlarm {
     /// Describes the block with the sibling's roles: `in` is the Bool
     /// alarm condition, `ack` the operator's clearing command, `alarm`
     /// the reported standing state, `unacknowledged` the reported
-    /// latch. The kind declares no parameters.
+    /// latch; the parameters are the decision-70 rationalization codes.
     fn describe(&self) -> ComponentDescriptor {
         describe::component(
             &self.name,
@@ -157,26 +177,52 @@ impl Component for BoolLatchingAlarm {
                 ("alarm", PortRole::Status),
                 ("unacknowledged", PortRole::Status),
             ],
-            vec![],
+            Rationalization::parameters(),
         )
     }
 
+    /// Tunes a declared rationalization code at the scan boundary — a
+    /// non-negative `Int`.
+    fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
+        self.rationalization = self.rationalization.tune(&self.name, parameter, value)?;
+        Ok(())
+    }
+
+    /// Reports the declared rationalization codes — the same fields
+    /// [`capture_state`](Self::capture_state) checkpoints, so the
+    /// faceplate and a tracking standby read one vocabulary.
+    fn report_parameters(&self) -> StateMap {
+        let mut parameters = StateMap::new();
+        self.rationalization.report(&mut parameters);
+        parameters
+    }
+
     /// Captures the tracked `in` level — so a restored standby does not
-    /// re-latch a still-asserted, already-acknowledged alarm — and the
+    /// re-latch a still-asserted, already-acknowledged alarm — the
     /// acknowledgment latch, so a tracking standby inherits
-    /// unacknowledged alarms; the Bool analogue of the sibling's
-    /// `state`/`unacknowledged` vocabulary.
+    /// unacknowledged alarms, and the tuned codes; the Bool analogue of
+    /// the sibling's `state`/`unacknowledged` vocabulary.
     fn capture_state(&self) -> StateMap {
-        let mut state = StateMap::new();
+        let mut state = self.report_parameters();
         state.insert("state", Value::Bool(self.state));
         state.insert("unacknowledged", Value::Bool(self.latched));
         state
     }
 
     fn restore_state(&mut self, state: &StateMap) -> Result<(), StateError> {
-        state.ensure_known_fields(&self.name, &["state", "unacknowledged"])?;
+        state.ensure_known_fields(
+            &self.name,
+            &[
+                "state",
+                "unacknowledged",
+                "priority",
+                "class",
+                "response_ticks",
+            ],
+        )?;
         let restored = state.require_bool(&self.name, "state")?;
         let latched = state.require_bool(&self.name, "unacknowledged")?;
+        self.rationalization = Rationalization::restore(&self.name, state)?;
         self.state = restored;
         self.latched = latched;
         Ok(())
@@ -196,8 +242,15 @@ mod tests {
     const ALARM: PointId = PointId(152);
     const UNACK: PointId = PointId(153);
 
+    /// The rationalization codes the tests build against.
+    const RATIONALIZATION: Rationalization = Rationalization {
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+
     fn component() -> BoolLatchingAlarm {
-        BoolLatchingAlarm::new("bal", IN, ACK, ALARM, UNACK)
+        BoolLatchingAlarm::new("bal", IN, ACK, ALARM, UNACK, RATIONALIZATION)
     }
 
     fn io() -> TestIo {
@@ -500,20 +553,53 @@ mod tests {
 
     #[test]
     fn builds_from_parameter_map() {
-        // The kind declares no parameters: the empty map builds, and a
-        // stray key is unread here — undeclared keys are the spec's
-        // `UnknownParameter` case at composition time.
+        // The declared parameter set is exactly the rationalization
+        // codes: the populated map builds, a missing code is named.
         let instance = ComponentInstance {
             id: ComponentId(13),
             kind: BoolLatchingAlarm::KIND.to_string(),
-            parameters: Parameters::new(),
+            parameters: [
+                ("priority".to_string(), Value::Int(1)),
+                ("class".to_string(), Value::Int(2)),
+                ("response_ticks".to_string(), Value::Int(30)),
+            ]
+            .into_iter()
+            .collect(),
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block =
             BoolLatchingAlarm::from_parameters("bal", IN, ACK, ALARM, UNACK, &instance.parameters)
                 .unwrap();
+        assert_eq!(block.rationalization, RATIONALIZATION);
         assert!(!block.state);
         assert!(!block.latched);
+
+        assert!(matches!(
+            BoolLatchingAlarm::from_parameters("bal", IN, ACK, ALARM, UNACK, &Parameters::new())
+                .unwrap_err(),
+            ParameterError::Missing { ref parameter, .. } if parameter == "priority"
+        ));
+    }
+
+    #[test]
+    fn apply_parameter_tunes_the_codes() {
+        let mut block = component();
+        block
+            .apply_parameter("response_ticks", Value::Int(60))
+            .unwrap();
+        assert_eq!(block.rationalization.response_ticks, 60);
+
+        // An undeclared name is a named rejection.
+        assert_eq!(
+            block
+                .apply_parameter("delay_ticks", Value::Int(1))
+                .unwrap_err(),
+            CommandError::UnknownParameter {
+                component: "bal".to_string(),
+                parameter: "delay_ticks".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -558,9 +644,28 @@ mod tests {
                 },
             ]
         );
-        // Drift guard: the kind declares no parameters and
-        // `from_parameters` reads none.
-        assert!(descriptor.parameters.is_empty());
+        // Drift guard: the descriptor's parameter names are exactly the
+        // keys `from_parameters` reads — the decision-70 codes.
+        assert_eq!(
+            descriptor.parameters,
+            [
+                dcs_core::ParameterDescriptor {
+                    name: "priority".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+                dcs_core::ParameterDescriptor {
+                    name: "class".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+                dcs_core::ParameterDescriptor {
+                    name: "response_ticks".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+            ]
+        );
     }
 
     #[test]

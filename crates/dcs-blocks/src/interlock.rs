@@ -468,6 +468,7 @@ mod tests {
             id: ComponentId(7),
             kind: Interlock::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block = Interlock::from_parameters(

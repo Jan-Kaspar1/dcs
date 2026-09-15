@@ -505,6 +505,7 @@ mod tests {
             id: ComponentId(13),
             kind: SignalFilter::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = SignalFilter::from_parameters("filt", IN, OUT, &instance.parameters).unwrap();

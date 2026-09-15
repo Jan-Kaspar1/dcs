@@ -34,7 +34,15 @@
 //!   Schema can write down. Other kinds' parameters stay unconstrained
 //!   objects: the `sim*` prefix family is open-ended, so the schema does
 //!   not pin its parameter rule (the standard `sim` factory rejecting all
-//!   parameters is an assembly-side contract, not a document shape).
+//!   parameters is an assembly-side contract, not a document shape);
+//! - the alarm rationalization obligation (decision 70): the known alarm
+//!   kind strings — `latching-alarm`, `bool-latching-alarm`, and the
+//!   managed siblings — require a `rationalization` block whose
+//!   `consequence`/`required_action`/`reference` prose fields are
+//!   non-empty and the non-negative `Int` parameters `priority`, `class`,
+//!   and `response_ticks`. The conditional documents the obligation for
+//!   non-Rust tooling; the operative rejection still lands at alarm-kind
+//!   construction, which is also where the component id is known.
 //!
 //! Rules the schema language cannot express — they stay with
 //! [`PlantModel::validate`](crate::PlantModel::validate) and the
@@ -118,6 +126,22 @@ const SCHEMA_SOURCE: &str = r##"{
       "additionalProperties": false,
       "required": ["int"],
       "properties": { "int": { "type": "integer" } }
+    },
+    "nonneg-int-value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["int"],
+      "properties": { "int": { "$ref": "#/$defs/nonneg-int" } }
+    },
+    "rationalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consequence", "required_action", "reference"],
+      "properties": {
+        "consequence": { "type": "string", "minLength": 1 },
+        "required_action": { "type": "string", "minLength": 1 },
+        "reference": { "type": "string", "minLength": 1 }
+      }
     },
     "float-value": {
       "type": "object",
@@ -441,11 +465,45 @@ const SCHEMA_SOURCE: &str = r##"{
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/value" }
         },
+        "rationalization": {
+          "anyOf": [{ "$ref": "#/$defs/rationalization" }, { "type": "null" }]
+        },
         "ports": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "latching-alarm",
+                  "bool-latching-alarm",
+                  "managed-latching-alarm",
+                  "managed-bool-latching-alarm"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": ["rationalization"],
+            "properties": {
+              "rationalization": { "$ref": "#/$defs/rationalization" },
+              "parameters": {
+                "required": ["priority", "class", "response_ticks"],
+                "properties": {
+                  "priority": { "$ref": "#/$defs/nonneg-int-value" },
+                  "class": { "$ref": "#/$defs/nonneg-int-value" },
+                  "response_ticks": { "$ref": "#/$defs/nonneg-int-value" }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "connection": {
       "type": "object",

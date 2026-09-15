@@ -224,6 +224,30 @@ pub struct Signal {
     pub group: Option<String>,
 }
 
+/// An instance's alarm rationalization record — decision 70's prose
+/// half of the alarm contract, carried so the plant model is the master
+/// alarm database: why the alarm exists, what the operator must do, and
+/// where the responding procedure lives.
+///
+/// The numeric half — `priority`, `class`, and `response_ticks` — rides
+/// the instance's `parameters` as descriptor-declared `Int`s; this block
+/// carries the prose. Optional like [`Signal::unit`]; see its note on
+/// schema versioning: documents predating the record load with
+/// `rationalization` unset. Presence is the alarm kinds' contract, not
+/// the model's — a `latching-alarm`'s construction rejects an instance
+/// whose record is absent or whose prose is empty, so validation stays
+/// kind-agnostic while non-alarm kinds may carry or omit the block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rationalization {
+    /// The consequence of the alarm going unanswered — what happens if
+    /// the operator does not respond inside `response_ticks`.
+    pub consequence: String,
+    /// The required operator response to the alarm.
+    pub required_action: String,
+    /// The display or procedure the alarm routes the operator to.
+    pub reference: String,
+}
+
 /// An instantiation of a reusable component kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComponentInstance {
@@ -234,6 +258,13 @@ pub struct ComponentInstance {
     pub kind: String,
     /// Kind-specific parameters, keyed by parameter name.
     pub parameters: BTreeMap<String, Value>,
+    /// The instance's alarm rationalization record — see
+    /// [`Rationalization`]. The alarm kinds require it of their
+    /// instances at construction; other kinds may carry or omit it.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationalization: Option<Rationalization>,
     /// The instance's ports, keyed by port name. These declare the signature
     /// the model wires; the runtime checks it against the component kind's
     /// definition.
@@ -545,6 +576,42 @@ mod tests {
         let reloaded = PlantModel::load(&json).unwrap();
         assert!(!reloaded.io_points[0].journaled);
         assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_rationalization_load_unchanged() {
+        // Components without the optional block deserialize
+        // `rationalization` as `None`, and `None` serializes back
+        // without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(
+            model
+                .components
+                .iter()
+                .all(|component| component.rationalization.is_none())
+        );
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"rationalization\""), "{json}");
+    }
+
+    #[test]
+    fn rationalization_block_parses_and_roundtrips() {
+        // The decision-70 record: optional on any instance — here the
+        // minimal fixture's motor carries one — and round-trips with
+        // the document.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.components[0].rationalization = Some(Rationalization {
+            consequence: "The wet well overflows the bench".to_string(),
+            required_action: "Start the standby pump".to_string(),
+            reference: "station-high-level".to_string(),
+        });
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"rationalization\""), "{json}");
+        assert!(json.contains("\"required_action\""), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
     }
