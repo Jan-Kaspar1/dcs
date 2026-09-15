@@ -47,7 +47,8 @@
         "avail-2": { "direction": "in", "value_type": "bool" },
         "cmd-1-echo": { "direction": "in", "value_type": "bool" },
         "cmd-2-echo": { "direction": "in", "value_type": "bool" },
-        "sel-backup": { "direction": "out", "value_type": "bool" },
+        "sel-alarm": { "direction": "out", "value_type": "bool" },
+        "sel-unack": { "direction": "out", "value_type": "bool" },
         "duty-call": { "direction": "out", "value_type": "bool" },
         "lag-call": { "direction": "out", "value_type": "bool" },
         "below-cutoff": { "direction": "out", "value_type": "bool" },
@@ -168,7 +169,32 @@
       "id": 41,
       "direction": "out",
       "value_type": "bool",
-      "channel": { "device": 1, "name": "sel-backup" }
+      "initial": { "bool": false }
+    },
+    {
+      "id": 47,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 48,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 49,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "sel-alarm" }
+    },
+    {
+      "id": 62,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "sel-unack" }
     },
     {
       "id": 43,
@@ -282,6 +308,18 @@
       "name": "pump-demand",
       "source": 23,
       "description": "Stage-count demand the pump group consumes"
+    },
+    {
+      "id": 104,
+      "name": "backup-mode-alarm",
+      "source": 49,
+      "description": "Standing alarm while the backup measurement serves"
+    },
+    {
+      "id": 105,
+      "name": "backup-mode-unacknowledged",
+      "source": 62,
+      "description": "Latched from the failover transition until the operator acknowledges"
     }
   ],
   "components": [
@@ -336,6 +374,17 @@
         "staged": { "direction": "out", "value_type": "int" },
         "none_available": { "direction": "out", "value_type": "bool" },
         "all_faulted": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "bool-latching-alarm",
+      "parameters": {},
+      "ports": {
+        "in": { "direction": "in", "value_type": "bool" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" }
       }
     },
     {
@@ -449,6 +498,26 @@
     {
       "from": { "port": { "component": 1, "name": "backup_active" } },
       "to": { "point": 41 }
+    },
+    {
+      "from": { "point": 47 },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "point": 47 },
+      "to": { "port": { "component": 4, "name": "in" } }
+    },
+    {
+      "from": { "point": 48 },
+      "to": { "port": { "component": 4, "name": "ack" } }
+    },
+    {
+      "from": { "port": { "component": 4, "name": "alarm" } },
+      "to": { "point": 49 }
+    },
+    {
+      "from": { "port": { "component": 4, "name": "unacknowledged" } },
+      "to": { "point": 62 }
     },
     {
       "from": { "point": 21 },
