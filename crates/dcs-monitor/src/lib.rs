@@ -229,7 +229,7 @@ use dcs_core::{
     RoleReport, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, Transfer};
+use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -561,6 +561,19 @@ impl<'d> Monitor<'d> {
             .note_transfer_failed(detail);
     }
 
+    /// Runs the standby's per-scan tracking cycle under the shared lock
+    /// — the paced loop's pre-scan half: `pull` fetches the active's
+    /// checkpoint once, routed through
+    /// [`Peer::track_once`](dcs_runtime::Peer::track_once)'s owns-field
+    /// gate, miss accounting, and promote-on-budget sequence — and the
+    /// transitions it queued (divergence detections, reinitialization
+    /// reports, the role change a self-promotion reported) drain into
+    /// the recorder. The returned [`TrackReport`] is the caller's to
+    /// present; the journal already holds its transitions.
+    pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
+        track_and_record(&mut self.shared.lock().unwrap(), pull)
+    }
+
     /// Whether the heartbeat's consecutive failed pulls have reached the
     /// peer's configured failover budget — the scan boundary at which a
     /// still-converged standby may self-promote. See
@@ -654,48 +667,18 @@ impl<'d> Monitor<'d> {
                     for _ in 0..body.scans {
                         // A tracking standby resynchronizes once per scan
                         // cycle — the pull a paced standby's loop runs
-                        // before its scan. A rejected checkpoint degrades
-                        // the peer but the scan still runs on its
-                        // last-known state.
-                        if let Some(active) = self.driven.track
-                            && !shared.peer.owns_field()
-                        {
-                            match MonitorClient::new(active).checkpoint() {
-                                Ok(checkpoint) => {
-                                    let _ = shared.peer.transfer(&checkpoint);
-                                    // The apply's divergence check
-                                    // journals a transition into
-                                    // `diverged` at the compared tick;
-                                    // a revision-armed crossing journals
-                                    // `reinitialized` at the resumed tick.
-                                    for report in shared.peer.take_divergences() {
-                                        shared
-                                            .recorder
-                                            .note_divergence(report.tick, report.mismatches);
-                                    }
-                                    for report in shared.peer.take_reinitializations() {
-                                        shared.recorder.note_reinitialized(report);
-                                    }
-                                }
-                                Err(error) => shared
-                                    .peer
-                                    .note_transfer_failed(format!("fetch from {active}: {error}")),
-                            }
-                            // Active loss detected at this boundary: the
-                            // miss budget is met, so a still-converged
-                            // standby promotes itself; a refusal is the
-                            // peer's named convergence state, which
-                            // `GET /role` serves — the scan runs either
-                            // way.
-                            if shared.peer.failover_due() && shared.peer.self_promote().is_ok() {
-                                for change in shared.peer.take_role_changes() {
-                                    shared.recorder.note_role_change(
-                                        change.tick,
-                                        change.from,
-                                        change.to,
-                                    );
-                                }
-                            }
+                        // before its scan, consolidated in
+                        // `Peer::track_once`. What the pull did — a
+                        // rejected checkpoint, a failed fetch, a refused
+                        // promotion — reports through the peer's named
+                        // sync state, which `GET /role` serves; the scan
+                        // still runs on its last-known state.
+                        if let Some(active) = self.driven.track {
+                            track_and_record(&mut shared, || {
+                                MonitorClient::new(active)
+                                    .checkpoint()
+                                    .map_err(|error| format!("fetch from {active}: {error}"))
+                            });
                         }
                         if let Err(error) = scan_and_record(&mut shared) {
                             failure = Some(error.to_string());
@@ -746,6 +729,30 @@ impl<'d> Monitor<'d> {
             Err(error) => json(409, &error),
         }
     }
+}
+
+/// One standby tracking cycle plus its journal recording — the body
+/// `track_cycle` and `POST /scan` share: `Peer::track_once` runs the
+/// owns-field gate, the pull routing, the miss accounting, and the
+/// promote-on-budget sequence, then the queues it filled — divergence
+/// detections, reinitialization reports, the role change a
+/// self-promotion reported — drain into the recorder in report order.
+fn track_and_record(
+    shared: &mut Shared<'_>,
+    pull: impl FnOnce() -> Result<Checkpoint, String>,
+) -> TrackReport {
+    let Shared { peer, recorder } = shared;
+    let report = peer.track_once(pull);
+    for divergence in peer.take_divergences() {
+        recorder.note_divergence(divergence.tick, divergence.mismatches);
+    }
+    for report in peer.take_reinitializations() {
+        recorder.note_reinitialized(report);
+    }
+    for change in peer.take_role_changes() {
+        recorder.note_role_change(change.tick, change.from, change.to);
+    }
+    report
 }
 
 /// One executor scan plus its recording — the body `paced_scan` and
