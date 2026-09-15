@@ -78,7 +78,11 @@
 //! - [`BackwashCoordinator`] — shared-supply backwash arbitration: an
 //!   ordered request queue and an exclusive held grant gated by the
 //!   declared permissives, with a declared queue policy and operator
-//!   reorder.
+//!   reorder;
+//! - [`HeaderCoordinator`] — shared aeration-header coordination: the
+//!   declared constant-pressure, most-open-valve-reset, or
+//!   direct-airflow strategy driving the bounded set-point and
+//!   floored demand, plus the capped pulse-grant set.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -105,6 +109,7 @@ mod digital_output;
 mod edge_trigger;
 mod failover_select;
 mod flow_paced_ratio;
+mod header_coordinator;
 mod interlock;
 mod latching_alarm;
 mod manual_station;
@@ -139,6 +144,9 @@ pub use digital_output::DigitalOutput;
 pub use edge_trigger::{Edge, EdgeTrigger};
 pub use failover_select::FailoverSelect;
 pub use flow_paced_ratio::{FlowPacedRatio, FlowPacedRatioConfig, RatioOutputs};
+pub use header_coordinator::{
+    CoordinationStrategy, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, ZoneIo,
+};
 pub use interlock::Interlock;
 pub use latching_alarm::LatchingAlarm;
 pub use manual_station::ManualStation;
@@ -197,6 +205,7 @@ pub const KINDS: &[&str] = &[
     FlowPacedRatio::KIND,
     DeviationMonitor::KIND,
     BackwashCoordinator::KIND,
+    HeaderCoordinator::KIND,
 ];
 
 #[cfg(test)]

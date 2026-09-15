@@ -19,10 +19,10 @@ use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
     BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
+    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
+    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -865,6 +865,7 @@ fn every_registered_kind_has_a_spec() {
         FlowPacedRatioSpec::KIND,
         DeviationMonitorSpec::KIND,
         BackwashCoordinatorSpec::KIND,
+        HeaderCoordinatorSpec::KIND,
     ]
     .into_iter()
     .collect();

@@ -19,22 +19,23 @@ use std::collections::BTreeSet;
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
-    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
-    FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
+    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
+    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger,
+    FailoverSelect, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs,
+    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
     PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
     Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
-    ThresholdOutputs, Timer, Totalizer, Valve,
+    ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
     BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec, InterlockSpec,
+    LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec,
+    PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec,
+    ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -476,6 +477,51 @@ fn specs_match_registered_kinds_descriptors() {
         &BackwashCoordinatorSpec::new(Default::default(), 2, false),
         &coordinator(None).describe(),
     ));
+    // `header-coordinator`'s per-zone `valve_pos_i`/`airflow_i`/
+    // `pulsing_i`/`pulse_grant_i` families are instance-dependent —
+    // `N` is the spec's `zones`, matching the interlock's `trips`
+    // convention.
+    covered.insert(check(
+        &HeaderCoordinatorSpec::new(Default::default(), 2),
+        &HeaderCoordinator::new(
+            "hdr",
+            point(1),
+            vec![
+                ZoneIo {
+                    valve_pos: point(10),
+                    airflow: point(11),
+                    pulsing: point(12),
+                    pulse_grant: point(13),
+                },
+                ZoneIo {
+                    valve_pos: point(20),
+                    airflow: point(21),
+                    pulsing: point(22),
+                    pulse_grant: point(23),
+                },
+            ],
+            HeaderOutputs {
+                pressure_sp: point(30),
+                blower_demand: point(31),
+                most_open: point(32),
+                at_bound: point(33),
+                pulse_blocked: point(34),
+            },
+            HeaderCoordinatorConfig {
+                strategy: CoordinationStrategy::ConstantPressure,
+                pressure_hold: 10.0,
+                pressure_min: 4.0,
+                pressure_max: 16.0,
+                mov_band_lo: 85.0,
+                mov_band_hi: 95.0,
+                adjust_ticks: 3,
+                min_total_airflow: 1.0,
+                max_pulsing: 1,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
 
     // The coverage guard: the table must pin exactly the kinds the
     // standard registry serves — the checked-in `dcs_blocks::KINDS`
@@ -596,6 +642,52 @@ fn backwash_coordinator_spec_tracks_filter_count() {
                 &component.describe(),
             );
         }
+    }
+}
+
+#[test]
+fn header_coordinator_spec_tracks_zone_count() {
+    // The `valve_pos_i`/`airflow_i`/`pulsing_i`/`pulse_grant_i`
+    // families are instance-dependent: the spec's port list must
+    // follow the constructed component's.
+    let config = HeaderCoordinatorConfig {
+        strategy: CoordinationStrategy::ConstantPressure,
+        pressure_hold: 10.0,
+        pressure_min: 4.0,
+        pressure_max: 16.0,
+        mov_band_lo: 85.0,
+        mov_band_hi: 95.0,
+        adjust_ticks: 3,
+        min_total_airflow: 1.0,
+        max_pulsing: 1,
+    };
+    for zones in [1usize, 2, 5] {
+        let zone_io: Vec<ZoneIo> = (0..zones as u64)
+            .map(|n| ZoneIo {
+                valve_pos: point(10 + n * 4),
+                airflow: point(11 + n * 4),
+                pulsing: point(12 + n * 4),
+                pulse_grant: point(13 + n * 4),
+            })
+            .collect();
+        let component = HeaderCoordinator::new(
+            "hdr",
+            point(1),
+            zone_io,
+            HeaderOutputs {
+                pressure_sp: point(2),
+                blower_demand: point(3),
+                most_open: point(4),
+                at_bound: point(5),
+                pulse_blocked: point(6),
+            },
+            config,
+        )
+        .unwrap();
+        check(
+            &HeaderCoordinatorSpec::new(Default::default(), zones),
+            &component.describe(),
+        );
     }
 }
 
