@@ -2489,3 +2489,180 @@ impl Spec for BackwashCoordinatorSpec {
         }
     }
 }
+
+/// Spec for the `header-coordinator` kind: the shared aeration-header
+/// coordination contract — the declared strategy, the bounded
+/// set-point, the floored aggregate demand, and the capped pulse-grant
+/// set.
+///
+/// The port set is not static: an instance declares
+/// [`zones`](Self::zones) managed zones, and [`ports`](Spec::ports)
+/// emits `pressure` (`In`, `Float`), then `valve_pos_i` (`In`,
+/// `Float`), `airflow_i` (`In`, `Float`), `pulsing_i` (`In`, `Bool`),
+/// `pulse_grant_i` (`Out`, `Bool`) per zone — each connected through
+/// the instance's [`valve_pos`](HeaderCoordinatorInstance::valve_pos),
+/// [`airflow`](HeaderCoordinatorInstance::airflow),
+/// [`pulsing`](HeaderCoordinatorInstance::pulsing), and
+/// [`pulse_grant`](HeaderCoordinatorInstance::pulse_grant) handles —
+/// followed by `pressure_sp` (`Out`, `Float`), `blower_demand` (`Out`,
+/// `Float`), `most_open` (`Out`, `Int`), `at_bound` (`Out`, `Bool`),
+/// and `pulse_blocked` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// Parameters: `strategy` (required `Int` in `0..=2` — `0` constant
+/// header pressure, `1` most-open-valve reset, `2` direct-airflow);
+/// `pressure_hold`, `pressure_min`, `pressure_max`, `mov_band_lo`,
+/// `mov_band_hi` (required finite `Float`s — `pressure_min <=
+/// pressure_max` and `mov_band_lo <= mov_band_hi` are the
+/// constructor's checks, the spec's ranges mirror the descriptor's);
+/// `adjust_ticks` (required positive `Int`); `min_total_airflow`
+/// (required non-negative `Float`); `max_pulsing` (required
+/// non-negative `Int`). All nine are the decision's
+/// assumption-marked declared data — required, never defaulted.
+pub struct HeaderCoordinatorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many zones the instance coordinates — the
+    /// `valve_pos_i`/`airflow_i`/`pulsing_i`/`pulse_grant_i` port
+    /// families' index bound.
+    pub zones: usize,
+}
+
+/// Typed port handles for a `header-coordinator` instance.
+pub struct HeaderCoordinatorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `pressure` port (`In`, `Float`): the discharge-header pressure
+    /// transmitter.
+    pub pressure: Sink<f64>,
+    /// `pressure_sp` port (`Out`, `Float`): the header-pressure
+    /// set-point the blower capacity loop tracks.
+    pub pressure_sp: Source<f64>,
+    /// `blower_demand` port (`Out`, `Float`): the aggregate capacity
+    /// demand the blower group stages against.
+    pub blower_demand: Source<f64>,
+    /// `most_open` port (`Out`, `Int`): the 1-based index of the zone
+    /// whose valve is most open, `0` while none is trusted.
+    pub most_open: Source<i64>,
+    /// `at_bound` port (`Out`, `Bool`): the set-point or demand
+    /// resting at a declared bound.
+    pub at_bound: Source<bool>,
+    /// `pulse_blocked` port (`Out`, `Bool`): a pulse request standing
+    /// refused by the declared cap.
+    pub pulse_blocked: Source<bool>,
+}
+
+impl HeaderCoordinatorInstance {
+    /// Zone `index`'s valve-position feedback
+    /// (`valve_pos_1`…`valve_pos_N`, where `N` is the spec's
+    /// [`zones`](HeaderCoordinatorSpec::zones)): an `In`, `Float`
+    /// port. An `index` outside `1..=N` names a port the instance does
+    /// not declare, and [`build`](crate::PlantBuilder::build) reports
+    /// the connection.
+    pub fn valve_pos(&self, index: usize) -> Sink<f64> {
+        Sink::port(self.id, &format!("valve_pos_{index}"))
+    }
+
+    /// Zone `index`'s airflow demand (`airflow_1`…`airflow_N`): an
+    /// `In`, `Float` port — the DO/airflow loop's output the header
+    /// must deliver.
+    pub fn airflow(&self, index: usize) -> Sink<f64> {
+        Sink::port(self.id, &format!("airflow_{index}"))
+    }
+
+    /// Zone `index`'s mixing-pulse request (`pulsing_1`…`pulsing_N`):
+    /// an `In`, `Bool` port.
+    pub fn pulsing(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("pulsing_{index}"))
+    }
+
+    /// Zone `index`'s pulse admission (`pulse_grant_1`…`pulse_grant_N`):
+    /// an `Out`, `Bool` port.
+    pub fn pulse_grant(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("pulse_grant_{index}"))
+    }
+}
+
+impl HeaderCoordinatorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "header-coordinator";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("strategy", ValueKind::Int, Some(CODE_RANGE)),
+        required("pressure_hold", ValueKind::Float, Some(FINITE_F64)),
+        required("pressure_min", ValueKind::Float, Some(FINITE_F64)),
+        required("pressure_max", ValueKind::Float, Some(FINITE_F64)),
+        required("mov_band_lo", ValueKind::Float, Some(FINITE_F64)),
+        required("mov_band_hi", ValueKind::Float, Some(FINITE_F64)),
+        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("min_total_airflow", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_pulsing", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
+
+    /// A spec for an instance coordinating `zones` zones and carrying
+    /// `parameters` as its parameter map.
+    pub fn new(parameters: Parameters, zones: usize) -> Self {
+        Self { parameters, zones }
+    }
+}
+
+impl Spec for HeaderCoordinatorSpec {
+    type Instance = HeaderCoordinatorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![port("pressure", Direction::In, ValueKind::Float)];
+        for index in 1..=self.zones {
+            ports.push(port(
+                &format!("valve_pos_{index}"),
+                Direction::In,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("airflow_{index}"),
+                Direction::In,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("pulsing_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("pulse_grant_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+        }
+        ports.push(port("pressure_sp", Direction::Out, ValueKind::Float));
+        ports.push(port("blower_demand", Direction::Out, ValueKind::Float));
+        ports.push(port("most_open", Direction::Out, ValueKind::Int));
+        ports.push(port("at_bound", Direction::Out, ValueKind::Bool));
+        ports.push(port("pulse_blocked", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        HeaderCoordinatorInstance {
+            id,
+            pressure: Sink::port(id, "pressure"),
+            pressure_sp: Source::port(id, "pressure_sp"),
+            blower_demand: Source::port(id, "blower_demand"),
+            most_open: Source::port(id, "most_open"),
+            at_bound: Source::port(id, "at_bound"),
+            pulse_blocked: Source::port(id, "pulse_blocked"),
+        }
+    }
+}

@@ -5,12 +5,13 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
+    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
+    CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo,
+    GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs,
     Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
     Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
     RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer,
-    Valve,
+    Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -351,12 +352,51 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            HeaderCoordinator::new(
+                "hdr",
+                point(&mut specs, 280, Direction::In, ValueKind::Float),
+                vec![
+                    ZoneIo {
+                        valve_pos: point(&mut specs, 281, Direction::In, ValueKind::Float),
+                        airflow: point(&mut specs, 282, Direction::In, ValueKind::Float),
+                        pulsing: point(&mut specs, 283, Direction::In, ValueKind::Bool),
+                        pulse_grant: point(&mut specs, 284, Direction::Out, ValueKind::Bool),
+                    },
+                    ZoneIo {
+                        valve_pos: point(&mut specs, 285, Direction::In, ValueKind::Float),
+                        airflow: point(&mut specs, 286, Direction::In, ValueKind::Float),
+                        pulsing: point(&mut specs, 287, Direction::In, ValueKind::Bool),
+                        pulse_grant: point(&mut specs, 288, Direction::Out, ValueKind::Bool),
+                    },
+                ],
+                HeaderOutputs {
+                    pressure_sp: point(&mut specs, 289, Direction::Out, ValueKind::Float),
+                    blower_demand: point(&mut specs, 290, Direction::Out, ValueKind::Float),
+                    most_open: point(&mut specs, 291, Direction::Out, ValueKind::Int),
+                    at_bound: point(&mut specs, 292, Direction::Out, ValueKind::Bool),
+                    pulse_blocked: point(&mut specs, 293, Direction::Out, ValueKind::Bool),
+                },
+                HeaderCoordinatorConfig {
+                    strategy: CoordinationStrategy::ConstantPressure,
+                    pressure_hold: 10.0,
+                    pressure_min: 4.0,
+                    pressure_max: 16.0,
+                    mov_band_lo: 85.0,
+                    mov_band_hi: 95.0,
+                    adjust_ticks: 3,
+                    min_total_airflow: 1.0,
+                    max_pulsing: 1,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 25] = [
+const EXPECTED_KINDS: [&str; 26] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -382,6 +422,7 @@ const EXPECTED_KINDS: [&str; 25] = [
     EdgeTrigger::KIND,
     BoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
+    HeaderCoordinator::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
