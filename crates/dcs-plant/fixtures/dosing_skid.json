@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "tank_level": { "direction": "in", "value_type": "float" },
+        "discharge_rate": { "direction": "in", "value_type": "float" },
+        "tank_draw": { "direction": "in", "value_type": "float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-ao",
+      "channels": {
+        "pump_speed": { "direction": "out", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "tank_level" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "discharge_rate" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "tank_draw" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 2, "name": "pump_speed" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "tank-level",
+      "source": 10,
+      "unit": "L",
+      "description": "Chemical tank level measurement"
+    },
+    {
+      "id": 101,
+      "name": "discharge-rate",
+      "source": 11,
+      "unit": "L/h",
+      "description": "Metering pump measured discharge rate"
+    },
+    {
+      "id": 102,
+      "name": "pump-speed-demand",
+      "source": 20,
+      "unit": "%",
+      "description": "P-201 analog speed demand"
+    }
+  ],
+  "components": [],
+  "connections": []
+}

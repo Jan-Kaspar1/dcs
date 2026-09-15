@@ -17,7 +17,8 @@
 //! `--dynamics` merges a plant-side dynamics document: a JSON list of
 //! [`ProcessElement`] declarations (`first_order_lag`,
 //! `second_order_lag`, `integrator`, `dead_time`, `noise`, `bool_flow`,
-//! `flow_sum`) standing in for field physics. The document is kept out
+//! `flow_sum`, `scaled_flow`) standing in for field physics. The
+//! document is kept out
 //! of the model on purpose — process physics are simulation internals,
 //! not part of the engineering contract the model shares with
 //! controllers and the monitoring UI. Each element is validated as it is
@@ -58,9 +59,9 @@ and serves the shared simulated plant on ADDR until signaled
                    0 binds an ephemeral port, reported on stderr
   --dynamics FILE  merge a JSON list of process-element declarations —
                    first_order_lag, second_order_lag, integrator,
-                   dead_time, noise, bool_flow, flow_sum — into the
-                   simulated plant; process physics are simulation
-                   internals, not part of the model contract
+                   dead_time, noise, bool_flow, flow_sum, scaled_flow —
+                   into the simulated plant; process physics are
+                   simulation internals, not part of the model contract
   -h, --help       show this text";
 
 impl Options {
