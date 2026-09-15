@@ -74,12 +74,13 @@
 //! The run length is [`TOTAL_SCANS`]: level climbs on the declared
 //! inflow, the chain stages duty then lag and the pumps drain the well
 //! back through `stop`; the level alarms trip, latch, and acknowledge;
-//! a `Bad` primary flips the failover to the backup measurement; a
-//! manual takeover hand-drives `p101` — the command register standing
-//! while the level measurably drains, then released; sustained `Bad`
-//! run contacts prove the motor faults and drop both pumps from the
-//! group; out-of-service blocks a hand start; power-fail drops every
-//! pump's availability; a thermal contact trips its per-pump alarm.
+//! while the well refills with the group stood down, a manual takeover
+//! hand-drives `p101` — the command register standing while the level
+//! measurably drains, then released; a `Bad` primary flips the
+//! failover to the backup measurement; sustained `Bad` run contacts
+//! prove the motor faults and drop both pumps from the group;
+//! out-of-service blocks a hand start; power-fail drops every pump's
+//! availability; a thermal contact trips its per-pump alarm.
 //!
 //! # What equality means here
 //!
@@ -97,7 +98,9 @@ use dcs_model::{Endpoint, PlantModel};
 use dcs_monitor::{Driven, Monitor, MonitorClient};
 use dcs_runtime::Peer;
 use dcs_sim::{Fault, ProcessElement, SimDriver};
-use dcs_sim_bus::{BusDriver, BusServer, DeviceParameters, PointRegister, RegisterBank, RegisterDecl};
+use dcs_sim_bus::{
+    BusDriver, BusServer, DeviceParameters, PointRegister, RegisterBank, RegisterDecl,
+};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::thread;
@@ -373,25 +376,31 @@ pub fn actions() -> Vec<OperatorAction> {
         },
     };
     vec![
+        // Manual takeover on pump 1 while the refilling well has the
+        // group stood down: `mode` selects hand, the operator's `hand`
+        // request is then the only request reaching the motor — the
+        // command register stands alone, drains the level, and its
+        // release hands the pump back to auto. The request propagates
+        // through three port-to-port gate hops, so `hand` applied at
+        // scan 29 asserts the command register at scan 32 and its
+        // release at scan 33 drops it at scan 36.
+        write(27, points::mode(0), true),
         // Acknowledge the level alarms and the startup none-available
-        // latch; release the acks two scans later.
+        // latch; the hand request rides the same tick; release the
+        // acks two scans later.
         write(29, points::LAH_ACK, true),
         write(29, points::LAL_ACK, true),
         write(29, points::NA_ACK, true),
+        write(29, points::hand(0), true),
         write(31, points::LAH_ACK, false),
         write(31, points::LAL_ACK, false),
         write(31, points::NA_ACK, false),
+        write(33, points::hand(0), false),
+        write(34, points::mode(0), false),
         // Acknowledge and release the backup-active alarm the failover
         // raised.
         write(44, points::BA_ACK, true),
         write(46, points::BA_ACK, false),
-        // Manual takeover on pump 1: `mode` selects hand, the operator's
-        // `hand` request drives the motor while the group's request
-        // drops.
-        write(51, points::mode(0), true),
-        write(53, points::hand(0), true),
-        write(58, points::hand(0), false),
-        write(59, points::mode(0), false),
         // Acknowledge the motor-fault, all-faulted, and none-available
         // latches the run-contact failures raised.
         write(71, points::fault_ack(0), true),
@@ -455,9 +464,13 @@ fn register_decls(model: &PlantModel) -> Result<Vec<RegisterDecl>, TwoKindsError
             .iter()
             .map(|(name, channel)| (name.clone(), channel.value_type))
             .collect();
-        let parameters = DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
-            TwoKindsError::Field(format!("device {} parameters rejected: {error}", device.id.0))
-        })?;
+        let parameters =
+            DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
+                TwoKindsError::Field(format!(
+                    "device {} parameters rejected: {error}",
+                    device.id.0
+                ))
+            })?;
         decls.extend(parameters.registers.iter().map(|(name, declaration)| {
             RegisterDecl {
                 register: declaration.register,
@@ -482,9 +495,13 @@ fn field_bindings(model: &PlantModel) -> Result<Vec<PointRegister>, TwoKindsErro
             .iter()
             .map(|(name, channel)| (name.clone(), channel.value_type))
             .collect();
-        let parameters = DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
-            TwoKindsError::Field(format!("device {} parameters rejected: {error}", device.id.0))
-        })?;
+        let parameters =
+            DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
+                TwoKindsError::Field(format!(
+                    "device {} parameters rejected: {error}",
+                    device.id.0
+                ))
+            })?;
         registers.extend(
             parameters
                 .registers
@@ -548,7 +565,9 @@ fn apply_local(
                 .map_err(|error| format!("field write to point {} failed: {error}", point.0))?,
             FieldOp::Inject { point, quality } => sim
                 .inject_fault(point, Fault::Quality(quality))
-                .map_err(|error| format!("quality injection on point {} failed: {error}", point.0))?,
+                .map_err(|error| {
+                    format!("quality injection on point {} failed: {error}", point.0)
+                })?,
             FieldOp::Clear { point } => sim
                 .clear_fault(point)
                 .map_err(|error| format!("fault clear on point {} failed: {error}", point.0))?,
@@ -575,9 +594,11 @@ fn apply_bus(
                 .map_err(|error| format!("field write to point {} failed: {error}", point.0))?,
             FieldOp::Inject { point, quality } => {
                 standing.lock().unwrap().insert(point.0 as u16, quality);
-                field.inject_quality(point.0 as u16, quality).map_err(|error| {
-                    format!("quality injection on register {} failed: {error}", point.0)
-                })?;
+                field
+                    .inject_quality(point.0 as u16, quality)
+                    .map_err(|error| {
+                        format!("quality injection on register {} failed: {error}", point.0)
+                    })?;
             }
             FieldOp::Clear { point } => {
                 standing.lock().unwrap().remove(&(point.0 as u16));
@@ -727,8 +748,7 @@ pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
         scope.spawn(|| server.serve());
         let result = (|| {
             let driver = resolve_drivers(&model, &DriverRegistry::standard())?.build()?;
-            let field =
-                BusDriver::connect(server.local_addr()?, &field_bindings(&model)?)?;
+            let field = BusDriver::connect(server.local_addr()?, &field_bindings(&model)?)?;
             let ops = field_ops();
             let wires = field_wires(&model);
             let standing: Mutex<BTreeMap<u16, Quality>> = Mutex::new(BTreeMap::new());

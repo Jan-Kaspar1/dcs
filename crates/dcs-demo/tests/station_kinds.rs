@@ -98,10 +98,7 @@ fn the_variants_share_the_station_plant() {
             "{local}"
         );
         assert_eq!(bus["kind"], json!("sim-bus"));
-        assert_eq!(
-            bus["parameters"]["address"],
-            json!(BUS_ADDRESS_PLACEHOLDER)
-        );
+        assert_eq!(bus["parameters"]["address"], json!(BUS_ADDRESS_PLACEHOLDER));
         // The register map covers the device's declared channels
         // exactly, each at its bound point's id — the numbering the
         // register-addressed dynamics document is written against.
@@ -292,16 +289,13 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
 
     // The chain staged real pumps and the station cycled: demand
     // reached two and the group's duty rotated between pumps.
-    assert!(local
-        .snapshots
-        .iter()
-        .any(|snapshot| matches!(
-            point_sample(snapshot, points::DEMAND),
-            Some(Sample {
-                value: Value::Int(2),
-                ..
-            })
-        )));
+    assert!(local.snapshots.iter().any(|snapshot| matches!(
+        point_sample(snapshot, points::DEMAND),
+        Some(Sample {
+            value: Value::Int(2),
+            ..
+        })
+    )));
     let duties: BTreeSet<i64> = local
         .snapshots
         .iter()
@@ -322,7 +316,9 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
         "backup_active must stand while the primary is Bad"
     );
     assert_eq!(
-        point_sample(at(40), points::LEVEL_PRIMARY).as_ref().map(|s| s.quality),
+        point_sample(at(40), points::LEVEL_PRIMARY)
+            .as_ref()
+            .map(|s| s.quality),
         Some(bad)
     );
 }
@@ -331,35 +327,42 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
 fn the_command_register_drains_the_level_only_while_it_stands() {
     // The closed loop over registers: the manual-takeover phase holds
     // pump 1's command asserted by the operator's `hand` request while
-    // the group's own request stands down — each explicit field step
-    // then drains the level by the pump's draw less the inflow, and
-    // releasing the command stops the drain on the next step.
+    // the group stands down — the well refills on the declared inflow
+    // alone, so the hand-driven command is the field's only draw. Each
+    // explicit field step then drains the level by the pump's draw less
+    // the inflow, and releasing the request stops the drain on the next
+    // step.
     let bus = station_kinds::run_bus().expect("the bus run completes");
     let level = |scan: u64| float_at(&bus.snapshots[scan as usize - 1], points::LEVEL_PRIMARY);
     let p101_cmd = |scan: u64| bool_at(&bus.snapshots[scan as usize - 1], points::cmd(0));
+    let p102_cmd = |scan: u64| bool_at(&bus.snapshots[scan as usize - 1], points::cmd(1));
 
-    // Hand stands from scan 53's application through its release at 58:
-    // every scan in the window observes the asserted command register
-    // and a level lower than the previous scan's — the draw (−1.0)
+    // `hand` applies at scan 29 and releases at 33; the three
+    // port-to-port gate hops between the request point and the motor
+    // turn that into the command register standing at scans 32–35 —
+    // and only it: the group has no demand, so p102's register stays
+    // down. Every step in the window drains the level, the draw (−1.0)
     // outweighing the declared inflow (0.6).
-    for scan in 54..=57 {
+    for scan in 32..=35 {
         assert!(p101_cmd(scan), "p101-cmd must stand at scan {scan}");
+        assert!(!p102_cmd(scan), "p102-cmd must be down at scan {scan}");
         assert!(
-            level(scan) < level(scan - 1),
+            level(scan + 1) < level(scan),
             "the level must drain while the command stands: scan {scan}: {} -> {}",
-            level(scan - 1),
-            level(scan)
+            level(scan),
+            level(scan + 1)
         );
     }
-    // With the command released, the same explicit steps let the inflow
-    // refill the well — the level stops draining and climbs.
-    for scan in 60..=62 {
+    // With the request released the register drops at scan 36 and the
+    // same explicit steps let the inflow refill the well — the level
+    // stops draining and climbs.
+    for scan in 36..=37 {
         assert!(!p101_cmd(scan), "p101-cmd must be down at scan {scan}");
         assert!(
-            level(scan) > level(scan - 1),
+            level(scan + 1) > level(scan),
             "the level must climb once the command releases: scan {scan}: {} -> {}",
-            level(scan - 1),
-            level(scan)
+            level(scan),
+            level(scan + 1)
         );
     }
     // And the staged pump-down did the same through the group's own
@@ -385,10 +388,12 @@ fn the_command_register_drains_the_level_only_while_it_stands() {
 #[test]
 fn a_misbound_overlay_is_rejected_before_the_first_scan() {
     // The honest bank: built from the checked-in overlay, so the
-    // controller's binding is the only thing under test.
+    // controller's binding is the only thing under test. The outcomes
+    // are collected and the server shut down before any assertion, so
+    // a failed expectation cannot deadlock the serve thread's join.
     let server = station_kinds::serve_bus_bank().expect("the bank binds");
     let addr = server.local_addr().unwrap();
-    thread::scope(|scope| {
+    let (wrong_kind, uncovered, mismatched) = thread::scope(|scope| {
         scope.spawn(|| server.serve());
         let load = |mutated: serde_json::Value| {
             PlantModel::load(
@@ -396,22 +401,13 @@ fn a_misbound_overlay_is_rejected_before_the_first_scan() {
                     .to_string()
                     .replace(BUS_ADDRESS_PLACEHOLDER, &addr.to_string()),
             )
+            .map(|model| check(&model))
         };
 
-        // A wrong kind: the standard registry names the device and its
-        // unserved kind.
+        // A wrong kind: a kind no registered factory serves.
         let mut document = parsed(BUS_DOCUMENT);
-        document["devices"][1]["kind"] = json!("sim-nope");
-        let error = check(&load(document).expect("the mutated document loads"))
-            .expect_err("a wrong-kind device must not assemble");
-        assert_eq!(
-            error,
-            AssemblyError::UnknownDeviceKind {
-                device: DeviceId(2),
-                kind: "sim-nope".to_string(),
-            },
-            "{error}"
-        );
+        document["devices"][1]["kind"] = json!("modbus");
+        let wrong_kind = load(document);
 
         // A missing register mapping: the device's channel is
         // uncovered — the parameter contract names it.
@@ -420,38 +416,61 @@ fn a_misbound_overlay_is_rejected_before_the_first_scan() {
             .as_object_mut()
             .unwrap()
             .remove("p101-run");
-        let error = check(&load(document).expect("the mutated document loads"))
-            .expect_err("an uncovered channel must not assemble");
-        match &error {
-            AssemblyError::InvalidDeviceParameters { device, detail, .. } => {
-                assert_eq!(*device, DeviceId(2), "{error}");
-                assert!(
-                    detail.contains("p101-run"),
-                    "the rejection must name the uncovered channel: {detail}"
-                );
-            }
-            other => panic!("expected InvalidDeviceParameters, got {other}"),
-        }
+        let uncovered = load(document);
 
         // A wrong-kind register mapping: the run channel binds the
         // level register — the probe finds a Float where the model
         // declares a Bool point.
         let mut document = parsed(BUS_DOCUMENT);
         document["devices"][1]["parameters"]["registers"]["p101-run"] = json!(10);
-        let error = check(&load(document).expect("the mutated document loads"))
-            .expect_err("a kind-mismatched register must not assemble");
-        match &error {
-            AssemblyError::DeviceBackend { device, detail, .. } => {
-                assert_eq!(*device, DeviceId(2), "{error}");
-                assert!(
-                    detail.contains("io point 40"),
-                    "the rejection must name the misbound point: {detail}"
-                );
-            }
-            other => panic!("expected DeviceBackend, got {other}"),
-        }
+        let mismatched = load(document);
+
         server.shutdown();
+        (wrong_kind, uncovered, mismatched)
     });
+
+    // The standard registry names the device and its unserved kind.
+    let error = wrong_kind
+        .expect("the mutated document loads")
+        .expect_err("a wrong-kind device must not assemble");
+    assert_eq!(
+        error,
+        AssemblyError::UnknownDeviceKind {
+            device: DeviceId(2),
+            kind: "modbus".to_string(),
+        },
+        "{error}"
+    );
+
+    // The parameter contract names the uncovered channel.
+    let error = uncovered
+        .expect("the mutated document loads")
+        .expect_err("an uncovered channel must not assemble");
+    match &error {
+        AssemblyError::InvalidDeviceParameters { device, detail, .. } => {
+            assert_eq!(*device, DeviceId(2), "{error}");
+            assert!(
+                detail.contains("p101-run"),
+                "the rejection must name the uncovered channel: {detail}"
+            );
+        }
+        other => panic!("expected InvalidDeviceParameters, got {other}"),
+    }
+
+    // The probe names the misbound point.
+    let error = mismatched
+        .expect("the mutated document loads")
+        .expect_err("a kind-mismatched register must not assemble");
+    match &error {
+        AssemblyError::DeviceBackend { device, detail, .. } => {
+            assert_eq!(*device, DeviceId(2), "{error}");
+            assert!(
+                detail.contains("io point 40"),
+                "the rejection must name the misbound point: {detail}"
+            );
+        }
+        other => panic!("expected DeviceBackend, got {other}"),
+    }
 
     // A wrong-direction channel: the command channel rebound as an
     // input — validation names the point, channel, and directions
