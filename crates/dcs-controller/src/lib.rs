@@ -19,8 +19,8 @@ use dcs_blocks::{
     GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo,
     ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
     OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo,
-    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, Valve, ZoneIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo,
+    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -533,6 +533,22 @@ pub fn registry() -> ComponentRegistry {
                     deviation: spec.require("deviation")?,
                     exceeded: spec.require("exceeded")?,
                     overdue: spec.require("overdue")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(SurgeGuard::KIND, |spec| {
+            boxed(SurgeGuard::from_parameters(
+                spec.name.as_str(),
+                SurgeGuardIo {
+                    demand: spec.require("demand")?,
+                    flow: spec.require("flow")?,
+                    pressure: spec.require("pressure")?,
+                    current: spec.get("current"),
+                    surge_trip: spec.require("surge_trip")?,
+                    out: spec.require("out")?,
+                    guarding: spec.require("guarding")?,
+                    tripped: spec.require("tripped")?,
                 },
                 spec.parameters,
             ))

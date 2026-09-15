@@ -1,0 +1,310 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "demand": [
+            { "tick": 0, "value": 70.0 },
+            { "tick": 30, "value": 70.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 33, "value": 70.0 },
+            { "tick": 60, "value": 30.0 },
+            { "tick": 63, "value": 45.0 },
+            { "tick": 66, "value": 70.0 }
+          ],
+          "flow": [
+            { "tick": 0, "value": 100.0 },
+            { "tick": 5, "value": 40.0 },
+            { "tick": 9, "value": 100.0 },
+            { "tick": 36, "value": 100.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 39, "value": 100.0 },
+            { "tick": 60, "value": 40.0 },
+            { "tick": 63, "value": 50.0 },
+            { "tick": 66, "value": 100.0 }
+          ],
+          "pressure": [
+            { "tick": 0, "value": 20.0 },
+            { "tick": 12, "value": 35.0 },
+            { "tick": 15, "value": 20.0 },
+            { "tick": 54, "value": 20.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 57, "value": 20.0 },
+            { "tick": 63, "value": 30.0 },
+            { "tick": 66, "value": 20.0 }
+          ],
+          "current": [
+            { "tick": 0, "value": 60.0 },
+            { "tick": 18, "value": 30.0 },
+            { "tick": 21, "value": 60.0 },
+            { "tick": 42, "value": 60.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 45, "value": 60.0 },
+            { "tick": 63, "value": 40.0 },
+            { "tick": 66, "value": 60.0 }
+          ],
+          "surge_trip": [
+            { "tick": 0, "value": false },
+            { "tick": 24, "value": true },
+            { "tick": 27, "value": false },
+            { "tick": 48, "value": false, "quality": "uncertain", "reason": "stale" },
+            { "tick": 51, "value": false }
+          ]
+        }
+      },
+      "channels": {
+        "demand": { "direction": "in", "value_type": "float" },
+        "flow": { "direction": "in", "value_type": "float" },
+        "pressure": { "direction": "in", "value_type": "float" },
+        "current": { "direction": "in", "value_type": "float" },
+        "surge_trip": { "direction": "in", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "demand" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "flow" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "pressure" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "current" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "surge_trip" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 25,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "blower-capacity-demand",
+      "source": 10,
+      "unit": "Nm3/h",
+      "description": "The unit's capacity demand — conventionally the blower-group's per-unit capacity"
+    },
+    {
+      "id": 101,
+      "name": "blower-discharge-flow",
+      "source": 11,
+      "unit": "Nm3/h",
+      "description": "The unit's discharge airflow — the surge region's low-flow edge"
+    },
+    {
+      "id": 102,
+      "name": "blower-discharge-pressure",
+      "source": 12,
+      "unit": "kPa",
+      "description": "The discharge pressure — the surge region's high-pressure edge"
+    },
+    {
+      "id": 103,
+      "name": "blower-motor-current",
+      "source": 13,
+      "unit": "A",
+      "description": "The motor current — the minimum-amperage surge proxy, wired to the clamp instance only"
+    },
+    {
+      "id": 104,
+      "name": "blower-surge-trip",
+      "source": 14,
+      "description": "The hardwired protective device's proven-surge trip status"
+    },
+    {
+      "id": 105,
+      "name": "clamp-guarded-demand",
+      "source": 20,
+      "unit": "Nm3/h",
+      "description": "The clamping guard's bounded demand"
+    },
+    {
+      "id": 106,
+      "name": "clamp-guarding",
+      "source": 21,
+      "description": "The clamping guard's operating-point-inside-the-surge-region report"
+    },
+    {
+      "id": 107,
+      "name": "clamp-tripped",
+      "source": 22,
+      "description": "The clamping guard's trip report — a proven surge or an untrusted demand"
+    },
+    {
+      "id": 108,
+      "name": "trip-guarded-demand",
+      "source": 23,
+      "unit": "Nm3/h",
+      "description": "The tripping guard's bounded demand"
+    },
+    {
+      "id": 109,
+      "name": "trip-guarding",
+      "source": 24,
+      "description": "The tripping guard's operating-point-inside-the-surge-region report"
+    },
+    {
+      "id": 110,
+      "name": "trip-tripped",
+      "source": 25,
+      "description": "The tripping guard's trip report"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "surge-guard",
+      "parameters": {
+        "min_flow": { "float": 50.0 },
+        "max_pressure": { "float": 30.0 },
+        "min_current": { "float": 40.0 },
+        "on_guard": { "int": 0 },
+        "trip_value": { "float": 0.0 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "float" },
+        "flow": { "direction": "in", "value_type": "float" },
+        "pressure": { "direction": "in", "value_type": "float" },
+        "current": { "direction": "in", "value_type": "float" },
+        "surge_trip": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "guarding": { "direction": "out", "value_type": "bool" },
+        "tripped": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "surge-guard",
+      "parameters": {
+        "min_flow": { "float": 50.0 },
+        "max_pressure": { "float": 30.0 },
+        "min_current": { "float": 40.0 },
+        "on_guard": { "int": 1 },
+        "trip_value": { "float": 0.0 }
+      },
+      "ports": {
+        "demand": { "direction": "in", "value_type": "float" },
+        "flow": { "direction": "in", "value_type": "float" },
+        "pressure": { "direction": "in", "value_type": "float" },
+        "surge_trip": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "float" },
+        "guarding": { "direction": "out", "value_type": "bool" },
+        "tripped": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "demand" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "flow" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "pressure" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 1, "name": "current" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 1, "name": "surge_trip" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "demand" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 2, "name": "flow" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 2, "name": "pressure" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 2, "name": "surge_trip" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "guarding" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "tripped" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "guarding" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "tripped" } },
+      "to": { "point": 25 }
+    }
+  ]
+}

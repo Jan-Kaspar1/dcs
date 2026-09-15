@@ -673,6 +673,52 @@ composition — five groups covering every `staging_authority` and
 `rotation` code over one scripted device; per-port semantics live
 beside `BlowerGroup::KIND`.
 
+The machine-protection demand bound architecture decision 64 records
+adds one fixed-arity kind. `surge-guard` sits on each blower's demand
+path between the `blower-group`'s `capacity_i` and the machine
+actuation demand, bounding `demand` (`in`, `Float`) against the
+declared two-variable surge region: `flow` (`in`, `Float`) — the
+unit's discharge airflow — below `min_flow`, `pressure` (`in`,
+`Float`) — the discharge or header pressure — above `max_pressure`,
+or a bound `current` (`in`, `Float`) — the optional minimum-amperage
+proxy — below `min_current` sit inside the region, the comparisons
+strict so a reading resting on its bound stays clear. `surge_trip`
+(`in`, `Bool`) is the hardwired protective device's proven-surge
+status — the kind honors it, never re-implements the device. It
+drives `out` (`out`, `Float`) — the guarded demand — `guarding`
+(`out`, `Bool`) — asserted while any declared bound is crossed — and
+`tripped` (`out`, `Bool`) — asserted while a proven surge, a declared
+trip response, or an untrusted demand drives `trip_value`. The
+`parameters` are `min_flow`, `max_pressure`, and `min_current`
+(non-negative finite `Float`s — the declared surge-region bounds),
+`on_guard` (`Int` code — `0` clamps `out` at each crossed bound,
+`min_flow` and `min_current` flooring the demand and `max_pressure`
+capping it; `1` trips `out` to `trip_value`), and `trip_value`
+(finite `Float` — the demand a trip emits, the unload/vent direction
+the machine's shutdown requires); all five are
+`SetParameter`-tunable. Inside the region the demand passes
+unmodified; a proven `surge_trip` drives `trip_value` whatever the
+demand or the region; neither report latches — the kind auto-clears
+with the inputs, and a plant needing a held lockout wires an
+`sr-latch` downstream per the decision. An instance not exposing the
+amperage proxy declares no `current` port — bound through
+`ComponentSpec::get` — and `min_current` guards nothing on it. The
+non-`Good` rules are the fail-safe set: an untrusted `flow` reads
+below `min_flow`, an untrusted `pressure` above `max_pressure`, an
+untrusted bound `current` below `min_current`, a non-`Good`
+`surge_trip` reads as proven, and an untrusted or non-finite `demand`
+can neither pass nor be bounded, so `out` drives `trip_value` and
+`tripped` asserts. `out` carries the merged worst of every bound
+input's quality plus `Bad(DeviceFault)` for a non-finite reading the
+point did not report; `guarding` and `tripped` always carry `Good`.
+The tuned parameters are the only run state under decision 20 —
+every output is a pure function of the current inputs — so a
+checkpointed standby resumes identically.
+`crates/dcs-assembly/fixtures/surge_guard.json` is the recorded
+composition — a clamp instance with `current` bound beside a trip
+instance without it over one scripted input set; per-port semantics
+live beside `SurgeGuard::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
