@@ -860,6 +860,7 @@ object whose single key is the snake_case element name:
 | `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a bool-gated flow source answering an actuator's run command. `input` is the one non-float element end: a `bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
 | `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
 | `scaled_flow` | `input`, `output`, `gain`, `initial` | `y = gain · u`, re-evaluated each step — a `float` demand scaled into the signed rate a downstream `flow_sum` or `integrator` consumes: a metering pump's measured discharge at its analog speed demand, a chemical tank's drawdown under a negative `gain`. `dt` does not scale the output. |
+| `threshold` | `input`, `output`, `on`, `off`, `initial` | The `float`→`bool` element — `bool_flow`'s mirror: a `float` `input` driving a `bool` contact `output` that asserts and releases on the declared `on`/`off` bounds. `on > off` is a high trip — assert at `u ≥ on`, release strictly below `off`; `on < off` is a low trip — assert at `u ≤ on`, release strictly above `off`; between the bounds the contact holds, so the band is the hysteresis that keeps a noisy input from chattering the output. `initial` is a `bool` covering reads before the first `Good` step, and `dt` scales nothing — the contact is a pure function of the standing input at each tick boundary. A level, pressure, or temperature crossing can thus drive protective behavior — the contact gating a `bool_flow` emergency draw — with no scheduled script. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
@@ -871,16 +872,19 @@ point it drives):
   unreachable for elements (`ConfigError::UnknownPoint`);
 - element ends must be `float` points (`ElementPointKind`) — except a
   `bool_flow`'s gate `input`, which must be a `bool` point
-  (`ElementGateKind`);
+  (`ElementGateKind`), and a `threshold`'s contact `output`, which must
+  be a `bool` point (`ElementContactKind`);
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
   `off_rate`, `gain`, and `bias` finite (`InvalidRate`, `InvalidGain`,
   `NonFiniteBias` — rates and gains are signed, so a negative draw is
-  legal), and `initial` finite (`NonFiniteInitial`);
+  legal), `on` and `off` finite and distinct (`InvalidBound`,
+  `NonPositiveBand` — equal bounds declare no hysteresis band), and
+  `initial` finite (`NonFiniteInitial`);
 - a non-`Good` input freezes the element's state and propagates its
   quality to the output sample — a `flow_sum` propagating the worst of
-  its inputs' qualities;
+  its inputs' qualities, a `threshold` holding its standing contact;
 - no point may be driven by more than one loopback or element
   (`ConflictingDriver`);
 - elements step in declaration order, after loopback routing, so an
@@ -913,7 +917,10 @@ the dosing loop `scaled_flow` exists for — the metering pump's analog
 speed demand scaled into the measured discharge rate and, with a
 negative gain, the chemical tank's drawdown, integrated into the tank
 level — merging onto `crates/dcs-plant/fixtures/dosing_skid.json`'s
-points.
+points. `crates/dcs-sim/fixtures/protection_dynamics.json` is the
+protection loop `threshold` exists for — the level crossing asserting
+the `sis-active` contact that gates a `bool_flow` emergency draw —
+merging onto `crates/dcs-plant/fixtures/protection.json`'s points.
 
 ## Which layer checks what
 

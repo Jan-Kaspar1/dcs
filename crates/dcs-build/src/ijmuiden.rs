@@ -67,10 +67,12 @@
 //!   finding). `sis-active` is the actuation contact the dynamics
 //!   document's `bool_flow` gates on — the emergency draw acts on the
 //!   process every plant step, whether or not the controller scans.
-//!   The layer's trip *decision* is a level-triggered threshold the
-//!   `ProcessElement` vocabulary does not express — the recorded
-//!   contract gap this composition reports rather than works around —
-//!   so the reference scenario asserts the contact on the declared
+//!   The layer's trip *decision* is a level-triggered threshold —
+//!   expressed by the `threshold` process element (#309), the
+//!   vocabulary's Float→Bool shape — but this composition predates its
+//!   adoption: rewiring the contact from the declared schedule tick to
+//!   the level crossing is a follow-on ticket, so the reference
+//!   scenario still asserts the contact on the declared
 //!   `schedule::SIS_TRIP` tick, the same tick the scripted `sis-trip`
 //!   report plays back: the layer's declared behavior stands on the
 //!   schedule, its action remains the dynamics' own. Trip, bypass, and
