@@ -146,6 +146,17 @@ pub enum ValidationError {
         /// The offending point.
         point: PointId,
     },
+    /// A point declares `journaled` but has value type `Float`. The
+    /// durable journal is the low-volume transition record — the
+    /// discrete `Bool`/`Int` status, mode, and protection points the
+    /// flag exists for — while a `Float` point's per-scan stream would
+    /// reproduce the volatile history ring inside it; an operator's
+    /// `Float` write is already durable in its attributed settled
+    /// receipt.
+    JournaledFloat {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -280,6 +291,11 @@ impl fmt::Display for ValidationError {
             Self::StaleInternal { point } => write!(
                 f,
                 "io point {} declares stale_after_ticks but binds no channel",
+                point.0
+            ),
+            Self::JournaledFloat { point } => write!(
+                f,
+                "io point {} declares journaled but has value type float",
                 point.0
             ),
             Self::ChannelTypeMismatch {
@@ -452,6 +468,10 @@ impl PlantModel {
     /// - `stale_after_ticks` marks only field `In` points: the freshness
     ///   budget applies where a driver read happens, so an `Out` point or
     ///   a channel-less internal point carrying it is reported;
+    /// - `journaled` marks only `Bool`/`Int` points: the durable journal
+    ///   is the low-volume record of discrete transitions, so a `Float`
+    ///   point carrying the flag is reported — either direction, field
+    ///   or internal;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
     ///   port), with matching value types on both ends — internal points
@@ -505,6 +525,15 @@ impl PlantModel {
                 if point.channel.is_none() {
                     errors.push(ValidationError::StaleInternal { point: point.id });
                 }
+            }
+            // `journaled` interacts with the value-kind rule: the
+            // durable journal records discrete state transitions — the
+            // `Bool`/`Int` lifecycle, mode, and protection points it
+            // exists for — while a `Float` point's per-scan stream
+            // belongs to the volatile history ring, so the flag on one
+            // is a declaration error.
+            if point.journaled && point.value_type == ValueKind::Float {
+                errors.push(ValidationError::JournaledFloat { point: point.id });
             }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
@@ -961,5 +990,68 @@ mod tests {
         let errors = model.validate();
         assert!(errors.contains(&ValidationError::StaleOut { point: PointId(11) }));
         assert!(errors.contains(&ValidationError::StaleInternal { point: PointId(11) }));
+    }
+
+    /// Turns point `index` of the minimal fixture into a `Bool` point —
+    /// internal when `internal`, channel-bound otherwise — so a
+    /// `journaled` declaration is legal on it.
+    fn make_bool(model: &mut PlantModel, index: usize, internal: bool) {
+        model.io_points[index].value_type = ValueKind::Bool;
+        if internal {
+            make_internal(model, index, Some(Value::Bool(false)));
+        } else {
+            let Some(channel) = &model.io_points[index].channel else {
+                return;
+            };
+            model.devices[channel.device.0 as usize - 1]
+                .channels
+                .get_mut(&channel.name)
+                .unwrap()
+                .value_type = ValueKind::Bool;
+        }
+    }
+
+    #[test]
+    fn journaled_marks_only_bool_and_int_points() {
+        // A field `In` Bool point — the protection-layer status shape —
+        // is a legal `journaled` declaration; the wired port's kind is
+        // matched so the connection stays valid.
+        let mut model = minimal();
+        make_bool(&mut model, 0, false);
+        model.io_points[0].journaled = true;
+        model.components[0].ports.get_mut("in").unwrap().value_type = ValueKind::Bool;
+        assert!(model.validate().is_empty());
+
+        // So is a journaled internal `Out` status point — the lifecycle
+        // shape the flag exists for — with the wired port's kind
+        // matched so the connection stays valid.
+        let mut model = minimal();
+        make_bool(&mut model, 1, true);
+        model.io_points[1].journaled = true;
+        model.components[0].ports.get_mut("out").unwrap().value_type = ValueKind::Bool;
+        assert!(model.validate().is_empty());
+
+        // `journaled` on a `Float` point — a per-scan measurement stream
+        // — is a declaration error naming the point, on either
+        // direction and on an internal point alike.
+        for index in [0, 1] {
+            let mut model = minimal();
+            model.io_points[index].journaled = true;
+            assert!(
+                model.validate().contains(&ValidationError::JournaledFloat {
+                    point: model.io_points[index].id
+                }),
+                "{:?}",
+                model.validate()
+            );
+        }
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Float(2.0)));
+        model.io_points[0].journaled = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::JournaledFloat { point: PointId(10) })
+        );
     }
 }

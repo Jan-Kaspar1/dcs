@@ -251,6 +251,7 @@ impl PlantBuilder {
             initial: None,
             writable,
             stale_after_ticks: None,
+            journaled: false,
         });
         InPoint::new(id)
     }
@@ -288,6 +289,7 @@ impl PlantBuilder {
             initial: None,
             writable: false,
             stale_after_ticks: None,
+            journaled: false,
         });
         OutPoint::new(id)
     }
@@ -313,6 +315,7 @@ impl PlantBuilder {
             initial: Some(initial.into_value()),
             writable,
             stale_after_ticks: None,
+            journaled: false,
         });
         InPoint::new(id)
     }
@@ -329,8 +332,31 @@ impl PlantBuilder {
             initial: Some(initial.into_value()),
             writable: false,
             stale_after_ticks: None,
+            journaled: false,
         });
         OutPoint::new(id)
+    }
+
+    /// Marks a declared point `journaled`: its observed value
+    /// transitions join the durable journal as `point_changed` entries
+    /// — the declared record flag for the status, lifecycle, mode, and
+    /// protection points the lifecycle-audit decision names.
+    ///
+    /// `point` may be a bare [`PointId`] or a handle a point declaration
+    /// returned — either direction, field or internal. Marking an id the
+    /// builder never declared is a programming error and panics naming
+    /// it; marking a `Float` point surfaces as
+    /// [`BuildError::Invalid`] at [`build`](Self::build), where the same
+    /// validation a loaded document faces rejects it.
+    pub fn journaled(&mut self, point: impl Into<PointId>) -> &mut Self {
+        let point = point.into();
+        let declared = self
+            .io_points
+            .iter_mut()
+            .find(|declared| declared.id == point)
+            .unwrap_or_else(|| panic!("journaled names undeclared io_point {}", point.0));
+        declared.journaled = true;
+        self
     }
 
     /// Declares a plant signal named `name` sourcing `source` — a point

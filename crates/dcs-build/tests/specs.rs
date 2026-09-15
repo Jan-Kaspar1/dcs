@@ -863,6 +863,58 @@ fn field_input_stale_after_emits_and_enforces_the_budget() {
     assert_eq!(sample.tick, dcs_core::Tick(3));
 }
 
+#[test]
+fn journaled_declaration_lands_on_the_emitted_points() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let fault_raw = plant.channel::<bool>(sim, "fault", Direction::In);
+
+    // The lifecycle-audit shapes: a journaled field `in` status point,
+    // a journaled writable `ack` command point, and a journaled
+    // internal `out` status point — marked by handle or bare id.
+    let pv = plant.field_input::<bool>(PointId(10), fault_raw, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let _alarm = plant.internal_output::<bool>(PointId(12), false);
+    let _unmarked = plant.internal_output::<bool>(PointId(13), false);
+    plant.journaled(pv);
+    plant.journaled(ack);
+    plant.journaled(PointId(12));
+
+    let model = plant.build().unwrap();
+    for point in &model.io_points {
+        assert_eq!(point.journaled, point.id.0 != 13, "{point:?}");
+    }
+
+    // The emitted document reloads through `dcs-model`'s validating
+    // loader unchanged — the flag survives the document contract.
+    let json = serde_json::to_string_pretty(&model).unwrap();
+    assert_eq!(PlantModel::load(&json).unwrap(), model);
+}
+
+#[test]
+fn journaled_float_point_is_a_build_error() {
+    // The durable record's low-volume bound rides `build`'s validation:
+    // a journaled `Float` point is `Invalid(JournaledFloat)` naming the
+    // point, not a silently emitted declaration.
+    let mut plant = PlantBuilder::new();
+    let setpoint = plant.internal_input::<f64>(PointId(10), 0.0, true);
+    plant.journaled(setpoint);
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::Invalid(ref errors))
+            if errors.contains(&dcs_model::ValidationError::JournaledFloat {
+                point: PointId(10)
+            })
+    ));
+}
+
+#[test]
+#[should_panic(expected = "journaled names undeclared io_point 77")]
+fn journaled_names_a_declared_point() {
+    let mut plant = PlantBuilder::new();
+    plant.journaled(PointId(77));
+}
+
 /// The `backwash-coordinator` plant both reorder cases wire: three
 /// scripted requests and the three permissives on the device, the
 /// writable internal `reorder` instruction point per decision 56, and

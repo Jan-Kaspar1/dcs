@@ -221,6 +221,12 @@ fn schema_rejects_documents_with_structural_violations() {
             {"id": 1, "direction": "in", "value_type": "float",
              "initial": {"float": 0.0}, "stale_after_ticks": 2}
         ], "signals": [], "components": [], "connections": []}),
+        // The journaled flag on a float point — the durable journal is
+        // the discrete-transition record, not a per-scan stream.
+        serde_json::json!({"version": 1, "devices": [], "io_points": [
+            {"id": 1, "direction": "in", "value_type": "float",
+             "initial": {"float": 0.0}, "journaled": true}
+        ], "signals": [], "components": [], "connections": []}),
         // A negative freshness budget.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim", "channels":

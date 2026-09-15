@@ -53,7 +53,7 @@ is the exact identifier those sources read or write.
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
   and an unset field serializes back without the key. `parameters` on a
-  device, `channel`/`initial`/`writable` on an io_point, and
+  device, `channel`/`initial`/`writable`/`journaled` on an io_point, and
   `unit`/`description`/`group` on a signal all follow this convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
@@ -142,6 +142,7 @@ carried by the controller's scan image — decision 14).
 | `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
 | `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
+| `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
 
 ### Internal points
 
@@ -217,6 +218,42 @@ protocol changes. A driver whose samples carry no usable freshness
 signal — one that stamps every read with the current tick, or a fixed
 tick — simply makes the declaration inert or always-stale; declare the
 field only where the source distinguishes fresh samples from held ones.
+
+### `journaled` and the durable transition record
+
+`journaled` marks the io_points whose observed *value* transitions join
+the durable transition journal — the low-volume, file-backed record of
+settled command receipts and quality transitions (decisions 36 and 74).
+Every point's samples already land in the bounded per-point history
+ring; that ring is volatile telemetry, and bounded eviction drops old
+samples. The journal is the audit-grade record: marking a point
+`journaled` makes each of its value changes durable as a
+`point_changed` journal event carrying `point`, `from`, and `to` —
+`from` reading `null` on the point's first observed sample, the
+`quality_changed` convention — attributed to the producing scan's tick
+and ordered after that scan's quality transitions in ascending point
+order.
+
+The declaration is deliberately opt-in and bounded:
+
+- either direction may be journaled — the alarm-lifecycle status points
+  the decision names (`alarm`, `unacknowledged`, `shelved`,
+  `suppressed`, `out_of_service`) are component `out` status points, and
+  mode or protection-layer states ride the same mechanism;
+- `float` points cannot be journaled (`JournaledFloat`): a per-scan
+  measurement stream would churn the durable record, and a float
+  transition belongs in the history ring, not the journal;
+- an undeclared point's value changes produce no journal entries — the
+  journal stays the low-volume record decision 36 describes, instead of
+  duplicating every point's history stream.
+
+A receipted write to a journaled writable point produces *both* its
+attributed `command_settled` entry and the resulting `point_changed`
+entry, in `seq` order — the action's attribution and the transition it
+caused are each auditable. A component-driven transition on a journaled
+status point lands with no receipt, and the durable journal file
+replays `point_changed` entries like every other event, continuing
+`seq` numbering across a restart.
 
 ## `signals`
 

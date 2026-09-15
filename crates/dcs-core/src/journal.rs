@@ -2,7 +2,8 @@
 //!
 //! Where [`PointHistory`](crate::PointHistory) records each point's sample
 //! stream, the journal records the run's transitions — command outcomes,
-//! point quality changes, component step failures, and redundancy role
+//! point quality changes, the value transitions of declared-`journaled`
+//! points, component step failures, and redundancy role
 //! changes — as one ordered event list an operator can audit. Every [`JournalEntry`] is stamped
 //! with the [`Tick`] the event is attributed to, keeping journal, history,
 //! snapshots, and receipts in one comparable timebase.
@@ -14,7 +15,7 @@
 use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
 use crate::role::{Divergence, Role};
-use crate::signal::{PointId, Quality, Tick};
+use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 
 /// One kind of event the journal records.
@@ -32,6 +33,24 @@ pub enum JournalEvent {
         from: Option<Quality>,
         /// The newly observed quality.
         to: Quality,
+    },
+    /// A declared-`journaled` point's observed value changed — the
+    /// generic durable transition record the lifecycle-audit decision
+    /// adds beside the settled receipts, so alarm and managed-state
+    /// status transitions (`alarm`, `unacknowledged`, `shelved`,
+    /// `suppressed`, `out_of_service`), mode changes, and
+    /// protection-layer states are preserved across restart without
+    /// dedicated alarm-lifecycle event variants. `from` is `None` when
+    /// the point's first observed sample already carried the `to`
+    /// value — the `QualityChanged` convention.
+    PointChanged {
+        /// The point whose value changed.
+        point: PointId,
+        /// The previously observed value, or `None` on the point's
+        /// first observed sample.
+        from: Option<Value>,
+        /// The newly observed value.
+        to: Value,
     },
     /// A submitted [`Command`](crate::Command) reached its final outcome:
     /// [`applied`](crate::CommandOutcome::Applied) at a scan boundary, or
@@ -132,6 +151,24 @@ mod tests {
             JournalEntry {
                 seq: 3,
                 tick: Tick(4),
+                event: JournalEvent::PointChanged {
+                    point: PointId(21),
+                    from: None,
+                    to: Value::Bool(false),
+                },
+            },
+            JournalEntry {
+                seq: 4,
+                tick: Tick(4),
+                event: JournalEvent::PointChanged {
+                    point: PointId(21),
+                    from: Some(Value::Bool(false)),
+                    to: Value::Bool(true),
+                },
+            },
+            JournalEntry {
+                seq: 5,
+                tick: Tick(4),
                 event: JournalEvent::CommandSettled {
                     receipt: CommandReceipt {
                         command: Command::WriteValue {
@@ -145,7 +182,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 4,
+                seq: 6,
                 tick: Tick(5),
                 event: JournalEvent::StepFailed {
                     component: "pid".to_string(),
@@ -153,7 +190,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 5,
+                seq: 7,
                 tick: Tick(8),
                 event: JournalEvent::RoleChanged {
                     from: Role::Standby,
@@ -161,7 +198,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 6,
+                seq: 8,
                 tick: Tick(9),
                 event: JournalEvent::DivergenceDetected {
                     mismatches: vec![Divergence {
@@ -172,7 +209,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 7,
+                seq: 9,
                 tick: Tick(12),
                 event: JournalEvent::Reinitialized {
                     report: CarryoverReport {
@@ -202,6 +239,7 @@ mod tests {
         );
         // Variant names serialize snake_case like the command contract.
         assert!(json.contains("\"quality_changed\""), "{json}");
+        assert!(json.contains("\"point_changed\""), "{json}");
         assert!(json.contains("\"command_settled\""), "{json}");
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");

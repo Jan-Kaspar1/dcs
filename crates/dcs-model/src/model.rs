@@ -76,11 +76,11 @@ pub struct ChannelRef {
     pub name: String,
 }
 
-/// `serde` helper for `IoPoint::writable`: the flag follows the
-/// optional-field convention — documents that predate it deserialize as
-/// `false`, and `false` serializes back without the key.
-fn is_false(writable: &bool) -> bool {
-    !*writable
+/// `serde` helper for `IoPoint`'s `writable`/`journaled` flags: they
+/// follow the optional-field convention — documents that predate them
+/// deserialize as `false`, and `false` serializes back without the key.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// A logical I/O point: the unit control logic binds to.
@@ -115,6 +115,18 @@ fn is_false(writable: &bool) -> bool {
 /// the budget. Only field inputs can declare one — the check reads the
 /// driver, so validation rejects the field on an `Out` point and on a
 /// channel-less internal point, which is never driver-read.
+///
+/// `journaled` declares the point's observed value transitions part of
+/// the durable transition journal: the recorder appends a
+/// `point_changed` entry carrying the previous and new values at the
+/// producing scan's tick. The flag is opt-in per point and valid on
+/// `Bool`/`Int` points of either direction — the lifecycle and
+/// managed-state status points (`alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service`), mode changes, and protection-layer
+/// states the record exists for — so validation rejects it on a `Float`
+/// point: a continuously moving measurement belongs to the volatile
+/// history ring, not the low-volume durable record, and an operator's
+/// `Float` write is already durable in its attributed settled receipt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -158,6 +170,16 @@ pub struct IoPoint {
     /// Optional like [`Signal::unit`]; see its note on schema versioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_after_ticks: Option<u64>,
+    /// Whether the point's observed value transitions join the durable
+    /// journal as `point_changed` entries; see the type docs. Valid on
+    /// `Bool`/`Int` points of either direction —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports the
+    /// flag on a `Float` point.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the flag load with `journaled` unset.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub journaled: bool,
 }
 
 impl IoPoint {
@@ -493,6 +515,52 @@ mod tests {
         assert_eq!(reloaded.io_points[1].stale_after_ticks, None);
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_journaled_load_unchanged() {
+        // Points without the optional field deserialize `journaled` as
+        // `false`, and `false` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.io_points.iter().all(|point| !point.journaled));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"journaled\""), "{json}");
+    }
+
+    #[test]
+    fn journaled_flag_parses_and_roundtrips() {
+        // `journaled` marks `Bool`/`Int` points of either direction: a
+        // journaled internal `Out` status point is the lifecycle shape —
+        // declare one by dropping the channel, carrying an initial, and
+        // matching the wired port's kind.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[1].channel = None;
+        model.io_points[1].initial = Some(Value::Bool(false));
+        model.io_points[1].value_type = ValueKind::Bool;
+        model.io_points[1].journaled = true;
+        model.components[0].ports.get_mut("out").unwrap().value_type = ValueKind::Bool;
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"journaled\": true"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(!reloaded.io_points[0].journaled);
+        assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn journaled_float_point_is_rejected_by_load() {
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].journaled = true;
+        let json = serde_json::to_string(&model).unwrap();
+        match PlantModel::load(&json) {
+            Err(LoadError::Invalid(errors)) => assert!(
+                errors.contains(&ValidationError::JournaledFloat { point: PointId(10) }),
+                "{errors:?}"
+            ),
+            other => panic!("expected invalid model, got {other:?}"),
+        }
     }
 
     #[test]
