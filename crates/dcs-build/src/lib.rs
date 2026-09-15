@@ -118,6 +118,7 @@ pub mod ijmuiden;
 mod spec;
 pub mod specs;
 pub mod station;
+pub mod wago;
 
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};
 pub use endpoint::{Dynamic, InPoint, OutPoint, Sink, Source};
