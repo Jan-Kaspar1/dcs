@@ -372,6 +372,7 @@ dependencies = [
  "dcs-build",
  "dcs-core",
  "dcs-demo",
+ "dcs-ethercat",
  "dcs-model",
  "dcs-monitor",
  "dcs-runtime",
