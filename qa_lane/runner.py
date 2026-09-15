@@ -557,7 +557,10 @@ def status(cfg):
         return {
             'last_attempted_sha': st.last_attempted_sha(),
             'queued': [r['attempted_sha'] for r in st.runs(('queued',))],
-            'running': [r['run_id'] for r in st.runs(('running',))],
+            'running': [{'run_id': r['run_id'],
+                         'attempted_sha': r['attempted_sha'],
+                         'started': r['started']}
+                        for r in st.runs(('running',))],
             'recent': [{'run_id': r['run_id'], 'sha': r['attempted_sha'],
                         'status': r['status'], 'outcome': r['outcome'],
                         'attempt': r['attempt']}
