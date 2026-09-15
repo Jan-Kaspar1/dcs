@@ -2224,3 +2224,179 @@ impl Spec for FlowPacedRatioSpec {
         }
     }
 }
+
+/// Spec for the `backwash-coordinator` kind: shared-supply arbitration
+/// across a filter bank — an ordered request queue and an exclusive
+/// held grant gated by the declared permissives, with a declared queue
+/// policy and an optional operator reorder input.
+///
+/// The port set is not static: an instance declares
+/// [`filters`](Self::filters) managed filters, and
+/// [`ports`](Spec::ports) emits `supply_ok`, `waste_ok`, `flow_ok`
+/// (`In`, `Bool`) — the grant permissives aggregated upstream —
+/// `reorder` (`In`, `Int`) when the spec's `reorder` flag wires the
+/// operator's standing queue instruction — then `request_i` (`In`,
+/// `Bool`), `grant_i` (`Out`, `Bool`), `position_i` (`Out`, `Int`) per
+/// filter, each connected through the instance's
+/// [`request`](BackwashCoordinatorInstance::request),
+/// [`grant`](BackwashCoordinatorInstance::grant), and
+/// [`position`](BackwashCoordinatorInstance::position) handles —
+/// followed by `active` (`Out`, `Int`), `queued` (`Out`, `Int`), and
+/// `resource_blocked` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// Parameters: `queue_policy` (required `Int` in `0..=2` — `0` FIFO,
+/// `1` priority-by-trigger, `2` operator-managed) and `queued_state`
+/// (required `Int` in `0..=1` — `0` keep filtering until granted, `1`
+/// offline with standby cover). Both are the decision's
+/// assumption-marked declared data — required, never defaulted.
+pub struct BackwashCoordinatorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many filters the instance arbitrates — the
+    /// `request_i`/`grant_i`/`position_i` port families' index bound.
+    pub filters: usize,
+    /// Whether the instance declares the `reorder` port — the
+    /// operator's standing queue instruction, conventionally wired to
+    /// a writable internal `In` point. `false` emits an instance with
+    /// no `reorder` to wire — a plant not exposing reorder leaves the
+    /// port unbound.
+    pub reorder: bool,
+}
+
+/// Typed port handles for a `backwash-coordinator` instance.
+pub struct BackwashCoordinatorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `supply_ok` port (`In`, `Bool`): the supply-side grant
+    /// permissive.
+    pub supply_ok: Sink<bool>,
+    /// `waste_ok` port (`In`, `Bool`): the waste-path grant
+    /// permissive.
+    pub waste_ok: Sink<bool>,
+    /// `flow_ok` port (`In`, `Bool`): the shared-flow grant
+    /// permissive.
+    pub flow_ok: Sink<bool>,
+    /// `reorder` port (`In`, `Int`): the operator's standing queue
+    /// instruction — `Some` only when the spec declared the port;
+    /// wire it to a writable internal `In` point so writes ride the
+    /// journaled receipted path.
+    pub reorder: Option<Sink<i64>>,
+    /// `active` port (`Out`, `Int`): the 1-based index of the filter
+    /// holding the grant, `0` while none does.
+    pub active: Source<i64>,
+    /// `queued` port (`Out`, `Int`): the count of requests pending in
+    /// the queue.
+    pub queued: Source<i64>,
+    /// `resource_blocked` port (`Out`, `Bool`): asserts while a
+    /// request stands first in queue and a grant permissive fails.
+    pub resource_blocked: Source<bool>,
+}
+
+impl BackwashCoordinatorInstance {
+    /// Filter `index`'s armed backwash request
+    /// (`request_1`…`request_N`, where `N` is the spec's
+    /// [`filters`](BackwashCoordinatorSpec::filters)): an `In`, `Bool`
+    /// port. An `index` outside `1..=N` names a port the instance does
+    /// not declare, and [`build`](crate::PlantBuilder::build) reports
+    /// the connection.
+    pub fn request(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("request_{index}"))
+    }
+
+    /// Filter `index`'s exclusive supply grant (`grant_1`…`grant_N`):
+    /// an `Out`, `Bool` port.
+    pub fn grant(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("grant_{index}"))
+    }
+
+    /// Filter `index`'s queue position (`position_1`…`position_N`):
+    /// an `Out`, `Int` port — `0` while the filter is not queued, the
+    /// grant holder included.
+    pub fn position(&self, index: usize) -> Source<i64> {
+        Source::port(self.id, &format!("position_{index}"))
+    }
+}
+
+impl BackwashCoordinatorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "backwash-coordinator";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("queue_policy", ValueKind::Int, Some(CODE_RANGE)),
+        required("queued_state", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec for an instance arbitrating `filters` filters, carrying
+    /// `parameters` as its parameter map, and declaring the `reorder`
+    /// port when `reorder` is set.
+    pub fn new(parameters: Parameters, filters: usize, reorder: bool) -> Self {
+        Self {
+            parameters,
+            filters,
+            reorder,
+        }
+    }
+}
+
+impl Spec for BackwashCoordinatorSpec {
+    type Instance = BackwashCoordinatorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("supply_ok", Direction::In, ValueKind::Bool),
+            port("waste_ok", Direction::In, ValueKind::Bool),
+            port("flow_ok", Direction::In, ValueKind::Bool),
+        ];
+        if self.reorder {
+            ports.push(port("reorder", Direction::In, ValueKind::Int));
+        }
+        for index in 1..=self.filters {
+            ports.push(port(
+                &format!("request_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("grant_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("position_{index}"),
+                Direction::Out,
+                ValueKind::Int,
+            ));
+        }
+        ports.push(port("active", Direction::Out, ValueKind::Int));
+        ports.push(port("queued", Direction::Out, ValueKind::Int));
+        ports.push(port("resource_blocked", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BackwashCoordinatorInstance {
+            id,
+            supply_ok: Sink::port(id, "supply_ok"),
+            waste_ok: Sink::port(id, "waste_ok"),
+            flow_ok: Sink::port(id, "flow_ok"),
+            reorder: self.reorder.then(|| Sink::port(id, "reorder")),
+            active: Source::port(id, "active"),
+            queued: Source::port(id, "queued"),
+            resource_blocked: Source::port(id, "resource_blocked"),
+        }
+    }
+}
