@@ -102,6 +102,12 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 - **Need:** An engineer composes a plant from typed reusable components and receives validation errors for missing parameters, incompatible ports, invalid mappings, and incomplete operator metadata before deployment.
 - **Acceptance evidence:** The reference station is produced through the typed build path and passes model validation, engineering lint, assembly, and full-stack simulation.
 
+### WW-ENG-003 — Independently owned plant project
+
+- **Status:** accepted
+- **Need:** A customer or system integrator owns plant-specific source, parameters, generated model artifacts, simulation fixtures, and deployment configuration independently of the DCS platform source. The plant project consumes a supported DCS release and never needs to become a workspace member, use path dependencies into the platform checkout, or modify platform crates.
+- **Acceptance evidence:** A reference water plant in a separate repository pins versioned DCS engineering and runtime artifacts, composes and deterministically emits its plant model through the supported Rust API, validates and lints it, runs its simulation and operator UI, and deploys it with the generic controller image. Its CI succeeds from a clean checkout with no DCS source tree present. A compatible platform update is exercised by changing the pinned release rather than moving or rewriting the plant source, and incompatible model/API versions fail with documented diagnostics. Platform-owned conformance fixtures may duplicate a minimal case, but they do not satisfy this requirement by themselves.
+
 ### WW-LCM-001 — Controller continuity and recovery
 
 - **Status:** accepted; partially implemented
