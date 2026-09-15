@@ -19,9 +19,9 @@ use dcs_blocks::{
     FeedforwardSum, FeedforwardSumIo, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator,
     HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm,
     ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer,
-    SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer,
-    Totalizer, Valve, ZoneIo,
+    PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RateOfRise, RatioOutputs,
+    Sequencer, SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -576,6 +576,15 @@ pub fn registry() -> ComponentRegistry {
                     clamped: spec.require("clamped")?,
                     fallback_active: spec.require("fallback_active")?,
                 },
+                spec.parameters,
+            ))
+        })
+        .with(RateOfRise::KIND, |spec| {
+            boxed(RateOfRise::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("rate")?,
+                spec.require("rising")?,
                 spec.parameters,
             ))
         })

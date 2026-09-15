@@ -3668,3 +3668,91 @@ impl Spec for FeedforwardSumSpec {
         }
     }
 }
+
+/// Spec for the `rate-of-rise` kind: the one-sided derivative
+/// annunciation the IJmuiden composition's recorded contract gap
+/// names — the composed `deviation-monitor`-versus-`signal-filter`
+/// detector flags fast excursions in either direction, so the rapidly
+/// falling level after the protective draw reads as a "rise"; this
+/// kind's flag asserts only while the input's per-scan rise meets the
+/// declared bound.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the measured
+/// value the kind differences; `rate` (`Out`, `Float`) — the per-scan
+/// first difference in the input's declared measured-units-per-tick,
+/// the evidence the trend and faceplate show beside the flag;
+/// `rising` (`Out`, `Bool`) — the standing condition a downstream
+/// `bool-latching-alarm`/`managed-bool-latching-alarm` `in` consumes.
+/// Parameters: `rate_limit` (required positive finite `Float` — the
+/// per-tick rise the flag asserts at) and `initial_rate` (required
+/// finite `Float` — the rate reported until the first `Good` sample
+/// pair completes a difference).
+pub struct RateOfRiseSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `rate-of-rise` instance.
+pub struct RateOfRiseInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the measured value the kind
+    /// differences — conventionally the level whose rise annunciates.
+    pub input: Sink<f64>,
+    /// `rate` port (`Out`, `Float`): the per-scan first difference —
+    /// the evidence trended beside the flag.
+    pub rate: Source<f64>,
+    /// `rising` port (`Out`, `Bool`): the standing rise-exceeds-bound
+    /// condition — wire it into a `bool-latching-alarm` for the
+    /// station's alarm set.
+    pub rising: Source<bool>,
+}
+
+impl RateOfRiseSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "rate-of-rise";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("rate_limit", ValueKind::Float, Some(POSITIVE_F64)),
+        required("initial_rate", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for RateOfRiseSpec {
+    type Instance = RateOfRiseInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("rate", Direction::Out, ValueKind::Float),
+            port("rising", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        RateOfRiseInstance {
+            id,
+            input: Sink::port(id, "in"),
+            rate: Source::port(id, "rate"),
+            rising: Source::port(id, "rising"),
+        }
+    }
+}

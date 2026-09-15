@@ -14,9 +14,9 @@ use dcs_blocks::{
     ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
     ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
     PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
-    RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter,
-    SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer, Totalizer,
-    UnitBounds, Valve, ZoneIo,
+    RateLimiter, RateOfRise, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
+    SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer,
+    Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -590,12 +590,23 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            RateOfRise::new(
+                "ror",
+                point(&mut specs, 400, Direction::In, ValueKind::Float),
+                point(&mut specs, 401, Direction::Out, ValueKind::Float),
+                point(&mut specs, 402, Direction::Out, ValueKind::Bool),
+                0.5,
+                0.0,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 33] = [
+const EXPECTED_KINDS: [&str; 34] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -629,6 +640,7 @@ const EXPECTED_KINDS: [&str; 33] = [
     SurgeGuard::KIND,
     DemandFallback::KIND,
     FeedforwardSum::KIND,
+    RateOfRise::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every

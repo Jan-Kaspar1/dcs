@@ -109,6 +109,10 @@
 //!   bounded `ff` + `trim` sum on a zone's demand path, the trim's
 //!   authority and the emitted demand bounded, each input's declared
 //!   untrusted response engaged with `fallback_active` asserted.
+//! - [`RateOfRise`] — the one-sided derivative annunciation: the
+//!   per-scan first difference of `in` on `rate`, `rising` asserting
+//!   while the per-tick rise meets the declared bound — the kind the
+//!   IJmuiden composition's recorded divergence-detector gap revisits.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -153,6 +157,7 @@ mod phase_monitor;
 mod pid;
 mod pump_group;
 mod rate_limiter;
+mod rate_of_rise;
 mod rationalization;
 mod sequencer;
 mod signal_filter;
@@ -206,6 +211,7 @@ pub use phase_monitor::{PhaseMode, PhaseMonitor, PhaseMonitorIo};
 pub use pid::{Pid, PidConfig};
 pub use pump_group::{GroupOutputs, PumpGroup, PumpGroupConfig, PumpIo, RotationPolicy};
 pub use rate_limiter::RateLimiter;
+pub use rate_of_rise::RateOfRise;
 pub use rationalization::Rationalization;
 pub use sequencer::{Sequencer, SequencerStep};
 pub use signal_filter::SignalFilter;
@@ -264,6 +270,7 @@ pub const KINDS: &[&str] = &[
     SurgeGuard::KIND,
     DemandFallback::KIND,
     FeedforwardSum::KIND,
+    RateOfRise::KIND,
 ];
 
 #[cfg(test)]
