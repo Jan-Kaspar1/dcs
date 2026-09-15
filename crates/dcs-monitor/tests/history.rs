@@ -97,6 +97,30 @@ impl Component for Scale {
 /// negative — a controllable step-failure source for the journal.
 struct Fragile;
 
+/// Reads `In` point 10 and writes `Out` point 20 with it — the Bool
+/// sibling of `Scale` for the journaled-transition rig: a component-driven
+/// status point that follows the field input.
+struct Mirror;
+
+impl Component for Mirror {
+    fn name(&self) -> &str {
+        "mirror"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        vec![
+            IoRequirement::input::<bool>("in", PointId(10)),
+            IoRequirement::output::<bool>("out", PointId(20)),
+        ]
+    }
+
+    fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        let sample = io.read_typed::<bool>(PointId(10))?;
+        io.write_typed(PointId(20), sample.value)?;
+        Ok(())
+    }
+}
+
 impl Component for Fragile {
     fn name(&self) -> &str {
         "fragile"
@@ -167,13 +191,24 @@ fn with_monitor_map<T>(
     ]);
     let executor = Executor::new(&driver, map, components).unwrap();
     let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
+    serve(&driver, monitor, body)
+}
+
+/// Runs `body` against a serving `monitor` and its `driver`; the server
+/// is shut down before the driver's borrow ends — the shared tail of
+/// every rig helper.
+fn serve<T>(
+    driver: &StubDriver,
+    monitor: Monitor,
+    body: impl FnOnce(&StubDriver, &MonitorClient) -> T,
+) -> T {
     let client = MonitorClient::new(monitor.local_addr());
     let result = thread::scope(|scope| {
         scope.spawn(|| monitor.serve());
         // A failing assertion must not deadlock the scope join: catch the
         // panic so the server is always shut down before it propagates.
         let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&driver, &client)));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(driver, &client)));
         monitor.shutdown();
         result
     });
@@ -470,6 +505,7 @@ fn stale_map() -> PointMap {
                 internal: None,
                 writable: false,
                 stale_after_ticks: Some(2),
+                journaled: false,
             },
         )
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -560,4 +596,251 @@ fn identical_stale_runs_produce_identical_history_and_journal() {
     };
 
     assert_eq!(run(), run());
+}
+
+/// The journaled-transition rig's point map: writable field `In` point
+/// 10 and internal `Out` status point 20 carry the declared `journaled`
+/// flag — the receipted-write and component-driven shapes the
+/// lifecycle-audit decision names — while field `In` point 40 stays
+/// undeclared, its value changes producing no journal entries.
+fn journaled_map() -> PointMap {
+    PointMap::new()
+        .with_spec(
+            PointId(10),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Bool,
+                internal: None,
+                writable: true,
+                stale_after_ticks: None,
+                journaled: true,
+            },
+        )
+        .with_spec(
+            PointId(20),
+            PointSpec {
+                direction: Direction::Out,
+                kind: ValueKind::Bool,
+                internal: Some(Value::Bool(false)),
+                writable: false,
+                stale_after_ticks: None,
+                journaled: true,
+            },
+        )
+        .with_point(PointId(40), Direction::In, ValueKind::Bool)
+}
+
+/// Builds the Bool journaled rig with the given retention and runs
+/// `body` against it.
+fn with_journaled_monitor<T>(
+    config: MonitorConfig,
+    body: impl FnOnce(&StubDriver, &MonitorClient) -> T,
+) -> T {
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Bool(false)),
+        (PointId(40), Value::Bool(false)),
+    ]);
+    let executor = Executor::new(&driver, journaled_map(), vec![Box::new(Mirror)]).unwrap();
+    let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
+    serve(&driver, monitor, body)
+}
+
+#[test]
+fn journaled_value_transitions_journal_at_the_producing_tick() {
+    with_journaled_monitor(MonitorConfig::default(), |driver, client| {
+        // The first recorded scan journals each journaled point's first
+        // observed sample with `from: None` — the `QualityChanged`
+        // convention — after that point's quality entry, all in
+        // ascending point order.
+        client.advance(1).unwrap();
+        assert_eq!(
+            client.journal(0).unwrap(),
+            vec![
+                JournalEntry {
+                    seq: 1,
+                    tick: Tick(1),
+                    event: JournalEvent::QualityChanged {
+                        point: PointId(10),
+                        from: None,
+                        to: Quality::Good,
+                    },
+                },
+                JournalEntry {
+                    seq: 2,
+                    tick: Tick(1),
+                    event: JournalEvent::QualityChanged {
+                        point: PointId(20),
+                        from: None,
+                        to: Quality::Good,
+                    },
+                },
+                JournalEntry {
+                    seq: 3,
+                    tick: Tick(1),
+                    event: JournalEvent::QualityChanged {
+                        point: PointId(40),
+                        from: None,
+                        to: Quality::Good,
+                    },
+                },
+                JournalEntry {
+                    seq: 4,
+                    tick: Tick(1),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(10),
+                        from: None,
+                        to: Value::Bool(false),
+                    },
+                },
+                JournalEntry {
+                    seq: 5,
+                    tick: Tick(1),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(20),
+                        from: None,
+                        to: Value::Bool(false),
+                    },
+                },
+            ]
+        );
+
+        // A field-side change on point 10 lands at the producing scan's
+        // tick; the component-driven status point 20 follows in the same
+        // scan — both in ascending point order — while undeclared point
+        // 40's identical change produces no value entry.
+        driver.write(PointId(10), Value::Bool(true)).unwrap();
+        driver.write(PointId(40), Value::Bool(true)).unwrap();
+        client.advance(1).unwrap();
+        assert_eq!(
+            client.journal(5).unwrap(),
+            vec![
+                JournalEntry {
+                    seq: 6,
+                    tick: Tick(2),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(10),
+                        from: Some(Value::Bool(false)),
+                        to: Value::Bool(true),
+                    },
+                },
+                JournalEntry {
+                    seq: 7,
+                    tick: Tick(2),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(20),
+                        from: Some(Value::Bool(false)),
+                        to: Value::Bool(true),
+                    },
+                },
+            ]
+        );
+        assert!(
+            client.journal(0).unwrap().iter().all(|entry| !matches!(
+                entry.event,
+                JournalEvent::PointChanged { point, .. } if point == PointId(40)
+            )),
+            "{:?}",
+            client.journal(0).unwrap()
+        );
+    });
+}
+
+#[test]
+fn a_receipted_write_to_a_journaled_point_journals_receipt_and_transition() {
+    with_journaled_monitor(MonitorConfig::default(), |driver, client| {
+        client.advance(1).unwrap();
+        let base_seq = client.journal(0).unwrap().last().unwrap().seq;
+
+        // The write to writable journaled point 10 applies at the next
+        // scan's head: the journal records the attributed
+        // `CommandSettled` first, then the resulting value transitions —
+        // the action's attribution and the transition coexisting in
+        // `seq` order.
+        let receipt = client
+            .command(&write_value(10, ValueKind::Bool, Value::Bool(true)))
+            .unwrap();
+        client.advance(1).unwrap();
+        assert_eq!(
+            client.journal(base_seq).unwrap(),
+            vec![
+                JournalEntry {
+                    seq: base_seq + 1,
+                    tick: Tick(2),
+                    event: JournalEvent::CommandSettled {
+                        receipt: CommandReceipt {
+                            command: receipt.command,
+                            outcome: CommandOutcome::Applied { tick: Tick(2) },
+                            actor: None,
+                        },
+                    },
+                },
+                JournalEntry {
+                    seq: base_seq + 2,
+                    tick: Tick(2),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(10),
+                        from: Some(Value::Bool(false)),
+                        to: Value::Bool(true),
+                    },
+                },
+                JournalEntry {
+                    seq: base_seq + 3,
+                    tick: Tick(2),
+                    event: JournalEvent::PointChanged {
+                        point: PointId(20),
+                        from: Some(Value::Bool(false)),
+                        to: Value::Bool(true),
+                    },
+                },
+            ]
+        );
+
+        // A component-driven transition needs no receipt: the scripted
+        // field change flipping point 10 back journals the two
+        // `PointChanged` entries alone.
+        driver.write(PointId(10), Value::Bool(false)).unwrap();
+        client.advance(1).unwrap();
+        let journal = client.journal(0).unwrap();
+        assert!(
+            journal.iter().all(
+                |entry| !matches!(entry.event, JournalEvent::CommandSettled { .. })
+                    || entry.seq <= base_seq + 1
+            ),
+            "{journal:?}"
+        );
+    });
+}
+
+#[test]
+fn journaled_transitions_evict_with_visible_seq_gaps() {
+    let config = MonitorConfig {
+        history_capacity: 8,
+        journal_capacity: 4,
+        ..MonitorConfig::default()
+    };
+    with_journaled_monitor(config, |driver, client| {
+        // Scan 1: five entries (three quality transitions, then the two
+        // first-observation value transitions). Each toggle scan then
+        // appends two `PointChanged` entries.
+        client.advance(1).unwrap();
+        for _ in 0..3 {
+            driver.write(PointId(10), Value::Bool(true)).unwrap();
+            client.advance(1).unwrap();
+            driver.write(PointId(10), Value::Bool(false)).unwrap();
+            client.advance(1).unwrap();
+        }
+        // Capacity 4 retains the newest four entries — seqs 14–17 — and
+        // the evicted prefix shows up as a numbering gap, never reused.
+        let journal = client.journal(0).unwrap();
+        assert_eq!(
+            journal.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            vec![14, 15, 16, 17]
+        );
+        assert!(
+            journal
+                .iter()
+                .all(|entry| matches!(entry.event, JournalEvent::PointChanged { .. })),
+            "{journal:?}"
+        );
+    });
 }

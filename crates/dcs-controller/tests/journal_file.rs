@@ -113,11 +113,27 @@ fn spawn_driven(args: &[String]) -> Spawned {
     }
 }
 
+/// The journaled-points rig: point 10 is a writable journaled `In`
+/// point — the receipted-write shape — and point 20 a journaled
+/// internal `Out` status point a `digital-output` component mirrors
+/// from the scripted, unjournaled point 11 — the component-driven
+/// shape.
+const JOURNALED_POINTS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-assembly/fixtures/journaled_points.json"
+);
+
 /// The driven-mode arguments: `--journal-file` always, `--state-file`
 /// when `state` names a checkpoint path.
 fn driven_args(journal: &Path, state: Option<&Path>) -> Vec<String> {
+    driven_args_for(TANK_LOOP, journal, state)
+}
+
+/// As [`driven_args`] for an explicit model — the journaled rig shares
+/// the same spawning harness.
+fn driven_args_for(model: &str, journal: &Path, state: Option<&Path>) -> Vec<String> {
     let mut args = vec![
-        TANK_LOOP.to_string(),
+        model.to_string(),
         "--listen".to_string(),
         "127.0.0.1:0".to_string(),
         "--driven".to_string(),
@@ -331,6 +347,112 @@ fn a_corrupt_journal_file_fails_startup_naming_the_file_and_record() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(journal.to_str().unwrap()), "{stderr}");
     assert!(stderr.contains(torn), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_receipted_write_and_a_component_transition_journal_side_by_side() {
+    let dir = scratch("journaled");
+    let journal = dir.join("journal.jsonl");
+
+    // First lifetime — the first scan journals the declared points'
+    // first observed samples (`from: None` on the two journaled
+    // points). The receipted write to journaled writable point 10 then
+    // lands its `CommandSettled` and the resulting `PointChanged` at
+    // the applying scan — the action's attribution and the transition
+    // coexisting in `seq` order.
+    let mut first = spawn_driven(&driven_args_for(JOURNALED_POINTS, &journal, None));
+    let client = MonitorClient::new(first.addr);
+    client.advance(1).unwrap();
+    let receipt = client
+        .command(&Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Bool,
+            value: Value::Bool(true),
+        })
+        .unwrap();
+    client.advance(1).unwrap();
+
+    // Scan 3 flips scripted point 11 — unjournaled, so no value entry —
+    // and the digital-output component mirrors it onto journaled status
+    // point 20: a component-driven transition with no command and so
+    // no receipt.
+    client.advance(1).unwrap();
+
+    let before_restart = client.journal(0).unwrap();
+    let settled = before_restart
+        .iter()
+        .position(|entry| matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. }))
+        .expect("the write settled");
+    assert_eq!(
+        before_restart[settled].event,
+        dcs_core::JournalEvent::CommandSettled {
+            receipt: dcs_core::CommandReceipt {
+                command: receipt.command,
+                outcome: dcs_core::CommandOutcome::Applied { tick: Tick(2) },
+                actor: None,
+            },
+        }
+    );
+    assert_eq!(
+        before_restart[settled + 1].event,
+        dcs_core::JournalEvent::PointChanged {
+            point: PointId(10),
+            from: Some(Value::Bool(false)),
+            to: Value::Bool(true),
+        }
+    );
+    assert_eq!(before_restart[settled + 1].tick, Tick(2));
+    assert!(
+        before_restart
+            .iter()
+            .filter(|entry| {
+                matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. })
+            })
+            .count()
+            == 1,
+        "{before_restart:?}"
+    );
+    let status_transition = before_restart
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.event,
+                dcs_core::JournalEvent::PointChanged {
+                    point,
+                    to: Value::Bool(true),
+                    ..
+                } if point == PointId(20)
+            )
+        })
+        .expect("the component-driven status transition is journaled");
+    assert_eq!(status_transition.tick, Tick(3));
+    assert!(
+        before_restart.iter().all(|entry| !matches!(
+            entry.event,
+            dcs_core::JournalEvent::PointChanged { point, .. } if point == PointId(11)
+        )),
+        "{before_restart:?}"
+    );
+    kill(&mut first);
+
+    // Every served entry — receipts and `point_changed` transitions
+    // alike — landed in the file in order behind the run-1 marker, and
+    // a restarted process replays them with `seq` numbering continued.
+    assert_eq!(file_entries(&journal), before_restart);
+    let second = spawn_driven(&driven_args_for(JOURNALED_POINTS, &journal, None));
+    let client = MonitorClient::new(second.addr);
+    assert_eq!(client.journal(0).unwrap(), before_restart);
+    client.advance(1).unwrap();
+    let after_restart = client.journal(0).unwrap();
+    assert_eq!(&after_restart[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        after_restart[before_restart.len()].seq,
+        before_restart.last().unwrap().seq + 1
+    );
+    assert_eq!(file_entries(&journal), after_restart);
+    assert_eq!(file_boundaries(&journal), vec![(1, 0), (2, 0)]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

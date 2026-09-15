@@ -52,6 +52,13 @@ pub struct PointSpec {
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
     pub stale_after_ticks: Option<u64>,
+    /// Whether the point's observed value transitions join the durable
+    /// journal — the `journaled` flag a model `io_point` declaration
+    /// carries through assembly. The monitor's recorder diffs declared
+    /// points' image values scan over scan and appends a `PointChanged`
+    /// entry at the producing scan's tick; undeclared points journal no
+    /// value transitions.
+    pub journaled: bool,
 }
 
 /// The executor's point map: which logical points exist, whether the
@@ -89,6 +96,7 @@ impl PointMap {
                 internal: None,
                 writable: false,
                 stale_after_ticks: None,
+                journaled: false,
             },
         );
         self
@@ -123,6 +131,7 @@ impl PointMap {
                 internal: None,
                 writable: true,
                 stale_after_ticks: None,
+                journaled: false,
             },
         );
         self
@@ -146,6 +155,7 @@ impl PointMap {
                 internal: Some(initial),
                 writable: false,
                 stale_after_ticks: None,
+                journaled: false,
             },
         );
         self
@@ -172,6 +182,7 @@ impl PointMap {
                 internal: Some(initial),
                 writable: true,
                 stale_after_ticks: None,
+                journaled: false,
             },
         );
         self
@@ -792,6 +803,15 @@ impl<'d> Executor<'d> {
     /// monitoring and tests.
     pub fn sample(&self, point: PointId) -> Option<Sample> {
         self.image.borrow().get(&point).copied()
+    }
+
+    /// The resolved point map the executor was wired against — the
+    /// assembled declaration of each point's direction, kind, and flags
+    /// (`writable`, `stale_after_ticks`, `journaled`). The monitor's
+    /// recorder reads it for the declared-`journaled` set its
+    /// value-transition diff covers.
+    pub fn point_map(&self) -> &PointMap {
+        &self.map
     }
 
     /// The driver the executor's scans read and write through — the
@@ -2549,6 +2569,7 @@ mod tests {
                 internal: None,
                 writable: false,
                 stale_after_ticks: Some(budget),
+                journaled: false,
             },
         )
     }
@@ -2749,6 +2770,7 @@ mod tests {
                 internal: None,
                 writable: true,
                 stale_after_ticks: Some(2),
+                journaled: false,
             },
         );
         let mut executor = Executor::new(
