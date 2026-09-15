@@ -249,7 +249,7 @@ impl DeviceParameters {
     fn mapping(
         parameters: &BTreeMap<String, serde_json::Value>,
         channels: &BTreeMap<String, ChannelDecl>,
-    ) -> Result<(BTreeMap<String, ImageOffset>, BTreeMap<String, ImageOffset>), String> {
+    ) -> Result<(ImageMap, ImageMap), String> {
         let mapping = required(parameters, "mapping")?;
         let Some(object) = mapping.as_object() else {
             return Err(format!(
@@ -290,7 +290,7 @@ impl DeviceParameters {
         image_name: &str,
         direction: Direction,
         channels: &BTreeMap<String, ChannelDecl>,
-    ) -> Result<BTreeMap<String, ImageOffset>, String> {
+    ) -> Result<ImageMap, String> {
         let mut offsets = BTreeMap::new();
         let Some(image) = image else {
             return Ok(offsets);
@@ -456,6 +456,9 @@ impl DeviceParameters {
         Ok(safe)
     }
 }
+
+/// One direction's process image: channel name → placement.
+type ImageMap = BTreeMap<String, ImageOffset>;
 
 /// The parameter `name` must be present.
 fn required<'a>(
