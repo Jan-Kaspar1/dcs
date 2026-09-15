@@ -137,19 +137,9 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(Interlock::KIND, |spec| {
-            // Trip inputs are declared `trip_1` … `trip_N`; order the
-            // bound points by numeric suffix, not lexically.
-            let mut trips: Vec<_> = spec
-                .ports
-                .iter()
-                .filter_map(|(name, point)| {
-                    name.strip_prefix("trip_")
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                        .map(|index| (index, *point))
-                })
-                .collect();
-            trips.sort_by_key(|(index, _)| *index);
-            let trips: Vec<_> = trips.into_iter().map(|(_, point)| point).collect();
+            // Trip inputs are declared `trip_1` … `trip_N`; the shared
+            // indexed-family accessor binds them in numeric order.
+            let trips = spec.indexed("trip_");
             boxed(Interlock::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -268,19 +258,8 @@ pub fn registry() -> ComponentRegistry {
         })
         .with(BoolGate::KIND, |spec| {
             // The input set is declared `in_1` … `in_N` following the
-            // interlock's `trip_N` convention; order the bound points by
-            // numeric suffix, not lexically.
-            let mut inputs: Vec<_> = spec
-                .ports
-                .iter()
-                .filter_map(|(name, point)| {
-                    name.strip_prefix("in_")
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                        .map(|index| (index, *point))
-                })
-                .collect();
-            inputs.sort_by_key(|(index, _)| *index);
-            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            // interlock's `trip_N` convention.
+            let inputs = spec.indexed("in_");
             boxed(BoolGate::from_parameters(
                 spec.name.as_str(),
                 inputs,
@@ -291,28 +270,18 @@ pub fn registry() -> ComponentRegistry {
         .with(PumpGroup::KIND, |spec| {
             // The pumps are declared `cmd_1` … `cmd_N`, `run_1` …
             // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`
-            // following the interlock's `trip_N` convention. The pump
-            // count is the highest bound index across the four
-            // families, and every index below it must bind all four —
-            // a partial family or a gap fails `UnboundPort` naming the
-            // missing member.
-            let mut indices = std::collections::BTreeSet::new();
-            for prefix in ["cmd_", "run_", "fault_", "avail_"] {
-                indices.extend(spec.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                }));
-            }
-            let count = indices.iter().next_back().copied().unwrap_or(0);
-            let mut pumps = Vec::with_capacity(count);
-            for index in 1..=count {
-                pumps.push(PumpIo {
-                    cmd: spec.require(&format!("cmd_{index}"))?,
-                    run: spec.require(&format!("run_{index}"))?,
-                    fault: spec.require(&format!("fault_{index}"))?,
-                    avail: spec.require(&format!("avail_{index}"))?,
-                });
-            }
+            // following the interlock's `trip_N` convention; the shared
+            // multi-family accessor counts and requires them.
+            let pumps = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail]| PumpIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                })
+                .collect();
             boxed(PumpGroup::from_parameters(
                 spec.name.as_str(),
                 spec.require("demand")?,
