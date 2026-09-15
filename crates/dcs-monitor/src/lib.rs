@@ -113,9 +113,12 @@
 //! — and submits `write_value` commands to `/command`, displaying the
 //! returned receipt. The snapshot's `io_health` section renders as the
 //! I/O-health pane: the executor's boundary counters (failed reads,
-//! failed writes, consecutive failures) with the last fault's tick and
-//! point attribution, the driver's volunteered transport diagnostics as
-//! named link degradation distinct from per-point quality, and the
+//! failed writes, failed cyclic exchanges, consecutive failures) with
+//! the last fault's tick and point attribution, the driver's
+//! volunteered transport diagnostics as named link degradation
+//! distinct from per-point quality — including a cyclic driver's
+//! exchange counters (attempted/succeeded, working-counter mismatches,
+//! missed deadlines, the last completed exchange's tick) — and the
 //! pacing shell's scan-overrun count — placed beside the pair view's
 //! role and convergence reporting so operator-facing health reads as
 //! one surface.
