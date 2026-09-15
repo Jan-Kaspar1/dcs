@@ -13,11 +13,12 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter,
-    DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FlowPacedRatio,
-    GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, Pid,
-    PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain,
-    ThresholdOutputs, Timer, Totalizer, Valve,
+    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
+    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
+    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -137,19 +138,9 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(Interlock::KIND, |spec| {
-            // Trip inputs are declared `trip_1` … `trip_N`; order the
-            // bound points by numeric suffix, not lexically.
-            let mut trips: Vec<_> = spec
-                .ports
-                .iter()
-                .filter_map(|(name, point)| {
-                    name.strip_prefix("trip_")
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                        .map(|index| (index, *point))
-                })
-                .collect();
-            trips.sort_by_key(|(index, _)| *index);
-            let trips: Vec<_> = trips.into_iter().map(|(_, point)| point).collect();
+            // Trip inputs are declared `trip_1` … `trip_N`; the shared
+            // indexed-family accessor binds them in numeric order.
+            let trips = spec.indexed("trip_");
             boxed(Interlock::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -268,19 +259,8 @@ pub fn registry() -> ComponentRegistry {
         })
         .with(BoolGate::KIND, |spec| {
             // The input set is declared `in_1` … `in_N` following the
-            // interlock's `trip_N` convention; order the bound points by
-            // numeric suffix, not lexically.
-            let mut inputs: Vec<_> = spec
-                .ports
-                .iter()
-                .filter_map(|(name, point)| {
-                    name.strip_prefix("in_")
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                        .map(|index| (index, *point))
-                })
-                .collect();
-            inputs.sort_by_key(|(index, _)| *index);
-            let inputs: Vec<_> = inputs.into_iter().map(|(_, point)| point).collect();
+            // interlock's `trip_N` convention.
+            let inputs = spec.indexed("in_");
             boxed(BoolGate::from_parameters(
                 spec.name.as_str(),
                 inputs,
@@ -291,28 +271,18 @@ pub fn registry() -> ComponentRegistry {
         .with(PumpGroup::KIND, |spec| {
             // The pumps are declared `cmd_1` … `cmd_N`, `run_1` …
             // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`
-            // following the interlock's `trip_N` convention. The pump
-            // count is the highest bound index across the four
-            // families, and every index below it must bind all four —
-            // a partial family or a gap fails `UnboundPort` naming the
-            // missing member.
-            let mut indices = std::collections::BTreeSet::new();
-            for prefix in ["cmd_", "run_", "fault_", "avail_"] {
-                indices.extend(spec.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                }));
-            }
-            let count = indices.iter().next_back().copied().unwrap_or(0);
-            let mut pumps = Vec::with_capacity(count);
-            for index in 1..=count {
-                pumps.push(PumpIo {
-                    cmd: spec.require(&format!("cmd_{index}"))?,
-                    run: spec.require(&format!("run_{index}"))?,
-                    fault: spec.require(&format!("fault_{index}"))?,
-                    avail: spec.require(&format!("avail_{index}"))?,
-                });
-            }
+            // following the interlock's `trip_N` convention; the shared
+            // multi-family accessor counts and requires them.
+            let pumps = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail]| PumpIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                })
+                .collect();
             boxed(PumpGroup::from_parameters(
                 spec.name.as_str(),
                 spec.require("demand")?,
@@ -391,6 +361,50 @@ pub fn registry() -> ComponentRegistry {
                 spec.require("measured")?,
                 spec.require("deviation")?,
                 spec.require("deviating")?,
+                spec.parameters,
+            ))
+        })
+        .with(BackwashCoordinator::KIND, |spec| {
+            // The filters are declared `request_1` … `request_N`,
+            // `grant_1` … `grant_N`, `position_1` … `position_N`
+            // following the interlock's `trip_N` convention. The
+            // filter count is the highest bound index across the
+            // three families, and every index below it must bind all
+            // three — a partial family or a gap fails `UnboundPort`
+            // naming the missing member. `reorder` is the optional
+            // operator instruction — bound only where the model wires
+            // it (`ComponentSpec::get`); an unwired instance exposes
+            // no reorder surface.
+            let mut indices = std::collections::BTreeSet::new();
+            for prefix in ["request_", "grant_", "position_"] {
+                indices.extend(spec.ports.keys().filter_map(|name| {
+                    name.strip_prefix(prefix)
+                        .and_then(|suffix| suffix.parse::<usize>().ok())
+                }));
+            }
+            let count = indices.iter().next_back().copied().unwrap_or(0);
+            let mut filters = Vec::with_capacity(count);
+            for index in 1..=count {
+                filters.push(FilterIo {
+                    request: spec.require(&format!("request_{index}"))?,
+                    grant: spec.require(&format!("grant_{index}"))?,
+                    position: spec.require(&format!("position_{index}"))?,
+                });
+            }
+            boxed(BackwashCoordinator::from_parameters(
+                spec.name.as_str(),
+                PermissiveInputs {
+                    supply_ok: spec.require("supply_ok")?,
+                    waste_ok: spec.require("waste_ok")?,
+                    flow_ok: spec.require("flow_ok")?,
+                },
+                spec.get("reorder"),
+                filters,
+                CoordinatorOutputs {
+                    active: spec.require("active")?,
+                    queued: spec.require("queued")?,
+                    resource_blocked: spec.require("resource_blocked")?,
+                },
                 spec.parameters,
             ))
         })

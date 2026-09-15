@@ -370,6 +370,51 @@ composition — a windowed instance beside a window-1 instantaneous
 instance over one scripted expected/measured pair; per-port semantics
 live beside `DeviationMonitor::KIND`.
 
+The filter-backwash shared-supply contract architecture decision 56
+records adds one variable-arity kind. `backwash-coordinator`
+arbitrates an exclusive grant across `N` filters declared
+`request_i`/`grant_i`/`position_i` under the same indexed-family
+convention `interlock`'s `trip_N` uses — the filter count is the
+highest bound index and every index below it must bind all three. Per
+filter `i`: `request_i` (`in`, `Bool`) is the armed backwash request,
+`grant_i` (`out`, `Bool`) the exclusive supply grant — at most one
+asserted at a time — and `position_i` (`out`, `Int`) the 1-based queue
+position, `0` while the filter is not queued (the grant holder
+included — it holds the grant, not a queue slot; `active` identifies
+it). The bank-level `active` (`out`, `Int`) names the grant holder,
+`queued` (`out`, `Int`) counts pending requests, and
+`resource_blocked` (`out`, `Bool`) asserts while a request stands
+first in queue and a grant permissive fails. The permissives are the
+declared inputs `supply_ok`, `waste_ok`, `flow_ok` (`in`, `Bool`),
+aggregated upstream through plant wiring; a non-`Good` permissive —
+and a non-`Good` `request_i` — reads fail-safe: not-OK and not
+asserted. The grant asserts only while every permissive holds, holds
+while the granted filter's request stands, and releases the scan it
+drops — completion and abort release identically, so the arbiter
+carries no completion vocabulary. The `parameters` are the `Int`
+codes `queue_policy` (`0` FIFO, `1` priority-by-trigger — the
+coordinator sees only `request_i`, so the plant numbers filters in
+priority order — `2` operator-managed, where no grant issues until
+the standing reorder instruction selects the queue's head) and
+`queued_state` (`0` keep filtering until granted, `1` offline with
+standby cover — declared contract data; its effect composes in bank
+wiring). Both are required declared data and `SetParameter`-tunable.
+Where the model binds `reorder` (`in`, `Int`) — conventionally a
+writable internal `in` point, so operator writes ride the journaled
+receipted command path and the held value crosses checkpoints — it
+carries a standing instruction: a `Good` value in `1..=N` naming a
+queued member moves it to the head (and, under `queue_policy` `2`,
+selects it for the grant); `0`, out-of-range, non-queued, and
+non-`Good` values apply nothing. An instance not exposing reorder
+declares no `reorder` port. The ordered queue and the held grant are
+per-scan run state: `capture_state` carries `granted`, `queued_count`,
+and `queue_k` under decision 20, so a checkpointed standby inherits
+order and grant mid-queue.
+`crates/dcs-assembly/fixtures/backwash_coordinator.json` is the
+recorded composition — a three-filter FIFO bank beside a two-filter
+operator-managed bank driving the reorder point; per-port semantics
+live beside `BackwashCoordinator::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
@@ -556,6 +601,7 @@ object whose single key is the snake_case element name:
 | `noise` | `input`, `output`, `amplitude`, `seed`, `initial` | `y = u + amplitude·(2x − 1)`, `x` drawn once per step from a splitmix64 generator seeded by `seed` — the output stays within `u ± amplitude` and identical seeds replay identical deviation sequences. |
 | `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a bool-gated flow source answering an actuator's run command. `input` is the one non-float element end: a `bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
 | `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
+| `scaled_flow` | `input`, `output`, `gain`, `initial` | `y = gain · u`, re-evaluated each step — a `float` demand scaled into the signed rate a downstream `flow_sum` or `integrator` consumes: a metering pump's measured discharge at its analog speed demand, a chemical tank's drawdown under a negative `gain`. `dt` does not scale the output. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
@@ -571,9 +617,9 @@ point it drives):
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
-  `off_rate`, and `bias` finite (`InvalidRate`, `NonFiniteBias` — rates
-  are signed flows, so a negative draw is legal), and `initial` finite
-  (`NonFiniteInitial`);
+  `off_rate`, `gain`, and `bias` finite (`InvalidRate`, `InvalidGain`,
+  `NonFiniteBias` — rates and gains are signed, so a negative draw is
+  legal), and `initial` finite (`NonFiniteInitial`);
 - a non-`Good` input freezes the element's state and propagates its
   quality to the output sample — a `flow_sum` propagating the worst of
   its inputs' qualities;
@@ -604,7 +650,12 @@ command:
 the showcase plant's; `crates/dcs-sim/fixtures/pump_station_dynamics.json`
 is the station loop `bool_flow` and `flow_sum` exist for — two bool-gated
 pump draws and a declared inflow summed into an integrator driving the
-well level.
+well level; and `crates/dcs-sim/fixtures/dosing_skid_dynamics.json` is
+the dosing loop `scaled_flow` exists for — the metering pump's analog
+speed demand scaled into the measured discharge rate and, with a
+negative gain, the chemical tank's drawdown, integrated into the tank
+level — merging onto `crates/dcs-plant/fixtures/dosing_skid.json`'s
+points.
 
 ## Which layer checks what
 

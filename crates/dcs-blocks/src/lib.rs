@@ -74,7 +74,11 @@
 //! - [`DeviationMonitor`] — the dose-confirmation check: the commanded
 //!   and measured chemical rates or totals accumulated over a declared
 //!   window, the relative deviation tripping `deviating` past the
-//!   declared limit.
+//!   declared limit;
+//! - [`BackwashCoordinator`] — shared-supply backwash arbitration: an
+//!   ordered request queue and an exclusive held grant gated by the
+//!   declared permissives, with a declared queue policy and operator
+//!   reorder.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -90,6 +94,7 @@
 mod alarm_monitor;
 mod analog_input;
 mod analog_output;
+mod backwash_coordinator;
 mod bool_gate;
 mod bool_latching_alarm;
 mod counter;
@@ -121,6 +126,10 @@ mod valve;
 pub use alarm_monitor::{AlarmLimits, AlarmMonitor};
 pub use analog_input::{AnalogInput, RawInput, Scaling};
 pub use analog_output::{AnalogOutput, RawOutput};
+pub use backwash_coordinator::{
+    BackwashCoordinator, BackwashCoordinatorConfig, CoordinatorOutputs, FilterIo, PermissiveInputs,
+    QueuePolicy, QueuedState,
+};
 pub use bool_gate::{BoolGate, GateOperation};
 pub use bool_latching_alarm::BoolLatchingAlarm;
 pub use counter::Counter;
@@ -187,6 +196,7 @@ pub const KINDS: &[&str] = &[
     FailoverSelect::KIND,
     FlowPacedRatio::KIND,
     DeviationMonitor::KIND,
+    BackwashCoordinator::KIND,
 ];
 
 #[cfg(test)]

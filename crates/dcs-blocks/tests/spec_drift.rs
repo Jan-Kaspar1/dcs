@@ -18,22 +18,23 @@ use std::collections::BTreeSet;
 
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BoolGate, BoolLatchingAlarm, Counter,
-    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect,
+    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
+    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
+    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
     FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, Pid, PidConfig, PumpGroup, PumpGroupConfig,
-    PumpIo, RateLimiter, RatioOutputs, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SetpointTable, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer,
-    Valve,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
+    Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
+    ThresholdOutputs, Timer, Totalizer, Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BoolGateSpec, BoolLatchingAlarmSpec,
-    CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
-    FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec,
-    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec,
-    SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
+    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
+    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
+    TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -430,6 +431,51 @@ fn specs_match_registered_kinds_descriptors() {
             .unwrap()
             .describe(),
     ));
+    // `backwash-coordinator`'s per-filter `request_i`/`grant_i`/
+    // `position_i` families are instance-dependent — `N` is the spec's
+    // `filters`, matching the interlock's `trips` convention — and
+    // `reorder` is the optional port, declared only where bound.
+    let coordinator = |reorder: Option<PointId>| {
+        BackwashCoordinator::new(
+            "bwc",
+            PermissiveInputs {
+                supply_ok: point(1),
+                waste_ok: point(2),
+                flow_ok: point(3),
+            },
+            reorder,
+            vec![
+                FilterIo {
+                    request: point(10),
+                    grant: point(11),
+                    position: point(12),
+                },
+                FilterIo {
+                    request: point(20),
+                    grant: point(21),
+                    position: point(22),
+                },
+            ],
+            CoordinatorOutputs {
+                active: point(30),
+                queued: point(31),
+                resource_blocked: point(32),
+            },
+            BackwashCoordinatorConfig {
+                queue_policy: QueuePolicy::Fifo,
+                queued_state: QueuedState::KeepFiltering,
+            },
+        )
+        .unwrap()
+    };
+    covered.insert(check(
+        &BackwashCoordinatorSpec::new(Default::default(), 2, true),
+        &coordinator(Some(point(4))).describe(),
+    ));
+    covered.insert(check(
+        &BackwashCoordinatorSpec::new(Default::default(), 2, false),
+        &coordinator(None).describe(),
+    ));
 
     // The coverage guard: the table must pin exactly the kinds the
     // standard registry serves — the checked-in `dcs_blocks::KINDS`
@@ -506,6 +552,50 @@ fn pump_group_spec_tracks_pump_count() {
             &PumpGroupSpec::new(Default::default(), pumps),
             &component.describe(),
         );
+    }
+}
+
+#[test]
+fn backwash_coordinator_spec_tracks_filter_count() {
+    // The `request_i`/`grant_i`/`position_i` families are
+    // instance-dependent: the spec's port list must follow the
+    // constructed component's — with and without the optional
+    // `reorder` port.
+    let config = BackwashCoordinatorConfig {
+        queue_policy: QueuePolicy::Fifo,
+        queued_state: QueuedState::KeepFiltering,
+    };
+    for filters in [1usize, 2, 5] {
+        for reorder in [None, Some(point(9))] {
+            let filter_io: Vec<FilterIo> = (0..filters as u64)
+                .map(|n| FilterIo {
+                    request: point(10 + n * 3),
+                    grant: point(11 + n * 3),
+                    position: point(12 + n * 3),
+                })
+                .collect();
+            let component = BackwashCoordinator::new(
+                "bwc",
+                PermissiveInputs {
+                    supply_ok: point(1),
+                    waste_ok: point(2),
+                    flow_ok: point(3),
+                },
+                reorder,
+                filter_io,
+                CoordinatorOutputs {
+                    active: point(4),
+                    queued: point(5),
+                    resource_blocked: point(6),
+                },
+                config,
+            )
+            .unwrap();
+            check(
+                &BackwashCoordinatorSpec::new(Default::default(), filters, reorder.is_some()),
+                &component.describe(),
+            );
+        }
     }
 }
 

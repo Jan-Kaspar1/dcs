@@ -58,23 +58,16 @@ where
 fn registry() -> ComponentRegistry {
     ComponentRegistry::new()
         .with(PumpGroup::KIND, |spec| {
-            let mut indices = std::collections::BTreeSet::new();
-            for prefix in ["cmd_", "run_", "fault_", "avail_"] {
-                indices.extend(spec.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                }));
-            }
-            let count = indices.iter().next_back().copied().unwrap_or(0);
-            let mut pumps = Vec::with_capacity(count);
-            for index in 1..=count {
-                pumps.push(PumpIo {
-                    cmd: spec.require(&format!("cmd_{index}"))?,
-                    run: spec.require(&format!("run_{index}"))?,
-                    fault: spec.require(&format!("fault_{index}"))?,
-                    avail: spec.require(&format!("avail_{index}"))?,
-                });
-            }
+            let pumps = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail]| PumpIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                })
+                .collect();
             boxed(PumpGroup::from_parameters(
                 spec.name.as_str(),
                 spec.require("demand")?,

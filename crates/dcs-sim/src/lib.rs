@@ -14,11 +14,11 @@
 //!   paired `In` point at the next [`SimDriver::step`], closing simple
 //!   control loops without a process model;
 //! - [`ProcessElement`]s ([`FirstOrderLag`], [`SecondOrderLag`],
-//!   [`Integrator`], [`DeadTime`], [`Noise`], [`BoolFlow`], and
-//!   [`FlowSum`]) drive `Float` points from other points — a
-//!   [`BoolFlow`] reads a `Bool` gate, a [`FlowSum`] a declared list —
-//!   advanced by the caller-supplied `dt` each step, never by
-//!   wall-clock time;
+//!   [`Integrator`], [`DeadTime`], [`Noise`], [`BoolFlow`],
+//!   [`FlowSum`], and [`ScaledFlow`]) drive `Float` points from other
+//!   points — a [`BoolFlow`] reads a `Bool` gate, a [`FlowSum`] a
+//!   declared list, a [`ScaledFlow`] a `Float` demand — advanced by
+//!   the caller-supplied `dt` each step, never by wall-clock time;
 //! - [`SimDriver::inject_fault`] marks points with non-[`Good`](dcs_core::Quality::Good)
 //!   quality or makes accesses fail with an [`IoError`](dcs_core::IoError),
 //!   standing in for field-device failures in diagnostics tests.
@@ -52,6 +52,6 @@ mod scripted;
 pub use driver::{Fault, PointInfo, SimDriver};
 pub use map::{
     BoolFlow, ChannelId, ChannelMap, ConfigError, DeadTime, Direction, FirstOrderLag, FlowSum,
-    Integrator, Loopback, Noise, PointBinding, ProcessElement, SecondOrderLag,
+    Integrator, Loopback, Noise, PointBinding, ProcessElement, ScaledFlow, SecondOrderLag,
 };
 pub use scripted::{RecordedWrite, ScriptEntry, ScriptError, ScriptedDriver};
