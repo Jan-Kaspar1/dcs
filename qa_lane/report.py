@@ -18,7 +18,8 @@ Schema version 1, top-level fields:
                            blocked by a capability gap, but a verdict
                            applies only to the revision actually tested.
   image                    {"controller": "sha256:...", "plant": "sha256:..."}
-                           the digests of the exact artifacts tested
+                           the digests of the exact artifacts tested, or
+                           null when the run was blocked before any build
   started_at/finished_at   ISO-8601 timestamps, finished >= started
   outcome                  passed | failed | blocked | inconclusive |
                            interrupted
@@ -196,12 +197,15 @@ def validate_report(text, run_id=None, attempted_sha=None):
         raise ValueError('attempt must be a positive integer')
 
     image = data['image']
-    if not isinstance(image, dict) or not {'controller', 'plant'} <= set(image) \
-            or not set(image) <= {'controller', 'plant'}:
-        raise ValueError('image must name controller and plant digests')
-    for name, digest in image.items():
-        if not isinstance(digest, str) or not IMAGE_DIGEST.match(digest):
-            raise ValueError('image.' + name + ' must be a sha256 digest')
+    if image is not None:
+        if not isinstance(image, dict) \
+                or not {'controller', 'plant'} <= set(image) \
+                or not set(image) <= {'controller', 'plant'}:
+            raise ValueError('image must name controller and plant digests')
+        for name, digest in image.items():
+            if not isinstance(digest, str) or not IMAGE_DIGEST.match(digest):
+                raise ValueError('image.' + name
+                                 + ' must be a sha256 digest')
 
     if 'host' in data:
         host = data['host']

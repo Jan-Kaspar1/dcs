@@ -1,0 +1,17 @@
+[Unit]
+Description=DCS QA lane run cycle (reconcile, then run newest queued revision)
+# Docker's own unit already carries RequiresMountsFor/BindsTo on the HDD
+# mount; this service must not weaken or duplicate that contract.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=jan-kaspar
+WorkingDirectory=/srv/homelab/dcs-hwtest
+Environment=QA_LANE_CONFIG=/srv/homelab/dcs-hwtest/config.json
+ExecStart=/usr/bin/python3 -m qa_lane cycle
+# Backstop above the lane's own 2h hard timeout: a wedged cycle is killed
+# and the next start reconciles its labeled containers.
+TimeoutStartSec=7800
+# Never restart mid-cycle: the timer schedules the next pass.
