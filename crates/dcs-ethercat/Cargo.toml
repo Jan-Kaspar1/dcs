@@ -1,0 +1,24 @@
+[package]
+name = "dcs-ethercat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcs-assembly = { path = "../dcs-assembly" }
+dcs-core = { path = "../dcs-core" }
+dcs-model = { path = "../dcs-model" }
+# The EtherCAT master stack, pinned exactly per the stack evaluation:
+# 0.7.1, MSRV 1.85 (<= toolchain 1.98.1), MIT OR Apache-2.0. `std`
+# without default features keeps the plain raw-socket TX/RX path and
+# leaves io-uring/xdp out of the dependency tree.
+ethercrab = { version = "=0.7.1", default-features = false, features = ["std"] }
+# The bus thread's small executor and request channel — smol-scale
+# pieces only; no tokio enters the runtime path.
+async-channel = "2.5.0"
+futures-lite = "2.6.0"
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+dcs-runtime = { path = "../dcs-runtime" }
