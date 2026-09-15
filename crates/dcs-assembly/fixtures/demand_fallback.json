@@ -1,0 +1,233 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "demand": [
+            { "tick": 0, "value": 42.0 },
+            { "tick": 20, "value": 55.0 },
+            { "tick": 45, "value": 55.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 48, "value": 55.0 },
+            { "tick": 60, "value": 30.0 }
+          ],
+          "pv": [
+            { "tick": 0, "value": 2.0 },
+            { "tick": 10, "value": 2.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 30, "value": 2.0 },
+            { "tick": 40, "value": 2.0, "quality": "uncertain", "reason": "stale" },
+            { "tick": 60, "value": 2.0 }
+          ]
+        }
+      },
+      "channels": {
+        "demand": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "demand" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "pv" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 25,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "airflow-demand",
+      "source": 10,
+      "unit": "Nm3/h",
+      "description": "The loop's airflow demand — the value passed through while the measurement reads Good"
+    },
+    {
+      "id": 101,
+      "name": "selected-do",
+      "source": 11,
+      "unit": "mg/l",
+      "description": "The selected DO measurement whose quality drives the fallback — the voter's or selector's out, or the single probe"
+    },
+    {
+      "id": 102,
+      "name": "hold-served-demand",
+      "source": 20,
+      "unit": "Nm3/h",
+      "description": "The holding fallback's served demand"
+    },
+    {
+      "id": 103,
+      "name": "hold-fallback-active",
+      "source": 21,
+      "description": "The holding fallback's engagement report — the alarmed transition surface"
+    },
+    {
+      "id": 104,
+      "name": "fixed-served-demand",
+      "source": 22,
+      "unit": "Nm3/h",
+      "description": "The fixed-airflow fallback's served demand"
+    },
+    {
+      "id": 105,
+      "name": "fixed-fallback-active",
+      "source": 23,
+      "description": "The fixed-airflow fallback's engagement report"
+    },
+    {
+      "id": 106,
+      "name": "safe-served-demand",
+      "source": 24,
+      "unit": "Nm3/h",
+      "description": "The safe-airflow fallback's served demand"
+    },
+    {
+      "id": 107,
+      "name": "safe-fallback-active",
+      "source": 25,
+      "description": "The safe-airflow fallback's engagement report"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "demand-fallback",
+      "parameters": {
+        "on_bad": { "int": 0 },
+        "fallback_flow": { "float": 25.0 },
+        "safe_flow": { "float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "demand-fallback",
+      "parameters": {
+        "on_bad": { "int": 1 },
+        "fallback_flow": { "float": 25.0 },
+        "safe_flow": { "float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "demand-fallback",
+      "parameters": {
+        "on_bad": { "int": 2 },
+        "fallback_flow": { "float": 25.0 },
+        "safe_flow": { "float": 5.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" },
+        "fallback_active": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "pv" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 2, "name": "pv" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 3, "name": "pv" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "fallback_active" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "fallback_active" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "fallback_active" } },
+      "to": { "point": 25 }
+    }
+  ]
+}

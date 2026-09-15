@@ -14,13 +14,13 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BlowerGroup, BlowerIo,
-    BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DeviationMonitor,
-    DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
-    GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo,
-    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
-    OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo,
-    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo,
-    ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
+    BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DemandFallback,
+    DemandFallbackIo, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect,
+    FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock,
+    LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation,
+    MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid,
+    PumpGroup, PumpIo, RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, SurgeGuard,
+    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -549,6 +549,18 @@ pub fn registry() -> ComponentRegistry {
                     out: spec.require("out")?,
                     guarding: spec.require("guarding")?,
                     tripped: spec.require("tripped")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(DemandFallback::KIND, |spec| {
+            boxed(DemandFallback::from_parameters(
+                spec.name.as_str(),
+                DemandFallbackIo {
+                    input: spec.require("in")?,
+                    pv: spec.require("pv")?,
+                    out: spec.require("out")?,
+                    fallback_active: spec.require("fallback_active")?,
                 },
                 spec.parameters,
             ))

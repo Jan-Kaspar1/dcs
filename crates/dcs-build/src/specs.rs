@@ -3480,3 +3480,92 @@ impl Spec for SurgeGuardSpec {
         }
     }
 }
+
+/// Spec for the `demand-fallback` kind: the declared
+/// all-measurements-bad demand response architecture decision 65
+/// records — the terminal fallback on a measurement-conditioned
+/// demand path, engaging while the selected `pv` is untrusted.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the demand
+/// passed through while `pv` reads `Good`; `pv` (`In`, `Float`) — the
+/// selected measurement whose quality drives the fallback; `out`
+/// (`Out`, `Float`); `fallback_active` (`Out`, `Bool`). Parameters:
+/// `on_bad` (required `Int` code `0`/`1`/`2` — hold the last
+/// `Good`-stamped demand / drive `fallback_flow` / drive `safe_flow`),
+/// `fallback_flow` and `safe_flow` (required finite `Float`s — the
+/// fixed demands the codes emit).
+pub struct DemandFallbackSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `demand-fallback` instance.
+pub struct DemandFallbackInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the demand passed through while the
+    /// measurement reads `Good` — conventionally a DO loop's airflow
+    /// demand.
+    pub input: Sink<f64>,
+    /// `pv` port (`In`, `Float`): the selected measurement whose
+    /// quality drives the fallback — a voter's or selector's `out`, or
+    /// the single probe.
+    pub pv: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the demand served downstream.
+    pub out: Source<f64>,
+    /// `fallback_active` port (`Out`, `Bool`): asserted for the
+    /// engagement's duration — the alarmed transition surface.
+    pub fallback_active: Source<bool>,
+}
+
+impl DemandFallbackSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "demand-fallback";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("on_bad", ValueKind::Int, Some(CODE_RANGE)),
+        required("fallback_flow", ValueKind::Float, Some(FINITE_F64)),
+        required("safe_flow", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for DemandFallbackSpec {
+    type Instance = DemandFallbackInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("pv", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("fallback_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        DemandFallbackInstance {
+            id,
+            input: Sink::port(id, "in"),
+            pv: Sink::port(id, "pv"),
+            out: Source::port(id, "out"),
+            fallback_active: Source::port(id, "fallback_active"),
+        }
+    }
+}

@@ -719,6 +719,43 @@ composition — a clamp instance with `current` bound beside a trip
 instance without it over one scripted input set; per-port semantics
 live beside `SurgeGuard::KIND`.
 
+The declared DO-loss fallback architecture decision 65 records adds
+one fixed-arity kind. `demand-fallback` sits on a zone's DO→airflow
+demand path — downstream of the `failover-select`/`median-voter`
+measurement layer — and carries the terminal response that layer
+cannot express once no DO source remains good. It reads `in` (`in`,
+`Float`) — the loop's airflow demand — and `pv` (`in`, `Float`) — the
+selected DO measurement whose quality drives the fallback — and
+drives `out` (`out`, `Float`) — the demand served downstream — and
+`fallback_active` (`out`, `Bool`) — asserted for the engagement's
+duration, the alarmed transition surface the alarm set consumes. The
+`parameters` are `on_bad` (`Int` code — `0` holds the last demand the
+kind stamped `Good`, zero before the first; `1` drives `fallback_flow`,
+a fixed airflow; `2` drives `safe_flow`, the declared safe airflow —
+e.g. the permit-protecting rate for the low-DO direction) and
+`fallback_flow`/`safe_flow` (finite `Float`s — the fixed demands the
+codes emit, declared engineering data emitted verbatim rather than
+clamped); all three are `SetParameter`-tunable where the plant
+declares the code operator-selectable. While `pv` reads `Good` with a
+finite value the demand passes unmodified; a non-`Good` or non-finite
+`pv` — a reading that cannot be controlled on — engages the declared
+response the same scan; recovery resumes pass-through the first scan
+`pv` reads `Good` again, neither state latching. The held demand is
+the last `Good` finite `in` stamped during pass-through — frozen for
+the engagement's duration, so a still-`Good` `in` moving while the
+fallback stands does not follow it; `in` itself never gates the
+response, an untrusted demand under a `Good` `pv` passing verbatim.
+`out` carries the merged worst of the `in` and `pv` qualities plus
+`Bad(DeviceFault)` for a non-finite reading the point did not report,
+so a held or fallback demand stays marked untrusted;
+`fallback_active` always carries `Good`. The held demand and the
+tuned parameters are run state under decision 20: `capture_state`
+carries them so a checkpointed standby resumes an engaged fallback
+identically.
+`crates/dcs-assembly/fixtures/demand_fallback.json` is the recorded
+composition — one instance per `on_bad` code over one scripted input
+set; per-port semantics live beside `DemandFallback::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
