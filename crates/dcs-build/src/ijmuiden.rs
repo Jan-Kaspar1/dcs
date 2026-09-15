@@ -236,6 +236,17 @@ const PARKED_LIMIT: f64 = 1.0e9;
 /// the last scripted update the image sample lands `Uncertain(Stale)`.
 const REMOTE_STALE_AFTER: u64 = 3;
 
+/// The independent high-high layer's declared trip bound, in metres —
+/// the `threshold` element's `on`: the canal `level` reaching it
+/// asserts the `sis-active` actuation contact.
+pub const SIS_HIGH_HIGH: f64 = 6.0;
+
+/// The independent layer's declared hysteresis release, in metres —
+/// the `threshold` element's `off`: the canal `level` falling
+/// strictly below it releases `sis-active`, the band that keeps a
+/// hovering level from chattering the contact.
+pub const SIS_RELEASE: f64 = 5.0;
+
 /// The scenario's tunable contract — level setpoints, filter and
 /// verification constants, and the shelving bound.
 /// [`reference`](Self::reference) is the checked-in document's
