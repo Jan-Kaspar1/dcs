@@ -1,0 +1,2984 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "gate-fb": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "gate-flow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "inflow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "level": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "net-flow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "sis-draw": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-ao",
+      "channels": {
+        "gate-cmd": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "sim-di",
+      "channels": {
+        "sis-active": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "sim-scripted",
+      "channels": {
+        "gate-mode": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "level-remote": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      },
+      "parameters": {
+        "script": {
+          "gate-mode": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 6,
+              "value": true
+            },
+            {
+              "tick": 45,
+              "value": false
+            }
+          ],
+          "level-remote": [
+            {
+              "tick": 0,
+              "value": 3.0
+            },
+            {
+              "tick": 4,
+              "value": 3.5
+            },
+            {
+              "tick": 8,
+              "value": 4.0
+            },
+            {
+              "tick": 10,
+              "value": 4.3
+            },
+            {
+              "tick": 30,
+              "value": 4.2
+            },
+            {
+              "tick": 34,
+              "value": 2.9
+            },
+            {
+              "tick": 38,
+              "value": 1.6
+            },
+            {
+              "tick": 42,
+              "value": 1.3
+            },
+            {
+              "tick": 46,
+              "value": 1.8
+            },
+            {
+              "tick": 50,
+              "value": 2.3
+            },
+            {
+              "tick": 54,
+              "value": 2.8
+            },
+            {
+              "tick": 58,
+              "value": 3.3
+            },
+            {
+              "tick": 62,
+              "value": 3.9
+            },
+            {
+              "tick": 66,
+              "value": 4.4
+            },
+            {
+              "tick": 70,
+              "value": 4.9
+            },
+            {
+              "tick": 74,
+              "value": 5.4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "kind": "sim-scripted",
+      "channels": {
+        "sis-available": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "sis-bypass": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "sis-fault": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "sis-proof-test": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "sis-trip": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      },
+      "parameters": {
+        "script": {
+          "sis-available": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "sis-bypass": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "sis-fault": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 34,
+              "value": true
+            },
+            {
+              "tick": 38,
+              "value": false
+            }
+          ],
+          "sis-proof-test": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 47,
+              "value": true
+            },
+            {
+              "tick": 49,
+              "value": false
+            }
+          ],
+          "sis-trip": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 24,
+              "value": true
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "level"
+      }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "inflow"
+      }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "net-flow"
+      }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "gate-flow"
+      }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "sis-draw"
+      }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "gate-fb"
+      }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 2,
+        "name": "gate-cmd"
+      }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 3,
+        "name": "sis-active"
+      },
+      "journaled": true
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 4,
+        "name": "level-remote"
+      },
+      "stale_after_ticks": 3
+    },
+    {
+      "id": 40,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 4,
+        "name": "gate-mode"
+      },
+      "journaled": true
+    },
+    {
+      "id": 41,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 5,
+        "name": "sis-available"
+      },
+      "journaled": true
+    },
+    {
+      "id": 42,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 5,
+        "name": "sis-fault"
+      },
+      "journaled": true
+    },
+    {
+      "id": 43,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 5,
+        "name": "sis-trip"
+      },
+      "journaled": true
+    },
+    {
+      "id": 44,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 5,
+        "name": "sis-proof-test"
+      },
+      "journaled": true
+    },
+    {
+      "id": 45,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 5,
+        "name": "sis-bypass"
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 200,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 201,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 202,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 203,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 204,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 205,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 206,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 207,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 208,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 3.0
+      }
+    },
+    {
+      "id": 209,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 210,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 211,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 212,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 213,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 214,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 215,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 216,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 217,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 220,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 1.0
+      }
+    },
+    {
+      "id": 221,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 1.0
+      }
+    },
+    {
+      "id": 230,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 231,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 232,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 233,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 234,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 240,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 1.0
+      }
+    },
+    {
+      "id": 241,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 1.0
+      },
+      "writable": true
+    },
+    {
+      "id": 1000,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1001,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 1002,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 1003,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1004,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1005,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1006,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1007,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1010,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1013,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1014,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1015,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1016,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1017,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1020,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1023,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1024,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1025,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1026,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1027,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1030,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1031,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1032,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1040,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1041,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1042,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1050,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1051,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1052,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1060,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1061,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1062,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1070,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1071,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1072,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    }
+  ],
+  "signals": [
+    {
+      "id": 10010,
+      "name": "level",
+      "source": 10,
+      "unit": "m",
+      "description": "Canal level — the integrator the dynamics document advances",
+      "group": "level"
+    },
+    {
+      "id": 10011,
+      "name": "level-remote",
+      "source": 11,
+      "unit": "m",
+      "description": "Remote operating position's level repeater — frozen presents stale",
+      "group": "level"
+    },
+    {
+      "id": 10012,
+      "name": "inflow",
+      "source": 12,
+      "unit": "m/s",
+      "description": "Declared tide forcing — the dynamics document's forcing input",
+      "group": "level"
+    },
+    {
+      "id": 10013,
+      "name": "net-flow",
+      "source": 13,
+      "unit": "m/s",
+      "description": "Net canal flow: tide plus gate-admitted flow minus the relief draw",
+      "group": "level"
+    },
+    {
+      "id": 10014,
+      "name": "gate-flow",
+      "source": 14,
+      "unit": "m/s",
+      "description": "Inflow the confirmed-open gate admits",
+      "group": "gate"
+    },
+    {
+      "id": 10015,
+      "name": "sis-draw",
+      "source": 15,
+      "unit": "m/s",
+      "description": "Independent layer's emergency discharge — acts whether or not the controller scans",
+      "group": "protection"
+    },
+    {
+      "id": 10016,
+      "name": "gate-fb",
+      "source": 16,
+      "unit": "fraction",
+      "description": "Gate confirmed position — the feedback the command proves against",
+      "group": "gate"
+    },
+    {
+      "id": 10020,
+      "name": "gate-cmd",
+      "source": 20,
+      "unit": "fraction",
+      "description": "Gate position demand driven to the field",
+      "group": "gate"
+    },
+    {
+      "id": 10030,
+      "name": "sis-active",
+      "source": 30,
+      "unit": "",
+      "description": "Protection layer's actuation contact — the relief's drive",
+      "group": "protection"
+    },
+    {
+      "id": 10040,
+      "name": "gate-mode",
+      "source": 40,
+      "unit": "",
+      "description": "Field-reported gate-control mode — true is local manual",
+      "group": "gate"
+    },
+    {
+      "id": 10041,
+      "name": "sis-available",
+      "source": 41,
+      "unit": "",
+      "description": "Protection layer reports itself available",
+      "group": "protection"
+    },
+    {
+      "id": 10042,
+      "name": "sis-fault",
+      "source": 42,
+      "unit": "",
+      "description": "Protection layer's reported fault",
+      "group": "protection"
+    },
+    {
+      "id": 10043,
+      "name": "sis-trip",
+      "source": 43,
+      "unit": "",
+      "description": "Protection layer's reported high-high trip",
+      "group": "protection"
+    },
+    {
+      "id": 10044,
+      "name": "sis-proof-test",
+      "source": 44,
+      "unit": "",
+      "description": "Protection layer's proof-test state",
+      "group": "protection"
+    },
+    {
+      "id": 10045,
+      "name": "sis-bypass",
+      "source": 45,
+      "unit": "",
+      "description": "Protection layer's bypass — the plant-exposed operator path",
+      "group": "protection"
+    },
+    {
+      "id": 10200,
+      "name": "level-selected",
+      "source": 200,
+      "unit": "m",
+      "description": "Failover-selected level the annunciation path controls on",
+      "group": "level"
+    },
+    {
+      "id": 10201,
+      "name": "level-filt-in",
+      "source": 201,
+      "unit": "m",
+      "description": "Selected level delivered to the alarm-path filter",
+      "group": "level"
+    },
+    {
+      "id": 10202,
+      "name": "level-trend-in",
+      "source": 202,
+      "unit": "m",
+      "description": "Selected level delivered to the trend filter",
+      "group": "level"
+    },
+    {
+      "id": 10203,
+      "name": "level-filtered",
+      "source": 203,
+      "unit": "m",
+      "description": "Filtered selected level the chain and alarms read",
+      "group": "level"
+    },
+    {
+      "id": 10204,
+      "name": "level-chain",
+      "source": 204,
+      "unit": "m",
+      "description": "Filtered level delivered to the threshold chain",
+      "group": "level"
+    },
+    {
+      "id": 10205,
+      "name": "level-lah",
+      "source": 205,
+      "unit": "m",
+      "description": "Filtered level delivered to the high-level alarm",
+      "group": "level"
+    },
+    {
+      "id": 10206,
+      "name": "level-ror",
+      "source": 206,
+      "unit": "m",
+      "description": "Filtered level delivered to the divergence detector",
+      "group": "level"
+    },
+    {
+      "id": 10207,
+      "name": "level-trend",
+      "source": 207,
+      "unit": "m",
+      "description": "Slow level trend the divergence detector compares against",
+      "group": "level"
+    },
+    {
+      "id": 10208,
+      "name": "level-trend-dev",
+      "source": 208,
+      "unit": "m",
+      "description": "Level trend delivered to the divergence detector",
+      "group": "level"
+    },
+    {
+      "id": 10209,
+      "name": "deviation",
+      "source": 209,
+      "unit": "fraction",
+      "description": "Windowed level-versus-trend relative deviation",
+      "group": "level"
+    },
+    {
+      "id": 10210,
+      "name": "deviating",
+      "source": 210,
+      "unit": "",
+      "description": "Level diverging from its trend — the composed rate-of-rise flag",
+      "group": "level"
+    },
+    {
+      "id": 10211,
+      "name": "deviating-in",
+      "source": 211,
+      "unit": "",
+      "description": "Divergence flag delivered to its alarm",
+      "group": "level"
+    },
+    {
+      "id": 10212,
+      "name": "backup-active",
+      "source": 212,
+      "unit": "",
+      "description": "The remote repeater is serving the level path",
+      "group": "level"
+    },
+    {
+      "id": 10213,
+      "name": "backup-active-in",
+      "source": 213,
+      "unit": "",
+      "description": "Backup-serving flag delivered to its alarm",
+      "group": "level"
+    },
+    {
+      "id": 10214,
+      "name": "manual-active",
+      "source": 214,
+      "unit": "",
+      "description": "The station reports manual mode — the mode annunciation's status",
+      "group": "gate"
+    },
+    {
+      "id": 10215,
+      "name": "manual-active-in",
+      "source": 215,
+      "unit": "",
+      "description": "Manual-active flag delivered to its alarm",
+      "group": "gate"
+    },
+    {
+      "id": 10216,
+      "name": "discrepancy",
+      "source": 216,
+      "unit": "",
+      "description": "Gate demanded-but-not-confirmed mismatch",
+      "group": "gate"
+    },
+    {
+      "id": 10217,
+      "name": "discrepancy-in",
+      "source": 217,
+      "unit": "",
+      "description": "Discrepancy flag delivered to its alarm",
+      "group": "gate"
+    },
+    {
+      "id": 10220,
+      "name": "gate-demand",
+      "source": 220,
+      "unit": "fraction",
+      "description": "Gate demand the station drives",
+      "group": "gate"
+    },
+    {
+      "id": 10221,
+      "name": "gate-demand-in",
+      "source": 221,
+      "unit": "fraction",
+      "description": "Gate demand delivered to the valve",
+      "group": "gate"
+    },
+    {
+      "id": 10230,
+      "name": "chain-demand",
+      "source": 230,
+      "unit": "stages",
+      "description": "Stage count the threshold chain holds",
+      "group": "level"
+    },
+    {
+      "id": 10231,
+      "name": "duty-call",
+      "source": 231,
+      "unit": "",
+      "description": "Level at or above the first annunciation rung",
+      "group": "level"
+    },
+    {
+      "id": 10232,
+      "name": "lag-call",
+      "source": 232,
+      "unit": "",
+      "description": "Level at or above the urgent annunciation rung",
+      "group": "level"
+    },
+    {
+      "id": 10233,
+      "name": "below-cutoff",
+      "source": 233,
+      "unit": "",
+      "description": "Level at or below the low-water mark",
+      "group": "level"
+    },
+    {
+      "id": 10234,
+      "name": "high-level",
+      "source": 234,
+      "unit": "",
+      "description": "Level at or above the high setpoint",
+      "group": "level"
+    },
+    {
+      "id": 10240,
+      "name": "gate-auto-demand",
+      "source": 240,
+      "unit": "fraction",
+      "description": "The automatic layer's standing gate demand",
+      "group": "gate"
+    },
+    {
+      "id": 10241,
+      "name": "gate-manual-demand",
+      "source": 241,
+      "unit": "fraction",
+      "description": "The operator's manual gate demand",
+      "group": "gate"
+    },
+    {
+      "id": 11000,
+      "name": "lah-ack",
+      "source": 1000,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11001,
+      "name": "lah-shelve",
+      "source": 1001,
+      "unit": "",
+      "description": "Operator shelving request for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11002,
+      "name": "lah-oos",
+      "source": 1002,
+      "unit": "",
+      "description": "Operator out-of-service command for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11003,
+      "name": "lah-alarm",
+      "source": 1003,
+      "unit": "",
+      "description": "Standing alarm state — process truth under every managed flag",
+      "group": "alarms"
+    },
+    {
+      "id": 11004,
+      "name": "lah-unacknowledged",
+      "source": 1004,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
+      "id": 11005,
+      "name": "lah-shelved",
+      "source": 1005,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "alarms"
+    },
+    {
+      "id": 11006,
+      "name": "lah-suppressed",
+      "source": 1006,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "alarms"
+    },
+    {
+      "id": 11007,
+      "name": "lah-out-of-service",
+      "source": 1007,
+      "unit": "",
+      "description": "Taken out of service by the operator",
+      "group": "alarms"
+    },
+    {
+      "id": 11010,
+      "name": "mode-ack",
+      "source": 1010,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11013,
+      "name": "mode-alarm",
+      "source": 1013,
+      "unit": "",
+      "description": "Standing alarm state — process truth under every managed flag",
+      "group": "alarms"
+    },
+    {
+      "id": 11014,
+      "name": "mode-unacknowledged",
+      "source": 1014,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
+      "id": 11015,
+      "name": "mode-shelved",
+      "source": 1015,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "alarms"
+    },
+    {
+      "id": 11016,
+      "name": "mode-suppressed",
+      "source": 1016,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "alarms"
+    },
+    {
+      "id": 11017,
+      "name": "mode-out-of-service",
+      "source": 1017,
+      "unit": "",
+      "description": "Taken out of service by the operator",
+      "group": "alarms"
+    },
+    {
+      "id": 11020,
+      "name": "disc-ack",
+      "source": 1020,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11023,
+      "name": "disc-alarm",
+      "source": 1023,
+      "unit": "",
+      "description": "Standing alarm state — process truth under every managed flag",
+      "group": "alarms"
+    },
+    {
+      "id": 11024,
+      "name": "disc-unacknowledged",
+      "source": 1024,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
+      "id": 11025,
+      "name": "disc-shelved",
+      "source": 1025,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "alarms"
+    },
+    {
+      "id": 11026,
+      "name": "disc-suppressed",
+      "source": 1026,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "alarms"
+    },
+    {
+      "id": 11027,
+      "name": "disc-out-of-service",
+      "source": 1027,
+      "unit": "",
+      "description": "Taken out of service by the operator",
+      "group": "alarms"
+    },
+    {
+      "id": 11030,
+      "name": "ror-ack",
+      "source": 1030,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11031,
+      "name": "ror-alarm",
+      "source": 1031,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "alarms"
+    },
+    {
+      "id": 11032,
+      "name": "ror-unacknowledged",
+      "source": 1032,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
+      "id": 11040,
+      "name": "backup-ack",
+      "source": 1040,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11041,
+      "name": "backup-alarm",
+      "source": 1041,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "alarms"
+    },
+    {
+      "id": 11042,
+      "name": "backup-unacknowledged",
+      "source": 1042,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
+      "id": 11050,
+      "name": "sis-trip-ack",
+      "source": 1050,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "protection"
+    },
+    {
+      "id": 11051,
+      "name": "sis-trip-alarm",
+      "source": 1051,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "protection"
+    },
+    {
+      "id": 11052,
+      "name": "sis-trip-unacknowledged",
+      "source": 1052,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "protection"
+    },
+    {
+      "id": 11060,
+      "name": "sis-bypass-ack",
+      "source": 1060,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "protection"
+    },
+    {
+      "id": 11061,
+      "name": "sis-bypass-alarm",
+      "source": 1061,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "protection"
+    },
+    {
+      "id": 11062,
+      "name": "sis-bypass-unacknowledged",
+      "source": 1062,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "protection"
+    },
+    {
+      "id": 11070,
+      "name": "sis-fault-ack",
+      "source": 1070,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "protection"
+    },
+    {
+      "id": 11071,
+      "name": "sis-fault-alarm",
+      "source": 1071,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "protection"
+    },
+    {
+      "id": 11072,
+      "name": "sis-fault-unacknowledged",
+      "source": 1072,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "protection"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "failover-select",
+      "parameters": {},
+      "ports": {
+        "backup": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "backup_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "primary": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "signal-filter",
+      "parameters": {
+        "alpha": {
+          "float": 0.6
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "signal-filter",
+      "parameters": {
+        "alpha": {
+          "float": 0.15
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "threshold-chain",
+      "parameters": {
+        "cutoff": {
+          "float": 1.0
+        },
+        "high": {
+          "float": 5.0
+        },
+        "lag_start": {
+          "float": 4.2
+        },
+        "on_bad_demand": {
+          "int": 0
+        },
+        "start": {
+          "float": 3.5
+        },
+        "stop": {
+          "float": 1.5
+        }
+      },
+      "ports": {
+        "below_cutoff": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "duty_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "high_level": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "lag_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "level": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "kind": "deviation-monitor",
+      "parameters": {
+        "deviation_limit": {
+          "float": 0.05
+        },
+        "window_ticks": {
+          "int": 3
+        }
+      },
+      "ports": {
+        "deviating": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "deviation": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "expected": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "measured": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "kind": "manual-station",
+      "parameters": {
+        "transfer_delta": {
+          "float": 0.5
+        }
+      },
+      "ports": {
+        "control": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "manual": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "manual_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "mode": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "kind": "valve",
+      "parameters": {
+        "discrepancy_ticks": {
+          "int": 2
+        },
+        "tolerance": {
+          "float": 0.05
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "discrepancy": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "fb": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "kind": "managed-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "high_limit": {
+          "float": 5.0
+        },
+        "hysteresis": {
+          "float": 0.1
+        },
+        "low_limit": {
+          "float": -1000000000.0
+        },
+        "max_shelve_ticks": {
+          "int": 6
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The canal overtops toward Amsterdam — the near-miss level",
+        "required_action": "Close the discharge gates and verify the protection layer's state",
+        "reference": "lah-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "oos": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelve": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 15
+        }
+      },
+      "rationalization": {
+        "consequence": "The gate answers the field, not the control layer — the incident's root annunciation",
+        "required_action": "Confirm local control at the gate and verify the commanded position",
+        "reference": "mode-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 15
+        }
+      },
+      "rationalization": {
+        "consequence": "The gate is demanded safe but confirmed open — water keeps coming in",
+        "required_action": "Verify the gate's local control and the protection layer's action",
+        "reference": "disc-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppress": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The canal level is diverging from its trend — rising or falling fast",
+        "required_action": "Check the level trend and the gate positions",
+        "reference": "ror-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The remote repeater carries the level path — degraded or stale data may be serving",
+        "required_action": "Check the primary level instrument and the remote link",
+        "reference": "backup-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 5
+        }
+      },
+      "rationalization": {
+        "consequence": "The independent high-high layer has tripped — the canal is beyond the DCS's protection",
+        "required_action": "Confirm the layer's action and the gate state; do not credit the alarm path",
+        "reference": "sis-trip-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The protection layer is bypassed — its independent action is unavailable",
+        "required_action": "Restore the bypass and re-verify the layer",
+        "reference": "sis-bypass-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The protection layer reports a fault — its availability is in question",
+        "required_action": "Investigate the layer's fault report",
+        "reference": "sis-fault-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "primary"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 11
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "backup"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "backup_active"
+        }
+      },
+      "to": {
+        "point": 212
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 202
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 202
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 207
+      }
+    },
+    {
+      "from": {
+        "point": 204
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 205
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 206
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 208
+      },
+      "to": {
+        "point": 207
+      }
+    },
+    {
+      "from": {
+        "point": 204
+      },
+      "to": {
+        "port": {
+          "component": 4,
+          "name": "level"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "demand"
+        }
+      },
+      "to": {
+        "point": 230
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "duty_call"
+        }
+      },
+      "to": {
+        "point": 231
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "lag_call"
+        }
+      },
+      "to": {
+        "point": 232
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "below_cutoff"
+        }
+      },
+      "to": {
+        "point": 233
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "high_level"
+        }
+      },
+      "to": {
+        "point": 234
+      }
+    },
+    {
+      "from": {
+        "point": 208
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "expected"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 206
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "measured"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "deviation"
+        }
+      },
+      "to": {
+        "point": 209
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "deviating"
+        }
+      },
+      "to": {
+        "point": 210
+      }
+    },
+    {
+      "from": {
+        "point": 211
+      },
+      "to": {
+        "point": 210
+      }
+    },
+    {
+      "from": {
+        "point": 213
+      },
+      "to": {
+        "point": 212
+      }
+    },
+    {
+      "from": {
+        "point": 240
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "control"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 241
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "manual"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "mode"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 220
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "manual_active"
+        }
+      },
+      "to": {
+        "point": 214
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "point": 220
+      }
+    },
+    {
+      "from": {
+        "point": 215
+      },
+      "to": {
+        "point": 214
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 20
+      }
+    },
+    {
+      "from": {
+        "point": 16
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "fb"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "discrepancy"
+        }
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "point": 217
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "point": 1000
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1001
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "shelve"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1002
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "oos"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1003
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1004
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1005
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1006
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1007
+      }
+    },
+    {
+      "from": {
+        "point": 205
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1010
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1013
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1014
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1015
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1016
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1017
+      }
+    },
+    {
+      "from": {
+        "point": 215
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1020
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1023
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1024
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1025
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1026
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1027
+      }
+    },
+    {
+      "from": {
+        "point": 217
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 30
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "suppress"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1030
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1031
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1032
+      }
+    },
+    {
+      "from": {
+        "point": 211
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1040
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1041
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1042
+      }
+    },
+    {
+      "from": {
+        "point": 213
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1050
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1051
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1052
+      }
+    },
+    {
+      "from": {
+        "point": 43
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1060
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1061
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1062
+      }
+    },
+    {
+      "from": {
+        "point": 45
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1070
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 15,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1071
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 15,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1072
+      }
+    },
+    {
+      "from": {
+        "point": 42
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in"
+        }
+      }
+    }
+  ]
+}
