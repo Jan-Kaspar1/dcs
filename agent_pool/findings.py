@@ -20,10 +20,19 @@ persisted in state: merged does not mean verified. A failed fix produces a
 linked follow-up issue bounded by max_fix_cycles, never a bare reopen, because
 the dispatcher skips issues it has already recorded.
 
-Contract seam: the qa_lane/ report schema lands with Task 1. validate_report
-accepts the vendored copy of the contract documented in
-docs/lenovo-hardware-qa-plan.md ('Findings and roadmap integration'); reconcile
-field names against qa_lane/ when that schema merges.
+Contract: the wire report is qa_lane.report's versioned schema — the single
+source of truth. validate_report delegates to it, then adapt_report derives
+the lane's internal finding records from the report's evidence channels:
+
+    failed scenario              -> defect finding (managed issue fields)
+    capability_limitations[]     -> capability finding (planner candidate)
+    infrastructure_failures[]    -> infrastructure finding (operational record)
+    blocked/inconclusive case    -> infrastructure finding (rig-side cause)
+
+Report schema v1 has no fix-verification channel, so 'verifications' stay an
+internal seam (exercised by tests and a future schema version), and the
+finding fields the wire schema does not carry (module, severity, confidence)
+are derived conservatively by the adapter.
 """
 import hashlib
 import json
@@ -33,12 +42,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from qa_lane import report as qa_report
+
 from . import planning
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = qa_report.SCHEMA_VERSION
 KEY = re.compile(r'^[a-z0-9][a-z0-9-]{0,79}$')
 SHA40 = re.compile(r'^[0-9a-f]{40}$')
-RUN_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
 GROUP = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
 DOC_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')
 ISSUE_PREFIX = 'qa-'
@@ -61,11 +71,6 @@ OPEN_STATUSES = ('recorded', 'issue-open', 'redispatched',
 # Statuses surfaced as open on the dashboard.
 DASHBOARD_OPEN = OPEN_STATUSES + ('held',)
 
-TOP_LEVEL = {'schema_version', 'run_id', 'sha', 'image_digest', 'model', 'rig',
-             'started_at', 'ended_at', 'status', 'capabilities', 'limitations',
-             'findings', 'verifications', 'notes'}
-REQUIRED_TOP = TOP_LEVEL - {'image_digest', 'capabilities', 'limitations',
-                            'verifications', 'notes'}
 FINDING_FIELDS = {'key', 'kind', 'module', 'severity', 'confidence', 'title',
                   'summary', 'reproduction', 'expected', 'evidence',
                   'test_requirements', 'product_cause'}
@@ -193,75 +198,137 @@ def validate_finding(item):
     return _redact_tree(item)
 
 
-def validate_report(text):
-    """Parse and validate a QA run report; raise ValueError on any violation."""
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        raise ValueError('Report is not JSON: ' + str(exc))
-    if not isinstance(data, dict) or not REQUIRED_TOP <= set(data) <= TOP_LEVEL:
-        raise ValueError('Invalid report top-level fields')
-    if data['schema_version'] != SCHEMA_VERSION:
-        raise ValueError('Unsupported report schema version')
-    if not isinstance(data['run_id'], str) or not RUN_ID.match(data['run_id']):
-        raise ValueError('Invalid run_id')
-    if not isinstance(data['sha'], str) or not SHA40.match(data['sha']):
-        raise ValueError('sha must be the exact 40-hex tested revision')
-    if data.get('image_digest') is not None:
-        _text(data['image_digest'], 'image_digest', 200)
-    _text(data['model'], 'model', 100)
-    _text(data['rig'], 'rig', 200)
-    started = _iso(data['started_at'], 'started_at')
-    ended = _iso(data['ended_at'], 'ended_at')
-    if ended < started:
-        raise ValueError('ended_at precedes started_at')
-    if data['status'] not in ('completed', 'inconclusive', 'failed'):
-        raise ValueError('Invalid report status')
-    for field in ('capabilities', 'limitations'):
-        value = data.get(field) or []
-        if not isinstance(value, list) or len(value) > 40:
-            raise ValueError('Invalid ' + field)
-        for entry in value:
-            _text(entry, field, 500)
-        data[field] = value
-    if 'notes' in data:
-        data['notes'] = _text(data['notes'], 'notes', 4000)
-    findings = data['findings']
-    if not isinstance(findings, list) or len(findings) > 50:
-        raise ValueError('Invalid findings list')
-    seen = set()
-    data['findings'] = []
-    for item in findings:
-        item = validate_finding(item)
+VERDICT_OUTCOMES = ('passed', 'failed')  # runs whose assessment completed
+
+
+def validate_verification(entry):
+    """One fix-verification result (finding -> fix SHA -> case -> outcome).
+
+    Schema v1 reports cannot carry these; they arrive through the internal
+    seam (tests, or a future schema version) and are validated the same way.
+    """
+    if not isinstance(entry, dict) \
+            or not {'finding_key', 'outcome'} <= set(entry) <= VERIFICATION_FIELDS:
+        raise ValueError('Invalid verification fields')
+    if not isinstance(entry['finding_key'], str) \
+            or not KEY.match(entry['finding_key']):
+        raise ValueError('Invalid verification finding_key')
+    if entry['outcome'] not in ('passed', 'failed', 'inconclusive'):
+        raise ValueError('Invalid verification outcome')
+    if entry.get('fix_sha') is not None and not SHA40.match(entry['fix_sha']):
+        raise ValueError('verification fix_sha must be 40-hex')
+    if entry.get('case') is not None:
+        _text(entry['case'], 'verification.case', 4000)
+    if entry.get('evidence') is not None:
+        if not isinstance(entry['evidence'], list) \
+                or len(entry['evidence']) > 20:
+            raise ValueError('Invalid verification evidence')
+        for ev in entry['evidence']:
+            _text(ev if isinstance(ev, str) else ev.get('detail'),
+                  'verification.evidence', 2000)
+    return _redact_tree(entry)
+
+
+def _scenario_finding(scenario, data):
+    """A failed case is a reproduced product defect; a blocked or
+    inconclusive one is rig-side evidence, recorded as infrastructure."""
+    key, outcome = scenario['key'], scenario['outcome']
+    source = 'run %s scenario %s' % (data['run_id'], key)
+    evidence = [{'detail': e.get('detail') or e['ref'],
+                 'source': '%s %s:%s' % (source, e['kind'], e['ref'])}
+                for e in scenario.get('evidence') or []]
+    evidence += [{'detail': o, 'source': source}
+                 for o in scenario.get('observations') or []]
+    if not evidence:
+        evidence = [{'detail': 'no evidence captured; see the run report',
+                     'source': source}]
+    if outcome != 'failed':
+        return {'key': key, 'kind': 'infrastructure',
+                'module': 'qa-lane/' + key,
+                'severity': 'low', 'confidence': 'medium',
+                'title': scenario['title'],
+                'summary': ('%s: %s' % (outcome, scenario.get('detail')
+                                        or scenario['expected']))[:4000],
+                'evidence': evidence}
+    return {'key': key, 'kind': 'defect',
+            'module': 'qa-lane/' + key,
+            'severity': 'medium', 'confidence': 'high',
+            'title': scenario['title'],
+            'summary': scenario.get('detail') or scenario['expected'],
+            'reproduction': 'Automated scenario %s of QA run %s on the '
+                            'Lenovo simulated rig.' % (key, data['run_id']),
+            'expected': scenario['expected'],
+            'evidence': evidence}
+
+
+def _keyed_finding(item, data, kind):
+    """capability_limitations / infrastructure_failures share one shape."""
+    key = item['key']
+    detail = item['detail']
+    if kind == 'infrastructure' and item.get('phase'):
+        detail = '%s (phase: %s)' % (detail, item['phase'])
+    return {'key': key, 'kind': kind, 'module': 'qa-lane/' + key,
+            'severity': 'medium'
+            if kind == 'capability' and item.get('blocking') else 'low',
+            'confidence': 'high',
+            'title': key, 'summary': detail[:4000],
+            'evidence': [{'detail': detail[:2000],
+                          'source': 'run ' + data['run_id']}]}
+
+
+def derive_findings(data):
+    """Map a validated report's evidence channels onto finding records.
+
+    Keys are the scenario/limitation/failure keys themselves — stable across
+    runs, so re-observation dedups by finding key. First record wins on a
+    cross-channel key collision inside one report.
+    """
+    derived = []
+    for item in data['capability_limitations']:
+        derived.append(_keyed_finding(item, data, 'capability'))
+    for item in data['infrastructure_failures']:
+        derived.append(_keyed_finding(item, data, 'infrastructure'))
+    for scenario in data['scenarios']:
+        if scenario['outcome'] != 'passed':
+            derived.append(_scenario_finding(scenario, data))
+    findings, seen = [], set()
+    for item in derived:
         if item['key'] in seen:
-            raise ValueError('Duplicate finding key in one report')
+            continue
         seen.add(item['key'])
-        data['findings'].append(item)
-    verifications = data.get('verifications') or []
-    if not isinstance(verifications, list) or len(verifications) > 50:
-        raise ValueError('Invalid verifications list')
-    data['verifications'] = []
-    for entry in verifications:
-        if not isinstance(entry, dict) or not {'finding_key', 'outcome'} <= set(entry) <= VERIFICATION_FIELDS:
-            raise ValueError('Invalid verification fields')
-        if not isinstance(entry['finding_key'], str) or not KEY.match(entry['finding_key']):
-            raise ValueError('Invalid verification finding_key')
-        if entry['outcome'] not in ('passed', 'failed', 'inconclusive'):
-            raise ValueError('Invalid verification outcome')
-        if entry.get('fix_sha') is not None and not SHA40.match(entry['fix_sha']):
-            raise ValueError('verification fix_sha must be 40-hex')
-        if entry.get('case') is not None:
-            _text(entry['case'], 'verification.case', 4000)
-        if entry.get('evidence') is not None:
-            if not isinstance(entry['evidence'], list) or len(entry['evidence']) > 20:
-                raise ValueError('Invalid verification evidence')
-            for ev in entry['evidence']:
-                _text(ev if isinstance(ev, str) else ev.get('detail'),
-                      'verification.evidence', 2000)
-        data['verifications'].append(_redact_tree(entry))
-    if 'notes' in data:
-        data['notes'] = redact(data['notes'])
-    return data
+        findings.append(validate_finding(item))
+    return findings
+
+
+def adapt_report(data):
+    """Adapt a validated qa_lane report to the lane's internal report shape.
+
+    sha <- completed_sha or attempted_sha; status <- 'completed' when the run
+    produced a verdict (passed/failed) so routing gates on completed
+    assessments only, otherwise the real outcome; rig <- the sanitized host
+    name; findings are derived from the evidence channels.
+    """
+    report = _redact_tree(dict(data))
+    report['sha'] = data['completed_sha'] or data['attempted_sha']
+    report['status'] = ('completed' if data['outcome'] in VERDICT_OUTCOMES
+                        else data['outcome'])
+    report['rig'] = (data.get('host') or {}).get('name') or 'qa-rig'
+    report['model'] = 'qa-lane'
+    report['ended_at'] = data['finished_at']
+    if 'notes' in report:
+        report['notes'] = redact(report['notes'])
+    report['findings'] = derive_findings(data)
+    report['verifications'] = []
+    return report
+
+
+def validate_report(text):
+    """Parse and validate a QA run report; raise ValueError on any violation.
+
+    qa_lane.report owns the wire contract; the validated document is then
+    adapted into the internal shape the routing pipeline consumes.
+    """
+    return adapt_report(qa_report.validate_report(text))
 
 
 def issue_key(finding_key):
@@ -424,7 +491,7 @@ def ingest_report(state, github, cfg, report, issues, log):
     routing = cfg['enabled'] and cfg['mode'] == 'route' and report['status'] == 'completed'
     summary = {'run_id': report['run_id'], 'routed': routing,
                'findings': {}, 'verifications': {}}
-    state.record_qa_report(report['run_id'], report['sha'], report['status'],
+    state.record_qa_report(report['run_id'], report['sha'], report.get('outcome') or report['status'],
                            len(report['findings']), 'ingesting')
     created = 0
     for finding in report['findings']:
@@ -464,7 +531,7 @@ def ingest_report(state, github, cfg, report, issues, log):
             summary['verifications'][entry['finding_key']] = \
                 apply_verification(state, github, cfg, entry, report, log)
     summary['created'] = created
-    state.record_qa_report(report['run_id'], report['sha'], report['status'],
+    state.record_qa_report(report['run_id'], report['sha'], report.get('outcome') or report['status'],
                            len(report['findings']), json.dumps(summary)[:2000])
     return summary
 

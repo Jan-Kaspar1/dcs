@@ -9,6 +9,20 @@ import time
 from .config import load
 from .state import State
 
+
+def qa_section(config, state):
+    """status's qa section: persisted counters plus the configured lane state
+    (the dashboard reads routing on/off from here)."""
+    qa = state.qa_summary()
+    try:
+        from . import findings
+        cfg = findings.settings(config)
+        qa.update(enabled=cfg['enabled'], mode=cfg['mode'],
+                  dashboard=cfg['dashboard'])
+    except Exception:
+        pass
+    return qa
+
 def main():
     parser = argparse.ArgumentParser(prog='dcs-agents')
     parser.add_argument('--config')
@@ -36,7 +50,7 @@ def main():
     elif args.command == 'stop':
         subprocess.run(['systemctl', '--user', 'stop', 'dcs-agents.service'], check=True)
     elif args.command == 'status':
-        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'review':state.review_summary(), 'qa':state.qa_summary(), 'jobs':state.jobs()}, indent=2))
+        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'review':state.review_summary(), 'qa':qa_section(config, state), 'jobs':state.jobs()}, indent=2))
     elif args.command == 'review':
         if args.action == 'run':
             if state.paused():

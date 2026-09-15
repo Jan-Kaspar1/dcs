@@ -7,59 +7,53 @@ publisher**. QA runners and exploratory agents never hold GitHub credentials;
 they deliver one versioned JSON report per assessed revision into the
 supervisor's findings inbox, and `agent_pool/findings.py` does the rest.
 
-## Contract seam (Task 1)
+## Report contract
 
-`findings.validate_report` accepts a vendored copy of the report contract
-documented in the plan's "Findings and roadmap integration" section. Task 1
-lands the authoritative `qa_lane/` schema; when it merges, reconcile field
-names in `validate_report`/`validate_finding` against it. Current accepted
-shape:
+The wire contract is `qa_lane/report.py` schema v1 — the single source of
+truth. `findings.validate_report` delegates to
+`qa_lane.report.validate_report`, then `adapt_report` maps the validated
+document onto the lane's internal shape:
 
-```json
-{
-  "schema_version": 1,
-  "run_id": "qa-20260915-a1b2c3",
-  "sha": "<40-hex main revision under test>",
-  "image_digest": "sha256:...",        // optional
-  "model": "swe-2-high",
-  "rig": "simulated",                  // rig identity string
-  "started_at": "...", "ended_at": "...",   // ISO-8601
-  "status": "completed",               // completed | inconclusive | failed
-  "capabilities": [], "limitations": [],
-  "findings": [{
-    "key": "stable-kebab-case-finding-key",   // stable across runs
-    "kind": "defect",                         // defect | capability | infrastructure
-    "module": "crates/dcs-core",              // affected module -> concurrency group
-    "severity": "medium",                     // low|medium|high|critical
-    "confidence": "high",                     // low|medium|high (recorded separately)
-    "title": "...", "summary": "...",
-    "reproduction": "...", "expected": "...",  // required for defects
-    "test_requirements": "...",               // worker-test requirements
-    "evidence": [{"detail": "...", "source": "..."}],
-    "product_cause": false                    // infrastructure only: evidence
-                                              // identifies a product cause
-  }],
-  "verifications": [{
-    "finding_key": "...", "fix_sha": "<40-hex>",
-    "case": "original reproduction re-run",
-    "outcome": "passed",                      // passed | failed | inconclusive
-    "evidence": ["..."]
-  }]
-}
-```
+| Report field | Internal field |
+| --- | --- |
+| `completed_sha` or `attempted_sha` | `sha` |
+| `outcome` `passed`/`failed` | `status: completed` (a finished assessment) |
+| `outcome` `blocked`/`inconclusive`/`interrupted` | `status` = the outcome |
+| `host.name` (sanitized) | `rig` |
 
-Only `completed` reports route findings; inconclusive/failed runs are recorded
-as evidence, matching the review lane's rule that partial output is never
-accepted as authoritative. Credential-shaped text is redacted before
-persistence and issue publication.
+Findings are **derived** from the report's three evidence channels — the
+runner emits scenarios and limitation/failure records, not findings:
 
-## Delivery seam (Task 1)
+| Report channel | Finding kind | Route |
+| --- | --- | --- |
+| scenario `outcome: failed` | `defect` (severity medium, confidence high — a deterministic case reproduced on the exact tested revision) | managed issue |
+| `capability_limitations[]` | `capability` (severity medium when `blocking`, else low) | planner candidate |
+| `infrastructure_failures[]` | `infrastructure` | operational record |
+| scenario `outcome: blocked`/`inconclusive` | `infrastructure` (rig-side cause, not a product defect) | operational record |
+
+Finding keys are the scenario/limitation/failure keys — stable across runs,
+so re-observation dedups by key (occurrences increment, evidence refreshes).
+Schema v1 has no fix-verification channel: `verifications` remain an
+internal seam until the schema carries them, so the `fix-merged` chain below
+is exercised by tests and by reports built inside the supervisor.
+
+Only `completed` reports route findings; inconclusive/blocked/interrupted
+runs are recorded as evidence, matching the review lane's rule that partial
+output is never accepted as authoritative. Credential-shaped text is
+redacted before persistence and issue publication.
+
+## Delivery seam
 
 Reports arrive as files in `<state_root>/qa/reports/*.json` (configurable via
-`qa.report_dir`). Task 1's Lenovo side can drop them there via SSH pull/push,
-rsync, or any transport — ingestion is file-based and idempotent. Validated
-reports move to `qa/processed/`; rejected ones to `qa/rejected/` with an
-`.error.txt` alongside. A repeated `run_id` is a duplicate, not a new report.
+`qa.report_dir`). The live transport is the WSL relay
+(`dcs-qa-sync.timer` → `dcs-qa-sync.sh`): it pulls new `reports/*.json` off
+the Lenovo each pass and drops a raw copy into the inbox, in addition to
+publishing the sanitized `qa/run-<id>.json`, `qa/latest.json`,
+`qa/runs.json`, and `qa/activity.json` documents to the Pi. Ingestion is
+file-based and idempotent — any equivalent drop works. Validated reports
+move to `qa/processed/`; rejected ones to `qa/rejected/` with an
+`.error.txt` alongside. A repeated `run_id` is a duplicate, not a new
+report.
 
 ## Routing
 
