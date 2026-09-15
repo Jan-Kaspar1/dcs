@@ -458,7 +458,7 @@ def reclaim(st, cfg, log=print, docker_ok=True):
     runs_dir = Path(cfg['state_dir']) / 'runs'
     if runs_dir.is_dir():
         for entry in sorted(runs_dir.iterdir()):
-            if not entry.name.startswith('qa-'):
+            if not entry.name.startswith(('qa-', 'qav-')):
                 continue  # foreign dir — never touch
             if entry.name in keep_runs:
                 continue
@@ -473,7 +473,7 @@ def reclaim(st, cfg, log=print, docker_ok=True):
     if reports_dir.is_dir():
         for entry in sorted(reports_dir.iterdir()):
             if entry.suffix != '.json' or \
-                    not entry.name.startswith('qa-'):
+                    not entry.name.startswith(('qa-', 'qav-')):
                 continue
             if entry.stem in record_ids:
                 continue

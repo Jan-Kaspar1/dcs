@@ -151,11 +151,17 @@ def _target_sha(st):
 def _teardown(run_id, timeline):
     """Remove this run's labeled containers and network — kept local so
     the verification kind stays independent of runner teardown
-    internals."""
-    for cid, label_run in runner._managed_containers():
+    internals. A failed docker listing raises so the caller records the
+    cleanup failure rather than silently leaving labeled leftovers."""
+    containers_ok, containers = runner._managed_containers()
+    networks_ok, networks = runner._managed_networks()
+    if not containers_ok or not networks_ok:
+        raise RuntimeError('docker listing failed during verification '
+                           'teardown')
+    for cid, label_run in containers:
         if label_run == run_id:
             runner.docker('rm', '-f', cid, check=False)
-    for nid, label_run in runner._managed_networks():
+    for nid, label_run in networks:
         if label_run == run_id:
             runner.docker('network', 'rm', nid, check=False)
     timeline('teardown', 'verification run containers and network removed')
