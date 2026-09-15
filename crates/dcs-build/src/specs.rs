@@ -2163,6 +2163,215 @@ impl Spec for PumpGroupSpec {
     }
 }
 
+/// Spec for the `blower-group` kind: an N-blower capacity-staged group
+/// with per-unit declared bounds, start-interval protection, the
+/// vent-based join/departure choreography, and the declared rotation
+/// and staging-authority policies.
+///
+/// The port set is not static: an instance declares
+/// [`blowers`](Self::blowers) managed blowers, and
+/// [`ports`](Spec::ports) emits `demand` (`In`, `Float`), then
+/// `approve` (`In`, `Bool`) when the spec's [`approve`](Self::approve)
+/// flag wires the operator release — required when `staging_authority`
+/// is `1` — then `cmd_i` (`Out`, `Bool`), `run_i` (`In`, `Bool`),
+/// `fault_i` (`In`, `Bool`), `avail_i` (`In`, `Bool`), `capacity_i`
+/// (`Out`, `Float`), `vent_i` (`Out`, `Bool`) per blower — each
+/// connected through the instance's [`cmd`](BlowerGroupInstance::cmd),
+/// [`run`](BlowerGroupInstance::run), [`fault`](BlowerGroupInstance::fault),
+/// [`avail`](BlowerGroupInstance::avail),
+/// [`capacity`](BlowerGroupInstance::capacity), and
+/// [`vent`](BlowerGroupInstance::vent) handles — followed by `staged`
+/// (`Out`, `Int`), `none_available`/`all_faulted`/`staging_pending`/
+/// `transition` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// The parameter set is indexed by `blowers` — `unit_<i>_min_flow`/
+/// `unit_<i>_max_flow`/`unit_<i>_max_current` per unit — a different
+/// key set per instance, so `declared_parameters` is `None` and
+/// `build` leaves the map to the kind's `from_parameters`, which
+/// reports `Missing`/`Invalid` naming the offending key. The shared
+/// keys are `staging_authority` (required `Int` in `0..=2` — `0`
+/// automatic, `1` operator-approval, `2` flag-only), `stage_up`/
+/// `stage_down` (required non-negative `Float`s), `min_run_ticks`/
+/// `min_start_interval_ticks` (required non-negative `Int`s),
+/// `vent_ticks` (required positive `Int`), and `rotation` (required
+/// `Int` in `0..=2` — `0` none, `1` equalize runtime, `2` fixed
+/// order).
+pub struct BlowerGroupSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many blowers the instance manages — the `cmd_i`/`run_i`/
+    /// `fault_i`/`avail_i`/`capacity_i`/`vent_i` port families' index
+    /// bound.
+    pub blowers: usize,
+    /// Whether the instance declares the `approve` port — the
+    /// operator release the `staging_authority = 1` instance requires;
+    /// a plant running automatic or flag-only staging leaves it
+    /// unwired.
+    pub approve: bool,
+}
+
+/// Typed port handles for a `blower-group` instance.
+pub struct BlowerGroupInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `demand` port (`In`, `Float`): the aggregate capacity demand —
+    /// the header-coordinator's `blower_demand`.
+    pub demand: Sink<f64>,
+    /// `approve` port (`In`, `Bool`): the operator release — `Some`
+    /// where the spec's `approve` flag declares it.
+    pub approve: Option<Sink<bool>>,
+    /// `staged` port (`Out`, `Int`): how many blowers the group
+    /// currently commands.
+    pub staged: Source<i64>,
+    /// `none_available` port (`Out`, `Bool`): no blower is available.
+    pub none_available: Source<bool>,
+    /// `all_faulted` port (`Out`, `Bool`): every blower's `fault_i`
+    /// reads failed.
+    pub all_faulted: Source<bool>,
+    /// `staging_pending` port (`Out`, `Bool`): a stage change standing
+    /// unexecuted under a non-automatic authority.
+    pub staging_pending: Source<bool>,
+    /// `transition` port (`Out`, `Bool`): a join, departure, or
+    /// rotation handover in progress — the valve-freeze surface.
+    pub transition: Source<bool>,
+}
+
+impl BlowerGroupInstance {
+    /// Blower `index`'s run request (`cmd_1`…`cmd_N`, where `N` is the
+    /// spec's [`blowers`](BlowerGroupSpec::blowers)): an `Out`, `Bool`
+    /// port. An `index` outside `1..=N` names a port the instance does
+    /// not declare, and [`build`](crate::PlantBuilder::build) reports
+    /// the connection.
+    pub fn cmd(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("cmd_{index}"))
+    }
+
+    /// Blower `index`'s run feedback (`run_1`…`run_N`): an `In`,
+    /// `Bool` port.
+    pub fn run(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("run_{index}"))
+    }
+
+    /// Blower `index`'s proven-failure flag (`fault_1`…`fault_N`): an
+    /// `In`, `Bool` port.
+    pub fn fault(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("fault_{index}"))
+    }
+
+    /// Blower `index`'s aggregated availability (`avail_1`…`avail_N`):
+    /// an `In`, `Bool` port.
+    pub fn avail(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("avail_{index}"))
+    }
+
+    /// Blower `index`'s capacity demand (`capacity_1`…`capacity_N`):
+    /// an `Out`, `Float` port — the unit's share under the equal
+    /// split, clamped to its declared bounds.
+    pub fn capacity(&self, index: usize) -> Source<f64> {
+        Source::port(self.id, &format!("capacity_{index}"))
+    }
+
+    /// Blower `index`'s vent command (`vent_1`…`vent_N`): an `Out`,
+    /// `Bool` port — `true` holds the unit off the header.
+    pub fn vent(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("vent_{index}"))
+    }
+}
+
+impl BlowerGroupSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "blower-group";
+
+    /// A spec for an instance managing `blowers` blowers, carrying
+    /// `parameters` as its parameter map, and declaring the `approve`
+    /// port when `approve` is set.
+    pub fn new(parameters: Parameters, blowers: usize, approve: bool) -> Self {
+        Self {
+            parameters,
+            blowers,
+            approve,
+        }
+    }
+}
+
+impl Spec for BlowerGroupSpec {
+    type Instance = BlowerGroupInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![port("demand", Direction::In, ValueKind::Float)];
+        if self.approve {
+            ports.push(port("approve", Direction::In, ValueKind::Bool));
+        }
+        for index in 1..=self.blowers {
+            ports.push(port(
+                &format!("cmd_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("run_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("fault_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("avail_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("capacity_{index}"),
+                Direction::Out,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("vent_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+        }
+        ports.push(port("staged", Direction::Out, ValueKind::Int));
+        ports.push(port("none_available", Direction::Out, ValueKind::Bool));
+        ports.push(port("all_faulted", Direction::Out, ValueKind::Bool));
+        ports.push(port("staging_pending", Direction::Out, ValueKind::Bool));
+        ports.push(port("transition", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    /// The parameter set is indexed by `blowers` — not statically
+    /// enumerable, so the map goes to the kind's `from_parameters`
+    /// unchecked by `build`.
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        None
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BlowerGroupInstance {
+            id,
+            demand: Sink::port(id, "demand"),
+            approve: self.approve.then(|| Sink::port(id, "approve")),
+            staged: Source::port(id, "staged"),
+            none_available: Source::port(id, "none_available"),
+            all_faulted: Source::port(id, "all_faulted"),
+            staging_pending: Source::port(id, "staging_pending"),
+            transition: Source::port(id, "transition"),
+        }
+    }
+}
+
 /// Spec for the `sr-latch` kind: a reset-dominant set/reset bistable.
 ///
 /// Ports mirror the descriptor: `set` (`In`, `Bool`), `reset` (`In`,
@@ -3028,6 +3237,109 @@ impl Spec for HeaderCoordinatorSpec {
             most_open: Source::port(id, "most_open"),
             at_bound: Source::port(id, "at_bound"),
             pulse_blocked: Source::port(id, "pulse_blocked"),
+        }
+    }
+}
+
+/// Spec for the `phase-monitor` kind: the phase-conditioned
+/// verification checks architecture decision 61 records — ripening
+/// turbidity under a declared bound within a declared duration of the
+/// condition window, and clean-bed headloss within a declared
+/// deviation of its captured baseline.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the measured
+/// value; `phase` (`In`, `Bool`) — the condition window; `capture`
+/// (`In`, `Bool`) — while asserted inside the window the kind holds
+/// `in` as its baseline; `deviation` (`Out`, `Float`) — the reported
+/// `in − baseline`; `exceeded` (`Out`, `Bool`) — the excursion
+/// condition the alarm set consumes; `overdue` (`Out`, `Bool`) — the
+/// bound not met within `limit_ticks` of the phase opening.
+/// Parameters: `bound` (required non-negative finite `Float`),
+/// `limit_ticks` (required `Int` in `1..=i64::MAX`), and `mode`
+/// (required `Int` code `0`/`1` — absolute bound on `in` / deviation
+/// from the captured baseline).
+pub struct PhaseMonitorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `phase-monitor` instance.
+pub struct PhaseMonitorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the measured value the check
+    /// verifies — turbidity for ripening, headloss for CBHL.
+    pub input: Sink<f64>,
+    /// `phase` port (`In`, `Bool`): the condition window — the
+    /// post-wash or return-to-service flag decoded upstream.
+    pub phase: Sink<bool>,
+    /// `capture` port (`In`, `Bool`): while asserted inside the
+    /// window the kind tracks `in` as its baseline — the CBHL
+    /// reference-flow hold.
+    pub capture: Sink<bool>,
+    /// `deviation` port (`Out`, `Float`): the reported
+    /// `in − baseline`, `0.0` until the window's first capture.
+    pub deviation: Source<f64>,
+    /// `exceeded` port (`Out`, `Bool`): the excursion condition the
+    /// alarm set consumes.
+    pub exceeded: Source<bool>,
+    /// `overdue` port (`Out`, `Bool`): the bound not met within
+    /// `limit_ticks` of the phase opening.
+    pub overdue: Source<bool>,
+}
+
+impl PhaseMonitorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "phase-monitor";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("bound", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("mode", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for PhaseMonitorSpec {
+    type Instance = PhaseMonitorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("phase", Direction::In, ValueKind::Bool),
+            port("capture", Direction::In, ValueKind::Bool),
+            port("deviation", Direction::Out, ValueKind::Float),
+            port("exceeded", Direction::Out, ValueKind::Bool),
+            port("overdue", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        PhaseMonitorInstance {
+            id,
+            input: Sink::port(id, "in"),
+            phase: Sink::port(id, "phase"),
+            capture: Sink::port(id, "capture"),
+            deviation: Source::port(id, "deviation"),
+            exceeded: Source::port(id, "exceeded"),
+            overdue: Source::port(id, "overdue"),
         }
     }
 }

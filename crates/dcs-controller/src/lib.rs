@@ -13,11 +13,12 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
-    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
-    Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
+    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BlowerGroup, BlowerIo,
+    BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DeviationMonitor,
+    DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
+    GroupOutputs, HeaderCoordinator, HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo,
+    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
+    OverrideSelect, PermissiveInputs, PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo,
     RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
     Timer, Totalizer, Valve, ZoneIo,
 };
@@ -343,6 +344,42 @@ pub fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(BlowerGroup::KIND, |spec| {
+            // The blowers are declared `cmd_1` … `cmd_N`, `run_1` …
+            // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`,
+            // `capacity_1` … `capacity_N`, `vent_1` … `vent_N`
+            // following the pump-group convention; the shared
+            // multi-family accessor counts and requires them.
+            // `approve` is the optional operator release — bound only
+            // where the model wires it; `staging_authority = 1`
+            // without it fails construction naming the parameter.
+            let blowers = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_", "capacity_", "vent_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail, capacity, vent]| BlowerIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                    capacity,
+                    vent,
+                })
+                .collect();
+            boxed(BlowerGroup::from_parameters(
+                spec.name.as_str(),
+                spec.require("demand")?,
+                spec.get("approve"),
+                blowers,
+                BlowerOutputs {
+                    staged: spec.require("staged")?,
+                    none_available: spec.require("none_available")?,
+                    all_faulted: spec.require("all_faulted")?,
+                    staging_pending: spec.require("staging_pending")?,
+                    transition: spec.require("transition")?,
+                },
+                spec.parameters,
+            ))
+        })
         .with(SrLatch::KIND, |spec| {
             boxed(SrLatch::from_parameters(
                 spec.name.as_str(),
@@ -482,6 +519,20 @@ pub fn registry() -> ComponentRegistry {
                     most_open: spec.require("most_open")?,
                     at_bound: spec.require("at_bound")?,
                     pulse_blocked: spec.require("pulse_blocked")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(PhaseMonitor::KIND, |spec| {
+            boxed(PhaseMonitor::from_parameters(
+                spec.name.as_str(),
+                PhaseMonitorIo {
+                    input: spec.require("in")?,
+                    phase: spec.require("phase")?,
+                    capture: spec.require("capture")?,
+                    deviation: spec.require("deviation")?,
+                    exceeded: spec.require("exceeded")?,
+                    overdue: spec.require("overdue")?,
                 },
                 spec.parameters,
             ))

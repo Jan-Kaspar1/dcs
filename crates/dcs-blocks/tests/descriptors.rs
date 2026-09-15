@@ -5,14 +5,15 @@
 
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
-    CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo,
-    GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs,
-    Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
-    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid,
-    PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
-    Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
-    Timer, Totalizer, Valve, ZoneIo,
+    BackwashCoordinatorConfig, BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs,
+    BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy, CoordinatorOutputs, Counter,
+    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
+    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
+    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
+    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
+    RateLimiter, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter,
+    SrLatch, StagingAuthority, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -454,12 +455,81 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        // The blower group fully bound — `approve` wired since its
+        // instance runs the operator-approval authority.
+        Box::new(
+            BlowerGroup::new(
+                "bg",
+                point(&mut specs, 340, Direction::In, ValueKind::Float),
+                Some(point(&mut specs, 341, Direction::In, ValueKind::Bool)),
+                vec![
+                    BlowerIo {
+                        cmd: point(&mut specs, 342, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 343, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 344, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 345, Direction::In, ValueKind::Bool),
+                        capacity: point(&mut specs, 346, Direction::Out, ValueKind::Float),
+                        vent: point(&mut specs, 347, Direction::Out, ValueKind::Bool),
+                    },
+                    BlowerIo {
+                        cmd: point(&mut specs, 348, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 349, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 350, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 351, Direction::In, ValueKind::Bool),
+                        capacity: point(&mut specs, 352, Direction::Out, ValueKind::Float),
+                        vent: point(&mut specs, 353, Direction::Out, ValueKind::Bool),
+                    },
+                ],
+                vec![
+                    UnitBounds {
+                        min_flow: 20.0,
+                        max_flow: 100.0,
+                        max_current: 90.0,
+                    };
+                    2
+                ],
+                BlowerOutputs {
+                    staged: point(&mut specs, 354, Direction::Out, ValueKind::Int),
+                    none_available: point(&mut specs, 355, Direction::Out, ValueKind::Bool),
+                    all_faulted: point(&mut specs, 356, Direction::Out, ValueKind::Bool),
+                    staging_pending: point(&mut specs, 357, Direction::Out, ValueKind::Bool),
+                    transition: point(&mut specs, 358, Direction::Out, ValueKind::Bool),
+                },
+                BlowerGroupConfig {
+                    staging_authority: StagingAuthority::OperatorApproval,
+                    stage_up: 0.9,
+                    stage_down: 0.8,
+                    min_run_ticks: 0,
+                    min_start_interval_ticks: 0,
+                    vent_ticks: 2,
+                    rotation: BlowerRotation::NoRotation,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            PhaseMonitor::new(
+                "phm",
+                PhaseMonitorIo {
+                    input: point(&mut specs, 360, Direction::In, ValueKind::Float),
+                    phase: point(&mut specs, 361, Direction::In, ValueKind::Bool),
+                    capture: point(&mut specs, 362, Direction::In, ValueKind::Bool),
+                    deviation: point(&mut specs, 363, Direction::Out, ValueKind::Float),
+                    exceeded: point(&mut specs, 364, Direction::Out, ValueKind::Bool),
+                    overdue: point(&mut specs, 365, Direction::Out, ValueKind::Bool),
+                },
+                0.5,
+                5,
+                PhaseMode::Absolute,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 28] = [
+const EXPECTED_KINDS: [&str; 30] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -488,6 +558,8 @@ const EXPECTED_KINDS: [&str; 28] = [
     ManagedBoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
     HeaderCoordinator::KIND,
+    BlowerGroup::KIND,
+    PhaseMonitor::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every

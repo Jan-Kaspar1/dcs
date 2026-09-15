@@ -1,0 +1,3595 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "demand-a": [
+            {
+              "tick": 0,
+              "value": 0.0
+            },
+            {
+              "tick": 2,
+              "value": 50.0
+            },
+            {
+              "tick": 5,
+              "value": 130.0
+            },
+            {
+              "tick": 16,
+              "value": 200.0
+            },
+            {
+              "tick": 30,
+              "value": 100.0
+            },
+            {
+              "tick": 46,
+              "value": 100.0,
+              "quality": "bad",
+              "reason": "communication_fault"
+            },
+            {
+              "tick": 50,
+              "value": 0.0
+            }
+          ],
+          "run-a1": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 3,
+              "value": true
+            },
+            {
+              "tick": 10,
+              "value": false
+            },
+            {
+              "tick": 26,
+              "value": true
+            },
+            {
+              "tick": 31,
+              "value": false
+            },
+            {
+              "tick": 45,
+              "value": true
+            },
+            {
+              "tick": 51,
+              "value": false
+            }
+          ],
+          "run-a2": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 6,
+              "value": true
+            },
+            {
+              "tick": 41,
+              "value": false
+            }
+          ],
+          "run-a3": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 11,
+              "value": true
+            },
+            {
+              "tick": 41,
+              "value": false
+            }
+          ],
+          "fault-a1": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 9,
+              "value": true
+            },
+            {
+              "tick": 14,
+              "value": false
+            },
+            {
+              "tick": 40,
+              "value": true
+            },
+            {
+              "tick": 44,
+              "value": false
+            }
+          ],
+          "fault-a2": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 40,
+              "value": true
+            },
+            {
+              "tick": 44,
+              "value": false
+            }
+          ],
+          "fault-a3": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 40,
+              "value": true
+            },
+            {
+              "tick": 44,
+              "value": false
+            }
+          ],
+          "avail-a1": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-a2": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-a3": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "demand-b": [
+            {
+              "tick": 0,
+              "value": 0.0
+            },
+            {
+              "tick": 1,
+              "value": 60.0
+            },
+            {
+              "tick": 8,
+              "value": 150.0
+            },
+            {
+              "tick": 11,
+              "value": 60.0
+            },
+            {
+              "tick": 20,
+              "value": 0.0
+            }
+          ],
+          "run-b1": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 2,
+              "value": true
+            },
+            {
+              "tick": 5,
+              "value": false
+            },
+            {
+              "tick": 9,
+              "value": true
+            },
+            {
+              "tick": 13,
+              "value": false
+            }
+          ],
+          "run-b2": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 4,
+              "value": true
+            },
+            {
+              "tick": 12,
+              "value": false
+            }
+          ],
+          "fault-b1": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "fault-b2": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "avail-b1": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-b2": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "demand-c": [
+            {
+              "tick": 0,
+              "value": 0.0
+            },
+            {
+              "tick": 1,
+              "value": 150.0
+            },
+            {
+              "tick": 3,
+              "value": 60.0
+            },
+            {
+              "tick": 12,
+              "value": 0.0
+            }
+          ],
+          "run-c1": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 2,
+              "value": true
+            },
+            {
+              "tick": 8,
+              "value": false
+            }
+          ],
+          "run-c2": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 3,
+              "value": true
+            },
+            {
+              "tick": 11,
+              "value": false
+            }
+          ],
+          "fault-c1": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "fault-c2": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "avail-c1": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-c2": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "demand-d": [
+            {
+              "tick": 0,
+              "value": 0.0
+            },
+            {
+              "tick": 1,
+              "value": 60.0
+            },
+            {
+              "tick": 5,
+              "value": 150.0
+            },
+            {
+              "tick": 10,
+              "value": 0.0
+            }
+          ],
+          "run-d1": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 3,
+              "value": true
+            },
+            {
+              "tick": 12,
+              "value": false
+            }
+          ],
+          "run-d2": [
+            {
+              "tick": 0,
+              "value": false
+            },
+            {
+              "tick": 8,
+              "value": true
+            },
+            {
+              "tick": 11,
+              "value": false
+            }
+          ],
+          "fault-d1": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "fault-d2": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "avail-d1": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-d2": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "demand-e": [
+            {
+              "tick": 0,
+              "value": 0.0
+            },
+            {
+              "tick": 1,
+              "value": 60.0
+            },
+            {
+              "tick": 8,
+              "value": 0.0
+            }
+          ],
+          "run-e1": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "run-e2": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "fault-e1": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "fault-e2": [
+            {
+              "tick": 0,
+              "value": false
+            }
+          ],
+          "avail-e1": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ],
+          "avail-e2": [
+            {
+              "tick": 0,
+              "value": true
+            }
+          ]
+        }
+      },
+      "channels": {
+        "demand-a": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "run-a1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-a2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-a3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-a1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-a2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-a3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-a1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-a2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-a3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "demand-b": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "run-b1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-b2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-b1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-b2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-b1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-b2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "demand-c": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "run-c1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-c2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-c1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-c2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-c1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-c2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "demand-d": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "run-d1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-d2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-d1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-d2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-d1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-d2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "demand-e": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "run-e1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run-e2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-e1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault-e2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-e1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail-e2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "cmd-a1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-a1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-a1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-a2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-a2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-a2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-a3": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-a3": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-a3": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged-a": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none-a": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "faulted-a": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "pending-a": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition-a": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-b1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-b1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-b1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-b2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-b2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-b2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged-b": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none-b": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "faulted-b": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "pending-b": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition-b": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-c1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-c1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-c1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-c2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-c2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-c2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged-c": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none-c": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "faulted-c": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "pending-c": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition-c": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-d1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-d1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-d1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-d2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-d2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-d2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged-d": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none-d": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "faulted-d": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "pending-d": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition-d": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-e1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-e1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-e1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd-e2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "capacity-e2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent-e2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged-e": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none-e": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "faulted-e": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "pending-e": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition-e": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "demand-a"
+      }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "demand-b"
+      }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "demand-c"
+      }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "demand-d"
+      }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "demand-e"
+      }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-a1"
+      }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-a2"
+      }
+    },
+    {
+      "id": 22,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-a3"
+      }
+    },
+    {
+      "id": 23,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-a1"
+      }
+    },
+    {
+      "id": 24,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-a2"
+      }
+    },
+    {
+      "id": 25,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-a3"
+      }
+    },
+    {
+      "id": 26,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-a1"
+      }
+    },
+    {
+      "id": 27,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-a2"
+      }
+    },
+    {
+      "id": 28,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-a3"
+      }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-b1"
+      }
+    },
+    {
+      "id": 31,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-b2"
+      }
+    },
+    {
+      "id": 32,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-b1"
+      }
+    },
+    {
+      "id": 33,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-b2"
+      }
+    },
+    {
+      "id": 34,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-b1"
+      }
+    },
+    {
+      "id": 35,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-b2"
+      }
+    },
+    {
+      "id": 40,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-c1"
+      }
+    },
+    {
+      "id": 41,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-c2"
+      }
+    },
+    {
+      "id": 42,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-c1"
+      }
+    },
+    {
+      "id": 43,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-c2"
+      }
+    },
+    {
+      "id": 44,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-c1"
+      }
+    },
+    {
+      "id": 45,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-c2"
+      }
+    },
+    {
+      "id": 50,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-d1"
+      }
+    },
+    {
+      "id": 51,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-d2"
+      }
+    },
+    {
+      "id": 52,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-d1"
+      }
+    },
+    {
+      "id": 53,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-d2"
+      }
+    },
+    {
+      "id": 54,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-d1"
+      }
+    },
+    {
+      "id": 55,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-d2"
+      }
+    },
+    {
+      "id": 60,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-e1"
+      }
+    },
+    {
+      "id": 61,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run-e2"
+      }
+    },
+    {
+      "id": 62,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-e1"
+      }
+    },
+    {
+      "id": 63,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "fault-e2"
+      }
+    },
+    {
+      "id": 64,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-e1"
+      }
+    },
+    {
+      "id": 65,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "avail-e2"
+      }
+    },
+    {
+      "id": 70,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 100,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-a1"
+      }
+    },
+    {
+      "id": 101,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-a2"
+      }
+    },
+    {
+      "id": 102,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-a3"
+      }
+    },
+    {
+      "id": 103,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-a1"
+      }
+    },
+    {
+      "id": 104,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-a2"
+      }
+    },
+    {
+      "id": 105,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-a3"
+      }
+    },
+    {
+      "id": 106,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-a1"
+      }
+    },
+    {
+      "id": 107,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-a2"
+      }
+    },
+    {
+      "id": 108,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-a3"
+      }
+    },
+    {
+      "id": 109,
+      "direction": "out",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "staged-a"
+      }
+    },
+    {
+      "id": 110,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "none-a"
+      }
+    },
+    {
+      "id": 111,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "faulted-a"
+      }
+    },
+    {
+      "id": 112,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "pending-a"
+      }
+    },
+    {
+      "id": 113,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "transition-a"
+      }
+    },
+    {
+      "id": 120,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-b1"
+      }
+    },
+    {
+      "id": 121,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-b2"
+      }
+    },
+    {
+      "id": 122,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-b1"
+      }
+    },
+    {
+      "id": 123,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-b2"
+      }
+    },
+    {
+      "id": 124,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-b1"
+      }
+    },
+    {
+      "id": 125,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-b2"
+      }
+    },
+    {
+      "id": 126,
+      "direction": "out",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "staged-b"
+      }
+    },
+    {
+      "id": 127,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "none-b"
+      }
+    },
+    {
+      "id": 128,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "faulted-b"
+      }
+    },
+    {
+      "id": 129,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "pending-b"
+      }
+    },
+    {
+      "id": 130,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "transition-b"
+      }
+    },
+    {
+      "id": 140,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-c1"
+      }
+    },
+    {
+      "id": 141,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-c2"
+      }
+    },
+    {
+      "id": 142,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-c1"
+      }
+    },
+    {
+      "id": 143,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-c2"
+      }
+    },
+    {
+      "id": 144,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-c1"
+      }
+    },
+    {
+      "id": 145,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-c2"
+      }
+    },
+    {
+      "id": 146,
+      "direction": "out",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "staged-c"
+      }
+    },
+    {
+      "id": 147,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "none-c"
+      }
+    },
+    {
+      "id": 148,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "faulted-c"
+      }
+    },
+    {
+      "id": 149,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "pending-c"
+      }
+    },
+    {
+      "id": 150,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "transition-c"
+      }
+    },
+    {
+      "id": 160,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-d1"
+      }
+    },
+    {
+      "id": 161,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-d2"
+      }
+    },
+    {
+      "id": 162,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-d1"
+      }
+    },
+    {
+      "id": 163,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-d2"
+      }
+    },
+    {
+      "id": 164,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-d1"
+      }
+    },
+    {
+      "id": 165,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-d2"
+      }
+    },
+    {
+      "id": 166,
+      "direction": "out",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "staged-d"
+      }
+    },
+    {
+      "id": 167,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "none-d"
+      }
+    },
+    {
+      "id": 168,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "faulted-d"
+      }
+    },
+    {
+      "id": 169,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "pending-d"
+      }
+    },
+    {
+      "id": 170,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "transition-d"
+      }
+    },
+    {
+      "id": 180,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-e1"
+      }
+    },
+    {
+      "id": 181,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "cmd-e2"
+      }
+    },
+    {
+      "id": 182,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-e1"
+      }
+    },
+    {
+      "id": 183,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "capacity-e2"
+      }
+    },
+    {
+      "id": 184,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-e1"
+      }
+    },
+    {
+      "id": 185,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "vent-e2"
+      }
+    },
+    {
+      "id": 186,
+      "direction": "out",
+      "value_type": "int",
+      "channel": {
+        "device": 1,
+        "name": "staged-e"
+      }
+    },
+    {
+      "id": 187,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "none-e"
+      }
+    },
+    {
+      "id": 188,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "faulted-e"
+      }
+    },
+    {
+      "id": 189,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "pending-e"
+      }
+    },
+    {
+      "id": 190,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "transition-e"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "demand-a",
+      "source": 10,
+      "description": "Aggregate blower capacity demand, group A"
+    },
+    {
+      "id": 101,
+      "name": "demand-b",
+      "source": 11,
+      "description": "Aggregate blower capacity demand, group B"
+    },
+    {
+      "id": 102,
+      "name": "demand-c",
+      "source": 12,
+      "description": "Aggregate blower capacity demand, group C"
+    },
+    {
+      "id": 103,
+      "name": "demand-d",
+      "source": 13,
+      "description": "Aggregate blower capacity demand, group D"
+    },
+    {
+      "id": 104,
+      "name": "demand-e",
+      "source": 14,
+      "description": "Aggregate blower capacity demand, group E"
+    },
+    {
+      "id": 105,
+      "name": "blower-approve",
+      "source": 70,
+      "description": "Operator staging approval for group D"
+    },
+    {
+      "id": 106,
+      "name": "staged-a",
+      "source": 109,
+      "description": "Staged unit count, group a"
+    },
+    {
+      "id": 107,
+      "name": "none-a",
+      "source": 110,
+      "description": "No blower available, group a"
+    },
+    {
+      "id": 108,
+      "name": "faulted-a",
+      "source": 111,
+      "description": "All blowers faulted, group a"
+    },
+    {
+      "id": 109,
+      "name": "pending-a",
+      "source": 112,
+      "description": "Stage change pending, group a"
+    },
+    {
+      "id": 110,
+      "name": "transition-a",
+      "source": 113,
+      "description": "Staging transition, group a"
+    },
+    {
+      "id": 111,
+      "name": "staged-b",
+      "source": 126,
+      "description": "Staged unit count, group b"
+    },
+    {
+      "id": 112,
+      "name": "none-b",
+      "source": 127,
+      "description": "No blower available, group b"
+    },
+    {
+      "id": 113,
+      "name": "faulted-b",
+      "source": 128,
+      "description": "All blowers faulted, group b"
+    },
+    {
+      "id": 114,
+      "name": "pending-b",
+      "source": 129,
+      "description": "Stage change pending, group b"
+    },
+    {
+      "id": 115,
+      "name": "transition-b",
+      "source": 130,
+      "description": "Staging transition, group b"
+    },
+    {
+      "id": 116,
+      "name": "staged-c",
+      "source": 146,
+      "description": "Staged unit count, group c"
+    },
+    {
+      "id": 117,
+      "name": "none-c",
+      "source": 147,
+      "description": "No blower available, group c"
+    },
+    {
+      "id": 118,
+      "name": "faulted-c",
+      "source": 148,
+      "description": "All blowers faulted, group c"
+    },
+    {
+      "id": 119,
+      "name": "pending-c",
+      "source": 149,
+      "description": "Stage change pending, group c"
+    },
+    {
+      "id": 120,
+      "name": "transition-c",
+      "source": 150,
+      "description": "Staging transition, group c"
+    },
+    {
+      "id": 121,
+      "name": "staged-d",
+      "source": 166,
+      "description": "Staged unit count, group d"
+    },
+    {
+      "id": 122,
+      "name": "none-d",
+      "source": 167,
+      "description": "No blower available, group d"
+    },
+    {
+      "id": 123,
+      "name": "faulted-d",
+      "source": 168,
+      "description": "All blowers faulted, group d"
+    },
+    {
+      "id": 124,
+      "name": "pending-d",
+      "source": 169,
+      "description": "Stage change pending, group d"
+    },
+    {
+      "id": 125,
+      "name": "transition-d",
+      "source": 170,
+      "description": "Staging transition, group d"
+    },
+    {
+      "id": 126,
+      "name": "staged-e",
+      "source": 186,
+      "description": "Staged unit count, group e"
+    },
+    {
+      "id": 127,
+      "name": "none-e",
+      "source": 187,
+      "description": "No blower available, group e"
+    },
+    {
+      "id": 128,
+      "name": "faulted-e",
+      "source": 188,
+      "description": "All blowers faulted, group e"
+    },
+    {
+      "id": 129,
+      "name": "pending-e",
+      "source": 189,
+      "description": "Stage change pending, group e"
+    },
+    {
+      "id": 130,
+      "name": "transition-e",
+      "source": 190,
+      "description": "Staging transition, group e"
+    }
+  ],
+  "components": [
+    {
+      "id": 10,
+      "kind": "blower-group",
+      "parameters": {
+        "staging_authority": {
+          "int": 0
+        },
+        "stage_up": {
+          "float": 0.9
+        },
+        "stage_down": {
+          "float": 0.8
+        },
+        "min_run_ticks": {
+          "int": 0
+        },
+        "min_start_interval_ticks": {
+          "int": 3
+        },
+        "vent_ticks": {
+          "int": 2
+        },
+        "rotation": {
+          "int": 0
+        },
+        "unit_1_min_flow": {
+          "float": 20.0
+        },
+        "unit_1_max_flow": {
+          "float": 100.0
+        },
+        "unit_1_max_current": {
+          "float": 60.0
+        },
+        "unit_2_min_flow": {
+          "float": 20.0
+        },
+        "unit_2_max_flow": {
+          "float": 100.0
+        },
+        "unit_2_max_current": {
+          "float": 90.0
+        },
+        "unit_3_min_flow": {
+          "float": 20.0
+        },
+        "unit_3_max_flow": {
+          "float": 100.0
+        },
+        "unit_3_max_current": {
+          "float": 90.0
+        }
+      },
+      "ports": {
+        "demand": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_3": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_3": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_3": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staging_pending": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "blower-group",
+      "parameters": {
+        "staging_authority": {
+          "int": 0
+        },
+        "stage_up": {
+          "float": 0.9
+        },
+        "stage_down": {
+          "float": 0.8
+        },
+        "min_run_ticks": {
+          "int": 2
+        },
+        "min_start_interval_ticks": {
+          "int": 2
+        },
+        "vent_ticks": {
+          "int": 2
+        },
+        "rotation": {
+          "int": 1
+        },
+        "unit_1_min_flow": {
+          "float": 20.0
+        },
+        "unit_1_max_flow": {
+          "float": 100.0
+        },
+        "unit_1_max_current": {
+          "float": 90.0
+        },
+        "unit_2_min_flow": {
+          "float": 20.0
+        },
+        "unit_2_max_flow": {
+          "float": 100.0
+        },
+        "unit_2_max_current": {
+          "float": 90.0
+        }
+      },
+      "ports": {
+        "demand": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staging_pending": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "blower-group",
+      "parameters": {
+        "staging_authority": {
+          "int": 0
+        },
+        "stage_up": {
+          "float": 0.9
+        },
+        "stage_down": {
+          "float": 0.8
+        },
+        "min_run_ticks": {
+          "int": 5
+        },
+        "min_start_interval_ticks": {
+          "int": 0
+        },
+        "vent_ticks": {
+          "int": 2
+        },
+        "rotation": {
+          "int": 2
+        },
+        "unit_1_min_flow": {
+          "float": 20.0
+        },
+        "unit_1_max_flow": {
+          "float": 100.0
+        },
+        "unit_1_max_current": {
+          "float": 90.0
+        },
+        "unit_2_min_flow": {
+          "float": 20.0
+        },
+        "unit_2_max_flow": {
+          "float": 100.0
+        },
+        "unit_2_max_current": {
+          "float": 90.0
+        }
+      },
+      "ports": {
+        "demand": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staging_pending": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "kind": "blower-group",
+      "parameters": {
+        "staging_authority": {
+          "int": 1
+        },
+        "stage_up": {
+          "float": 0.9
+        },
+        "stage_down": {
+          "float": 0.8
+        },
+        "min_run_ticks": {
+          "int": 0
+        },
+        "min_start_interval_ticks": {
+          "int": 0
+        },
+        "vent_ticks": {
+          "int": 2
+        },
+        "rotation": {
+          "int": 0
+        },
+        "unit_1_min_flow": {
+          "float": 20.0
+        },
+        "unit_1_max_flow": {
+          "float": 100.0
+        },
+        "unit_1_max_current": {
+          "float": 90.0
+        },
+        "unit_2_min_flow": {
+          "float": 20.0
+        },
+        "unit_2_max_flow": {
+          "float": 100.0
+        },
+        "unit_2_max_current": {
+          "float": 90.0
+        }
+      },
+      "ports": {
+        "demand": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "approve": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staging_pending": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "blower-group",
+      "parameters": {
+        "staging_authority": {
+          "int": 2
+        },
+        "stage_up": {
+          "float": 0.9
+        },
+        "stage_down": {
+          "float": 0.8
+        },
+        "min_run_ticks": {
+          "int": 0
+        },
+        "min_start_interval_ticks": {
+          "int": 0
+        },
+        "vent_ticks": {
+          "int": 2
+        },
+        "rotation": {
+          "int": 0
+        },
+        "unit_1_min_flow": {
+          "float": 20.0
+        },
+        "unit_1_max_flow": {
+          "float": 100.0
+        },
+        "unit_1_max_current": {
+          "float": 90.0
+        },
+        "unit_2_min_flow": {
+          "float": 20.0
+        },
+        "unit_2_max_flow": {
+          "float": 100.0
+        },
+        "unit_2_max_current": {
+          "float": 90.0
+        }
+      },
+      "ports": {
+        "demand": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_1": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "capacity_2": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "vent_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "staging_pending": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "transition": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 20
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 23
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 26
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 21
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 24
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 27
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 22
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "run_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 25
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "fault_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 28
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "avail_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 11
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 30
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 32
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 34
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 31
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 33
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 35
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 42
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 44
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 43
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 45
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 13
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 50
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 52
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 54
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 51
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 53
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 55
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 14
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 62
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 64
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 63
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 65
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 70
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "approve"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 100
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 101
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "cmd_3"
+        }
+      },
+      "to": {
+        "point": 102
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "capacity_1"
+        }
+      },
+      "to": {
+        "point": 103
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "capacity_2"
+        }
+      },
+      "to": {
+        "point": 104
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "capacity_3"
+        }
+      },
+      "to": {
+        "point": 105
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "vent_1"
+        }
+      },
+      "to": {
+        "point": 106
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "vent_2"
+        }
+      },
+      "to": {
+        "point": 107
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "vent_3"
+        }
+      },
+      "to": {
+        "point": 108
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 109
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 110
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 111
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "staging_pending"
+        }
+      },
+      "to": {
+        "point": 112
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "transition"
+        }
+      },
+      "to": {
+        "point": 113
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 120
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 121
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "capacity_1"
+        }
+      },
+      "to": {
+        "point": 122
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "capacity_2"
+        }
+      },
+      "to": {
+        "point": 123
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "vent_1"
+        }
+      },
+      "to": {
+        "point": 124
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "vent_2"
+        }
+      },
+      "to": {
+        "point": 125
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 126
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 127
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 128
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "staging_pending"
+        }
+      },
+      "to": {
+        "point": 129
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "transition"
+        }
+      },
+      "to": {
+        "point": 130
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 140
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 141
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "capacity_1"
+        }
+      },
+      "to": {
+        "point": 142
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "capacity_2"
+        }
+      },
+      "to": {
+        "point": 143
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "vent_1"
+        }
+      },
+      "to": {
+        "point": 144
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "vent_2"
+        }
+      },
+      "to": {
+        "point": 145
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 146
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 147
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 148
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "staging_pending"
+        }
+      },
+      "to": {
+        "point": 149
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "transition"
+        }
+      },
+      "to": {
+        "point": 150
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 160
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 161
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "capacity_1"
+        }
+      },
+      "to": {
+        "point": 162
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "capacity_2"
+        }
+      },
+      "to": {
+        "point": 163
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "vent_1"
+        }
+      },
+      "to": {
+        "point": 164
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "vent_2"
+        }
+      },
+      "to": {
+        "point": 165
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 166
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 167
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 168
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "staging_pending"
+        }
+      },
+      "to": {
+        "point": 169
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "transition"
+        }
+      },
+      "to": {
+        "point": 170
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 180
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 181
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "capacity_1"
+        }
+      },
+      "to": {
+        "point": 182
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "capacity_2"
+        }
+      },
+      "to": {
+        "point": 183
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "vent_1"
+        }
+      },
+      "to": {
+        "point": 184
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "vent_2"
+        }
+      },
+      "to": {
+        "point": 185
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 186
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 187
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 188
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "staging_pending"
+        }
+      },
+      "to": {
+        "point": 189
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "transition"
+        }
+      },
+      "to": {
+        "point": 190
+      }
+    }
+  ]
+}

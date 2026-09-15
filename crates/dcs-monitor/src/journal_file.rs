@@ -42,6 +42,100 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+/// A journal file's full contents for review tooling: every journaled
+/// entry in `seq` order — the durable record is never truncated here,
+/// unlike the replayed ring — plus the run-boundary markers separating
+/// its process lifetimes.
+///
+/// Produced by [`read_journal_file`]; the metrics report consumes it as
+/// the restart-surviving dataset the flood-and-performance decision
+/// computes over. The boundaries matter: each run's entries carry its
+/// own tick domain, so durations spanning a restart compute on the
+/// elapsed-scans axis the boundaries declare, never by subtracting
+/// ticks across domains.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournalData {
+    /// Every entry the file records, oldest first.
+    pub entries: Vec<JournalEntry>,
+    /// The file's run-boundary markers in order — one per process
+    /// lifetime the file records.
+    pub boundaries: Vec<RunBoundary>,
+}
+
+/// One run-boundary marker's report-relevant data: which lifetime
+/// began, the tick its run started at, and the `seq` the run's first
+/// entry takes — the attribution an entry's run comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunBoundary {
+    /// Which lifetime begins — the file counts runs from 1.
+    pub run: u64,
+    /// The tick the run started at: `0` on a cold start, the restored
+    /// tick under `--state-file`.
+    pub start_tick: Tick,
+    /// The `seq` the run's first entry takes.
+    pub first_seq: u64,
+}
+
+/// Reads the whole journal file at `path` for review tooling — the
+/// consumer side of the durable sink, returning every [`JournalEntry`]
+/// the file holds and its run count.
+///
+/// The same strictness startup replay applies: a line that does not
+/// parse as a [`JournalRecord`] or an entry whose `seq` does not
+/// continue the strictly increasing stream fails naming the file, the
+/// line, and the record. A missing or unreadable file is an error here
+/// — unlike the monitor's cold start, a review tool asked for a file
+/// that does not exist has nothing to report on.
+pub fn read_journal_file(path: &Path) -> io::Result<JournalData> {
+    let file = File::open(path).map_err(|error| named(path, "cannot read journal file", error))?;
+    let mut data = JournalData {
+        entries: Vec::new(),
+        boundaries: Vec::new(),
+    };
+    let mut next_seq = 1_u64;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| named(path, "cannot read journal file", error))?;
+        let record: JournalRecord = serde_json::from_str(&line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "journal file {} cannot be read: line {} is not a journal record: \
+                     {line} ({error})",
+                    path.display(),
+                    index + 1,
+                ),
+            )
+        })?;
+        match record {
+            JournalRecord::Entry(entry) => {
+                if entry.seq < next_seq {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "journal file {} cannot be read: line {} carries seq {} after \
+                             seq {}: {line}",
+                            path.display(),
+                            index + 1,
+                            entry.seq,
+                            next_seq - 1,
+                        ),
+                    ));
+                }
+                next_seq = entry.seq + 1;
+                data.entries.push(entry);
+            }
+            JournalRecord::RunBoundary { run, tick } => {
+                data.boundaries.push(RunBoundary {
+                    run,
+                    start_tick: tick,
+                    first_seq: next_seq,
+                });
+            }
+        }
+    }
+    Ok(data)
+}
+
 /// One line of the journal file — the monitor's own format wrapping
 /// the contract's serialized [`JournalEntry`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
