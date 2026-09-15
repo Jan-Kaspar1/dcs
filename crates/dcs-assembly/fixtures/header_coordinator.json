@@ -1,0 +1,719 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "pressure-a": [{ "tick": 0, "value": 8.0 }],
+          "valve-a1": [{ "tick": 0, "value": 60.0 }],
+          "airflow-a1": [
+            { "tick": 0, "value": 2.5 },
+            { "tick": 14, "value": 1.0 }
+          ],
+          "pulsing-a1": [
+            { "tick": 4, "value": true },
+            { "tick": 10, "value": false }
+          ],
+          "valve-a2": [{ "tick": 0, "value": 70.0 }],
+          "airflow-a2": [
+            { "tick": 0, "value": 3.0 },
+            { "tick": 14, "value": 2.0 }
+          ],
+          "pulsing-a2": [
+            { "tick": 6, "value": true },
+            { "tick": 16, "value": false }
+          ],
+          "pressure-b": [
+            { "tick": 0, "value": 9.0 },
+            { "tick": 17, "value": 9.0, "quality": "bad" },
+            { "tick": 20, "value": 9.0 }
+          ],
+          "valve-b1": [{ "tick": 0, "value": 50.0 }],
+          "airflow-b1": [{ "tick": 0, "value": 1.0 }],
+          "valve-b2": [{ "tick": 0, "value": 60.0 }],
+          "airflow-b2": [{ "tick": 0, "value": 2.0 }],
+          "valve-b3": [
+            { "tick": 0, "value": 97.0 },
+            { "tick": 12, "value": 88.0 },
+            { "tick": 16, "value": 70.0 },
+            { "tick": 24, "value": 70.0, "quality": "bad" },
+            { "tick": 30, "value": 90.0 }
+          ],
+          "airflow-b3": [{ "tick": 0, "value": 1.5 }],
+          "pressure-c": [{ "tick": 0, "value": 7.0 }],
+          "valve-c1": [{ "tick": 0, "value": 40.0 }],
+          "airflow-c1": [
+            { "tick": 0, "value": 1.2 },
+            { "tick": 8, "value": 4.0 }
+          ],
+          "pulsing-c1": [
+            { "tick": 3, "value": true },
+            { "tick": 15, "value": false }
+          ],
+          "valve-c2": [{ "tick": 0, "value": 55.0 }],
+          "airflow-c2": [
+            { "tick": 0, "value": 1.5 },
+            { "tick": 8, "value": 5.0 },
+            { "tick": 12, "value": 99.0, "quality": "bad" },
+            { "tick": 16, "value": 6.0 }
+          ],
+          "pulsing-c2": [
+            { "tick": 5, "value": true },
+            { "tick": 18, "value": false }
+          ]
+        }
+      },
+      "channels": {
+        "pressure-a": { "direction": "in", "value_type": "float" },
+        "valve-a1": { "direction": "in", "value_type": "float" },
+        "airflow-a1": { "direction": "in", "value_type": "float" },
+        "pulsing-a1": { "direction": "in", "value_type": "bool" },
+        "valve-a2": { "direction": "in", "value_type": "float" },
+        "airflow-a2": { "direction": "in", "value_type": "float" },
+        "pulsing-a2": { "direction": "in", "value_type": "bool" },
+        "pressure-b": { "direction": "in", "value_type": "float" },
+        "valve-b1": { "direction": "in", "value_type": "float" },
+        "airflow-b1": { "direction": "in", "value_type": "float" },
+        "pulsing-b1": { "direction": "in", "value_type": "bool" },
+        "valve-b2": { "direction": "in", "value_type": "float" },
+        "airflow-b2": { "direction": "in", "value_type": "float" },
+        "pulsing-b2": { "direction": "in", "value_type": "bool" },
+        "valve-b3": { "direction": "in", "value_type": "float" },
+        "airflow-b3": { "direction": "in", "value_type": "float" },
+        "pulsing-b3": { "direction": "in", "value_type": "bool" },
+        "pressure-c": { "direction": "in", "value_type": "float" },
+        "valve-c1": { "direction": "in", "value_type": "float" },
+        "airflow-c1": { "direction": "in", "value_type": "float" },
+        "pulsing-c1": { "direction": "in", "value_type": "bool" },
+        "valve-c2": { "direction": "in", "value_type": "float" },
+        "airflow-c2": { "direction": "in", "value_type": "float" },
+        "pulsing-c2": { "direction": "in", "value_type": "bool" },
+        "grant-a1": { "direction": "out", "value_type": "bool" },
+        "grant-a2": { "direction": "out", "value_type": "bool" },
+        "sp-a": { "direction": "out", "value_type": "float" },
+        "demand-a": { "direction": "out", "value_type": "float" },
+        "most-a": { "direction": "out", "value_type": "int" },
+        "bound-a": { "direction": "out", "value_type": "bool" },
+        "pblocked-a": { "direction": "out", "value_type": "bool" },
+        "grant-b1": { "direction": "out", "value_type": "bool" },
+        "grant-b2": { "direction": "out", "value_type": "bool" },
+        "grant-b3": { "direction": "out", "value_type": "bool" },
+        "sp-b": { "direction": "out", "value_type": "float" },
+        "demand-b": { "direction": "out", "value_type": "float" },
+        "most-b": { "direction": "out", "value_type": "int" },
+        "bound-b": { "direction": "out", "value_type": "bool" },
+        "pblocked-b": { "direction": "out", "value_type": "bool" },
+        "grant-c1": { "direction": "out", "value_type": "bool" },
+        "grant-c2": { "direction": "out", "value_type": "bool" },
+        "sp-c": { "direction": "out", "value_type": "float" },
+        "demand-c": { "direction": "out", "value_type": "float" },
+        "most-c": { "direction": "out", "value_type": "int" },
+        "bound-c": { "direction": "out", "value_type": "bool" },
+        "pblocked-c": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "pressure-a" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-a1" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-a1" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-a1" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-a2" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-a2" }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-a2" }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "pressure-b" }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-b1" }
+    },
+    {
+      "id": 22,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-b1" }
+    },
+    {
+      "id": 23,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-b1" }
+    },
+    {
+      "id": 24,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-b2" }
+    },
+    {
+      "id": 25,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-b2" }
+    },
+    {
+      "id": 26,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-b2" }
+    },
+    {
+      "id": 27,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-b3" }
+    },
+    {
+      "id": 28,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-b3" }
+    },
+    {
+      "id": 29,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-b3" }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "pressure-c" }
+    },
+    {
+      "id": 31,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-c1" }
+    },
+    {
+      "id": 32,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-c1" }
+    },
+    {
+      "id": 33,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-c1" }
+    },
+    {
+      "id": 34,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "valve-c2" }
+    },
+    {
+      "id": 35,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "airflow-c2" }
+    },
+    {
+      "id": 36,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pulsing-c2" }
+    },
+    {
+      "id": 40,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-a1" }
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-a2" }
+    },
+    {
+      "id": 42,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "sp-a" }
+    },
+    {
+      "id": 43,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "demand-a" }
+    },
+    {
+      "id": 44,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "most-a" }
+    },
+    {
+      "id": 45,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "bound-a" }
+    },
+    {
+      "id": 46,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pblocked-a" }
+    },
+    {
+      "id": 50,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b1" }
+    },
+    {
+      "id": 51,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b2" }
+    },
+    {
+      "id": 52,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b3" }
+    },
+    {
+      "id": 53,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "sp-b" }
+    },
+    {
+      "id": 54,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "demand-b" }
+    },
+    {
+      "id": 55,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "most-b" }
+    },
+    {
+      "id": 56,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "bound-b" }
+    },
+    {
+      "id": 57,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pblocked-b" }
+    },
+    {
+      "id": 60,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-c1" }
+    },
+    {
+      "id": 61,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-c2" }
+    },
+    {
+      "id": 62,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "sp-c" }
+    },
+    {
+      "id": 63,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "demand-c" }
+    },
+    {
+      "id": 64,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "most-c" }
+    },
+    {
+      "id": 65,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "bound-c" }
+    },
+    {
+      "id": 66,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pblocked-c" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "bank-a-pressure-setpoint",
+      "source": 42,
+      "description": "Bank A held header-pressure set-point"
+    },
+    {
+      "id": 101,
+      "name": "bank-a-total-demand",
+      "source": 43,
+      "description": "Bank A aggregate airflow demand"
+    },
+    {
+      "id": 102,
+      "name": "bank-b-pressure-setpoint",
+      "source": 53,
+      "description": "Bank B walking header-pressure set-point"
+    },
+    {
+      "id": 103,
+      "name": "bank-b-most-open",
+      "source": 55,
+      "description": "Bank B most-open zone index"
+    },
+    {
+      "id": 104,
+      "name": "bank-c-total-demand",
+      "source": 63,
+      "description": "Bank C summed airflow demand"
+    },
+    {
+      "id": 105,
+      "name": "bank-c-pulse-blocked",
+      "source": 66,
+      "description": "A bank C mixing-pulse request refused by the cap"
+    }
+  ],
+  "components": [
+    {
+      "id": 10,
+      "kind": "header-coordinator",
+      "parameters": {
+        "strategy": { "int": 0 },
+        "pressure_hold": { "float": 12.0 },
+        "pressure_min": { "float": 5.0 },
+        "pressure_max": { "float": 20.0 },
+        "mov_band_lo": { "float": 85.0 },
+        "mov_band_hi": { "float": 95.0 },
+        "adjust_ticks": { "int": 3 },
+        "min_total_airflow": { "float": 4.0 },
+        "max_pulsing": { "int": 1 }
+      },
+      "ports": {
+        "pressure": { "direction": "in", "value_type": "float" },
+        "valve_pos_1": { "direction": "in", "value_type": "float" },
+        "airflow_1": { "direction": "in", "value_type": "float" },
+        "pulsing_1": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_1": { "direction": "out", "value_type": "bool" },
+        "valve_pos_2": { "direction": "in", "value_type": "float" },
+        "airflow_2": { "direction": "in", "value_type": "float" },
+        "pulsing_2": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_2": { "direction": "out", "value_type": "bool" },
+        "pressure_sp": { "direction": "out", "value_type": "float" },
+        "blower_demand": { "direction": "out", "value_type": "float" },
+        "most_open": { "direction": "out", "value_type": "int" },
+        "at_bound": { "direction": "out", "value_type": "bool" },
+        "pulse_blocked": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "header-coordinator",
+      "parameters": {
+        "strategy": { "int": 1 },
+        "pressure_hold": { "float": 10.0 },
+        "pressure_min": { "float": 4.0 },
+        "pressure_max": { "float": 16.0 },
+        "mov_band_lo": { "float": 85.0 },
+        "mov_band_hi": { "float": 95.0 },
+        "adjust_ticks": { "int": 3 },
+        "min_total_airflow": { "float": 1.0 },
+        "max_pulsing": { "int": 3 }
+      },
+      "ports": {
+        "pressure": { "direction": "in", "value_type": "float" },
+        "valve_pos_1": { "direction": "in", "value_type": "float" },
+        "airflow_1": { "direction": "in", "value_type": "float" },
+        "pulsing_1": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_1": { "direction": "out", "value_type": "bool" },
+        "valve_pos_2": { "direction": "in", "value_type": "float" },
+        "airflow_2": { "direction": "in", "value_type": "float" },
+        "pulsing_2": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_2": { "direction": "out", "value_type": "bool" },
+        "valve_pos_3": { "direction": "in", "value_type": "float" },
+        "airflow_3": { "direction": "in", "value_type": "float" },
+        "pulsing_3": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_3": { "direction": "out", "value_type": "bool" },
+        "pressure_sp": { "direction": "out", "value_type": "float" },
+        "blower_demand": { "direction": "out", "value_type": "float" },
+        "most_open": { "direction": "out", "value_type": "int" },
+        "at_bound": { "direction": "out", "value_type": "bool" },
+        "pulse_blocked": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "header-coordinator",
+      "parameters": {
+        "strategy": { "int": 2 },
+        "pressure_hold": { "float": 8.0 },
+        "pressure_min": { "float": 4.0 },
+        "pressure_max": { "float": 16.0 },
+        "mov_band_lo": { "float": 85.0 },
+        "mov_band_hi": { "float": 95.0 },
+        "adjust_ticks": { "int": 2 },
+        "min_total_airflow": { "float": 3.0 },
+        "max_pulsing": { "int": 1 }
+      },
+      "ports": {
+        "pressure": { "direction": "in", "value_type": "float" },
+        "valve_pos_1": { "direction": "in", "value_type": "float" },
+        "airflow_1": { "direction": "in", "value_type": "float" },
+        "pulsing_1": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_1": { "direction": "out", "value_type": "bool" },
+        "valve_pos_2": { "direction": "in", "value_type": "float" },
+        "airflow_2": { "direction": "in", "value_type": "float" },
+        "pulsing_2": { "direction": "in", "value_type": "bool" },
+        "pulse_grant_2": { "direction": "out", "value_type": "bool" },
+        "pressure_sp": { "direction": "out", "value_type": "float" },
+        "blower_demand": { "direction": "out", "value_type": "float" },
+        "most_open": { "direction": "out", "value_type": "int" },
+        "at_bound": { "direction": "out", "value_type": "bool" },
+        "pulse_blocked": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 10, "name": "pressure" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 10, "name": "valve_pos_1" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 10, "name": "airflow_1" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 10, "name": "pulsing_1" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 10, "name": "valve_pos_2" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 10, "name": "airflow_2" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 10, "name": "pulsing_2" } }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "pulse_grant_1" } },
+      "to": { "point": 40 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "pulse_grant_2" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "pressure_sp" } },
+      "to": { "point": 42 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "blower_demand" } },
+      "to": { "point": 43 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "most_open" } },
+      "to": { "point": 44 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "at_bound" } },
+      "to": { "point": 45 }
+    },
+    {
+      "from": { "port": { "component": 10, "name": "pulse_blocked" } },
+      "to": { "point": 46 }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 11, "name": "pressure" } }
+    },
+    {
+      "from": { "point": 21 },
+      "to": { "port": { "component": 11, "name": "valve_pos_1" } }
+    },
+    {
+      "from": { "point": 22 },
+      "to": { "port": { "component": 11, "name": "airflow_1" } }
+    },
+    {
+      "from": { "point": 23 },
+      "to": { "port": { "component": 11, "name": "pulsing_1" } }
+    },
+    {
+      "from": { "point": 24 },
+      "to": { "port": { "component": 11, "name": "valve_pos_2" } }
+    },
+    {
+      "from": { "point": 25 },
+      "to": { "port": { "component": 11, "name": "airflow_2" } }
+    },
+    {
+      "from": { "point": 26 },
+      "to": { "port": { "component": 11, "name": "pulsing_2" } }
+    },
+    {
+      "from": { "point": 27 },
+      "to": { "port": { "component": 11, "name": "valve_pos_3" } }
+    },
+    {
+      "from": { "point": 28 },
+      "to": { "port": { "component": 11, "name": "airflow_3" } }
+    },
+    {
+      "from": { "point": 29 },
+      "to": { "port": { "component": 11, "name": "pulsing_3" } }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "pulse_grant_1" } },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "pulse_grant_2" } },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "pulse_grant_3" } },
+      "to": { "point": 52 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "pressure_sp" } },
+      "to": { "point": 53 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "blower_demand" } },
+      "to": { "point": 54 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "most_open" } },
+      "to": { "point": 55 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "at_bound" } },
+      "to": { "point": 56 }
+    },
+    {
+      "from": { "port": { "component": 11, "name": "pulse_blocked" } },
+      "to": { "point": 57 }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 12, "name": "pressure" } }
+    },
+    {
+      "from": { "point": 31 },
+      "to": { "port": { "component": 12, "name": "valve_pos_1" } }
+    },
+    {
+      "from": { "point": 32 },
+      "to": { "port": { "component": 12, "name": "airflow_1" } }
+    },
+    {
+      "from": { "point": 33 },
+      "to": { "port": { "component": 12, "name": "pulsing_1" } }
+    },
+    {
+      "from": { "point": 34 },
+      "to": { "port": { "component": 12, "name": "valve_pos_2" } }
+    },
+    {
+      "from": { "point": 35 },
+      "to": { "port": { "component": 12, "name": "airflow_2" } }
+    },
+    {
+      "from": { "point": 36 },
+      "to": { "port": { "component": 12, "name": "pulsing_2" } }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "pulse_grant_1" } },
+      "to": { "point": 60 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "pulse_grant_2" } },
+      "to": { "point": 61 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "pressure_sp" } },
+      "to": { "point": 62 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "blower_demand" } },
+      "to": { "point": 63 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "most_open" } },
+      "to": { "point": 64 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "at_bound" } },
+      "to": { "point": 65 }
+    },
+    {
+      "from": { "port": { "component": 12, "name": "pulse_blocked" } },
+      "to": { "point": 66 }
+    }
+  ]
+}
