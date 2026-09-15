@@ -279,7 +279,9 @@ def scenario_evidence_capture(ctx):
                 'GET /receipts and GET /journal return records covering the '
                 'run so far')
     try:
-        _, receipts = http_json('GET', ctx['standby'] + '/receipts')
+        # Receipts live on the peer that accepted the command (ctrl-a);
+        # the journal is read off the post-failover active (ctrl-b).
+        _, receipts = http_json('GET', ctx['active'] + '/receipts')
         _, journal = http_json('GET', ctx['standby'] + '/journal')
         save_evidence(ctx['evidence_dir'], 'evidence-receipts.json',
                       receipts)
@@ -288,8 +290,10 @@ def scenario_evidence_capture(ctx):
         case.evidence('file', 'evidence/evidence-journal.json')
         count = len(receipts) if isinstance(receipts, list) \
             else len(receipts.get('receipts', []))
-        case.observe('receipts returned ' + str(count) + ' entr'
-                     + ('y' if count == 1 else 'ies'))
+        entries = len(journal) if isinstance(journal, list) \
+            else len(journal.get('entries', journal.get('journal', [])))
+        case.observe('receipts=' + str(count) + ' journal_entries='
+                     + str(entries))
         if count < 1:
             return case.finish('failed', 'no command receipts recorded')
         return case.finish('passed')
