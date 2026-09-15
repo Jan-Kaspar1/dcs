@@ -142,12 +142,13 @@ class State:
                 "outcome='interrupted', error=?, finished=? "
                 'WHERE run_id=?', (error, now, run_id))
 
-    def fail_queued(self, run_id, error, now):
+    def attach_report(self, run_id, path, now):
+        """Record a report path without changing lifecycle status —
+        used when reconciliation writes an interrupted run's report."""
         with self.db:
             self.db.execute(
-                "UPDATE runs SET status='interrupted', "
-                "outcome='interrupted', error=?, finished=? "
-                'WHERE run_id=?', (error, now, run_id))
+                'UPDATE runs SET report=?, finished=? WHERE run_id=?',
+                (path, now, run_id))
 
     def last_attempted_sha(self):
         rows = self.runs(('queued', 'running', 'finished', 'interrupted'))

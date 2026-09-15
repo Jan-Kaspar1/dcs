@@ -142,6 +142,8 @@ def reconcile(st, cfg, log=print):
 
     Runs at every cycle start so a killed runner — timeout, SIGKILL, or
     reboot — never leaves an orphaned rig or a record stuck 'running'.
+    A dead run still gets a report built from its persisted timeline so
+    the interruption is visible as evidence.
     """
     live = {r['run_id'] for r in st.runs(qa_state.ACTIVE_STATUSES)
             if _pid_alive(r['pid'])}
@@ -151,6 +153,7 @@ def reconcile(st, cfg, log=print):
                          'runner pid ' + str(record['pid'])
                          + ' gone; reconciled', time.time())
             log('reconcile: marked ' + record['run_id'] + ' interrupted')
+            _write_interrupted_report(st, record, cfg, log)
     for cid, run_id in _managed_containers():
         if run_id not in live:
             docker('rm', '-f', cid, check=False)
@@ -315,7 +318,12 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     for path in (model, dynamics):
         if not path.is_file():
             raise RuntimeError('model fixture missing: ' + str(path))
-    docker('network', 'create', '--internal',
+    # A dedicated bridge per run. `--internal` is rejected on purpose:
+    # it also blocks the loopback-published monitor ports the scenario
+    # driver needs. Disabled masquerade gives no NAT egress instead —
+    # containers can reach only each other and the published-port DNAT.
+    docker('network', 'create',
+           '-o', 'com.docker.network.bridge.enable_ip_masquerade=false',
            '--label', MANAGED_LABEL + '=1',
            '--label', RUN_LABEL + '=' + run_id, net)
     docker(*_docker_run_args(cfg, run_id, prefix + '-plant'),
@@ -388,43 +396,77 @@ def _teardown_rig(run_id, timeline):
     timeline('teardown', 'run containers and network removed')
 
 
-def _finish_blocked(st, record, run_dir, cfg, timeline, events,
-                    reason, phase):
-    """A run that never assessed the revision still produces a report."""
-    scenarios_list = []
+def _persist_report(st, record, cfg, outcome, completed_sha, images,
+                    results, infra, events, log=print):
+    """Validate, store, stage, and record a report for a run record."""
+    run_dir = Path(cfg['state_dir']) / 'runs' / record['run_id']
+    run_dir.mkdir(parents=True, exist_ok=True)
+    started = record['started'] or time.time()
     report_doc = {
         'schema_version': qa_report.SCHEMA_VERSION,
         'run_id': record['run_id'],
         'attempted_sha': record['attempted_sha'],
-        'completed_sha': None,
-        'image': None,
-        'started_at': _iso(datetime.fromtimestamp(
-            record['started'] or time.time(), timezone.utc)),
+        'completed_sha': completed_sha,
+        'image': images,
+        'started_at': _iso(datetime.fromtimestamp(started, timezone.utc)),
         'finished_at': _iso(),
-        'outcome': 'blocked',
+        'outcome': outcome,
         'attempt': record['attempt'],
         'host': {'name': 'lenovo', 'os': platform.system().lower()},
-        'scenarios': scenarios_list,
+        'scenarios': results,
         'capability_limitations': cfg['capabilities'],
-        'infrastructure_failures': [
-            {'key': 'preflight-' + phase, 'detail': reason,
-             'phase': phase}],
+        'infrastructure_failures': infra,
         'timeline': events,
     }
-    path = run_dir / 'report.json'
+    if record.get('range_first'):
+        report_doc['changed_range'] = {
+            'first': record['range_first'], 'last': record['attempted_sha']}
     qa_report.validate_report(json.dumps(report_doc),
                               run_id=record['run_id'],
                               attempted_sha=record['attempted_sha'])
+    path = run_dir / 'report.json'
     path.write_text(json.dumps(report_doc, indent=1) + '\n')
-    _stage_report(cfg, record['run_id'], path)
-    st.finish(record['run_id'], 'blocked', None, str(path), time.time())
-    timeline('run-blocked', reason)
-
-
-def _stage_report(cfg, run_id, path):
     reports = Path(cfg['state_dir']) / 'reports'
     reports.mkdir(exist_ok=True)
-    shutil.copy2(path, reports / (run_id + '.json'))
+    shutil.copy2(path, reports / (record['run_id'] + '.json'))
+    if outcome == 'interrupted':
+        # The record already carries the interrupted lifecycle status.
+        st.attach_report(record['run_id'], str(path), time.time())
+    else:
+        st.finish(record['run_id'], outcome, completed_sha, str(path),
+                  time.time())
+    return path
+
+
+def _read_timeline(run_dir):
+    path = Path(run_dir) / 'timeline.jsonl'
+    events = []
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+    return events
+
+
+def _write_interrupted_report(st, record, cfg, log=print):
+    """Compose the interrupted-run report from the persisted timeline."""
+    run_dir = Path(cfg['state_dir']) / 'runs' / record['run_id']
+    events = _read_timeline(run_dir)
+    events.append({'t': _iso(), 'event': 'reconciled',
+                   'detail': 'runner process gone; run marked interrupted '
+                             'and its labeled containers removed'})
+    try:
+        _persist_report(st, record, cfg, 'interrupted', None, None, [],
+                        [{'key': 'runner-died',
+                          'detail': record.get('error')
+                          or 'runner process died mid-run',
+                          'phase': 'run'}],
+                        events, log)
+    except Exception as exc:
+        log('interrupted report failed for ' + record['run_id']
+            + ': ' + str(exc)[:300])
 
 
 def run(st, record, cfg, log=print):
@@ -439,19 +481,26 @@ def run(st, record, cfg, log=print):
     timeline, events = _timeline_writer(run_dir)
     timeline('run-start', 'attempting ' + sha)
     deadline = time.monotonic() + cfg['hard_timeout_seconds']
+    results, images, infra = [], None, []
     try:
         if _free_bytes(state_dir) < cfg['min_free_bytes']:
-            _finish_blocked(st, record, run_dir, cfg, timeline, events,
-                            'insufficient free space under '
-                            + str(state_dir), 'preflight')
+            timeline('run-blocked', 'insufficient free space')
+            _persist_report(st, record, cfg, 'blocked', None, None, [],
+                            [{'key': 'preflight-disk',
+                              'detail': 'insufficient free space under '
+                              + str(state_dir), 'phase': 'preflight'}],
+                            events, log)
             return
         src_tar = Path(cfg['src_dir']) / (sha + '.tar')
         src = Path(cfg['src_dir']) / sha
         if not src.is_dir():
             if not src_tar.is_file():
-                _finish_blocked(st, record, run_dir, cfg, timeline, events,
-                                'source archive missing: '
-                                + src_tar.name, 'preflight')
+                timeline('run-blocked', 'source archive missing')
+                _persist_report(st, record, cfg, 'blocked', None, None, [],
+                                [{'key': 'preflight-source',
+                                  'detail': 'source archive missing: '
+                                  + src_tar.name, 'phase': 'preflight'}],
+                                events, log)
                 return
             src.mkdir(parents=True, exist_ok=True)
             subprocess.run(['tar', '-xf', str(src_tar), '-C', str(src)],
@@ -473,41 +522,26 @@ def run(st, record, cfg, log=print):
                    else 'failed' if any(r['outcome'] == 'failed'
                                         for r in results)
                    else 'inconclusive')
-        report_doc = {
-            'schema_version': qa_report.SCHEMA_VERSION,
-            'run_id': run_id,
-            'attempted_sha': sha,
-            'completed_sha': sha if outcome in ('passed', 'failed')
-            else None,
-            'image': images,
-            'started_at': _iso(datetime.fromtimestamp(
-                record['started'], timezone.utc)),
-            'finished_at': _iso(),
-            'outcome': outcome,
-            'attempt': record['attempt'],
-            'host': {'name': 'lenovo', 'os': platform.system().lower()},
-            'scenarios': results,
-            'capability_limitations': cfg['capabilities'],
-            'infrastructure_failures': [],
-            'timeline': events,
-        }
-        if record['range_first']:
-            report_doc['changed_range'] = {
-                'first': record['range_first'], 'last': sha}
-        path = run_dir / 'report.json'
-        qa_report.validate_report(json.dumps(report_doc), run_id=run_id,
-                                  attempted_sha=sha)
-        path.write_text(json.dumps(report_doc, indent=1) + '\n')
-        _stage_report(cfg, run_id, path)
-        st.finish(run_id, outcome,
-                  report_doc['completed_sha'], str(path), time.time())
+        _persist_report(st, record, cfg, outcome,
+                        sha if outcome in ('passed', 'failed') else None,
+                        images, results, infra, events, log)
         timeline('run-finished', outcome)
         log('run ' + run_id + ': ' + outcome)
     except Exception as exc:
+        # A run that errored mid-flight produced no verdict: record it
+        # inconclusive with the infrastructure failure named, so the one
+        # automatic retry applies. Only process death stays 'interrupted'.
         timeline('run-error', str(exc)[:500])
-        st.interrupt(run_id, str(exc)[:500], time.time())
-        log('run ' + run_id + ' interrupted: ' + str(exc)[:300])
-        raise
+        infra.append({'key': 'run-error', 'detail': str(exc)[:500],
+                      'phase': 'run'})
+        try:
+            _persist_report(st, record, cfg, 'inconclusive', None,
+                            images, results, infra, events, log)
+        except Exception as rep_exc:
+            st.interrupt(run_id, str(exc)[:500] + ' | report failed: '
+                         + str(rep_exc)[:300], time.time())
+            raise
+        log('run ' + run_id + ' inconclusive: ' + str(exc)[:300])
     finally:
         try:
             _teardown_rig(run_id, timeline)
