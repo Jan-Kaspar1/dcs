@@ -124,7 +124,8 @@
       "channel": {
         "device": 2,
         "name": "power-fail"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 200,
@@ -220,7 +221,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 215,
@@ -228,7 +230,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 216,
@@ -236,7 +239,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 217,
@@ -244,7 +248,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 218,
@@ -252,7 +257,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 219,
@@ -293,7 +299,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1002,
@@ -301,7 +308,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1010,
@@ -318,7 +326,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1012,
@@ -326,7 +335,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1020,
@@ -343,7 +353,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1022,
@@ -351,7 +362,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1030,
@@ -368,7 +380,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1032,
@@ -376,7 +389,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1040,
@@ -393,7 +407,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1042,
@@ -401,7 +416,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1050,
@@ -418,7 +434,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 1052,
@@ -426,7 +443,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 20,
@@ -444,7 +462,8 @@
       "channel": {
         "device": 2,
         "name": "p101-run"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 60,
@@ -453,7 +472,8 @@
       "channel": {
         "device": 2,
         "name": "p101-thermal"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 80,
@@ -462,7 +482,8 @@
       "channel": {
         "device": 2,
         "name": "p101-moisture"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 100,
@@ -480,7 +501,8 @@
       "initial": {
         "bool": false
       },
-      "writable": true
+      "writable": true,
+      "journaled": true
     },
     {
       "id": 301,
@@ -498,7 +520,8 @@
       "initial": {
         "bool": false
       },
-      "writable": true
+      "writable": true,
+      "journaled": true
     },
     {
       "id": 303,
@@ -578,7 +601,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 313,
@@ -634,7 +658,8 @@
       "value_type": "bool",
       "initial": {
         "bool": true
-      }
+      },
+      "journaled": true
     },
     {
       "id": 329,
@@ -659,7 +684,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 317,
@@ -667,7 +693,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 318,
@@ -684,7 +711,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 320,
@@ -692,7 +720,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 321,
@@ -709,7 +738,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 323,
@@ -717,7 +747,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 21,
@@ -735,7 +766,8 @@
       "channel": {
         "device": 2,
         "name": "p102-run"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 61,
@@ -744,7 +776,8 @@
       "channel": {
         "device": 2,
         "name": "p102-thermal"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 81,
@@ -753,7 +786,8 @@
       "channel": {
         "device": 2,
         "name": "p102-moisture"
-      }
+      },
+      "journaled": true
     },
     {
       "id": 101,
@@ -771,7 +805,8 @@
       "initial": {
         "bool": false
       },
-      "writable": true
+      "writable": true,
+      "journaled": true
     },
     {
       "id": 333,
@@ -789,7 +824,8 @@
       "initial": {
         "bool": false
       },
-      "writable": true
+      "writable": true,
+      "journaled": true
     },
     {
       "id": 335,
@@ -869,7 +905,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 345,
@@ -925,7 +962,8 @@
       "value_type": "bool",
       "initial": {
         "bool": true
-      }
+      },
+      "journaled": true
     },
     {
       "id": 361,
@@ -950,7 +988,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 349,
@@ -958,7 +997,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 350,
@@ -975,7 +1015,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 352,
@@ -983,7 +1024,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 353,
@@ -1000,7 +1042,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     },
     {
       "id": 355,
@@ -1008,7 +1051,8 @@
       "value_type": "bool",
       "initial": {
         "bool": false
-      }
+      },
+      "journaled": true
     }
   ],
   "signals": [
