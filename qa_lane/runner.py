@@ -36,11 +36,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import report as qa_report
+from . import netpolicy, report as qa_report
 from . import scenarios, state as qa_state
 
 MANAGED_LABEL = 'dcs-hwtest.managed'
 RUN_LABEL = 'dcs-hwtest.run'
+IMAGE_PREFIX = 'dcs-hwtest/'
 
 DEFAULT_CONFIG = {
     'state_dir': '/srv/dcs-hwtest',
@@ -49,6 +50,37 @@ DEFAULT_CONFIG = {
     'max_attempts_per_sha': 2,
     'hard_timeout_seconds': 7200,
     'min_free_bytes': 10 * 1024 ** 3,
+    # Total lane footprint bound: everything under state_dir (source
+    # archives/extractions, cargo+build caches, run evidence, staged
+    # reports, state.db) plus lane-owned Docker images, the builder
+    # image, and Docker build cache. Chosen as enforced accounting +
+    # hard-fail preflight rather than a dedicated filesystem: Docker
+    # image storage lives in the shared daemon and cannot be bounded
+    # by a filesystem quota, so a filesystem bound would only ever
+    # cover part of the footprint. A run refuses to start when the
+    # measured footprint plus run_headroom_bytes would exceed this.
+    'qa_storage_max_bytes': 60 * 1024 ** 3,
+    # Conservative estimate of one run's growth: two ~120 MB runtime
+    # images, extracted source, incremental target/ output, evidence.
+    'run_headroom_bytes': 8 * 1024 ** 3,
+    # Retention (reclaim runs every cycle): terminal run dirs kept,
+    # distinct recently-attempted SHAs kept under src/, and distinct
+    # recent SHAs whose images stay cached.
+    'runs_keep': 20,
+    'src_keep': 2,
+    'images_keep': 3,
+    # Staged reports are kept while their run record exists; files
+    # whose record is gone are reaped only after this age.
+    'reports_orphan_days': 30,
+    'cargo_cache_max_bytes': 8 * 1024 ** 3,
+    'build_cache_max_bytes': 20 * 1024 ** 3,
+    'docker_build_cache_max_bytes': 4 * 1024 ** 3,
+    # Fail closed when the host egress policy (qa_lane.netpolicy) is
+    # absent. The dcs-hwtest-netpolicy systemd unit installs it at
+    # boot; each cycle verifies and self-heals via sudo -n.
+    'egress_required': True,
+    'builder_ifname': netpolicy.BUILDER_IFACE,
+    'rig_ifname': netpolicy.RIG_IFACE,
     'active_port': 18080,
     'standby_port': 18081,
     'plant_port': 9001,
@@ -157,12 +189,330 @@ def reconcile(st, cfg, log=print):
             _write_interrupted_report(st, record, cfg, log)
     for cid, run_id in _managed_containers():
         if run_id not in live:
-            docker('rm', '-f', cid, check=False)
-            log('reconcile: removed orphaned container ' + cid)
+            res = docker('rm', '-f', cid, check=False)
+            if res.returncode != 0:
+                st.record_cleanup_error(
+                    'cleanup-container-' + cid,
+                    'docker rm failed: ' + res.stderr.strip()[:300])
+                log('reconcile: container ' + cid + ' removal FAILED')
+            else:
+                st.clear_cleanup_error('cleanup-container-' + cid)
+                log('reconcile: removed orphaned container ' + cid)
     for nid, run_id in _managed_networks():
         if run_id not in live:
-            docker('network', 'rm', nid, check=False)
-            log('reconcile: removed orphaned network ' + nid)
+            res = docker('network', 'rm', nid, check=False)
+            if res.returncode != 0:
+                st.record_cleanup_error(
+                    'cleanup-network-' + nid,
+                    'docker network rm failed: ' + res.stderr.strip()[:300])
+                log('reconcile: network ' + nid + ' removal FAILED')
+            else:
+                st.clear_cleanup_error('cleanup-network-' + nid)
+                log('reconcile: removed orphaned network ' + nid)
+
+
+def ownership_block(st, log=print):
+    """Fail-closed gate after reconcile: while exclusive ownership of
+    the lane's resources is uncertain, no new run may start.
+
+    Two conditions block, each with a named reason:
+      active-run-conflict  a 'running' record points at a live process
+                           that is not this cycle — the flock should
+                           make that impossible, so the state is
+                           inconsistent. Self-heals once the foreign
+                           pid exits and reconcile interrupts it.
+      cleanup-incomplete   managed containers/networks from dead runs
+                           survived reconcile — teardown or host
+                           docker is misbehaving, and starting a run
+                           on top of leftovers is unsafe.
+    Returns (reason, detail) or None.
+    """
+    active = st.runs(qa_state.ACTIVE_STATUSES)
+    if active:
+        ids = ', '.join(r['run_id'] for r in active)
+        return ('active-run-conflict',
+                'run record(s) still active under another pid: ' + ids)
+    leftovers = ([('container', cid, rid)
+                  for cid, rid in _managed_containers()]
+                 + [('network', nid, rid)
+                    for nid, rid in _managed_networks()])
+    if leftovers:
+        detail = '; '.join(kind + ' ' + ref + ' (run ' + rid + ')'
+                           for kind, ref, rid in leftovers[:8])
+        return ('cleanup-incomplete',
+                'unreconciled managed objects: ' + detail[:400])
+    return None
+
+
+# --------------------------------------------------------------------------
+# Storage accounting and retention
+#
+# The lane's footprint = everything under state_dir (archives,
+# extractions, caches, run evidence, staged reports, state.db) plus
+# lane-owned Docker objects (dcs-hwtest/* images, the builder image,
+# Docker build cache — the daemon keeps those outside state_dir, so a
+# filesystem quota alone cannot bound them). qa_storage_max_bytes is
+# enforced by accounting + a hard-fail preflight; reclaim() is the
+# retention reconciler that keeps the footprint inside the bound by
+# removing only QA-owned artifacts, preserving evidence pinned for
+# unresolved findings/verifications (qa_lane preserve).
+
+_SIZE_UNITS = {'b': 1, 'kb': 1000, 'mb': 1000 ** 2, 'gb': 1000 ** 3,
+               'tb': 1000 ** 4, 'kib': 1024, 'mib': 1024 ** 2,
+               'gib': 1024 ** 3, 'tib': 1024 ** 4}
+
+
+def _parse_size(text):
+    """Parse docker's human sizes ('20.11GB', '823.6MB', '0B')."""
+    text = text.strip()
+    for unit in sorted(_SIZE_UNITS, key=len, reverse=True):
+        if text.lower().endswith(unit):
+            try:
+                return int(float(text[:-len(unit)]) * _SIZE_UNITS[unit])
+            except ValueError:
+                return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def _dir_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _qa_images(cfg):
+    """Lane-owned images: dcs-hwtest/* build outputs plus the builder
+    image. Listed by repository prefix — never matched by name
+    collision with other stacks (their repos don't share the prefix).
+    """
+    result = docker('image', 'ls', '--format',
+                    '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Size}}',
+                    check=False)
+    rows = []
+    if result.returncode != 0:
+        return rows
+    for line in result.stdout.splitlines():
+        parts = line.split('|')
+        if len(parts) != 4:
+            continue
+        repo, tag, iid, size = parts
+        if repo.startswith(IMAGE_PREFIX) or \
+                repo + ':' + tag == cfg['builder_image']:
+            rows.append({'repo': repo, 'tag': tag, 'id': iid,
+                         'size': _parse_size(size)})
+    return rows
+
+
+def _docker_build_cache_bytes():
+    result = docker('system', 'df', '--format', '{{json .}}',
+                    check=False)
+    if result.returncode != 0:
+        return 0
+    for line in result.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if 'build' in str(row.get('Type', '')).lower():
+            return _parse_size(str(row.get('Size', '0')))
+    return 0
+
+
+def qa_storage_usage(cfg):
+    """Measured lane footprint in bytes."""
+    files = _dir_size(cfg['state_dir'])
+    images = sum(i['size'] for i in _qa_images(cfg))
+    build_cache = _docker_build_cache_bytes()
+    return {'files': files, 'images': images,
+            'docker_build_cache': build_cache,
+            'total': files + images + build_cache}
+
+
+def _record_reclaim_error(st, key, detail):
+    st.record_cleanup_error('reclaim-' + key, str(detail)[:400])
+
+
+def _remove_path(path, st, key, log):
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        st.clear_cleanup_error('reclaim-' + key)
+        return True
+    except OSError as exc:
+        _record_reclaim_error(st, key, str(exc))
+        log('reclaim: failed to remove ' + path.name + ': '
+            + str(exc)[:200])
+        return False
+
+
+def _trim_dir(path, cap):
+    """Delete oldest-mtime files under path until it fits cap bytes.
+    Used for the cargo registry cache — entries are re-fetched on
+    demand, so dropping old ones is safe."""
+    files = []
+    total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            p = Path(root) / name
+            try:
+                st_ = p.stat()
+            except OSError:
+                continue
+            files.append((st_.st_mtime, st_.st_size, p))
+            total += st_.st_size
+    removed = 0
+    for _mtime, size, p in sorted(files):
+        if total <= cap:
+            break
+        try:
+            p.unlink()
+            total -= size
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def reclaim(st, cfg, log=print, docker_ok=True):
+    """Retention reconciler: remove only QA-owned artifacts.
+
+    Preserved without exception: artifacts of non-terminal runs
+    (queued/running), run ids and SHAs pinned via `qa_lane preserve`
+    (unresolved findings / queued verification), and runs whose record
+    has no persisted report yet (evidence still being written).
+    """
+    now = time.time()
+    preserved = st.preserved()
+    all_runs = st.runs()
+    active_shas = {r['attempted_sha']
+                   for r in all_runs if r['status'] in ('queued', 'running')}
+    recent_shas = []
+    for r in reversed(all_runs):
+        sha = r['attempted_sha']
+        if sha not in recent_shas:
+            recent_shas.append(sha)
+    keep_shas = (active_shas | set(preserved['shas'])
+                 | set(recent_shas[:cfg['src_keep']]))
+
+    # 1. src/<sha>.tar and src/<sha>/ for SHAs nothing references.
+    src_dir = Path(cfg['src_dir'])
+    if src_dir.is_dir():
+        for entry in sorted(src_dir.iterdir()):
+            sha = entry.name[:-4] if entry.name.endswith('.tar') \
+                else entry.name
+            if len(sha) != 40 or any(c not in '0123456789abcdef'
+                                     for c in sha):
+                continue  # foreign file — never touch
+            if sha in keep_shas:
+                continue
+            if _remove_path(entry, st, 'src-' + sha, log):
+                log('reclaim: removed src ' + entry.name)
+
+    # 2. runs/<id>/ beyond the retention window.
+    keep_runs = ({r['run_id'] for r in all_runs
+                  if r['status'] in ('queued', 'running')}
+                 | set(preserved['runs'])
+                 | {r['run_id'] for r in all_runs if not r['report']
+                    and r['status'] != 'superseded'})
+    terminal = [r for r in all_runs
+                if r['status'] in ('finished', 'interrupted')
+                and r['run_id'] not in keep_runs]
+    terminal.sort(key=lambda r: r['finished'] or 0, reverse=True)
+    keep_runs |= {r['run_id'] for r in terminal[:cfg['runs_keep']]}
+    runs_dir = Path(cfg['state_dir']) / 'runs'
+    if runs_dir.is_dir():
+        for entry in sorted(runs_dir.iterdir()):
+            if not entry.name.startswith('qa-'):
+                continue  # foreign dir — never touch
+            if entry.name in keep_runs:
+                continue
+            if _remove_path(entry, st, 'run-' + entry.name, log):
+                log('reclaim: removed run dir ' + entry.name)
+
+    # 3. reports/<id>.json: keep while the run record exists (the WSL
+    #    relay pulls from here); reap only old orphans.
+    reports_dir = Path(cfg['state_dir']) / 'reports'
+    record_ids = {r['run_id'] for r in all_runs}
+    orphan_age = cfg['reports_orphan_days'] * 86400
+    if reports_dir.is_dir():
+        for entry in sorted(reports_dir.iterdir()):
+            if entry.suffix != '.json' or \
+                    not entry.name.startswith('qa-'):
+                continue
+            if entry.stem in record_ids:
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age > orphan_age and \
+                    _remove_path(entry, st, 'report-' + entry.stem, log):
+                log('reclaim: removed orphan report ' + entry.name)
+
+    # 4. cargo cache: trim oldest entries to the cap (safe — cargo
+    #    re-fetches missing registry entries on demand).
+    cargo = Path(cfg['state_dir']) / 'cargo-cache'
+    if cargo.is_dir() and _dir_size(cargo) > cfg['cargo_cache_max_bytes']:
+        removed = _trim_dir(cargo, cfg['cargo_cache_max_bytes'])
+        log('reclaim: trimmed cargo-cache by ' + str(removed) + ' files')
+        if _dir_size(cargo) > cfg['cargo_cache_max_bytes']:
+            _record_reclaim_error(st, 'cargo-cache',
+                                  'still over cap after trim')
+
+    # 5. build cache (shared cargo target/): wiping forces a clean
+    #    rebuild, which is safe but slow — only when over the cap.
+    work = Path(cfg['state_dir']) / 'build-cache'
+    if work.is_dir() and _dir_size(work) > cfg['build_cache_max_bytes']:
+        for entry in sorted(work.iterdir()):
+            _remove_path(entry, st, 'build-cache-' + entry.name, log)
+        log('reclaim: wiped build-cache (was over cap)')
+
+    if not docker_ok:
+        log('reclaim: skipping docker objects while ownership is '
+            'uncertain')
+        return
+
+    # 6. lane images for SHAs beyond images_keep recent ones.
+    keep_image_shas = (active_shas | set(preserved['shas'])
+                       | set(recent_shas[:cfg['images_keep']]))
+    for image in _qa_images(cfg):
+        if not image['repo'].startswith(IMAGE_PREFIX):
+            continue  # builder image is never reaped
+        if image['tag'] in keep_image_shas:
+            continue
+        res = docker('image', 'rm', image['id'], check=False)
+        if res.returncode != 0:
+            _record_reclaim_error(st, 'image-' + image['tag'],
+                                  'docker image rm failed: '
+                                  + res.stderr.strip()[:300])
+        else:
+            st.clear_cleanup_error('reclaim-image-' + image['tag'])
+            log('reclaim: removed image ' + image['repo']
+                + ':' + image['tag'])
+
+    # 7. docker build cache: only the lane builds on this host, so the
+    #    cache is lane-attributable; bound it conservatively.
+    if _docker_build_cache_bytes() > cfg['docker_build_cache_max_bytes']:
+        res = docker('builder', 'prune', '-f', '--keep-storage',
+                     str(cfg['docker_build_cache_max_bytes']),
+                     check=False)
+        if res.returncode != 0:
+            _record_reclaim_error(st, 'docker-build-cache',
+                                  'builder prune failed: '
+                                  + res.stderr.strip()[:300])
+        else:
+            st.clear_cleanup_error('reclaim-docker-build-cache')
+            log('reclaim: pruned docker build cache')
 
 
 def _maybe_retry(st, cfg, now, day):
@@ -191,8 +541,39 @@ def _new_run_id(st, now):
     return 'qa-' + day + '-' + format(seq, '03d')
 
 
+def _ensure_egress_policy(log):
+    """Verify the host egress policy; self-heal once via sudo. Returns
+    the list of still-missing rules ([] = enforced)."""
+    try:
+        missing = netpolicy.verify()
+    except Exception as exc:
+        return ['verify failed: ' + str(exc)[:200]]
+    if not missing:
+        return []
+    log('cycle: egress policy incomplete; re-applying')
+    try:
+        netpolicy.apply()
+        missing = netpolicy.verify()
+    except Exception as exc:
+        return ['apply failed: ' + str(exc)[:200]]
+    return missing
+
+
+def _set_blocked(st, reason, detail, log):
+    if reason is None:
+        if st.get('blocked'):
+            st.set('blocked', None)
+        return False
+    st.set('blocked', {'reason': reason, 'detail': str(detail)[:400],
+                     'since': _iso()})
+    log('cycle: ' + reason + ' — refusing to start runs: '
+        + str(detail)[:200])
+    return True
+
+
 def cycle(cfg, log=print):
-    """One supervisor pass: reconcile, retry, then run the newest queued."""
+    """One supervisor pass: reconcile, gate, reclaim, then run the
+    newest queued revision."""
     state_dir = Path(cfg['state_dir'])
     state_dir.mkdir(parents=True, exist_ok=True)
     lock = (state_dir / 'lock').open('a')
@@ -203,10 +584,14 @@ def cycle(cfg, log=print):
         return
     st = qa_state.State(state_dir / 'state.db')
     try:
-        reconcile(st, cfg, log)
         now = time.time()
+        reconcile(st, cfg, log)
+        block = ownership_block(st, log)
+        reclaim(st, cfg, log, docker_ok=block is None)
         day = _utcnow().strftime('%Y-%m-%d')
         _maybe_retry(st, cfg, now, day)
+        if _set_blocked(st, *(block or (None, None)), log):
+            return
         if st.started_today(day) >= cfg['max_runs_per_day']:
             log('cycle: daily run budget reached')
             return
@@ -214,6 +599,13 @@ def cycle(cfg, log=print):
         if record is None:
             log('cycle: nothing queued')
             return
+        if cfg.get('egress_required'):
+            missing = _ensure_egress_policy(log)
+            if missing:
+                _set_blocked(st, 'egress-policy-missing',
+                             'host firewall rules absent: '
+                             + '; '.join(missing[:5]), log)
+                return
         run(st, record, cfg, log)
     finally:
         st.close()
@@ -255,9 +647,19 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
     sha = src.name
     timeline('build-start', 'builder ' + cfg['builder_image']
              + ' cpus ' + cfg['builder_cpus'])
+    # The builder needs crates.io egress (sparse index + crate files);
+    # it runs on its own labeled bridge so the host egress policy can
+    # allowlist web traffic for it while the rig bridge stays closed.
+    net = 'dcs-hwtest-build-' + run_id
+    docker('network', 'create',
+           '-o', 'com.docker.network.bridge.name='
+           + cfg['builder_ifname'],
+           '--label', MANAGED_LABEL + '=1',
+           '--label', RUN_LABEL + '=' + run_id, net)
     docker('run', '--rm', '--name', 'dcs-hwtest-build-' + sha[:12],
            '--label', MANAGED_LABEL + '=1',
            '--label', RUN_LABEL + '=' + run_id,
+           '--network', net,
            '--cpuset-cpus', cfg['builder_cpus'],
            '--memory', cfg['builder_memory'],
            '--memory-swap', cfg['builder_memory'],
@@ -289,7 +691,10 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
             'USER dcs\n'
             'ENTRYPOINT ["' + binary + '"]\n'
             'CMD ["--help"]\n')
-        docker('build', '-t', tag + ':' + sha, str(context), timeout=600)
+        docker('build', '-t', tag + ':' + sha,
+               '--label', MANAGED_LABEL + '=1',
+               '--label', RUN_LABEL + '=' + run_id,
+               str(context), timeout=600)
         image_id = docker('image', 'inspect', tag + ':' + sha,
                           '--format', '{{.Id}}').stdout.strip()
         digests[crate] = image_id
@@ -319,11 +724,15 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     for path in (model, dynamics):
         if not path.is_file():
             raise RuntimeError('model fixture missing: ' + str(path))
-    # A dedicated bridge per run. `--internal` is rejected on purpose:
-    # it also blocks the loopback-published monitor ports the scenario
-    # driver needs. Disabled masquerade gives no NAT egress instead —
-    # containers can reach only each other and the published-port DNAT.
+    # A dedicated bridge per run on a fixed interface name the host
+    # egress policy (qa_lane.netpolicy) matches: no new outbound
+    # connections leave it — no LAN, no other containers, no IPv6;
+    # only replies to loopback-published monitor connections pass.
+    # `--internal` is still rejected on purpose: it also blocks the
+    # published ports the scenario driver needs. Disabled masquerade
+    # remains as defense in depth beneath the firewall policy.
     docker('network', 'create',
+           '-o', 'com.docker.network.bridge.name=' + cfg['rig_ifname'],
            '-o', 'com.docker.network.bridge.enable_ip_masquerade=false',
            '--label', MANAGED_LABEL + '=1',
            '--label', RUN_LABEL + '=' + run_id, net)
@@ -387,19 +796,57 @@ def _wait_monitor(cfg, timeline):
     return False
 
 
-def _teardown_rig(run_id, timeline):
+def _teardown_rig(run_id, timeline, st=None):
+    """Remove a run's labeled containers and networks. Returns a list
+    of report-shaped infra failures; failures are also written to the
+    cleanup ledger so they stay visible until a later removal succeeds
+    and the ownership gate can refuse new runs while they persist."""
+    failures = []
+
+    def _remove(kind, ref, args):
+        res = docker(*args, check=False)
+        if res.returncode != 0:
+            detail = res.stderr.strip()[:300] or 'exit ' \
+                + str(res.returncode)
+            failures.append({'key': 'cleanup-' + kind + '-' + ref,
+                             'detail': kind + ' ' + ref + ': ' + detail,
+                             'phase': 'cleanup'})
+            if st is not None:
+                st.record_cleanup_error(
+                    'cleanup-' + kind + '-' + ref,
+                    'docker ' + args[0] + ' failed: ' + detail)
+        elif st is not None:
+            st.clear_cleanup_error('cleanup-' + kind + '-' + ref)
+
     for cid, label_run in _managed_containers():
         if label_run == run_id:
-            docker('rm', '-f', cid, check=False)
+            _remove('container', cid, ('rm', '-f', cid))
     for nid, label_run in _managed_networks():
         if label_run == run_id:
-            docker('network', 'rm', nid, check=False)
-    timeline('teardown', 'run containers and network removed')
+            _remove('network', nid, ('network', 'rm', nid))
+    detail = 'run containers and network removed'
+    if failures:
+        detail += ' — ' + str(len(failures)) + ' removal(s) FAILED'
+    timeline('teardown', detail)
+    return failures
 
 
 def _persist_report(st, record, cfg, outcome, completed_sha, images,
                     results, infra, events, log=print):
-    """Validate, store, stage, and record a report for a run record."""
+    """Validate, store, stage, and record a report for a run record.
+
+    The durable cleanup ledger is merged into infrastructure_failures
+    so teardown/reclaim failures that outlived a single run stay
+    visible in every report until resolved.
+    """
+    infra = list(infra)
+    seen = {i.get('key') for i in infra if isinstance(i, dict)}
+    for key, entry in sorted(st.cleanup_errors().items()):
+        if key not in seen:
+            infra.append({'key': key,
+                          'detail': str(entry.get('detail', ''))[:3900]
+                          + ' (first seen ' + str(entry.get('first_seen'))
+                          + ')', 'phase': 'cleanup'})
     run_dir = Path(cfg['state_dir']) / 'runs' / record['run_id']
     run_dir.mkdir(parents=True, exist_ok=True)
     started = record['started'] or time.time()
@@ -470,6 +917,49 @@ def _write_interrupted_report(st, record, cfg, log=print):
             + ': ' + str(exc)[:300])
 
 
+def _preflight_blocked(st, record, cfg, timeline, events, log):
+    """Resource gates that refuse a run before it touches the rig.
+    Returns True when the run was closed out as 'blocked' — a blocked
+    run never attempted its revision, so the dispatcher may requeue
+    the same SHA once the condition clears."""
+    state_dir = Path(cfg['state_dir'])
+    if _free_bytes(state_dir) < cfg['min_free_bytes']:
+        timeline('run-blocked', 'insufficient free space')
+        _persist_report(st, record, cfg, 'blocked', None, None, [],
+                        [{'key': 'preflight-disk',
+                          'detail': 'insufficient free space under '
+                          + str(state_dir), 'phase': 'preflight'}],
+                        events, log)
+        return True
+    try:
+        usage = qa_storage_usage(cfg)
+    except Exception as exc:
+        timeline('run-blocked', 'storage accounting failed')
+        _persist_report(st, record, cfg, 'blocked', None, None, [],
+                        [{'key': 'preflight-storage-error',
+                          'detail': 'cannot measure the lane footprint: '
+                          + str(exc)[:300], 'phase': 'preflight'}],
+                        events, log)
+        return True
+    projected = usage['total'] + cfg['run_headroom_bytes']
+    if projected > cfg['qa_storage_max_bytes']:
+        timeline('run-blocked', 'qa storage bound would be exceeded')
+        _persist_report(st, record, cfg, 'blocked', None, None, [],
+                        [{'key': 'preflight-storage-bound',
+                          'detail': 'lane footprint ' + str(usage['total'])
+                          + ' + headroom '
+                          + str(cfg['run_headroom_bytes']) + ' exceeds '
+                          + str(cfg['qa_storage_max_bytes'])
+                          + ' (files ' + str(usage['files'])
+                          + ', images ' + str(usage['images'])
+                          + ', docker build cache '
+                          + str(usage['docker_build_cache']) + ')',
+                          'phase': 'preflight'}],
+                        events, log)
+        return True
+    return False
+
+
 def run(st, record, cfg, log=print):
     """Execute one QA run against record['attempted_sha']."""
     run_id, sha = record['run_id'], record['attempted_sha']
@@ -484,13 +974,7 @@ def run(st, record, cfg, log=print):
     deadline = time.monotonic() + cfg['hard_timeout_seconds']
     results, images, infra = [], None, []
     try:
-        if _free_bytes(state_dir) < cfg['min_free_bytes']:
-            timeline('run-blocked', 'insufficient free space')
-            _persist_report(st, record, cfg, 'blocked', None, None, [],
-                            [{'key': 'preflight-disk',
-                              'detail': 'insufficient free space under '
-                              + str(state_dir), 'phase': 'preflight'}],
-                            events, log)
+        if _preflight_blocked(st, record, cfg, timeline, events, log):
             return
         src_tar = Path(cfg['src_dir']) / (sha + '.tar')
         src = Path(cfg['src_dir']) / sha
@@ -518,7 +1002,7 @@ def run(st, record, cfg, log=print):
                    'deadline': deadline}
             results = scenarios.run_all(ctx, timeline)
         finally:
-            _teardown_rig(run_id, timeline)
+            infra += _teardown_rig(run_id, timeline, st)
         outcome = ('passed' if all(r['outcome'] == 'passed' for r in results)
                    else 'failed' if any(r['outcome'] == 'failed'
                                         for r in results)
@@ -545,7 +1029,10 @@ def run(st, record, cfg, log=print):
         log('run ' + run_id + ' inconclusive: ' + str(exc)[:300])
     finally:
         try:
-            _teardown_rig(run_id, timeline)
+            leftover = _teardown_rig(run_id, timeline, st)
+            if leftover:
+                log('teardown reported ' + str(len(leftover))
+                    + ' failure(s); recorded in the cleanup ledger')
         except Exception as exc:
             log('teardown failed: ' + str(exc)[:300])
 
@@ -554,6 +1041,11 @@ def status(cfg):
     st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
     try:
         runs = st.runs()
+        try:
+            storage = qa_storage_usage(cfg)
+            storage['bound'] = cfg['qa_storage_max_bytes']
+        except Exception as exc:
+            storage = {'error': str(exc)[:300]}
         return {
             'last_attempted_sha': st.last_attempted_sha(),
             'queued': [r['attempted_sha'] for r in st.runs(('queued',))],
@@ -561,9 +1053,13 @@ def status(cfg):
                          'attempted_sha': r['attempted_sha'],
                          'started': r['started']}
                         for r in st.runs(('running',))],
+            'blocked': st.get('blocked'),
+            'cleanup_errors': st.cleanup_errors(),
+            'preserve': st.preserved(),
+            'storage': storage,
             'recent': [{'run_id': r['run_id'], 'sha': r['attempted_sha'],
                         'status': r['status'], 'outcome': r['outcome'],
-                        'attempt': r['attempt']}
+                        'attempt': r['attempt'], 'day': r['day']}
                        for r in runs[-10:]],
         }
     finally:

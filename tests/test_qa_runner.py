@@ -22,6 +22,7 @@ def cfg_for(root):
     cfg = dict(runner.DEFAULT_CONFIG)
     cfg['state_dir'] = str(Path(root) / 'state')
     cfg['src_dir'] = str(Path(root) / 'state' / 'src')
+    cfg['egress_required'] = False
     return cfg
 
 
@@ -114,9 +115,11 @@ class CycleTests(unittest.TestCase):
         self.cfg['max_runs_per_day'] = 1
         st = qa_state.State(Path(self.cfg['state_dir']) / 'state.db')
         st.enqueue('qa-1', SHA_A, 1.0, '2026-09-15')
-        st.begin('qa-1', 1, 1.0)
-        st.finish('qa-1', 'passed', SHA_A, '/r.json', 2.0)
-        st.enqueue('qa-2', 'b' * 40, 3.0, '2026-09-15')
+        st.begin('qa-1', 1, DAY.timestamp())
+        st.finish('qa-1', 'passed', SHA_A, '/r.json',
+                  DAY.timestamp() + 60)
+        st.enqueue('qa-2', 'b' * 40, DAY.timestamp() + 120,
+                   '2026-09-15')
         st.close()
         logs = []
         with patch.object(runner, 'docker', lambda *a, **k: Result('')), \

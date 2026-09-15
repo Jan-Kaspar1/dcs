@@ -5,6 +5,15 @@ anywhere a config or report file is reachable).
   python3 -m qa_lane enqueue <sha>       queue a revision for testing
   python3 -m qa_lane cycle               reconcile, then run newest queued
   python3 -m qa_lane reconcile           reap dead runs and orphans only
+  python3 -m qa_lane reclaim             retention pass only (no run)
+  python3 -m qa_lane preserve <spec> [on|off]
+                                         pin run:<id> or sha:<sha>
+                                         evidence against retention;
+                                         no spec lists current pins
+  python3 -m qa_lane netpolicy <apply|verify>
+                                         host egress firewall policy
+                                         (needs root; the dedicated
+                                         netpolicy unit applies it)
   python3 -m qa_lane validate <file>     validate a report document
 """
 import json
@@ -12,10 +21,24 @@ import sys
 import time
 from pathlib import Path
 
-from . import report as qa_report
+from . import netpolicy, report as qa_report
 from . import runner, state as qa_state
 
 GIT_SHA_LEN = 40
+
+
+def _preserve(st, rest):
+    if not rest:
+        print(json.dumps(st.preserved(), indent=1))
+        return
+    spec = rest[0]
+    on = not (len(rest) > 1 and rest[1] == 'off')
+    if ':' not in spec:
+        raise SystemExit('preserve expects run:<id> or sha:<sha> '
+                         '[on|off]')
+    kind, value = spec.split(':', 1)
+    pins = st.set_preserve(kind, value, on)
+    print(json.dumps(pins))
 
 
 def _enqueue(cfg, sha):
@@ -60,6 +83,22 @@ def main(argv=None):
             runner.reconcile(st, cfg)
         finally:
             st.close()
+    elif command == 'reclaim':
+        st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
+        try:
+            runner.reclaim(st, cfg)
+        finally:
+            st.close()
+    elif command == 'preserve':
+        st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
+        try:
+            _preserve(st, rest)
+        finally:
+            st.close()
+    elif command == 'netpolicy':
+        if len(rest) != 1 or rest[0] not in ('apply', 'verify'):
+            raise SystemExit('netpolicy expects apply or verify')
+        return netpolicy.main(rest)
     elif command == 'cycle':
         runner.cycle(cfg)
     else:
