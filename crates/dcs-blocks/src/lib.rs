@@ -71,6 +71,10 @@
 //! - [`FlowPacedRatio`] — the chemical-dosing `dose × flow` demand
 //!   with an optional analyzer `trim`, declared dose and rate bounds,
 //!   and declared responses to untrusted inputs;
+//! - [`DeviationMonitor`] — the dose-confirmation check: the commanded
+//!   and measured chemical rates or totals accumulated over a declared
+//!   window, the relative deviation tripping `deviating` past the
+//!   declared limit;
 //! - [`BackwashCoordinator`] — shared-supply backwash arbitration: an
 //!   ordered request queue and an exclusive held grant gated by the
 //!   declared permissives, with a declared queue policy and operator
@@ -95,6 +99,7 @@ mod bool_gate;
 mod bool_latching_alarm;
 mod counter;
 pub mod describe;
+mod deviation_monitor;
 mod digital_input;
 mod digital_output;
 mod edge_trigger;
@@ -128,6 +133,7 @@ pub use backwash_coordinator::{
 pub use bool_gate::{BoolGate, GateOperation};
 pub use bool_latching_alarm::BoolLatchingAlarm;
 pub use counter::Counter;
+pub use deviation_monitor::DeviationMonitor;
 pub use digital_input::DigitalInput;
 pub use digital_output::DigitalOutput;
 pub use edge_trigger::{Edge, EdgeTrigger};
@@ -189,6 +195,7 @@ pub const KINDS: &[&str] = &[
     ThresholdChain::KIND,
     FailoverSelect::KIND,
     FlowPacedRatio::KIND,
+    DeviationMonitor::KIND,
     BackwashCoordinator::KIND,
 ];
 

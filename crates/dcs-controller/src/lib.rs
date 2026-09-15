@@ -14,10 +14,11 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect,
-    FilterIo, FlowPacedRatio, GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter,
-    Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo, RateLimiter, RatioOutputs,
-    Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer, Totalizer, Valve,
+    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
+    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
+    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
+    Timer, Totalizer, Valve,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -350,6 +351,16 @@ pub fn registry() -> ComponentRegistry {
                     clamped: spec.require("clamped")?,
                     fallback_active: spec.require("fallback_active")?,
                 },
+                spec.parameters,
+            ))
+        })
+        .with(DeviationMonitor::KIND, |spec| {
+            boxed(DeviationMonitor::from_parameters(
+                spec.name.as_str(),
+                spec.require("expected")?,
+                spec.require("measured")?,
+                spec.require("deviation")?,
+                spec.require("deviating")?,
                 spec.parameters,
             ))
         })

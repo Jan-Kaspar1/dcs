@@ -18,11 +18,11 @@ use std::collections::BTreeSet;
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
-    FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec,
-    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec,
-    SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
+    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
+    TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -600,6 +600,51 @@ fn flow_paced_ratio_rejects_an_out_of_range_response_code() {
     ));
 }
 
+/// The `deviation-monitor` plant the tests wire: a scripted pair of
+/// expected/measured channels and internal carriers for the two
+/// outputs.
+fn deviation_monitor_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let expected_raw = plant.channel::<f64>(sim, "expected", Direction::In);
+    let measured_raw = plant.channel::<f64>(sim, "measured", Direction::In);
+
+    let expected = plant.field_input::<f64>(PointId(10), expected_raw, false);
+    let measured = plant.field_input::<f64>(PointId(11), measured_raw, false);
+    let deviation = plant.internal_output::<f64>(PointId(20), 0.0);
+    let deviating = plant.internal_output::<bool>(PointId(21), false);
+
+    let monitor = plant.add(DeviationMonitorSpec::new(parameters_map));
+    plant.connect(expected, monitor.expected);
+    plant.connect(measured, monitor.measured);
+    plant.connect(&monitor.deviation, deviation);
+    plant.connect(&monitor.deviating, deviating);
+    plant
+}
+
+#[test]
+fn deviation_monitor_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(deviation_monitor_plant(parameters([
+        ("deviation_limit", Value::Float(0.1)),
+        ("window_ticks", Value::Int(5)),
+    ])));
+    assert_eq!(model.components[0].kind, DeviationMonitorSpec::KIND);
+}
+
+#[test]
+fn deviation_monitor_rejects_an_out_of_range_window() {
+    // `window_ticks` declares the `1..=i64::MAX` range; a zero window
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    assert!(matches!(
+        deviation_monitor_plant(parameters([
+            ("deviation_limit", Value::Float(0.1)),
+            ("window_ticks", Value::Int(0)),
+        ]))
+        .build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "window_ticks"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -766,6 +811,7 @@ fn every_registered_kind_has_a_spec() {
         ThresholdChainSpec::KIND,
         FailoverSelectSpec::KIND,
         FlowPacedRatioSpec::KIND,
+        DeviationMonitorSpec::KIND,
         BackwashCoordinatorSpec::KIND,
     ]
     .into_iter()

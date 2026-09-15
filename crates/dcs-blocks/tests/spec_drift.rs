@@ -20,9 +20,9 @@ use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
     BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo, FlowPacedRatio,
-    FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm, ManualStation,
-    MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
+    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
+    FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
     PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
     Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
     ThresholdOutputs, Timer, Totalizer, Valve,
@@ -30,11 +30,11 @@ use dcs_blocks::{
 use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
-    FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec, ManualStationSpec,
-    MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec,
-    SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
-    ValveSpec,
+    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
+    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
+    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
+    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
+    TotalizerSpec, ValveSpec,
 };
 use dcs_core::{ComponentDescriptor, PointId, ValueKind};
 use dcs_runtime::Component;
@@ -422,6 +422,12 @@ fn specs_match_registered_kinds_descriptors() {
     covered.insert(check(
         &FlowPacedRatioSpec::new(Default::default(), false),
         &FlowPacedRatio::new("fpr", point(1), point(2), None, fpr_outputs(), fpr_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &DeviationMonitorSpec::new(Default::default()),
+        &DeviationMonitor::new("dev", point(1), point(2), point(3), point(4), 0.1, 4)
             .unwrap()
             .describe(),
     ));
