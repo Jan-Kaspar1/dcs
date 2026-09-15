@@ -48,6 +48,12 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 - **Need:** The reference station controls level using declared start and stop thresholds or a continuous controller, with explicit behavior for bad level measurement and manual operation.
 - **Acceptance evidence:** Scenarios cover normal inflow, high and low levels, changing inflow, bad measurement, manual takeover, and recovery without an unintended output step. Evidence-supported specifics from the research note: the threshold form is an ordered setpoint chain — low cut-off, duty start/stop, lag start, high-level alarm — with operator-adjustable setpoints; the continuous form is constant-level control for variable-speed stations with a minimum-speed cycling bound; a bad primary measurement fails over to a declared backup mode or voted source with an alarmed transition; manual takeover is a per-pump mode that persists declared protections (e.g., motor over-temperature) while the operator holds the demand. Open assumptions to validate: which control form is primary for the first client, behavior when all level sources are bad, and which protections persist in manual.
 
+### WW-CTL-003 — Chemical dosing and flow-paced control
+
+- **Status:** accepted
+- **Need:** An engineer can compose a dosing function that paces a metering pump to a measured process flow at an operator-set dose, bounds the demand within declared dose and rate limits, respects declared permissives and interlocks, accounts for chemical consumed, and responds predictably to a lost pacing signal or a proven pump fault.
+- **Acceptance evidence:** A simulated dosing loop demonstrates: flow-paced ratio control delivering the declared dose per flow unit across the flow range; the demand clamped at declared minimum and maximum dose and pump-rate limits with a clamped indication; dosing inhibited until declared permissives hold (process flow proven, metering pump available, chemical tank above the low level) and dropped to the safe value on loss of any permissive; the declared response to a bad pacing-flow signal — stop, hold, or fallback rate — taken with an alarmed transition; consumption totalized from the commanded or measured chemical rate; and the declared skid alarm set raised. Evidence-supported specifics from `docs/research/chemical-dosing.md`: flow-paced ratio control is the primary mode owner specifications require — dose per flow unit (e.g., mg/L) times measured flow — with fixed-rate as a declared alternative for steady-flow service and diurnal profile dosing as a specified third form; feedback trim by a residual or quality analyzer is an optional compound layer over pacing; actuation is a speed demand or an on/off run command, with stroke length an engineering/operator setting rather than a control output; loss of any dosing permissive stops the pump and inhibits restart; a proven no-discharge or pump fault alarms and can hand over to a standby pump. Open assumptions to validate: the first client's primary mode, the declared bad-flow-signal behavior, whether analyzer trim is in scope, and the required skid alarm set and latch policy.
+
 ### WW-ENG-001 — Reusable plant composition
 
 - **Status:** accepted; partially implemented
@@ -65,7 +71,6 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 These subjects are likely relevant but are not implementation authority yet:
 
 - `WW-ALM-001`: alarm priorities, shelving, suppression, out-of-service state, and flood handling — the pumping-station note gathers supporting lifecycle evidence but the station alarm set stays on the two-flag model per decision 38; promotion awaits the customer answers it records;
-- `WW-CTL-003`: chemical dosing with flow pacing, ratio limits, permissives, and totalization;
 - `WW-CTL-004`: filter sequencing, backwash coordination, and shared-resource arbitration;
 - `WW-CTL-005`: aeration or dissolved-oxygen control;
 - `WW-ENG-002`: bulk engineering, templates, naming conventions, and site-specific parameter sets;
