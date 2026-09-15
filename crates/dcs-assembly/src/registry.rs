@@ -21,8 +21,10 @@ use std::collections::BTreeMap;
 /// [`require_rationalization`](Self::require_rationalization), assembly
 /// being where kind and instance meet.
 pub struct ComponentSpec<'m> {
-    /// The instance's diagnostic name — `"<kind>:<id>"`, e.g. `"pid:1"` —
-    /// carried into executor diagnostics.
+    /// The instance's diagnostic name —
+    /// [`ComponentInstance::name`](dcs_model::ComponentInstance::name),
+    /// `"<kind>:<id>"`, e.g. `"pid:1"` — carried into executor
+    /// diagnostics.
     pub name: String,
     /// The model instance's id.
     pub id: ComponentId,

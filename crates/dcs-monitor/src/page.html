@@ -31,11 +31,33 @@
   #health > section { flex: 1 1 24rem; }
   .forced { background: #a60; color: #fff; font-size: 0.75rem;
           padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
-  #pair-summary.good, #io-health-summary.good, #alarm-summary.good { color: #060; }
-  #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health-summary.good, #alarm-summary.good,
+  #protection-summary.good { color: #060; }
+  #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad,
+  #protection-summary.bad { color: #b00; font-weight: bold; }
   tr.alarm td.value { font-weight: 600; }
   tr.alarm.bad td, tr.alarm.substituted td, tr.alarm.uncertain td {
     background: #f4f0fa; font-style: italic; }
+  tr.alarm .priority { display: inline-block; padding: 0 0.4rem;
+    border: 1px solid #999; border-radius: 3px; font-size: 0.8rem;
+    font-weight: 700; }
+  tr.alarm .priority.p1 { background: #b00; border-color: #b00; color: #fff; }
+  tr.alarm .priority.p2 { background: #e60; border-color: #e60; color: #fff; }
+  tr.alarm .priority.p3 { background: #fc3; border-color: #cc0; color: #420; }
+  tr.alarm .priority.other { background: #eee; color: #555; }
+  tr.alarm .rationalization-code { white-space: nowrap; font-size: 0.85rem;
+    color: #444; }
+  .rationalization { font-size: 0.82rem; color: #444; margin-top: 0.25rem; }
+  .rationalization p { margin: 0.2rem 0; }
+  .rationalization .field { font-weight: 600; color: #333; }
+  section.managed { margin: 0.8rem 0; }
+  section.managed h3 { margin: 0.3rem 0; }
+  .managed-count { font-size: 0.85rem; color: #666; margin: 0.2rem 0; }
+  #protection-pane { border: 2px solid #06c; border-radius: 4px;
+    padding: 0.4rem 1rem 0.8rem; margin: 1rem 0; background: #f4f8fc; }
+  #protection-pane .protection-note { font-size: 0.85rem; color: #345; }
+  tr.protection.bad td, tr.protection.substituted td,
+  tr.protection.uncertain td { background: #dde8f4; font-style: italic; }
   button.ack { color: #b00; font-weight: bold; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
@@ -46,10 +68,10 @@
     gap: 0.6rem; margin: 0.25rem 0; }
   .faceplate .role .value { font-variant-numeric: tabular-nums; }
   .faceplate .role-process_value .value { font-size: 1.35rem; font-weight: 600; }
-  .faceplate .flag { display: inline-block; margin: 0.15rem 0.3rem 0.15rem 0;
+  .flag { display: inline-block; margin: 0.15rem 0.3rem 0.15rem 0;
     padding: 0 0.45rem; border: 1px solid #ccc; border-radius: 3px;
     background: #eee; color: #555; }
-  .faceplate .flag.on { background: #fee; border-color: #b00; color: #b00; font-weight: bold; }
+  .flag.on { background: #fee; border-color: #b00; color: #b00; font-weight: bold; }
   .faceplate table { margin-top: 0.4rem; font-size: 0.85rem; }
   .faceplate .diag { margin-top: 0.45rem; font-size: 0.8rem; color: #666; }
   .faceplate .diag .errors { color: #b00; font-weight: bold; }
@@ -107,21 +129,48 @@
 <section id="alarm-pane" hidden>
 <h2>Alarms</h2>
 <p id="alarm-summary"></p>
+<p><label>state
+  <select id="alarm-filter">
+    <option value="all">all</option>
+    <option value="active">active</option>
+    <option value="unacknowledged">unacknowledged</option>
+    <option value="shelved">shelved</option>
+    <option value="suppressed">suppressed</option>
+    <option value="out_of_service">out of service</option>
+  </select></label></p>
 <table>
   <thead>
     <tr>
       <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
-      <th>Last changed</th><th></th>
+      <th>Last changed</th><th>Priority</th><th></th>
     </tr>
   </thead>
   <tbody id="alarms"></tbody>
 </table>
+<div id="managed-lists"></div>
 <h3>Alarm journal</h3>
 <table>
   <thead>
     <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
   </thead>
   <tbody id="alarm-journal"></tbody>
+</table>
+</section>
+
+<section id="protection-pane" hidden>
+<h2>Protection layer</h2>
+<p class="protection-note">The independent protection layer's declared
+reported states — availability, demand, bypass, trip — rendered on their
+own surface: the HMI alarm path is never presented as the safeguard.</p>
+<p id="protection-summary"></p>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Value</th><th>Quality</th>
+      <th>Unit</th><th>Last changed</th>
+    </tr>
+  </thead>
+  <tbody id="protection-points"></tbody>
 </table>
 </section>
 
@@ -208,15 +257,41 @@
 // component, value, quality, and the tick the value last changed,
 // walked back through the point's retained history. A non-good quality
 // draws the whole row distinctly, so a degraded sensor reads as
-// uncertainty rather than a hidden alarm state. Journal entries
-// touching the alarm surface — quality transitions on status-bound
-// points, settled commands on them, the owning components' step
-// failures and tunes — list in tick order as the alarm journal. A
-// component declaring an `ack` input wired to a model-writable point
-// gets an ack affordance issuing an ordinary receipted write_value —
-// no alarm-specific protocol — and because the kind's ack is
-// level-observed the pane pulses it: once the write's apply tick has
-// scanned past, a second receipted write drops the point back to false.
+// uncertainty rather than a hidden alarm state.
+//
+// The managed-alarm decisions extend the pane: a component whose
+// shelved, suppressed, or out_of_service status port asserts — the
+// uniform vocabulary every managed kind shares — routes its rows to
+// the named managed list beneath the standing list, each list carrying
+// its count and every row still reporting the component's `alarm` and
+// `unacknowledged` truth; managed rows count toward the displayed
+// totals — suppressed or shelved alarms are never erased. Each row
+// renders the instance's declared priority — joined from the
+// snapshot's parameters section — as colour plus the textual level
+// from the declared PRIORITY_VOCABULARY presentation data, with the
+// declared `class` and `response_ticks` beside it, and the instance's
+// rationalization record — consequence, required action, reference —
+// joined from the served index's components section. The state select
+// filters rows by state — all, active, unacknowledged, and each
+// managed state — the operator navigation the pane offers. Journal
+// entries touching the alarm surface — value transitions on
+// status-bound journaled points, quality transitions, settled commands
+// on them, the owning components' step failures and tunes — list in
+// the durable journal's seq order as the alarm journal, so the
+// initiating cause of a burst stands first. A component declaring an
+// `ack` input wired to a model-writable point gets an ack affordance
+// issuing an ordinary receipted write_value — no alarm-specific
+// protocol — and because the kind's ack is level-observed the pane
+// pulses it: once the write's apply tick has scanned past, a second
+// receipted write drops the point back to false.
+//
+// The protection boundary (the independent-protection-layer decision):
+// each ?protection=<group> parameter names a model signal `group`
+// whose points are the independent protection layer's reported field
+// states — availability, demand, bypass, trip. Those points render in
+// their own section beside the alarm pane, visually distinct, so the
+// HMI alarm path is never presented as the safeguard; undeclared, the
+// section stays hidden.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
 // configured with both peers' monitor addresses — the serving origin is
@@ -290,6 +365,14 @@ const overviewPairs = urlParams.getAll("pair")
   .map(parsePairSpec)
   .filter(pair => pair !== null);
 
+// The declared protection-layer signal groups: each ?protection=<group>
+// parameter names a model signal `group` whose points are the
+// independent protection layer's reported field states. Deployment
+// configuration like ?peer and ?operator — the layer's identity is
+// declared data, not page policy. Empty means undeclared: the
+// protection section stays hidden.
+const protectionGroups = new Set(urlParams.getAll("protection"));
+
 // Signals declare an optional display group in the model; the point
 // listing organizes itself under those groups. A point whose signal —
 // or whose missing signal — declares none lists under DEFAULT_GROUP.
@@ -311,10 +394,15 @@ function groupedPoints() {
   return groups;
 }
 
-let index = { points: [] };
+let index = { points: [], components: [] };
 // point id -> PointSignal metadata, built once from the fetched index:
 // the writable flag that gates every command affordance lives here.
 const metaByPoint = new Map();
+// component diagnostic name -> its served ComponentRecord — the
+// per-instance model data the alarm pane joins: the decision-70
+// rationalization block. The index's components section is
+// serde-defaulted — an index served without it simply joins nothing.
+const componentsByName = new Map();
 // point id -> { samples: [Sample], lastSeq, lastTick } — the series a
 // trend draws. lastSeq is the since-cursor in the *current* source's
 // stream; lastTick is the merge watermark that keeps the series
@@ -823,8 +911,10 @@ async function refresh() {
     // The alarm pane draws last: its standing list reads this snapshot's
     // telemetry, the last-changed tick walks the history refreshTrends
     // just grew, and its journal slice reads the entries refreshJournal
-    // just merged.
+    // just merged. The protection section draws with it — the same
+    // telemetry, its own surface.
     renderAlarms(snapshot, telemetry, forced);
+    renderProtection(telemetry, forced);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
@@ -1274,6 +1364,48 @@ function renderFaceplates(snapshot, telemetry, forced) {
 // filter the merged journal into the alarm journal, and a component
 // declaring an `ack` input bound to a model-writable point gets the
 // acknowledge affordance.
+//
+// The managed-alarm decisions add three surfaces on the same join:
+//
+// - Managed-state lists (decision 71): the asserted subset of the
+//   uniform `shelved`/`suppressed`/`out_of_service` status vocabulary
+//   routes the component's rows to the named managed list — joined by
+//   port name across kinds, never per-kind code. Routing is
+//   presentation only: every row keeps reporting `alarm` and
+//   `unacknowledged` truth, and managed rows count toward the
+//   displayed totals — a suppressed or shelved alarm is never erased.
+// - Consequential coding (decisions 70, 75): each row renders the
+//   instance's declared `priority` — joined from the snapshot's
+//   parameters section — as colour plus the textual level the declared
+//   PRIORITY_VOCABULARY names, with `class` and `response_ticks` beside
+//   it, and exposes the instance's served rationalization record.
+// - First-out ordering (decision 75): the alarm journal lists in the
+//   durable journal's seq order — point_changed transitions and
+//   settled receipts alike — so a burst's initiating cause stands
+//   first.
+
+// Decision 71's uniform managed-state vocabulary: the status Out ports
+// every managed alarm kind declares, with the name each asserts under
+// in the pane. Joined by port name across kinds — a kind's managed
+// surface is exactly the bound subset.
+const MANAGED_STATES = ["shelved", "suppressed", "out_of_service"];
+const MANAGED_LABELS = {
+  shelved: "shelved",
+  suppressed: "suppressed",
+  out_of_service: "out of service",
+};
+
+// The site's priority presentation — the site vocabulary being the
+// recorded open customer assumption — carried as declared presentation
+// data, not compiled policy: each entry maps a declared `priority` Int
+// code to the level's text and colour class. Editing the table is a
+// data change; a code no entry declares renders as the bare code under
+// the neutral class.
+const PRIORITY_VOCABULARY = [
+  { code: 1, label: "P1", cls: "p1" },
+  { code: 2, label: "P2", cls: "p2" },
+  { code: 3, label: "P3", cls: "p3" },
+];
 
 // One snapshot's alarm surface: the status-role Out ports the standing
 // list draws from, plus the sets the journal filter tests against —
@@ -1344,13 +1476,122 @@ function ackAffordance(descriptor) {
     "\">ack</button>";
 }
 
-// Whether a journal entry belongs to the alarm surface: a quality
-// transition on a status-bound point — the trust change that makes a
-// standing value read as uncertain — a settled command targeting one
-// (the ack write included), or a tune or step failure of a component
-// declaring status ports. The merged list is already in tick order.
+// The live sample of the component's status Out port named `name`, or
+// null when the kind declares none — the uniform-vocabulary join the
+// managed flags and the two-flag truth share.
+function flagSample(descriptor, telemetry, name) {
+  const port = descriptor.ports.find(p =>
+    p.name === name && p.role === "status" && p.direction === "out");
+  return port ? portSample(port, telemetry) : null;
+}
+
+// The states the component reports this snapshot — what a row routes
+// by and the state filter matches on: each asserted managed flag, plus
+// "active" while the `alarm` port stands and "unacknowledged" while
+// the latch stands.
+function alarmRowStates(descriptor, telemetry) {
+  const states = new Set();
+  for (const name of MANAGED_STATES) {
+    if (isAsserted(flagSample(descriptor, telemetry, name))) {
+      states.add(name);
+    }
+  }
+  if (isAsserted(flagSample(descriptor, telemetry, "alarm"))) {
+    states.add("active");
+  }
+  if (isAsserted(flagSample(descriptor, telemetry, "unacknowledged"))) {
+    states.add("unacknowledged");
+  }
+  return states;
+}
+
+// The two-flag truth every row still reports: the component's live
+// `alarm` and `unacknowledged` flags drawn on or off, so a routed row
+// keeps reporting process truth and its latch — a managed state
+// reroutes the presentation, never the record. A kind declaring
+// neither port draws no flags.
+function truthFlags(descriptor, telemetry) {
+  return ["alarm", "unacknowledged"].map(name => {
+    const port = descriptor.ports.find(p =>
+      p.name === name && p.role === "status" && p.direction === "out");
+    if (!port) return "";
+    return " <span class=\"flag" +
+      (isAsserted(portSample(port, telemetry)) ? " on" : "") + "\">" +
+      esc(name) + "</span>";
+  }).join("");
+}
+
+// The instance's declared `priority`, joined from the snapshot's
+// parameters section by component name — the same join the parameter
+// tables use — and mapped through the declared PRIORITY_VOCABULARY to
+// its redundant indication: the colour class plus the textual level.
+// `class` and `response_ticks` render beside as declared data. An
+// absent section, undeclared parameters, or a code the vocabulary does
+// not name renders plainly — never an error.
+function priorityMarkup(name, parameters) {
+  const values = parameters.get(name);
+  if (!values) return "";
+  const parts = [];
+  const priority = values["priority"];
+  if (priority && "int" in priority) {
+    const entry = PRIORITY_VOCABULARY.find(e => e.code === priority.int);
+    parts.push("<span class=\"priority " + (entry ? entry.cls : "other") +
+      "\">" + esc(entry ? entry.label : "P" + priority.int) + "</span>");
+  }
+  for (const key of ["class", "response_ticks"]) {
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      parts.push(" <span class=\"rationalization-code\">" +
+        esc(key.replace(/_/g, " ")) + " " +
+        esc(formatValue(values[key])) + "</span>");
+    }
+  }
+  return parts.join("");
+}
+
+// The instance's decision-70 record — the consequence of inaction, the
+// required action, and the display/procedure reference — joined from
+// the served index's components section by diagnostic name. An index
+// served without the section, or an instance declaring no block,
+// renders nothing.
+function rationalizationMarkup(name) {
+  const record = componentsByName.get(name);
+  const block = record && record.rationalization;
+  if (!block) return "";
+  return "<details class=\"rationalization\"><summary>rationalization</summary>" +
+    "<p><span class=\"field\">consequence</span> " +
+      esc(block.consequence) + "</p>" +
+    "<p><span class=\"field\">required action</span> " +
+      esc(block.required_action) + "</p>" +
+    "<p><span class=\"field\">reference</span> " +
+      esc(block.reference) + "</p></details>";
+}
+
+// One named managed list's section: the decision-71 state name, its
+// count — managed rows still count even while their annunciation is
+// withheld — and the routed rows in the standing list's own columns.
+function managedListMarkup(state, rows) {
+  return "<section class=\"managed\" id=\"managed-" + state + "\">" +
+    "<h3>" + esc(MANAGED_LABELS[state]) + "</h3>" +
+    "<p class=\"managed-count\">" + rows.length + " " +
+      esc(MANAGED_LABELS[state]) + "</p>" +
+    "<table><thead><tr>" + ALARM_HEADINGS + "</tr></thead><tbody>" +
+    rows.join("") + "</tbody></table></section>";
+}
+const ALARM_HEADINGS =
+  "<th>Component</th><th>Status</th><th>Value</th><th>Quality</th>" +
+  "<th>Last changed</th><th>Priority</th><th></th>";
+
+// Whether a journal entry belongs to the alarm surface: a value
+// transition on a status-bound journaled point — the alarm
+// lifecycle's durable record — a quality transition on one (the trust
+// change that makes a standing value read as uncertain), a settled
+// command targeting one (the ack write included), or a tune or step
+// failure of a component declaring status ports.
 function alarmJournalEntry(entry, join) {
   const event = entry.event;
+  if ("point_changed" in event) {
+    return join.related.has(event.point_changed.point);
+  }
   if ("quality_changed" in event) {
     return join.related.has(event.quality_changed.point);
   }
@@ -1376,9 +1617,44 @@ function commandPoint(command) {
   return null;
 }
 
+// One asserted status port's row: the markup every list renders, plus
+// the states the row routes and filters by — the component's asserted
+// managed flags, "active" while `alarm` stands, "unacknowledged" while
+// the latch stands. `managed` is the subset of states in the uniform
+// vocabulary, in MANAGED_STATES order.
+function alarmRow(descriptor, port, sample, telemetry, forced, parameters, ack) {
+  const states = alarmRowStates(descriptor, telemetry);
+  const cls = qualityClass(sample.quality);
+  const meta = portMeta(port);
+  // The row carries the quality class: a Bad or Uncertain value draws
+  // degraded — italic, tinted — instead of as a clean assertion, so a
+  // bad sensor reads as uncertainty rather than a hidden alarm state.
+  return {
+    states,
+    managed: MANAGED_STATES.filter(state => states.has(state)),
+    degraded: !isGood(sample.quality),
+    html: "<tr class=\"alarm " + cls + "\">" +
+      "<td>" + esc(descriptor.label) +
+        rationalizationMarkup(descriptor.name) + "</td>" +
+      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
+        truthFlags(descriptor, telemetry) + "</td>" +
+      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
+        forcedBadge(port.point, forced) + "</td>" +
+      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
+      "</td>" +
+      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
+      "<td>" + priorityMarkup(descriptor.name, parameters) + "</td>" +
+      "<td>" + ack + "</td></tr>",
+  };
+}
+
 // Renders the pane from the polled snapshot plus the history and
 // journal the refresh already fetched. The section shows while any
 // descriptor declares a status-role port; a plant with none hides it.
+// Rows whose component reports a managed flag route to that state's
+// named list — the standing list keeps the unmanaged rows — and the
+// state select filters every list at once: filtering selects which
+// rows render, never which exist.
 function renderAlarms(snapshot, telemetry, forced) {
   const pane = document.getElementById("alarm-pane");
   const join = alarmJoin(snapshot);
@@ -1387,46 +1663,103 @@ function renderAlarms(snapshot, telemetry, forced) {
     return;
   }
   pane.hidden = false;
-  const rows = [];
-  let degraded = 0;
+  const parameters = new Map(
+    (snapshot.parameters || []).map(p => [p.name, p.values]));
+  const filter = document.getElementById("alarm-filter").value;
   // One ack affordance per component per render: a latching kind's
   // `alarm` and `unacknowledged` can stand together, and both clear
-  // through the same `ack` input.
+  // through the same `ack` input — the row built once is shared by
+  // every managed list its states route it to.
   const acked = new Set();
+  const rows = [];
+  let degraded = 0;
   for (const { descriptor, port } of join.standing) {
-    const sample = port.point == null
-      ? null : (telemetry.get(port.point) || {}).sample || null;
+    const sample = port.point == null ? null : portSample(port, telemetry);
     if (!isAsserted(sample)) continue;
-    const cls = qualityClass(sample.quality);
-    if (!isGood(sample.quality)) degraded++;
-    const meta = portMeta(port);
     const ack = acked.has(descriptor.name) ? "" : ackAffordance(descriptor);
     if (ack !== "") acked.add(descriptor.name);
-    // The row carries the quality class: a Bad or Uncertain value draws
-    // degraded — italic, tinted — instead of as a clean assertion, so a
-    // bad sensor reads as uncertainty rather than a hidden alarm state.
-    rows.push("<tr class=\"alarm " + cls + "\">" +
-      "<td>" + esc(descriptor.label) + "</td>" +
-      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") + "</td>" +
-      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
-        forcedBadge(port.point, forced) + "</td>" +
-      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
-      "</td>" +
-      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
-      "<td>" + ack + "</td></tr>");
+    const row = alarmRow(descriptor, port, sample, telemetry, forced,
+      parameters, ack);
+    if (row.degraded) degraded++;
+    rows.push(row);
   }
-  document.getElementById("alarms").innerHTML = rows.join("");
+  const visible = filter === "all"
+    ? rows : rows.filter(row => row.states.has(filter));
+  document.getElementById("alarms").innerHTML = visible
+    .filter(row => row.managed.length === 0)
+    .map(row => row.html).join("");
+  const lists = [];
+  const counts = [];
+  for (const state of MANAGED_STATES) {
+    const listed = visible.filter(row => row.states.has(state));
+    counts.push(listed.length);
+    if (listed.length > 0) {
+      lists.push(managedListMarkup(state, listed.map(row => row.html)));
+    }
+  }
+  document.getElementById("managed-lists").innerHTML = lists.join("");
   const summary = document.getElementById("alarm-summary");
+  const managed = MANAGED_STATES
+    .map((state, i) => counts[i] + " " + MANAGED_LABELS[state])
+    .filter((_, i) => counts[i] > 0);
   summary.textContent = rows.length === 0
     ? "no standing alarms"
     : rows.length + " standing" +
-      (degraded > 0 ? " — " + degraded + " degraded" : "");
+      (managed.length > 0 ? " — " + managed.join(" · ") : "") +
+      (degraded > 0 ? " — " + degraded + " degraded" : "") +
+      (filter !== "all"
+        ? " — showing " + (MANAGED_LABELS[filter] || filter) : "");
   summary.className = rows.length === 0 ? "good" : "bad";
+  // The alarm journal lists in the durable journal's transition order —
+  // seq order — so a burst's initiating cause stands first: equal-tick
+  // point_changed transitions and the settled receipt that caused them
+  // keep the order the recorder appended them.
   document.getElementById("alarm-journal").innerHTML = journalEntries
     .filter(entry => alarmJournalEntry(entry, join))
+    .sort((a, b) => a.seq - b.seq)
     .map(entry => "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
       "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>")
     .join("");
+}
+
+// The independent protection layer's declared points — every index
+// point whose signal `group` a ?protection= parameter names — on their
+// own section, visually distinct from the alarm pane: the HMI alarm
+// path is never presented as the safeguard. Undeclared (no
+// ?protection), the section stays hidden; a named group matching no
+// points renders the empty count rather than failing.
+function renderProtection(telemetry, forced) {
+  const pane = document.getElementById("protection-pane");
+  if (protectionGroups.size === 0) {
+    pane.hidden = true;
+    return;
+  }
+  pane.hidden = false;
+  const rows = [];
+  let degraded = 0;
+  for (const meta of index.points) {
+    if (!protectionGroups.has(meta.group || "")) continue;
+    const sample = (telemetry.get(meta.point) || {}).sample;
+    const cls = sample ? qualityClass(sample.quality) : "nosample";
+    if (sample && !isGood(sample.quality)) degraded++;
+    rows.push("<tr class=\"protection " + cls + "\">" +
+      "<td>" + meta.point + "</td><td>" + esc(meta.name) + "</td>" +
+      "<td class=\"value " + cls + "\">" +
+        (sample ? esc(formatValue(sample.value)) : "") +
+        forcedBadge(meta.point, forced) + "</td>" +
+      "<td class=\"" + cls + "\">" +
+        (sample ? esc(formatQuality(sample.quality)) : "no sample") + "</td>" +
+      "<td>" + esc(meta.unit || "") + "</td>" +
+      "<td>" + (sample ? lastChangedTick(meta.point, sample) : "") +
+      "</td></tr>");
+  }
+  document.getElementById("protection-points").innerHTML = rows.join("");
+  const summary = document.getElementById("protection-summary");
+  summary.textContent = rows.length === 0
+    ? "no declared protection-layer points"
+    : rows.length + " declared protection point(s)" +
+      (degraded > 0 ? " — " + degraded + " degraded" : "");
+  summary.className = degraded > 0 ? "bad" : "good";
 }
 
 // The acknowledge submission: an ordinary receipted write_value of true
@@ -1582,11 +1915,17 @@ async function refreshJournal(base) {
     esc(describeEvent(entry.event)) + "</td></tr>").join("");
 }
 
-// Journal events serialize as {"quality_changed": ...} |
-// {"command_settled": ...} | {"step_failed": ...} |
-// {"role_changed": {from, to}} |
+// Journal events serialize as {"point_changed": ...} |
+// {"quality_changed": ...} | {"command_settled": ...} |
+// {"step_failed": ...} | {"role_changed": {from, to}} |
 // {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
 function describeEvent(event) {
+  if ("point_changed" in event) {
+    const change = event.point_changed;
+    return pointName(change.point) + " value " +
+      (change.from ? formatValue(change.from) : "no prior sample") +
+      " → " + formatValue(change.to);
+  }
   if ("quality_changed" in event) {
     const change = event.quality_changed;
     return pointName(change.point) + " quality " +
@@ -1898,6 +2237,12 @@ async function init() {
   }
   index = await (await fetch("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
+  // The index's components section — serde-defaulted, so an index
+  // served without it joins nothing — carries the per-instance records
+  // the alarm pane's rationalization disclosure reads by name.
+  for (const record of index.components || []) {
+    componentsByName.set(record.name, record);
+  }
   const select = document.getElementById("command-point");
   // The command form offers only the model-declared writable points —
   // the index carries each io_point's `writable` mark, and writes to
@@ -1962,11 +2307,13 @@ async function init() {
     refresh();
   });
   // The alarm pane's ack affordance takes the same delegated shape —
-  // the rows re-render on every poll.
+  // the rows re-render on every poll — and the state select re-filters
+  // the lists on the next refresh, triggered immediately here.
   document.getElementById("alarm-pane").addEventListener("click", async event => {
     const ack = event.target.closest("button.ack");
     if (ack) await submitAck(ack);
   });
+  document.getElementById("alarm-filter").addEventListener("change", refresh);
   // The point listing's force and release affordances take the same
   // delegated shape — the rows re-render on every poll.
   const points = document.getElementById("points");

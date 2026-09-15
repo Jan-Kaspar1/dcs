@@ -4,7 +4,10 @@
 //! entry per declared [`IoPoint`](crate::IoPoint), ordered by [`PointId`],
 //! carrying the metadata a monitoring UI needs — signal name, engineering
 //! unit, description, display group, direction, value type, and command
-//! writability — so consumers never walk the device/channel/signal graph
+//! writability — plus one [`ComponentRecord`] per declared
+//! [`ComponentInstance`](crate::ComponentInstance) carrying the per-instance
+//! model data descriptors do not, today the decision-70 rationalization
+//! block — so consumers never walk the device/channel/signal graph
 //! themselves.
 //! [`PlantModel::signal_index`] builds it.
 //!
@@ -21,7 +24,7 @@
 //!   validated model ([`PlantModel::load`] rejects it); from an unvalidated
 //!   model it is ignored, since there is no point to attach it to.
 
-use crate::model::{Direction, PlantModel, Signal};
+use crate::model::{Direction, PlantModel, Rationalization, Signal};
 use dcs_core::{PointId, SignalId, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -56,12 +59,44 @@ pub struct PointSignal {
     pub writable: bool,
 }
 
+/// A component instance's monitoring record — the per-instance model
+/// data a monitoring consumer joins against the snapshot's descriptors
+/// that the descriptor contract itself does not carry: today, the
+/// declared decision-70 rationalization block.
+///
+/// `name` is the instance's diagnostic name —
+/// [`ComponentInstance::name`](crate::ComponentInstance::name) — the
+/// identity the assembled component reports as
+/// `ComponentDescriptor.name`, so the record joins the descriptor by
+/// name without the consumer knowing the naming convention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentRecord {
+    /// The instance's diagnostic name — `"<kind>:<id>"` — matching the
+    /// served `ComponentDescriptor.name`.
+    pub name: String,
+    /// The instance's declared kind.
+    pub kind: String,
+    /// The instance's declared alarm rationalization block — the
+    /// consequence of inaction, the required action, and the
+    /// display/procedure reference — when it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationalization: Option<Rationalization>,
+}
+
 /// A derived view resolving every declared I/O point to its monitoring
 /// metadata; see the [module documentation](self) for the resolution rules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalIndex {
     /// One entry per declared point, ordered by [`PointId`].
     pub points: Vec<PointSignal>,
+    /// One record per declared component instance, in the model's
+    /// `components` order — the declared scan order.
+    ///
+    /// Serde-defaulted like [`Signal::unit`]: an index serialized before
+    /// the section existed decodes it empty, and a consumer simply joins
+    /// nothing — the model keeps evolving without a version bump.
+    #[serde(default)]
+    pub components: Vec<ComponentRecord>,
 }
 
 impl SignalIndex {
@@ -94,6 +129,16 @@ impl PlantModel {
                 .or_insert(signal);
         }
 
+        let components = self
+            .components
+            .iter()
+            .map(|instance| ComponentRecord {
+                name: instance.name(),
+                kind: instance.kind.clone(),
+                rationalization: instance.rationalization.clone(),
+            })
+            .collect();
+
         let mut points: Vec<_> = self.io_points.iter().collect();
         points.sort_by_key(|point| point.id);
         let points = points
@@ -123,7 +168,7 @@ impl PlantModel {
                 },
             })
             .collect();
-        SignalIndex { points }
+        SignalIndex { points, components }
     }
 }
 
@@ -199,6 +244,46 @@ mod tests {
         let model = PlantModel::load(SIGNAL_INDEX).unwrap();
         let json = serde_json::to_string_pretty(&model.signal_index()).unwrap();
         assert_eq!(json, EXPECTED_INDEX.trim_end());
+    }
+
+    #[test]
+    fn index_carries_each_instances_component_record() {
+        let model = PlantModel::load(SIGNAL_INDEX).unwrap();
+        let index = model.signal_index();
+        // One record per declared instance, named by the same
+        // `"<kind>:<id>"` convention the assembled component reports as
+        // its descriptor name — the join key the record documents.
+        assert_eq!(index.components.len(), model.components.len());
+        let record = &index.components[0];
+        assert_eq!(record.name, "gain:1");
+        assert_eq!(record.name, model.components[0].name());
+        assert_eq!(record.kind, "gain");
+        // The fixture's instance declares no rationalization block.
+        assert_eq!(record.rationalization, None);
+    }
+
+    #[test]
+    fn component_record_carries_the_rationalization_block() {
+        let mut model: PlantModel = serde_json::from_str(MINIMAL).unwrap();
+        model.components[0].rationalization = Some(Rationalization {
+            consequence: "the vessel overfills".to_string(),
+            required_action: "close the inlet valve".to_string(),
+            reference: "ALM-101 procedure".to_string(),
+        });
+        let index = model.signal_index();
+        let record = index
+            .components
+            .iter()
+            .find(|record| record.name == model.components[0].name())
+            .unwrap();
+        assert_eq!(record.rationalization, model.components[0].rationalization);
+        // The served record roundtrips — the monitoring consumer decodes
+        // exactly the block the model declared.
+        let json = serde_json::to_string(&index).unwrap();
+        assert_eq!(serde_json::from_str::<SignalIndex>(&json).unwrap(), index);
+        // An index serialized before the section existed decodes it empty.
+        let legacy: SignalIndex = serde_json::from_str("{\"points\": []}").unwrap();
+        assert!(legacy.components.is_empty());
     }
 
     #[test]
