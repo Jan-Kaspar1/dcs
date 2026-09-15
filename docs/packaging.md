@@ -127,15 +127,32 @@ hot-swap test (`crates/dcs-controller/tests/hot_swap.rs`) exercises.
 
 `compose.yaml` at the repository root is the checked-in rig definition
 — the same topology the commands above describe, declared as data:
-one `dcs-plant` service carrying the model and dynamics mounts, the
-`ctrl-a`/`ctrl-b` redundant pair attaching to its listener with the
-standby wired to the active's monitor, and the pair's monitor ports
-published on the host. The plant service's healthcheck orders the
-controllers' one-shot `--remote` attach behind the listener actually
-serving. The file is a statically inspectable declaration —
-`docker compose config` checks it — and like the Dockerfiles it is a
-checked-in packaging artifact: a single-host orchestration
-declaration that defines no deployment.
+one `dcs-plant` service mounting the checked-in reference-station
+artifacts — `crates/dcs-demo/fixtures/pump_station.json` and
+`crates/dcs-demo/fixtures/pump_station_dynamics.json`, the model and
+dynamics documents `dcs-build`'s `pump_station` example emits — the
+`ctrl-a`/`ctrl-b` redundant pair mounting the same station model and
+attaching to its listener with the standby wired to the active's
+monitor, and the pair's monitor ports published on the host. The
+plant service's healthcheck orders the controllers' one-shot
+`--remote` attach behind the listener actually serving. The file is a
+statically inspectable declaration — `docker compose config` checks
+it — and like the Dockerfiles it is a checked-in packaging artifact:
+a single-host orchestration declaration that defines no deployment.
+
+What the running rig demonstrates is the reference duty/standby
+pumping station under the redundant pair: the dynamics document drives
+the wet well — the declared inflow against both pump draws through
+the level integrator and lag — while the active controller runs the
+station: failover-select over the primary and backup level
+measurements feeding the threshold chain, the pump group staging the
+duty and lag pumps on its computed demand, and the full alarm set
+(high and low level, per-pump motor-fault, thermal, and moisture,
+backup-active, none-available, all-faulted, and power-fail) latching
+until acknowledged. Every alarm `ack` point and each pump's manual
+takeover — the writable `mode`, `hand`, and `oos` points — are
+model-declared writable, so they are commanded through the published
+monitor ports the same way the documented promotion is.
 
 ### Build
 
