@@ -113,6 +113,7 @@
 mod builder;
 pub mod dosing;
 mod endpoint;
+pub mod ethercat;
 pub mod ijmuiden;
 mod spec;
 pub mod specs;
