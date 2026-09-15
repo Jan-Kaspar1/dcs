@@ -1,0 +1,274 @@
+"""Versioned QA run report contract and validator.
+
+One report describes one Lenovo QA run against one exact main revision.
+The schema is deliberately close to agent_pool.review's report contract:
+stable keys, bounded fields, explicit outcomes, and validation that raises
+ValueError on any violation. Reports are untrusted data until validated.
+
+Schema version 1, top-level fields:
+
+  schema_version           int, must equal SCHEMA_VERSION
+  run_id                   stable run key: ^[a-z0-9][a-z0-9-]{0,79}$
+  attempted_sha            40-hex main revision the run was launched against
+  completed_sha            40-hex revision whose assessment completed, or
+                           null when no assessment completed (blocked,
+                           inconclusive, or interrupted runs). A passed or
+                           failed outcome requires completed_sha ==
+                           attempted_sha: an assessed revision may be
+                           blocked by a capability gap, but a verdict
+                           applies only to the revision actually tested.
+  image                    {"controller": "sha256:...", "plant": "sha256:..."}
+                           the digests of the exact artifacts tested
+  started_at/finished_at   ISO-8601 timestamps, finished >= started
+  outcome                  passed | failed | blocked | inconclusive |
+                           interrupted
+  attempt                  positive int retry counter (1 = first attempt)
+  host                     {"name": str, "os": str} — sanitized host identity
+  changed_range            {"first": sha, "last": sha} — the intervening
+                           commit range this run's verdict covers when
+                           queuing skipped intermediate revisions
+  scenarios                per-case results (see SCENARIO_FIELDS)
+  capability_limitations   [{"key","detail","blocking"}] known product gaps
+                           that bounded this run (e.g. no EtherCAT driver)
+  infrastructure_failures  [{"key","detail","phase"}] rig/build/credential/
+                           agent failures, recorded separately from product
+                           findings
+  timeline                 [{"t","event","detail"}] action timeline
+  notes                    optional free text
+
+Consistency rules enforced beyond field shape:
+  - outcome "passed" requires every scenario passed
+  - outcome "failed" requires at least one failed scenario
+  - completed_sha must equal attempted_sha for passed/failed outcomes
+"""
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+MAX_FIELD = 12000
+MAX_SCENARIOS = 40
+MAX_TIMELINE = 200
+MAX_OBSERVATIONS = 40
+MAX_EVIDENCE = 20
+MAX_LIMITATIONS = 40
+MAX_INFRA_FAILURES = 40
+
+KEY = re.compile(r'^[a-z0-9][a-z0-9-]{0,79}$')
+GIT_SHA = re.compile(r'^[0-9a-f]{40}$')
+IMAGE_DIGEST = re.compile(r'^sha256:[0-9a-f]{64}$')
+
+RUN_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive', 'interrupted')
+CASE_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive')
+EVIDENCE_KINDS = ('file', 'endpoint', 'log', 'metric')
+
+TOP_LEVEL = {'schema_version', 'run_id', 'attempted_sha', 'completed_sha',
+             'image', 'started_at', 'finished_at', 'outcome', 'attempt',
+             'host', 'changed_range', 'scenarios', 'capability_limitations',
+             'infrastructure_failures', 'timeline', 'notes'}
+REQUIRED_TOP = TOP_LEVEL - {'attempt', 'host', 'changed_range', 'notes'}
+
+SCENARIO_FIELDS = {'key', 'title', 'expected', 'outcome', 'observations',
+                   'evidence', 'detail'}
+REQUIRED_SCENARIO = SCENARIO_FIELDS - {'evidence', 'detail'}
+
+
+def _bounded_text(value, field, limit=MAX_FIELD):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise ValueError('Missing or oversized text: ' + field)
+    return value
+
+
+def _bounded_list(value, field, item_limit=MAX_FIELD, count=40):
+    if not isinstance(value, list) or len(value) > count:
+        raise ValueError('Invalid list: ' + field)
+    for entry in value:
+        _bounded_text(entry, field, item_limit)
+    return value
+
+
+def _iso(value, field):
+    if not isinstance(value, str):
+        raise ValueError(field + ' must be an ISO-8601 string')
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError(field + ' must be an ISO-8601 string')
+
+
+def _git_sha(value, field):
+    if not isinstance(value, str) or not GIT_SHA.match(value):
+        raise ValueError(field + ' must be a 40-hex git revision')
+    return value
+
+
+def _keyed_detail(item, field, extra_required=()):
+    """Shared shape for capability limitations and infrastructure failures."""
+    if not isinstance(item, dict):
+        raise ValueError(field + ' entries must be objects')
+    required = {'key', 'detail'} | set(extra_required)
+    if not required <= set(item):
+        raise ValueError(field + ' entry missing fields: ' + ','.join(sorted(required - set(item))))
+    if not isinstance(item['key'], str) or not KEY.match(item['key']):
+        raise ValueError('Invalid ' + field + ' key')
+    _bounded_text(item['detail'], field + '.detail', 4000)
+    return item
+
+
+def _validate_evidence(item, scenario_key):
+    evidence = item['evidence']
+    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
+        raise ValueError('Invalid evidence list in scenario ' + scenario_key)
+    for entry in evidence:
+        if not isinstance(entry, dict) or not {'kind', 'ref'} <= set(entry) \
+                or not set(entry) <= {'kind', 'ref', 'detail'}:
+            raise ValueError('Invalid evidence entry in scenario ' + scenario_key)
+        if entry['kind'] not in EVIDENCE_KINDS:
+            raise ValueError('Invalid evidence kind in scenario ' + scenario_key)
+        ref = entry['ref']
+        if not isinstance(ref, str) or not ref or len(ref) > 500:
+            raise ValueError('Invalid evidence ref in scenario ' + scenario_key)
+        if entry['kind'] == 'file':
+            # File evidence must name a path inside the run's results
+            # directory — never an absolute or escaping host path.
+            if ref.startswith('/') or re.match(r'^[A-Za-z]:', ref) \
+                    or '..' in Path(ref).parts:
+                raise ValueError('Evidence file ref must be relative: ' + scenario_key)
+        if 'detail' in entry:
+            _bounded_text(entry['detail'], 'evidence.detail', 2000)
+
+
+def validate_scenario(item):
+    if not isinstance(item, dict) or not set(item) <= SCENARIO_FIELDS:
+        raise ValueError('Invalid scenario fields')
+    missing = REQUIRED_SCENARIO - set(item)
+    if missing:
+        raise ValueError('Scenario missing fields: ' + ','.join(sorted(missing)))
+    if not isinstance(item['key'], str) or not KEY.match(item['key']):
+        raise ValueError('Invalid scenario key')
+    _bounded_text(item['title'], 'scenario.title', 200)
+    _bounded_text(item['expected'], 'scenario.expected', 4000)
+    if item['outcome'] not in CASE_OUTCOMES:
+        raise ValueError('Invalid scenario outcome')
+    _bounded_list(item['observations'], 'scenario.observations', 2000,
+                  MAX_OBSERVATIONS)
+    if 'evidence' in item:
+        _validate_evidence(item, item['key'])
+    if 'detail' in item:
+        _bounded_text(item['detail'], 'scenario.detail', 4000)
+    return item
+
+
+def validate_report(text, run_id=None, attempted_sha=None):
+    """Parse and validate a run report; raise ValueError on any violation.
+
+    `run_id` and `attempted_sha` optionally pin the report to the run the
+    supervisor launched — the same convention review.validate_report uses
+    to bind a report to its invocation.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError('Report is not JSON: ' + str(exc))
+    if not isinstance(data, dict) or not REQUIRED_TOP <= set(data) <= TOP_LEVEL:
+        raise ValueError('Invalid report top-level fields')
+    if data['schema_version'] != SCHEMA_VERSION:
+        raise ValueError('Unsupported report schema version')
+    if not isinstance(data['run_id'], str) or not KEY.match(data['run_id']):
+        raise ValueError('Invalid run_id')
+    if run_id is not None and data['run_id'] != run_id:
+        raise ValueError('Report run_id does not match the launched run')
+    _git_sha(data['attempted_sha'], 'attempted_sha')
+    if attempted_sha is not None and data['attempted_sha'] != attempted_sha:
+        raise ValueError('Report attempted_sha does not match the launched run')
+    completed = data['completed_sha']
+    if completed is not None:
+        _git_sha(completed, 'completed_sha')
+    started, finished = _iso(data['started_at'], 'started_at'), \
+        _iso(data['finished_at'], 'finished_at')
+    if finished < started:
+        raise ValueError('finished_at precedes started_at')
+    if data['outcome'] not in RUN_OUTCOMES:
+        raise ValueError('Invalid run outcome')
+    if 'attempt' in data and (type(data['attempt']) is not int
+                              or data['attempt'] < 1):
+        raise ValueError('attempt must be a positive integer')
+
+    image = data['image']
+    if not isinstance(image, dict) or not {'controller', 'plant'} <= set(image) \
+            or not set(image) <= {'controller', 'plant'}:
+        raise ValueError('image must name controller and plant digests')
+    for name, digest in image.items():
+        if not isinstance(digest, str) or not IMAGE_DIGEST.match(digest):
+            raise ValueError('image.' + name + ' must be a sha256 digest')
+
+    if 'host' in data:
+        host = data['host']
+        if not isinstance(host, dict) or not {'name', 'os'} <= set(host) \
+                or not set(host) <= {'name', 'os'}:
+            raise ValueError('host must contain name and os')
+        _bounded_text(host['name'], 'host.name', 200)
+        _bounded_text(host['os'], 'host.os', 500)
+
+    if 'changed_range' in data:
+        rng = data['changed_range']
+        if not isinstance(rng, dict) or set(rng) != {'first', 'last'}:
+            raise ValueError('changed_range must contain first and last')
+        _git_sha(rng['first'], 'changed_range.first')
+        _git_sha(rng['last'], 'changed_range.last')
+        if rng['last'] != data['attempted_sha']:
+            raise ValueError('changed_range.last must equal attempted_sha')
+
+    scenarios = data['scenarios']
+    if not isinstance(scenarios, list) or len(scenarios) > MAX_SCENARIOS:
+        raise ValueError('Invalid scenarios list')
+    seen = set()
+    case_outcomes = []
+    for item in scenarios:
+        validate_scenario(item)
+        if item['key'] in seen:
+            raise ValueError('Duplicate scenario key')
+        seen.add(item['key'])
+        case_outcomes.append(item['outcome'])
+
+    outcome = data['outcome']
+    if outcome == 'passed' and (not case_outcomes
+                                or any(c != 'passed' for c in case_outcomes)):
+        raise ValueError('passed outcome requires every scenario passed')
+    if outcome == 'failed' and 'failed' not in case_outcomes:
+        raise ValueError('failed outcome requires a failed scenario')
+    if outcome in ('passed', 'failed') and completed != data['attempted_sha']:
+        raise ValueError('passed/failed requires completed_sha == attempted_sha')
+
+    limitations = data['capability_limitations']
+    if not isinstance(limitations, list) or len(limitations) > MAX_LIMITATIONS:
+        raise ValueError('Invalid capability_limitations list')
+    for item in limitations:
+        _keyed_detail(item, 'capability_limitations')
+        if 'blocking' in item and type(item['blocking']) is not bool:
+            raise ValueError('capability_limitations.blocking must be boolean')
+
+    failures = data['infrastructure_failures']
+    if not isinstance(failures, list) or len(failures) > MAX_INFRA_FAILURES:
+        raise ValueError('Invalid infrastructure_failures list')
+    for item in failures:
+        _keyed_detail(item, 'infrastructure_failures')
+        if 'phase' in item:
+            _bounded_text(item['phase'], 'infrastructure_failures.phase', 200)
+
+    timeline = data['timeline']
+    if not isinstance(timeline, list) or len(timeline) > MAX_TIMELINE:
+        raise ValueError('Invalid timeline')
+    for entry in timeline:
+        if not isinstance(entry, dict) or not {'t', 'event'} <= set(entry) \
+                or not set(entry) <= {'t', 'event', 'detail'}:
+            raise ValueError('Invalid timeline entry')
+        _iso(entry['t'], 'timeline.t')
+        _bounded_text(entry['event'], 'timeline.event', 200)
+        if 'detail' in entry:
+            _bounded_text(entry['detail'], 'timeline.detail', 2000)
+
+    if 'notes' in data:
+        _bounded_text(data['notes'], 'notes', 4000)
+    return data
