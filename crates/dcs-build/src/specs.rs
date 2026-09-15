@@ -3240,3 +3240,106 @@ impl Spec for HeaderCoordinatorSpec {
         }
     }
 }
+
+/// Spec for the `phase-monitor` kind: the phase-conditioned
+/// verification checks architecture decision 61 records — ripening
+/// turbidity under a declared bound within a declared duration of the
+/// condition window, and clean-bed headloss within a declared
+/// deviation of its captured baseline.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the measured
+/// value; `phase` (`In`, `Bool`) — the condition window; `capture`
+/// (`In`, `Bool`) — while asserted inside the window the kind holds
+/// `in` as its baseline; `deviation` (`Out`, `Float`) — the reported
+/// `in − baseline`; `exceeded` (`Out`, `Bool`) — the excursion
+/// condition the alarm set consumes; `overdue` (`Out`, `Bool`) — the
+/// bound not met within `limit_ticks` of the phase opening.
+/// Parameters: `bound` (required non-negative finite `Float`),
+/// `limit_ticks` (required `Int` in `1..=i64::MAX`), and `mode`
+/// (required `Int` code `0`/`1` — absolute bound on `in` / deviation
+/// from the captured baseline).
+pub struct PhaseMonitorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `phase-monitor` instance.
+pub struct PhaseMonitorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the measured value the check
+    /// verifies — turbidity for ripening, headloss for CBHL.
+    pub input: Sink<f64>,
+    /// `phase` port (`In`, `Bool`): the condition window — the
+    /// post-wash or return-to-service flag decoded upstream.
+    pub phase: Sink<bool>,
+    /// `capture` port (`In`, `Bool`): while asserted inside the
+    /// window the kind tracks `in` as its baseline — the CBHL
+    /// reference-flow hold.
+    pub capture: Sink<bool>,
+    /// `deviation` port (`Out`, `Float`): the reported
+    /// `in − baseline`, `0.0` until the window's first capture.
+    pub deviation: Source<f64>,
+    /// `exceeded` port (`Out`, `Bool`): the excursion condition the
+    /// alarm set consumes.
+    pub exceeded: Source<bool>,
+    /// `overdue` port (`Out`, `Bool`): the bound not met within
+    /// `limit_ticks` of the phase opening.
+    pub overdue: Source<bool>,
+}
+
+impl PhaseMonitorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "phase-monitor";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("bound", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("mode", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for PhaseMonitorSpec {
+    type Instance = PhaseMonitorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("phase", Direction::In, ValueKind::Bool),
+            port("capture", Direction::In, ValueKind::Bool),
+            port("deviation", Direction::Out, ValueKind::Float),
+            port("exceeded", Direction::Out, ValueKind::Bool),
+            port("overdue", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        PhaseMonitorInstance {
+            id,
+            input: Sink::port(id, "in"),
+            phase: Sink::port(id, "phase"),
+            capture: Sink::port(id, "capture"),
+            deviation: Source::port(id, "deviation"),
+            exceeded: Source::port(id, "exceeded"),
+            overdue: Source::port(id, "overdue"),
+        }
+    }
+}

@@ -22,8 +22,8 @@ use dcs_build::specs::{
     DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
     HeaderCoordinatorSpec, InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec,
     ManagedInputs, ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    OverrideSelectSpec, PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec,
+    SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
@@ -895,6 +895,58 @@ fn deviation_monitor_rejects_an_out_of_range_window() {
     ));
 }
 
+/// The `phase-monitor` plant the tests wire: scripted channels for
+/// `in`, `phase`, and `capture`, internal carriers for the three
+/// outputs.
+fn phase_monitor_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let input_raw = plant.channel::<f64>(sim, "value", Direction::In);
+    let phase_raw = plant.channel::<bool>(sim, "phase", Direction::In);
+    let capture_raw = plant.channel::<bool>(sim, "capture", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), input_raw, false);
+    let phase = plant.field_input::<bool>(PointId(11), phase_raw, false);
+    let capture = plant.field_input::<bool>(PointId(12), capture_raw, false);
+    let deviation = plant.internal_output::<f64>(PointId(20), 0.0);
+    let exceeded = plant.internal_output::<bool>(PointId(21), false);
+    let overdue = plant.internal_output::<bool>(PointId(22), false);
+
+    let monitor = plant.add(PhaseMonitorSpec::new(parameters_map));
+    plant.connect(input, monitor.input);
+    plant.connect(phase, monitor.phase);
+    plant.connect(capture, monitor.capture);
+    plant.connect(&monitor.deviation, deviation);
+    plant.connect(&monitor.exceeded, exceeded);
+    plant.connect(&monitor.overdue, overdue);
+    plant
+}
+
+#[test]
+fn phase_monitor_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(phase_monitor_plant(parameters([
+        ("bound", Value::Float(0.5)),
+        ("limit_ticks", Value::Int(5)),
+        ("mode", Value::Int(0)),
+    ])));
+    assert_eq!(model.components[0].kind, PhaseMonitorSpec::KIND);
+}
+
+#[test]
+fn phase_monitor_rejects_an_out_of_range_mode() {
+    // `mode` declares the binary code range `0..=1`; a code outside it
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    assert!(matches!(
+        phase_monitor_plant(parameters([
+            ("bound", Value::Float(0.5)),
+            ("limit_ticks", Value::Int(5)),
+            ("mode", Value::Int(4)),
+        ]))
+        .build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "mode"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -1119,6 +1171,7 @@ fn every_registered_kind_has_a_spec() {
         BackwashCoordinatorSpec::KIND,
         HeaderCoordinatorSpec::KIND,
         BlowerGroupSpec::KIND,
+        PhaseMonitorSpec::KIND,
     ]
     .into_iter()
     .collect();
