@@ -30,5 +30,14 @@
       "output": 10,
       "initial": 3.0
     }
+  },
+  {
+    "threshold": {
+      "input": 10,
+      "output": 30,
+      "on": 6.0,
+      "off": 5.0,
+      "initial": false
+    }
   }
 ]
