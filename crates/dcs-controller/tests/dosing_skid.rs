@@ -614,6 +614,44 @@ fn role_changes(client: &MonitorClient) -> Vec<(Role, Role)> {
     role_changes_in(&client.journal(0).unwrap())
 }
 
+/// The `PointChanged` transitions `journal` recorded for `point`, in
+/// file order — `(seq, from, to)` per entry.
+fn point_changes(journal: &[JournalEntry], point: PointId) -> Vec<(u64, Option<Value>, Value)> {
+    journal
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::PointChanged {
+                point: changed,
+                from,
+                to,
+            } if *changed == point => Some((entry.seq, *from, *to)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts `needle`'s `(from, to)` pairs are an in-order subsequence
+/// of `actual`'s — the scripted transitions landing in the order the
+/// script produced them, among the record's other entries (the run-2
+/// restart re-emits every journaled point's carried state as
+/// `from: None`).
+fn assert_transitions(
+    point: PointId,
+    actual: &[(u64, Option<Value>, Value)],
+    needle: &[(Option<Value>, Value)],
+) {
+    let mut cursor = 0;
+    for want in needle {
+        cursor = actual[cursor..]
+            .iter()
+            .position(|(_, from, to)| (from, to) == (&want.0, &want.1))
+            .map(|index| cursor + index + 1)
+            .unwrap_or_else(|| {
+                panic!("{point:?}'s {want:?} never followed the earlier transitions: {actual:?}")
+            });
+    }
+}
+
 /// Replaces the run-varying strings inside a serialized value —
 /// monitor, relay, and plant addresses are ephemeral ports — so two
 /// runs' digests compare. Longer strings mask first: one address can
@@ -1474,6 +1512,149 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     assert_eq!(file_entries(&journal_standby), served_standby);
     assert_eq!(file_boundaries(&journal_standby), vec![(1, 0)]);
 
+    // -- Close-out: decision 74's durable lifecycle record -------------
+    // Every `point_changed` entry names a point the model declared
+    // `journaled`; the file's `seq` order is strict across the
+    // restart.
+    let declared: std::collections::BTreeSet<PointId> = model
+        .io_points
+        .iter()
+        .filter(|point| point.journaled)
+        .map(|point| point.id)
+        .collect();
+    assert!(
+        !declared.is_empty(),
+        "the composition declares no journaled points"
+    );
+    for entry in &served {
+        if let JournalEvent::PointChanged { point, .. } = &entry.event {
+            assert!(
+                declared.contains(point),
+                "a `point_changed` entry named undeclared point {point:?}"
+            );
+        }
+    }
+    assert!(
+        served.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+        "the durable record's seq order must be strict across the restart"
+    );
+
+    // Activation, return, and managed-state transitions journaled in
+    // order — the permissive contact's loss and return, the pacing
+    // alarm's assert/clear lifecycle, the mode select's engage and
+    // release, and the protection status the run exercised.
+    let b = Value::Bool;
+    let transitions = |point: PointId| point_changes(&served, point);
+    assert_transitions(
+        layout.flow_proven,
+        &transitions(layout.flow_proven),
+        &[(Some(b(true)), b(false)), (Some(b(false)), b(true))],
+    );
+    assert_transitions(
+        layout.pacing_alarm.alarm,
+        &transitions(layout.pacing_alarm.alarm),
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
+    );
+    assert_transitions(
+        layout.pacing_alarm.unacknowledged,
+        &transitions(layout.pacing_alarm.unacknowledged),
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
+    );
+    assert_transitions(
+        layout.manual_mode,
+        &transitions(layout.manual_mode),
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
+    );
+    assert_transitions(
+        layout.manual_active,
+        &transitions(layout.manual_active),
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
+    );
+    assert_transitions(
+        layout.interlock_tripped,
+        &transitions(layout.interlock_tripped),
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
+    );
+    assert_transitions(
+        layout.deviating,
+        &transitions(layout.deviating),
+        &[(Some(b(false)), b(true))],
+    );
+    assert_transitions(
+        layout.pumps[0].motor_fault,
+        &transitions(layout.pumps[0].motor_fault),
+        &[(Some(b(false)), b(true))],
+    );
+    assert_transitions(
+        layout.pumps[0].avail,
+        &transitions(layout.pumps[0].avail),
+        &[(Some(b(true)), b(false)), (Some(b(false)), b(true))],
+    );
+    // The durable lifecycle persisted across the `--journal-file`
+    // restart: the resumed run re-emitted the carried latch state as
+    // `from: None`, and the post-restart ack landed as the same
+    // record's next transition.
+    assert_transitions(
+        layout.tank_low_alarm.unacknowledged,
+        &transitions(layout.tank_low_alarm.unacknowledged),
+        &[
+            (Some(b(false)), b(true)),
+            (None, b(true)),
+            (Some(b(true)), b(false)),
+        ],
+    );
+    // Beside the attributed receipts, in `seq` order: the mode
+    // write's settle precedes the journaled transition it produced.
+    let mode_settle = served
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::CommandSettled { receipt }
+                    if receipt.command
+                        == (Command::WriteValue {
+                            point: layout.manual_mode,
+                            kind: ValueKind::Bool,
+                            value: b(true),
+                        })
+            )
+        })
+        .expect("the manual-mode write's settle must be journaled");
+    let mode_changed = served
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::PointChanged { point, from: Some(_), to }
+                    if *point == layout.manual_mode && *to == b(true)
+            )
+        })
+        .expect("the manual-mode transition must be journaled");
+    assert!(
+        mode_changed.seq > mode_settle.seq,
+        "the transition must follow its attributed settle in seq order"
+    );
+    // Undeclared points journaled no value transitions — the float
+    // setpoints and measurements, the stroke and count churn, the
+    // delivered request, and the receipts-only ack all stayed off the
+    // durable record.
+    for point in [
+        layout.dose,
+        layout.manual_rate,
+        layout.deviation,
+        layout.pumps[0].stroke,
+        layout.pumps[0].strokes,
+        layout.pumps[0].cmd,
+        layout.pumps[0].group_cmd,
+        layout.pumps[0].speed_eng,
+        layout.tank_low_alarm.ack,
+    ] {
+        assert!(
+            transitions(point).is_empty(),
+            "undeclared point {point:?} journaled a value transition"
+        );
+    }
+
     // Strings that legitimately differ run to run — every address is an
     // ephemeral port — are masked before the digests compare; the
     // assertions above already pinned each value to its named source.
@@ -1497,6 +1678,8 @@ fn run_dosing(tag: &str) -> serde_json::Value {
             "standby_boundaries": file_boundaries(&journal_standby),
             "settled": settled_receipts(&served),
             "standby_roles": role_changes(&standby),
+            "active_file": masked(serde_json::to_value(&served).unwrap(), &masks),
+            "standby_file": masked(serde_json::to_value(&served_standby).unwrap(), &masks),
         },
         "restart": {
             "interrupted_at": interrupted,

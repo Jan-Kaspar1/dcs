@@ -248,6 +248,12 @@ pub struct PumpLayout {
     /// leg's input; monitoring distinguishes the group's request from
     /// the driven `cmd`.
     pub group_cmd: PointId,
+    /// The motor's proven fault carrier — the `fault` output fanned
+    /// out to the group and the alarm, `journaled`.
+    pub fault: PointId,
+    /// The aggregated `avail_i` carrier the group consumes —
+    /// `journaled`.
+    pub avail: PointId,
     /// The `motor` instance's id.
     pub motor: ComponentId,
     /// The motor-fault alarm.
@@ -376,6 +382,10 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
     plant.field_input::<f64>(points::NET_FLOW, net_flow_ch, false);
     let power_fail = plant.field_input::<bool>(points::POWER_FAIL, power_fail_ch, false);
+    // The power-fail contact is a protection-layer reported state —
+    // decision 74's durable record marks it `journaled` so its
+    // transitions land in the journal beside its alarm's.
+    plant.journaled(power_fail);
 
     signal(
         &mut plant,
@@ -446,6 +456,20 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         plant.internal_input::<bool>(PointId(carriers::NONE_AVAILABLE_IN), false, false);
     let all_faulted_in =
         plant.internal_input::<bool>(PointId(carriers::ALL_FAULTED_IN), false, false);
+
+    // The protection-relevant status carriers decision 74's durable
+    // record names — the chain's dry-run and high flags, the failover's
+    // backup-serving state, and the group's availability roll-ups —
+    // marked `journaled` so every transition lands in the journal.
+    for point in [
+        below_cutoff,
+        high_level,
+        backup_active,
+        none_available,
+        all_faulted,
+    ] {
+        plant.journaled(point);
+    }
 
     for (point, name, description) in [
         (
@@ -874,6 +898,13 @@ fn station_alarm<A: AlarmHandles>(
     let ack = plant.internal_input::<bool>(PointId(base), false, true);
     let alarm = plant.internal_output::<bool>(PointId(base + 1), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(base + 2), false);
+    // Decision 74's lifecycle audit: the `alarm`/`unacknowledged`
+    // status points are `journaled` — activation, return, and the
+    // latch's clear all land as durable `point_changed` entries. The
+    // `ack` point stays receipted-only: its writes are already the
+    // attributed record.
+    plant.journaled(alarm);
+    plant.journaled(unacknowledged);
     plant.connect(ack, instance.ack());
     plant.connect(instance.alarm(), alarm);
     plant.connect(instance.unacknowledged(), unacknowledged);
@@ -931,6 +962,12 @@ fn wire_pump(
     let thermal = plant.field_input::<bool>(points::thermal(index), thermal_ch, false);
     let moisture = plant.field_input::<bool>(points::moisture(index), moisture_ch, false);
     let cmd = plant.field_output::<bool>(points::cmd(index), cmd_ch);
+    // The run, thermal, and moisture contacts are the protection
+    // layer's reported states — activation/demand and fault — so the
+    // durable record carries their transitions (decisions 74, 77).
+    plant.journaled(run);
+    plant.journaled(thermal);
+    plant.journaled(moisture);
     signal(
         plant,
         points::draw(index),
@@ -978,10 +1015,15 @@ fn wire_pump(
     plant.connect(run, cmd);
 
     // Writable operator points: manual mode, hand request, out of
-    // service.
+    // service. `mode` and `out_of_service` carry the durable record's
+    // mode-change and managed-state transitions (decisions 74, 75);
+    // `hand` is a demand request — its writes are already the
+    // attributed receipts, so it stays off the journaled set.
     let mode = plant.internal_input::<bool>(PointId(base), false, true);
     let hand = plant.internal_input::<bool>(PointId(base + 1), false, true);
     let oos = plant.internal_input::<bool>(PointId(base + 2), false, true);
+    plant.journaled(mode);
+    plant.journaled(oos);
     signal(
         plant,
         PointId(base),
@@ -1036,6 +1078,12 @@ fn wire_pump(
     let moisture_ok_in = plant.internal_input::<bool>(PointId(base + 27), false, false);
     let avail_carrier = plant.internal_output::<bool>(PointId(base + 28), true);
     let avail_in = plant.internal_input::<bool>(PointId(base + 29), false, false);
+    // The proven fault and the aggregated availability are
+    // protection-relevant status — `journaled` like the contacts
+    // feeding them; the inverted and delivered copies stay off the
+    // record, their sources already carry it.
+    plant.journaled(fault);
+    plant.journaled(avail_carrier);
     for (point, name, description) in [
         (
             base + 3,
@@ -1261,6 +1309,18 @@ fn wire_pump(
     let moisture_ack = plant.internal_input::<bool>(PointId(base + 21), false, true);
     let moisture_alarm_out = plant.internal_output::<bool>(PointId(base + 22), false);
     let moisture_unack_out = plant.internal_output::<bool>(PointId(base + 23), false);
+    // Every alarm's `alarm`/`unacknowledged` status points join the
+    // durable record — decision 74's lifecycle audit.
+    for point in [
+        fault_alarm_out,
+        fault_unack_out,
+        thermal_alarm_out,
+        thermal_unack_out,
+        moisture_alarm_out,
+        moisture_unack_out,
+    ] {
+        plant.journaled(point);
+    }
     plant.connect(fault_ack, &fault_alarm.ack);
     plant.connect(&fault_alarm.alarm, fault_alarm_out);
     plant.connect(&fault_alarm.unacknowledged, fault_unack_out);
@@ -1336,6 +1396,8 @@ fn wire_pump(
         hand: PointId(base + 1),
         out_of_service: PointId(base + 2),
         group_cmd: PointId(base + 3),
+        fault: PointId(base + 12),
+        avail: PointId(base + 28),
         motor: motor.id,
         fault_alarm: AlarmLayout {
             component: fault_alarm.id,

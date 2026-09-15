@@ -679,6 +679,13 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
     let bund_flood = plant.field_input::<bool>(points::BUND_FLOOD, bund_flood_ch, false);
     let external_inhibit =
         plant.field_input::<bool>(points::EXTERNAL_INHIBIT, external_inhibit_ch, false);
+    // The permissive contacts are the protection layer's reported
+    // states — decision 74's durable record marks them `journaled` so
+    // their transitions land in the journal beside the alarms and
+    // trips they raise.
+    plant.journaled(flow_proven);
+    plant.journaled(bund_flood);
+    plant.journaled(external_inhibit);
 
     signal(
         &mut plant,
@@ -817,6 +824,10 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
     // the held values cross checkpoints.
     let dose = plant.internal_input::<f64>(PointId(carriers::DOSE), config.initial_dose, true);
     let manual_mode = plant.internal_input::<bool>(PointId(carriers::MANUAL_MODE), false, true);
+    // The mode select is decision 75's mode-change point — `journaled`
+    // so the transition is durable beside its receipt; the float
+    // setpoints can't carry the flag (`JournaledFloat`).
+    plant.journaled(manual_mode);
     let manual_rate = plant.internal_input::<f64>(PointId(carriers::MANUAL_RATE), 0.0, true);
     let totalizer_reset =
         plant.internal_input::<bool>(PointId(carriers::TOTALIZER_RESET), false, true);
@@ -825,6 +836,26 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
     let deviation = plant.internal_output::<f64>(PointId(carriers::DEVIATION), 0.0);
     let deviating = plant.internal_output::<bool>(PointId(carriers::DEVIATING), false);
     let deviating_in = plant.internal_input::<bool>(PointId(carriers::DEVIATING_IN), false, false);
+
+    // Decision 74's durable record: the fallback-engaged flag, the
+    // group's availability roll-ups, the aggregated permissive, the
+    // interlock's trip flag, the manual station's selection report
+    // (decision 75's mode-change point), and the dose-not-confirmed
+    // flag are the skid's protection-relevant status carriers — each
+    // `journaled`. The inverted legs, delivered copies, and the
+    // demand-side carriers stay off the record; the measurement and
+    // demand points keep the history-ring-only path.
+    for point in [
+        fallback_active,
+        none_available,
+        dosing_permitted,
+        interlock_tripped,
+        manual_active,
+        all_faulted,
+        deviating,
+    ] {
+        plant.journaled(point);
+    }
 
     for (point, name, unit, description) in [
         (
@@ -1520,6 +1551,13 @@ fn skid_alarm<A: SkidAlarmPorts>(
     let ack = plant.internal_input::<bool>(PointId(base), false, true);
     let alarm = plant.internal_output::<bool>(PointId(base + 1), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(base + 2), false);
+    // Decision 74's lifecycle audit: the `alarm`/`unacknowledged`
+    // status points are `journaled` — activation, return, and the
+    // latch's clear all land as durable `point_changed` entries. The
+    // `ack` point stays receipted-only: its writes are already the
+    // attributed record.
+    plant.journaled(alarm);
+    plant.journaled(unacknowledged);
     plant.connect(ack, instance.ack());
     plant.connect(instance.alarm(), alarm);
     plant.connect(instance.unacknowledged(), unacknowledged);
@@ -1586,6 +1624,13 @@ fn wire_pump(
     let local = plant.field_input::<bool>(points::local(index), local_ch, false);
     let pfault = plant.field_input::<bool>(points::pump_fault(index), pfault_ch, false);
     let stroke = plant.field_input::<bool>(points::stroke(index), stroke_ch, false);
+    // `run` is the activation state, `local` the authority state, and
+    // `pfault` the pump's fault contact — the protection layer's
+    // reported states, journaled per decisions 74 and 77. The stroke
+    // pulse is per-stroke churn — history-ring-only.
+    plant.journaled(run);
+    plant.journaled(local);
+    plant.journaled(pfault);
     let cmd = plant.field_output::<bool>(points::cmd(index), cmd_ch);
     let speed = plant.field_output::<f64>(points::speed(index), speed_ch);
     for (point, name, unit, description) in [
@@ -1639,8 +1684,10 @@ fn wire_pump(
     plant.connect(run, cmd);
 
     // Writable operator points: out of service and the stroke-counter
-    // reset.
+    // reset. `out_of_service` is the equipment's managed-state flag —
+    // journaled; the reset pulse rides its attributed receipt.
     let oos = plant.internal_input::<bool>(PointId(base + pump_point::OUT_OF_SERVICE), false, true);
+    plant.journaled(oos);
     let stroke_reset =
         plant.internal_input::<bool>(PointId(base + pump_point::STROKE_RESET), false, true);
     signal(
@@ -1693,6 +1740,13 @@ fn wire_pump(
     let speed_eng_in =
         plant.internal_input::<f64>(PointId(base + pump_point::SPEED_ENG_IN), 0.0, false);
     let speed_gated = plant.internal_output::<bool>(PointId(base + pump_point::SPEED_GATED), false);
+    // The aggregated availability, the proven motor fault, and the
+    // speed interlock's gated flag are protection-relevant status —
+    // `journaled`; the inverted legs and delivered copies stay off the
+    // record, their sources already carry it.
+    plant.journaled(avail_carrier);
+    plant.journaled(motor_fault);
+    plant.journaled(speed_gated);
     let strokes = plant.internal_output::<i64>(PointId(base + pump_point::STROKES), 0);
     let strokes_done =
         plant.internal_output::<bool>(PointId(base + pump_point::STROKES_DONE), false);
@@ -1918,6 +1972,16 @@ fn wire_pump(
         plant.internal_output::<bool>(PointId(base + pump_point::PFAULT_ALARM), false);
     let pfault_unack_out =
         plant.internal_output::<bool>(PointId(base + pump_point::PFAULT_UNACK), false);
+    // Every alarm's `alarm`/`unacknowledged` status points join the
+    // durable record — decision 74's lifecycle audit.
+    for point in [
+        fault_alarm_out,
+        fault_unack_out,
+        pfault_alarm_out,
+        pfault_unack_out,
+    ] {
+        plant.journaled(point);
+    }
     plant.connect(fault_ack, &fault_alarm.ack);
     plant.connect(&fault_alarm.alarm, fault_alarm_out);
     plant.connect(&fault_alarm.unacknowledged, fault_unack_out);

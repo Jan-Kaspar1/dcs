@@ -442,6 +442,95 @@ fn document_serde_roundtrips() {
 }
 
 #[test]
+fn journaled_marks_the_durable_record_points() {
+    // Decision 74's sweep: every alarm's `alarm`/`unacknowledged`
+    // status points, the mode and managed-state flags decision 75
+    // names, and the protection-relevant status points the
+    // composition carries are declared `journaled` — their value
+    // transitions join the durable journal as `point_changed`
+    // entries. The flag stays opt-in: receipts, demand copies, and
+    // the float measurements keep their own paths.
+    let emitted = emit();
+    let layout = &emitted.layout;
+    let journaled = |point: PointId| {
+        emitted
+            .model
+            .io_points
+            .iter()
+            .find(|io| io.id == point)
+            .unwrap_or_else(|| panic!("{point:?} is not in the emitted model"))
+            .journaled
+    };
+
+    let mut record = vec![
+        layout.power_fail,
+        layout.below_cutoff,
+        layout.high_level,
+        layout.backup_active,
+        layout.none_available,
+        layout.all_faulted,
+    ];
+    let mut off_record = vec![
+        layout.level_primary,
+        layout.level_backup,
+        layout.level_selected,
+        layout.inflow,
+        layout.net_flow,
+        layout.demand,
+        layout.duty,
+        layout.staged,
+        layout.duty_call,
+        layout.lag_call,
+    ];
+    for alarm in [
+        &layout.high_level_alarm,
+        &layout.low_level_alarm,
+        &layout.backup_active_alarm,
+        &layout.none_available_alarm,
+        &layout.all_faulted_alarm,
+        &layout.power_fail_alarm,
+    ] {
+        record.extend([alarm.alarm, alarm.unacknowledged]);
+        // The ack point's writes are already the attributed,
+        // receipted record — it stays off the journaled set.
+        off_record.push(alarm.ack);
+    }
+    for pump in &layout.pumps {
+        record.extend([
+            pump.run,
+            pump.thermal,
+            pump.moisture,
+            pump.mode,
+            pump.out_of_service,
+            pump.fault,
+            pump.avail,
+        ]);
+        off_record.extend([pump.cmd, pump.draw, pump.hand, pump.group_cmd]);
+        for alarm in [&pump.fault_alarm, &pump.thermal_alarm, &pump.moisture_alarm] {
+            record.extend([alarm.alarm, alarm.unacknowledged]);
+            off_record.push(alarm.ack);
+        }
+    }
+    for point in &record {
+        assert!(journaled(*point), "{point:?} must carry `journaled`");
+    }
+    for point in &off_record {
+        assert!(!journaled(*point), "{point:?} must stay off the record");
+    }
+
+    // The durable record is bool/int-only: no float point may carry
+    // the flag — validation reports `JournaledFloat`.
+    for point in &emitted.model.io_points {
+        if point.journaled {
+            assert!(
+                matches!(point.value_type, ValueKind::Bool | ValueKind::Int),
+                "a journaled float slipped in: {point:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn identical_builds_emit_identical_documents() {
     let first = emit().model;
     let second = emit().model;
