@@ -495,6 +495,7 @@ mod tests {
             id: ComponentId(9),
             kind: Valve::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut valve =

@@ -721,7 +721,15 @@
       "parameters": {
         "low_limit": { "float": 10.0 },
         "high_limit": { "float": 95.0 },
-        "hysteresis": { "float": 2.0 }
+        "hysteresis": { "float": 2.0 },
+        "priority": { "int": 1 },
+        "class": { "int": 1 },
+        "response_ticks": { "int": 30 }
+      },
+      "rationalization": {
+        "consequence": "The tank level stands out of limits unnoticed",
+        "required_action": "Acknowledge and investigate the level excursion",
+        "reference": "level-alarm-latched"
       },
       "ports": {
         "in": { "direction": "in", "value_type": "float" },

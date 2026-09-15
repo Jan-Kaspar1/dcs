@@ -196,6 +196,28 @@ fn check_names_a_port_binding_failure() {
 }
 
 #[test]
+fn check_names_an_alarm_rationalization_failure() {
+    // Decision 70: a declared alarm kind fails construction when the
+    // instance's required rationalization data is absent or empty —
+    // the rejection names the offending element.
+    for (fixture, element) in [
+        ("alarm_missing_rationalization.json", "\"rationalization\""),
+        ("alarm_empty_rationalization.json", "\"required_action\""),
+        ("alarm_missing_priority.json", "\"priority\""),
+        ("alarm_missing_response_ticks.json", "\"response_ticks\""),
+    ] {
+        let path = format!("{INVALID}/{fixture}");
+        let output = run(&[&path, "--check"]);
+        assert!(!output.status.success(), "{fixture} unexpectedly checked");
+        let message = stderr(&output);
+        assert!(
+            message.contains("component 2") && message.contains(element),
+            "{fixture}: {message}"
+        );
+    }
+}
+
+#[test]
 fn check_names_a_parameter_failure() {
     // A component constructor rejecting the instance's parameters.
     let path = format!("{INVALID}/bad_parameters.json");

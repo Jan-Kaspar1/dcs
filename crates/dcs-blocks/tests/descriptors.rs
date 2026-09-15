@@ -11,8 +11,8 @@ use dcs_blocks::{
     Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
     ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid,
     PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
-    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer,
-    Valve, ZoneIo,
+    Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch,
+    Timer, Totalizer, Valve, ZoneIo,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -190,6 +190,11 @@ fn rig() -> Rig {
                     high: 90.0,
                     hysteresis: 5.0,
                 },
+                Rationalization {
+                    priority: 1,
+                    class: 2,
+                    response_ticks: 30,
+                },
             )
             .unwrap(),
         ),
@@ -319,6 +324,11 @@ fn rig() -> Rig {
             point(&mut specs, 251, Direction::In, ValueKind::Bool),
             point(&mut specs, 252, Direction::Out, ValueKind::Bool),
             point(&mut specs, 253, Direction::Out, ValueKind::Bool),
+            Rationalization {
+                priority: 1,
+                class: 2,
+                response_ticks: 30,
+            },
         )),
         // The managed siblings, fully bound — `in`/`ack` plus the
         // `shelve`/`oos`/`suppress` inputs and the five status outputs.
@@ -542,9 +552,8 @@ fn snapshot_reports_every_kind_descriptor_in_scan_order() {
         .filter(|descriptor| !descriptor.parameters.is_empty())
         .map(|descriptor| descriptor.name.as_str())
         .collect();
-    // OverrideSelect, SrLatch, and BoolLatchingAlarm are the rig's
-    // parameterless kinds.
-    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 3);
+    // OverrideSelect and SrLatch are the rig's parameterless kinds.
+    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 2);
 }
 
 #[test]
@@ -583,8 +592,8 @@ fn reported_parameters_match_each_kinds_declared_set() {
         let reported: BTreeSet<&str> = parameters.values.keys().map(String::as_str).collect();
         assert_eq!(reported, declared, "{}", descriptor.name);
     }
-    // OverrideSelect, SrLatch, and BoolLatchingAlarm declare no
-    // parameters and report an empty set.
+    // OverrideSelect and SrLatch declare no parameters and report an
+    // empty set; BoolLatchingAlarm reports the decision-70 codes.
     let ovr = &snapshot.parameters[7];
     assert_eq!(ovr.name, "ovr");
     assert!(ovr.values.is_empty());
@@ -593,7 +602,9 @@ fn reported_parameters_match_each_kinds_declared_set() {
     assert!(srl.values.is_empty());
     let bal = &snapshot.parameters[23];
     assert_eq!(bal.name, "bal");
-    assert!(bal.values.is_empty());
+    assert_eq!(bal.values["priority"], Value::Int(1));
+    assert_eq!(bal.values["class"], Value::Int(2));
+    assert_eq!(bal.values["response_ticks"], Value::Int(30));
 }
 
 #[test]

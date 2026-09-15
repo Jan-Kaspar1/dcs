@@ -69,7 +69,7 @@ pub use drivers::{
     DriverRegistry, FanoutDriver, SIM_BUS_KIND, SIM_SCRIPTED_KIND, SIM_TCP_KIND, StepError,
     StepHook, resolve_drivers,
 };
-pub use error::{AssemblyError, BuildError, InternalPointError};
+pub use error::{AssemblyError, BuildError, InternalPointError, MissingRationalization};
 pub use registry::{ComponentRegistry, ComponentSpec};
 
 /// The engineer-facing integration guide: adding component kinds and

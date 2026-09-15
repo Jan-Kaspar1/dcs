@@ -692,6 +692,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block =

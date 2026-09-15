@@ -555,6 +555,7 @@ mod tests {
             id: ComponentId(6),
             kind: AlarmMonitor::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block =

@@ -25,9 +25,28 @@ use dcs_build::specs::{
     RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
     TotalizerSpec, ValveSpec,
 };
-use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
+use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
 use dcs_model::PlantModel;
+
+/// A complete decision-70 record — the alarm specs' required typed
+/// argument a composed plant cannot omit.
+fn record() -> Rationalization {
+    Rationalization {
+        consequence: "c".to_string(),
+        required_action: "a".to_string(),
+        reference: "r".to_string(),
+    }
+}
+
+/// The decision-70 rationalization codes both latching kinds require.
+fn rationalization_codes() -> dcs_build::Parameters {
+    parameters([
+        ("priority", Value::Int(1)),
+        ("class", Value::Int(2)),
+        ("response_ticks", Value::Int(30)),
+    ])
+}
 
 /// Builds `plant`, reloads the emitted document through `dcs-model`'s
 /// loader — which validates it — and assembles it through the standard
@@ -53,11 +72,13 @@ fn latching_alarm_spec_emits_an_assembling_document() {
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let lal = plant.add(LatchingAlarmSpec::new(parameters([
+    let mut parameter_map = parameters([
         ("low_limit", Value::Float(10.0)),
         ("high_limit", Value::Float(90.0)),
         ("hysteresis", Value::Float(5.0)),
-    ])));
+    ]);
+    parameter_map.extend(rationalization_codes());
+    let lal = plant.add(LatchingAlarmSpec::new(parameter_map, record()));
     plant.connect(pv, lal.input);
     plant.connect(ack, lal.ack);
     plant.connect(&lal.alarm, alarm);
@@ -65,6 +86,15 @@ fn latching_alarm_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, LatchingAlarmSpec::KIND);
+    // The emitted instance carries the decision-70 record.
+    assert_eq!(
+        model.components[0].rationalization,
+        Some(Rationalization {
+            consequence: "c".to_string(),
+            required_action: "a".to_string(),
+            reference: "r".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -78,7 +108,10 @@ fn bool_latching_alarm_spec_emits_an_assembling_document() {
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let bal = plant.add(BoolLatchingAlarmSpec::new(Default::default()));
+    let bal = plant.add(BoolLatchingAlarmSpec::new(
+        rationalization_codes(),
+        record(),
+    ));
     plant.connect(input, bal.input);
     plant.connect(ack, bal.ack);
     plant.connect(&bal.alarm, alarm);
@@ -86,24 +119,30 @@ fn bool_latching_alarm_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, BoolLatchingAlarmSpec::KIND);
-    assert!(model.components[0].parameters.is_empty());
+    // The emitted instance carries the codes and the record.
+    assert_eq!(
+        model.components[0].parameters.len(),
+        3,
+        "the declared set is exactly the rationalization codes"
+    );
+    assert!(model.components[0].rationalization.is_some());
 }
 
 #[test]
 fn bool_latching_alarm_rejects_an_undeclared_parameter() {
-    // The kind declares no parameters: a stray key — a `latching-alarm`
-    // tunable carried onto the Bool sibling, say — is `UnknownParameter`
-    // naming the key at `build`, before the document exists.
+    // The declared set is exactly the rationalization codes: a stray
+    // key — a `latching-alarm` tunable carried onto the Bool sibling,
+    // say — is `UnknownParameter` naming the key at `build`, before the
+    // document exists.
     let mut plant = PlantBuilder::new();
     let input = plant.internal_input::<bool>(PointId(10), false, true);
     let ack = plant.internal_input::<bool>(PointId(11), false, true);
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let bal = plant.add(BoolLatchingAlarmSpec::new(parameters([(
-        "hysteresis",
-        Value::Float(0.5),
-    )])));
+    let mut parameter_map = rationalization_codes();
+    parameter_map.insert("hysteresis".to_string(), Value::Float(0.5));
+    let bal = plant.add(BoolLatchingAlarmSpec::new(parameter_map, record()));
     plant.connect(input, bal.input);
     plant.connect(ack, bal.ack);
     plant.connect(&bal.alarm, alarm);
@@ -112,6 +151,30 @@ fn bool_latching_alarm_rejects_an_undeclared_parameter() {
     assert!(matches!(
         plant.build(),
         Err(BuildError::UnknownParameter { ref parameter, .. }) if parameter == "hysteresis"
+    ));
+}
+
+#[test]
+fn bool_latching_alarm_rejects_a_missing_rationalization_code() {
+    // The codes are required declared data: a map missing
+    // `response_ticks` is `MissingParameter` naming the key at `build`.
+    let mut plant = PlantBuilder::new();
+    let input = plant.internal_input::<bool>(PointId(10), false, true);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(12), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
+
+    let mut parameter_map = rationalization_codes();
+    parameter_map.remove("response_ticks");
+    let bal = plant.add(BoolLatchingAlarmSpec::new(parameter_map, record()));
+    plant.connect(input, bal.input);
+    plant.connect(ack, bal.ack);
+    plant.connect(&bal.alarm, alarm);
+    plant.connect(&bal.unacknowledged, unacknowledged);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::MissingParameter { ref parameter, .. }) if parameter == "response_ticks"
     ));
 }
 
@@ -149,7 +212,11 @@ fn managed_latching_plant(
     let suppressed = plant.internal_output::<bool>(PointId(23), false);
     let out_of_service = plant.internal_output::<bool>(PointId(24), false);
 
-    let mla = plant.add(ManagedLatchingAlarmSpec::new(parameters_map, managed));
+    let mla = plant.add(ManagedLatchingAlarmSpec::new(
+        parameters_map,
+        managed,
+        record(),
+    ));
     plant.connect(pv, mla.input);
     plant.connect(ack, mla.ack);
     if let Some(shelve_port) = mla.managed.shelve {
@@ -245,6 +312,7 @@ fn managed_bool_latching_alarm_spec_emits_an_assembling_document() {
             oos: true,
             suppress: true,
         },
+        record(),
     ));
     plant.connect(input, mbal.input);
     plant.connect(ack, mbal.ack);
@@ -280,6 +348,7 @@ fn managed_bool_latching_alarm_rejects_an_undeclared_parameter() {
     let mbal = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters_map,
         ManagedInputs::default(),
+        record(),
     ));
     plant.connect(input, mbal.input);
     plant.connect(ack, mbal.ack);

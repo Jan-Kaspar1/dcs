@@ -60,7 +60,28 @@ fn invalid_expectations() -> std::collections::BTreeMap<&'static str, (bool, boo
         // dcs-assembly's invalid corpus fails at assembly, not at `load`.
         // The schema still rejects the two whose known device-kind
         // parameter shape is broken: a `sim-tcp` without `address` and a
-        // `sim-bus` register index past u16.
+        // `sim-bus` register index past u16. The decision-70 alarm
+        // fixtures fail construction — the missing record and the missing
+        // parameters are also schema-visible through the kind-conditional
+        // `then`; a whitespace-only prose field is not, so it keeps its
+        // (accepted, accepted) verdicts for the construction seam to
+        // reject.
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_empty_rationalization.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_priority.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_rationalization.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_response_ticks.json",
+            (false, true),
+        ),
         (
             "crates/dcs-assembly/fixtures/invalid/bad_device_parameters.json",
             (false, true),
@@ -240,6 +261,90 @@ fn schema_rejects_documents_with_structural_violations() {
         assert!(
             !validator.is_valid(document),
             "case {index} unexpectedly valid: {document}"
+        );
+    }
+}
+
+#[test]
+fn schema_pins_the_alarm_rationalization_obligation() {
+    // Decision 70's kind-conditional rule: the known alarm kinds must
+    // carry the `rationalization` block and the `priority`/`class`/
+    // `response_ticks` parameters; other kinds may omit the block.
+    let schema = PlantModel::json_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let model = |component: serde_json::Value| {
+        serde_json::json!({
+            "version": 1, "devices": [], "io_points": [], "signals": [],
+            "components": [component], "connections": []
+        })
+    };
+    let alarm_parameters = serde_json::json!({
+        "priority": {"int": 1},
+        "class": {"int": 2},
+        "response_ticks": {"int": 30}
+    });
+    let record = serde_json::json!({
+        "consequence": "The wet well overflows",
+        "required_action": "Start the standby pump",
+        "reference": "station-high-level"
+    });
+
+    // A fully rationalized alarm validates, and a non-alarm kind may
+    // omit the block entirely.
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "latching-alarm", "parameters": alarm_parameters,
+        "rationalization": record, "ports": {}
+    }))));
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "motor", "parameters": {}, "ports": {}
+    }))));
+
+    for kind in [
+        "latching-alarm",
+        "bool-latching-alarm",
+        "managed-latching-alarm",
+        "managed-bool-latching-alarm",
+    ] {
+        // The record is obligatory...
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": alarm_parameters, "ports": {}
+            }))),
+            "{kind}: missing rationalization unexpectedly valid"
+        );
+        // ... as is the parameter basis.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": {
+                    "priority": {"int": 1}, "response_ticks": {"int": 30}
+                },
+                "rationalization": record, "ports": {}
+            }))),
+            "{kind}: missing `class` unexpectedly valid"
+        );
+        // A negative code fails the non-negative bound.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind,
+                "parameters": {
+                    "priority": {"int": -1}, "class": {"int": 2},
+                    "response_ticks": {"int": 30}
+                },
+                "rationalization": record, "ports": {}
+            }))),
+            "{kind}: negative priority unexpectedly valid"
+        );
+        // An empty prose field fails the record's own rule.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": alarm_parameters,
+                "rationalization": {
+                    "consequence": "", "required_action": "Respond",
+                    "reference": "ref"
+                },
+                "ports": {}
+            }))),
+            "{kind}: empty consequence unexpectedly valid"
         );
     }
 }

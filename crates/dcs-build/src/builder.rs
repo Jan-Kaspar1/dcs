@@ -400,6 +400,7 @@ impl PlantBuilder {
             id,
             kind: spec.kind().to_string(),
             parameters: spec.parameter_values().clone(),
+            rationalization: spec.rationalization().cloned(),
             ports: spec
                 .ports()
                 .into_iter()

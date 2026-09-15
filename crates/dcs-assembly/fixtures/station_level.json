@@ -379,7 +379,16 @@
     {
       "id": 4,
       "kind": "bool-latching-alarm",
-      "parameters": {},
+      "parameters": {
+        "priority": { "int": 2 },
+        "class": { "int": 1 },
+        "response_ticks": { "int": 30 }
+      },
+      "rationalization": {
+        "consequence": "The backup level measurement carries the station unnoticed",
+        "required_action": "Check the primary level instrument",
+        "reference": "backup-mode-alarm"
+      },
       "ports": {
         "in": { "direction": "in", "value_type": "bool" },
         "ack": { "direction": "in", "value_type": "bool" },

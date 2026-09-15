@@ -322,6 +322,7 @@ mod tests {
             id: ComponentId(1),
             kind: FailoverSelect::KIND.to_string(),
             parameters: Parameters::new(),
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         FailoverSelect::from_parameters("fsel", PRIMARY, BACKUP, OUT, ACTIVE, &instance.parameters)

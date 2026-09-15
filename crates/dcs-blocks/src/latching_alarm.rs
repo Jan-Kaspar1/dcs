@@ -4,6 +4,7 @@
 use crate::alarm_monitor::{Alarm, AlarmLimits};
 use crate::describe;
 use crate::params::{ParameterError, Parameters};
+use crate::rationalization::Rationalization;
 use dcs_core::{
     CommandError, ComponentDescriptor, PointId, PortRole, Quality, QualityReason, Sample,
     StateError, StateMap, Tick, Value, ValueKind,
@@ -46,7 +47,11 @@ use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepErr
 /// Parameters: shared with [`AlarmMonitor`](crate::AlarmMonitor) —
 /// `low_limit` and `high_limit` required finite `Float` or losslessly
 /// representable `Int`, `low_limit < high_limit`; `hysteresis` optional,
-/// finite and non-negative, default `0.0`.
+/// finite and non-negative, default `0.0` — plus the decision-70
+/// rationalization codes `priority`, `class`, and `response_ticks`,
+/// required non-negative `Int`s. The instance's `rationalization` prose
+/// block is a separate obligation the registry checks where kind and
+/// instance meet.
 #[derive(Debug)]
 pub struct LatchingAlarm {
     name: String,
@@ -55,6 +60,7 @@ pub struct LatchingAlarm {
     alarm: PointId,
     unacknowledged: PointId,
     limits: AlarmLimits,
+    rationalization: Rationalization,
     state: Alarm,
     /// The acknowledgment latch: set on a fresh trip, cleared while
     /// `ack` reads `true`.
@@ -66,8 +72,9 @@ impl LatchingAlarm {
     /// type's constructor.
     pub const KIND: &'static str = "latching-alarm";
 
-    /// Builds the component from explicit points and limits, or reports
-    /// the limits' inconsistency as a [`ParameterError`].
+    /// Builds the component from explicit points, limits, and the
+    /// declared rationalization codes, or reports the limits'
+    /// inconsistency as a [`ParameterError`].
     pub fn new(
         name: impl Into<String>,
         input: PointId,
@@ -75,6 +82,7 @@ impl LatchingAlarm {
         alarm: PointId,
         unacknowledged: PointId,
         limits: AlarmLimits,
+        rationalization: Rationalization,
     ) -> Result<Self, ParameterError> {
         let name = name.into();
         Ok(Self {
@@ -84,13 +92,15 @@ impl LatchingAlarm {
             ack,
             alarm,
             unacknowledged,
+            rationalization,
             state: Alarm::Clear,
             latched: false,
         })
     }
 
     /// Builds the component from a plant-model parameter map, reading the
-    /// parameters listed on the type's docs.
+    /// parameters listed on the type's docs — the limits plus the
+    /// required rationalization codes.
     pub fn from_parameters(
         name: impl Into<String>,
         input: PointId,
@@ -101,7 +111,16 @@ impl LatchingAlarm {
     ) -> Result<Self, ParameterError> {
         let name = name.into();
         let limits = AlarmLimits::from_parameters(&name, parameters)?;
-        Self::new(name, input, ack, alarm, unacknowledged, limits)
+        let rationalization = Rationalization::from_parameters(&name, parameters)?;
+        Self::new(
+            name,
+            input,
+            ack,
+            alarm,
+            unacknowledged,
+            limits,
+            rationalization,
+        )
     }
 }
 
@@ -145,9 +164,19 @@ impl Component for LatchingAlarm {
     /// Describes the block: `in` is the measured process value checked
     /// against the limits, `ack` the operator's clearing command,
     /// `alarm` the reported trip state, `unacknowledged` the reported
-    /// latch; the shared limit and hysteresis parameters
-    /// `from_parameters` reads.
+    /// latch; the shared limit and hysteresis parameters plus the
+    /// decision-70 rationalization codes `from_parameters` reads.
     fn describe(&self) -> ComponentDescriptor {
+        let mut parameters = vec![
+            describe::parameter("low_limit", ValueKind::Float, Some(describe::FINITE_F64)),
+            describe::parameter("high_limit", ValueKind::Float, Some(describe::FINITE_F64)),
+            describe::parameter(
+                "hysteresis",
+                ValueKind::Float,
+                Some(describe::NONNEGATIVE_F64),
+            ),
+        ];
+        parameters.extend(Rationalization::parameters());
         describe::component(
             &self.name,
             Self::KIND,
@@ -158,42 +187,40 @@ impl Component for LatchingAlarm {
                 ("alarm", PortRole::Status),
                 ("unacknowledged", PortRole::Status),
             ],
-            vec![
-                describe::parameter("low_limit", ValueKind::Float, Some(describe::FINITE_F64)),
-                describe::parameter("high_limit", ValueKind::Float, Some(describe::FINITE_F64)),
-                describe::parameter(
-                    "hysteresis",
-                    ValueKind::Float,
-                    Some(describe::NONNEGATIVE_F64),
-                ),
-            ],
+            parameters,
         )
     }
 
-    /// Tunes a declared limit parameter at the scan boundary — the same
-    /// tunables and invariants [`AlarmMonitor`](crate::AlarmMonitor)
-    /// accepts, including the `low_limit < high_limit` ordering a
-    /// declared range cannot express.
+    /// Tunes a declared parameter at the scan boundary — the limits with
+    /// the same invariants [`AlarmMonitor`](crate::AlarmMonitor)
+    /// accepts, the rationalization codes as non-negative `Int`s.
     fn apply_parameter(&mut self, parameter: &str, value: Value) -> Result<(), CommandError> {
-        self.limits = self.limits.tune(&self.name, parameter, value)?;
+        match parameter {
+            "priority" | "class" | "response_ticks" => {
+                self.rationalization = self.rationalization.tune(&self.name, parameter, value)?;
+            }
+            _ => self.limits = self.limits.tune(&self.name, parameter, value)?,
+        }
         Ok(())
     }
 
-    /// Reports the declared limit tuning — the same fields
-    /// [`capture_state`](Self::capture_state) checkpoints, so the
-    /// faceplate and a tracking standby read one vocabulary.
+    /// Reports the declared limit tuning and the rationalization codes —
+    /// the same fields [`capture_state`](Self::capture_state)
+    /// checkpoints, so the faceplate and a tracking standby read one
+    /// vocabulary.
     fn report_parameters(&self) -> StateMap {
         let mut parameters = StateMap::new();
         parameters.insert("low_limit", Value::Float(self.limits.low));
         parameters.insert("high_limit", Value::Float(self.limits.high));
         parameters.insert("hysteresis", Value::Float(self.limits.hysteresis));
+        self.rationalization.report(&mut parameters);
         parameters
     }
 
     /// Captures the limit state, the acknowledgment latch — so a
     /// tracking standby inherits unacknowledged alarms — and the tuned
-    /// limits, sharing [`AlarmMonitor`](crate::AlarmMonitor)'s `state`
-    /// encoding.
+    /// parameters, sharing [`AlarmMonitor`](crate::AlarmMonitor)'s
+    /// `state` encoding.
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
@@ -210,6 +237,9 @@ impl Component for LatchingAlarm {
                 "low_limit",
                 "high_limit",
                 "hysteresis",
+                "priority",
+                "class",
+                "response_ticks",
             ],
         )?;
         let restored = Alarm::from_code(&self.name, state.require_i64(&self.name, "state")?)?;
@@ -222,6 +252,7 @@ impl Component for LatchingAlarm {
         // The same invariants `new` and `apply_parameter` enforce.
         limits.check_restored(&self.name)?;
         self.limits = limits;
+        self.rationalization = Rationalization::restore(&self.name, state)?;
         self.state = restored;
         self.latched = latched;
         Ok(())
@@ -241,6 +272,13 @@ mod tests {
     const ALARM: PointId = PointId(142);
     const UNACK: PointId = PointId(143);
 
+    /// The rationalization codes the tests build against.
+    const RATIONALIZATION: Rationalization = Rationalization {
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+
     /// Limits 10 <= low, 90 <= high with a 5-unit hysteresis.
     fn component() -> LatchingAlarm {
         LatchingAlarm::new(
@@ -254,6 +292,7 @@ mod tests {
                 high: 90.0,
                 hysteresis: 5.0,
             },
+            RATIONALIZATION,
         )
         .unwrap()
     }
@@ -553,6 +592,15 @@ mod tests {
             Err(StateError::MissingField { ref field, .. }) if field == "unacknowledged"
         ));
 
+        // A negative rationalization code in the checkpoint is named —
+        // a rejected restore changes nothing.
+        let mut state = block.capture_state();
+        state.insert("priority", Value::Int(-1));
+        assert!(matches!(
+            block.restore_state(&state),
+            Err(StateError::InvalidValue { ref field, .. }) if field == "priority"
+        ));
+
         // A field the kind never captured is rejected, not ignored.
         let mut state = block.capture_state();
         state.insert("trip_count", Value::Int(3));
@@ -568,6 +616,9 @@ mod tests {
             ("low_limit".to_string(), Value::Int(10)),
             ("high_limit".to_string(), Value::Int(90)),
             ("hysteresis".to_string(), Value::Float(5.0)),
+            ("priority".to_string(), Value::Int(1)),
+            ("class".to_string(), Value::Int(2)),
+            ("response_ticks".to_string(), Value::Int(30)),
         ]
         .into_iter()
         .collect();
@@ -575,6 +626,7 @@ mod tests {
             id: ComponentId(12),
             kind: LatchingAlarm::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block =
@@ -588,6 +640,7 @@ mod tests {
                 hysteresis: 5.0,
             }
         );
+        assert_eq!(block.rationalization, RATIONALIZATION);
 
         let io = io();
         step(&mut block, &io, 95.0, false, 1);
@@ -634,6 +687,16 @@ mod tests {
                 .unwrap_err(),
             ParameterError::Invalid { ref parameter, .. } if parameter == "high_limit"
         ));
+
+        // The rationalization codes are required too — a map carrying
+        // the limits but no `priority` names it.
+        let mut unrationalized = instance.parameters.clone();
+        unrationalized.remove("priority");
+        assert!(matches!(
+            LatchingAlarm::from_parameters("lal", IN, ACK, ALARM, UNACK, &unrationalized)
+                .unwrap_err(),
+            ParameterError::Missing { ref parameter, .. } if parameter == "priority"
+        ));
     }
 
     #[test]
@@ -647,6 +710,18 @@ mod tests {
             .unwrap();
         assert_eq!(block.limits.high, 80.0);
         assert_eq!(block.limits.hysteresis, 2.0);
+
+        // The rationalization codes tune as non-negative Ints.
+        block.apply_parameter("priority", Value::Int(3)).unwrap();
+        assert_eq!(block.rationalization.priority, 3);
+        assert_eq!(
+            block.apply_parameter("class", Value::Int(-1)).unwrap_err(),
+            CommandError::InvalidParameter {
+                component: "lal".to_string(),
+                parameter: "class".to_string(),
+                detail: "must be non-negative".to_string(),
+            }
+        );
 
         let io = io();
         step(&mut block, &io, 85.0, false, 1);
@@ -735,6 +810,21 @@ mod tests {
                     name: "hysteresis".to_string(),
                     kind: ValueKind::Float,
                     range: Some(describe::NONNEGATIVE_F64),
+                },
+                ParameterDescriptor {
+                    name: "priority".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+                ParameterDescriptor {
+                    name: "class".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
+                },
+                ParameterDescriptor {
+                    name: "response_ticks".to_string(),
+                    kind: ValueKind::Int,
+                    range: Some(describe::NONNEGATIVE_INT),
                 },
             ]
         );

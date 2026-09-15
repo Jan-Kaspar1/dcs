@@ -20,7 +20,7 @@
 
 use crate::endpoint::{Dynamic, Sink, Source};
 use dcs_core::{Direction, ParameterRange, Value, ValueKind};
-use dcs_model::ComponentId;
+use dcs_model::{ComponentId, Rationalization};
 use std::collections::BTreeMap;
 
 /// A component instance's parameter map: the `parameters` field of the
@@ -204,6 +204,15 @@ pub trait Spec {
 
     /// The instance's supplied parameter map.
     fn parameter_values(&self) -> &Parameters;
+
+    /// The instance's alarm rationalization record — decision 70's
+    /// prose — written into the emitted
+    /// [`ComponentInstance`](dcs_model::ComponentInstance). `None` for
+    /// kinds carrying no record; the alarm specs require one as a typed
+    /// constructor argument so a composed alarm cannot omit it.
+    fn rationalization(&self) -> Option<&Rationalization> {
+        None
+    }
 
     /// The typed port handles bound to the allocated component `id`.
     fn instance(&self, id: ComponentId) -> Self::Instance;

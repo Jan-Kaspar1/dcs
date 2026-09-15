@@ -71,7 +71,15 @@
       "parameters": {
         "low_limit": { "float": 10.0 },
         "high_limit": { "float": 90.0 },
-        "hysteresis": { "float": 5.0 }
+        "hysteresis": { "float": 5.0 },
+        "priority": { "int": 1 },
+        "class": { "int": 2 },
+        "response_ticks": { "int": 30 }
+      },
+      "rationalization": {
+        "consequence": "The measured value stands out of limits unnoticed",
+        "required_action": "Acknowledge and investigate the limit violation",
+        "reference": "alarm-state"
       },
       "ports": {
         "in": { "direction": "in", "value_type": "float" },

@@ -60,7 +60,7 @@ use crate::{
     BuildError, ChannelRef, Direction, OutPoint, PlantBuilder, PointId, SignalId, Sink, Source,
     Value, parameters,
 };
-use dcs_model::{ComponentId, PlantModel};
+use dcs_model::{ComponentId, PlantModel, Rationalization};
 
 /// Field point ids — the fixed block the dynamics document addresses.
 pub mod points {
@@ -613,20 +613,86 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "invert",
         Value::Bool(true),
     )])));
-    let lah = plant.add(LatchingAlarmSpec::new(parameters([
-        ("low_limit", Value::Float(-PARKED_LIMIT)),
-        ("high_limit", Value::Float(config.high)),
-        ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
-    ])));
-    let lal = plant.add(LatchingAlarmSpec::new(parameters([
-        ("low_limit", Value::Float(config.cutoff)),
-        ("high_limit", Value::Float(PARKED_LIMIT)),
-        ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
-    ])));
-    let backup_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let none_available_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let all_faulted_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let power_fail_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
+    // The decision-70 codes are declared data — the site priority/class
+    // vocabulary and response budgets stay an open customer assumption.
+    let lah = plant.add(LatchingAlarmSpec::new(
+        parameters([
+            ("low_limit", Value::Float(-PARKED_LIMIT)),
+            ("high_limit", Value::Float(config.high)),
+            ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The wet well overflows the bench",
+            "Start a pump and investigate why the demand did not call one",
+            "lah-alarm",
+        ),
+    ));
+    let lal = plant.add(LatchingAlarmSpec::new(
+        parameters([
+            ("low_limit", Value::Float(config.cutoff)),
+            ("high_limit", Value::Float(PARKED_LIMIT)),
+            ("hysteresis", Value::Float(config.level_alarm_hysteresis)),
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The wet well pumps dry and the running pumps cavitate",
+            "Stop the running pumps and investigate the low level",
+            "lal-alarm",
+        ),
+    ));
+    let backup_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The backup level instrument carries the station unnoticed",
+            "Check the primary level instrument",
+            "backup-active-alarm",
+        ),
+    ));
+    let none_available_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "Demand stands with no pump available to meet it",
+            "Restore a pump to service or clear its faults",
+            "none-available-alarm",
+        ),
+    ));
+    let all_faulted_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "Every pump is faulted; the station cannot pump",
+            "Dispatch maintenance to clear the pump faults",
+            "all-faulted-alarm",
+        ),
+    ));
+    let power_fail_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "Station power is lost; the pumps cannot run",
+            "Switch to backup power and investigate the supply",
+            "power-fail-alarm",
+        ),
+    ));
 
     // Measurement path: failover-select's output fans out to the chain
     // and both level alarms through the carrier; the chain's demand
@@ -731,6 +797,22 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             power_fail_alarm: power_fail_alarm_layout,
         },
     })
+}
+
+/// An alarm's decision-70 rationalization record — the prose half of
+/// the alarm contract, carried on the component instance so the plant
+/// model is the master alarm database. `reference` names the standing
+/// alarm `Signal` (`{prefix}-alarm`) the operator display resolves.
+pub(crate) fn rationalization(
+    consequence: &str,
+    required_action: &str,
+    reference: &str,
+) -> Rationalization {
+    Rationalization {
+        consequence: consequence.to_string(),
+        required_action: required_action.to_string(),
+        reference: reference.to_string(),
+    }
 }
 
 /// The 1-based tag "p101", "p102", … matching the recorded station
@@ -1126,9 +1208,42 @@ fn wire_pump(
         "fault_ticks",
         Value::Int(config.motor_fault_ticks),
     )])));
-    let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let thermal_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
-    let moisture_alarm = plant.add(BoolLatchingAlarmSpec::new(parameters([])));
+    let fault_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(60)),
+        ]),
+        rationalization(
+            "The pump cannot run while its fault stands",
+            "Clear the motor fault and reset the pump",
+            &format!("{tag}-fault-alarm"),
+        ),
+    ));
+    let thermal_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(60)),
+        ]),
+        rationalization(
+            "The motor overheats and the pump trips out",
+            "Investigate the thermal overload and reset the contact",
+            &format!("{tag}-thermal-alarm"),
+        ),
+    ));
+    let moisture_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(3)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(60)),
+        ]),
+        rationalization(
+            "Water ingress degrades the motor insulation",
+            "Schedule a seal inspection for the pump",
+            &format!("{tag}-moisture-alarm"),
+        ),
+    ));
 
     // Mode and service inversions; the group request carrier.
     plant.connect(mode, &inv_mode.input);

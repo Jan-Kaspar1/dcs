@@ -36,6 +36,7 @@ pub use index::{PointSignal, SignalIndex};
 pub use lint::{LintFinding, LintRule};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
-    Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Signal,
+    Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Rationalization,
+    Signal,
 };
 pub use validate::{End, IdCollection, ValidationError};

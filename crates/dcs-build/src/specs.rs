@@ -21,7 +21,7 @@ use crate::spec::{
     POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
 use dcs_core::{Direction, PointType, ValueKind};
-use dcs_model::ComponentId;
+use dcs_model::{ComponentId, Rationalization};
 use std::marker::PhantomData;
 
 mod sealed {
@@ -1008,10 +1008,15 @@ impl Spec for RateLimiterSpec {
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
 /// Parameters — shared with `alarm-monitor`: `low_limit`, `high_limit`
 /// required finite `Float`s; `hysteresis` optional non-negative
-/// `Float`.
+/// `Float` — plus the decision-70 rationalization codes `priority`,
+/// `class`, `response_ticks`, required non-negative `Int`s.
+/// `rationalization` is the record's required prose half — a typed
+/// argument so a composed plant cannot omit it.
 pub struct LatchingAlarmSpec {
     /// The instance's parameter map.
     pub parameters: Parameters,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `latching-alarm` instance.
@@ -1038,11 +1043,18 @@ impl LatchingAlarmSpec {
         required("low_limit", ValueKind::Float, Some(FINITE_F64)),
         required("high_limit", ValueKind::Float, Some(FINITE_F64)),
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
     ];
 
-    /// A spec carrying `parameters` as the instance's parameter map.
-    pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+    /// A spec carrying `parameters` as the instance's parameter map and
+    /// `rationalization` as the instance's required decision-70 record.
+    pub fn new(parameters: Parameters, rationalization: Rationalization) -> Self {
+        Self {
+            parameters,
+            rationalization,
+        }
     }
 }
 
@@ -1070,6 +1082,10 @@ impl Spec for LatchingAlarmSpec {
         &self.parameters
     }
 
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
     fn instance(&self, id: ComponentId) -> Self::Instance {
         LatchingAlarmInstance {
             id,
@@ -1088,12 +1104,18 @@ impl Spec for LatchingAlarmSpec {
 ///
 /// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
-/// The kind declares no parameters.
+/// Parameters are the decision-70 rationalization codes `priority`,
+/// `class`, `response_ticks` — required non-negative `Int`s;
+/// `rationalization` is the record's required prose half — a typed
+/// argument so a composed plant cannot omit it.
 pub struct BoolLatchingAlarmSpec {
-    /// The instance's parameter map — the kind declares no parameters,
-    /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
-    /// at `build`.
+    /// The instance's parameter map — the three required rationalization
+    /// codes; any other key is an
+    /// [`UnknownParameter`](crate::BuildError::UnknownParameter) at
+    /// `build`.
     pub parameters: Parameters,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `bool-latching-alarm` instance.
@@ -1115,12 +1137,21 @@ impl BoolLatchingAlarmSpec {
     /// The model kind string this spec emits.
     pub const KIND: &'static str = "bool-latching-alarm";
 
-    /// The declared parameter set: the kind takes none.
-    pub const PARAMETERS: &'static [ParamDecl] = &[];
+    /// The declared parameter set — the decision-70 rationalization
+    /// codes.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
 
-    /// A spec carrying `parameters` as the instance's parameter map.
-    pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+    /// A spec carrying `parameters` as the instance's parameter map and
+    /// `rationalization` as the instance's required decision-70 record.
+    pub fn new(parameters: Parameters, rationalization: Rationalization) -> Self {
+        Self {
+            parameters,
+            rationalization,
+        }
     }
 }
 
@@ -1146,6 +1177,10 @@ impl Spec for BoolLatchingAlarmSpec {
 
     fn parameter_values(&self) -> &Parameters {
         &self.parameters
+    }
+
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
     }
 
     fn instance(&self, id: ComponentId) -> Self::Instance {
@@ -1274,11 +1309,15 @@ impl ManagedAlarmHandles {
 /// `hysteresis` (optional non-negative `Float`), plus the shared
 /// managed set: `max_shelve_ticks`, `priority`, `class`, and
 /// `response_ticks` (required non-negative `Int`s).
+/// `rationalization` is the decision-70 record's required prose half —
+/// a typed argument so a composed plant cannot omit it.
 pub struct ManagedLatchingAlarmSpec {
     /// The instance's parameter map.
     pub parameters: Parameters,
     /// Which managed inputs the instance declares.
     pub managed: ManagedInputs,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `managed-latching-alarm` instance.
@@ -1316,11 +1355,17 @@ impl ManagedLatchingAlarmSpec {
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map;
-    /// `managed` selects which managed inputs the instance declares.
-    pub fn new(parameters: Parameters, managed: ManagedInputs) -> Self {
+    /// `managed` selects which managed inputs the instance declares;
+    /// `rationalization` is the instance's required decision-70 record.
+    pub fn new(
+        parameters: Parameters,
+        managed: ManagedInputs,
+        rationalization: Rationalization,
+    ) -> Self {
         Self {
             parameters,
             managed,
+            rationalization,
         }
     }
 }
@@ -1354,6 +1399,10 @@ impl Spec for ManagedLatchingAlarmSpec {
         &self.parameters
     }
 
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
     fn instance(&self, id: ComponentId) -> Self::Instance {
         ManagedLatchingAlarmInstance {
             id,
@@ -1378,11 +1427,15 @@ impl Spec for ManagedLatchingAlarmSpec {
 /// shared managed set: `max_shelve_ticks`, `priority`, `class`, and
 /// `response_ticks` (required non-negative `Int`s); the Bool analogue
 /// of the standing limit state has no limits or hysteresis.
+/// `rationalization` is the decision-70 record's required prose half —
+/// a typed argument so a composed plant cannot omit it.
 pub struct ManagedBoolLatchingAlarmSpec {
     /// The instance's parameter map.
     pub parameters: Parameters,
     /// Which managed inputs the instance declares.
     pub managed: ManagedInputs,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `managed-bool-latching-alarm` instance.
@@ -1411,11 +1464,17 @@ impl ManagedBoolLatchingAlarmSpec {
     pub const PARAMETERS: &'static [ParamDecl] = MANAGED_ALARM_PARAMETERS;
 
     /// A spec carrying `parameters` as the instance's parameter map;
-    /// `managed` selects which managed inputs the instance declares.
-    pub fn new(parameters: Parameters, managed: ManagedInputs) -> Self {
+    /// `managed` selects which managed inputs the instance declares;
+    /// `rationalization` is the instance's required decision-70 record.
+    pub fn new(
+        parameters: Parameters,
+        managed: ManagedInputs,
+        rationalization: Rationalization,
+    ) -> Self {
         Self {
             parameters,
             managed,
+            rationalization,
         }
     }
 }
@@ -1447,6 +1506,10 @@ impl Spec for ManagedBoolLatchingAlarmSpec {
 
     fn parameter_values(&self) -> &Parameters {
         &self.parameters
+    }
+
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
     }
 
     fn instance(&self, id: ComponentId) -> Self::Instance {

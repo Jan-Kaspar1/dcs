@@ -431,6 +431,7 @@ mod tests {
             id: ComponentId(10),
             kind: Counter::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block =

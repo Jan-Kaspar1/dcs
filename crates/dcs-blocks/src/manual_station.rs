@@ -674,6 +674,7 @@ mod tests {
             id: ComponentId(12),
             kind: ManualStation::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = ManualStation::from_parameters(
