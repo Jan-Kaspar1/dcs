@@ -12,7 +12,12 @@
 //! - `GET /snapshot` → `200` [`TelemetrySnapshot`]
 //! - `GET /signals` → `200` [`SignalIndex`] — the loaded model's
 //!   point-to-signal metadata: every known point's signal name, unit,
-//!   description, display group, direction, and value type
+//!   description, display group, direction, and value type, plus the
+//!   index's `components` section — one
+//!   [`ComponentRecord`](dcs_model::ComponentRecord) per declared
+//!   instance, the per-instance model data the descriptors do not
+//!   carry (the decision-70 rationalization block), joined by the
+//!   `kind:id` diagnostic name the descriptor reports
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
 //!   receipt log, retrievable alongside the snapshot
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
@@ -144,9 +149,24 @@
 //! sample asserts lists with its component, value, quality, and the
 //! tick the value last changed in the point's retained history — a
 //! non-good quality draws the row degraded rather than as a clean
-//! assertion — and the journal entries touching the alarm-bound points
-//! and their components list in tick order beside it. Where the
-//! component declares an `ack` input wired to a model-declared writable
+//! assertion. The managed-alarm decisions extend the pane: the uniform
+//! `shelved`/`suppressed`/`out_of_service` status vocabulary routes a
+//! component's rows to the named managed list — joined by port name
+//! across kinds, the row still reporting `alarm`/`unacknowledged`
+//! truth and still counting toward the totals — the declared
+//! `priority` renders as colour plus the textual level from the page's
+//! declared site vocabulary beside `class` and `response_ticks`, the
+//! instance's rationalization record discloses from the served
+//! components section, and a state select filters rows by active,
+//! unacknowledged, and each managed state. The journal entries
+//! touching the alarm-bound points and their components — `journaled`
+//! points' `point_changed` transitions included — list in the durable
+//! journal's `seq` order beside it, so a burst's initiating cause
+//! stands first. Points whose signal `group` a `?protection=<group>`
+//! parameter declares render on the visually distinct
+//! protection-layer section, the HMI alarm path never presented as
+//! the safeguard. Where the component declares an `ack` input wired
+//! to a model-declared writable
 //! point the pane offers an acknowledge button issuing an ordinary
 //! receipted `write_value` — no alarm-specific protocol — pulsed back
 //! to `false` once a scan has observed it, because the kind's `ack` is
