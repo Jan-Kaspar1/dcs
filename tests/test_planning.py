@@ -45,6 +45,8 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('docs/research/', text)
         self.assertIn('Requirements: ID, ID', text)
         self.assertIn('documentation-only research issue first', text)
+        self.assertIn('WW-ALM-001', text)
+        self.assertIn('IJmuiden mode-change/unsafe-position/rising-level scenario', text)
         self.assertIn('batch control as deferred', text)
 
 if __name__ == '__main__': unittest.main()

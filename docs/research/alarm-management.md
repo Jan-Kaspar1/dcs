@@ -1,8 +1,8 @@
 # Alarm-management lifecycle depth beyond acknowledgment
 
 - **Checked:** 2026-09-15
-- **Question:** Which alarm-lifecycle elements do the alarm-management standards and water-sector owner specifications actually define — the alarm state model, shelving with automatic return, suppression-by-design and by operating state, out-of-service handling, priority and classification, and alarm-flood management — which of those the implemented two-flag model plus decision 38's per-kind extension seam already express, which would need contract work, and which a first water client actually requires, so that `WW-ALM-001` can carry either observable acceptance criteria or a concrete revisit condition?
-- **Affected requirements:** `WW-ALM-001`, `WW-OPS-002` (its deferred aspects)
+- **Question:** Which alarm-lifecycle elements do the alarm-management standards, water-sector owner specifications, and the IJmuiden 2023 high-water near miss support — the alarm contract, managed states, consequential annunciation, alarm-flood management, and the boundary to automatic protection — and which implemented seams or contract gaps should the accepted water requirements expose?
+- **Affected requirements:** `WW-ALM-001`–`WW-ALM-005`, `WW-OPS-002`
 
 ## Primary sources
 
@@ -31,6 +31,18 @@ Vendor and consultant design references — they inform behavior and do not defi
 15. Emerson, *Advanced Alarming Techniques* whitepaper — the ISA-18.2 shelving semantics as implemented practice: shelving is operator-initiated temporary suppression for a limited period of time; each alarm carries a pre-assigned maximum shelving time (including zero — not shelvable); unshelving is automatic on expiry or manual; shelved alarms are reviewed and justified at shift transition; out-of-service alarms are a maintenance mode whose restoration is not automatic, with accountability differing from shelving. <https://www.emerson.com/content/dam/emerson/en/systems-and-software-syss/deltav-distributed-control-system-dcs/white-papers/documents/advanced-alarming-techniques.pdf>
 16. exida, *Implement an Effective Alarm Management Program* — reproduces ISA-18.2's recommended performance targets: roughly 150 annunciated alarms per operator position per day acceptable (300 maximum manageable), 1–2 per 10 minutes, alarm flood defined at 10 or more alarms in 10 minutes, percentage of 10-minute periods exceeding 10 alarms below 1%, zero chattering/fleeting alarms, few stale alarms, and an annunciated priority distribution near 80/15/5 low/medium/high. <https://www.exida.com/articles/Implement%20an%20Effective%20Alarm%20Management%20Program.pdf>
 17. Schneider Electric, IGSS alarm-shelving product documentation — a shipping IEC 62682-conformant shelving implementation: operator-initiated shelving for a defined period, automatic unshelve on expiry, manual unshelve and period adjustment, a shelved-alarm list, optional authorization and audit-trail recording, and recording of the shelving reason as the standard requires. <https://igss.schneider-electric.com/Files/Doc-Help/Webhelp/V15/Alm/Content/Shelve_Alarm.htm>
+18. Rijkswaterstaat, *Evaluatie incident spuikokers Spui- en Gemaalcomplex IJmuiden*, official evaluation hub and report bundle, 3 September 2024 — the four evaluations of the technical installation, crisis organization, operating location, and regional coordination following the 2 November 2023 incident. <https://open.rijkswaterstaat.nl/@275817/evaluatie-incident-spuikokers-spui/>
+19. Rijkswaterstaat, *Maatregelen na incident spuikokers van Gemaalcomplex IJmuiden*, 3 September 2024 — the official findings and corrective measures: a technical fault switched the gates to manual and they remained open; the remote operating position did not give operators sufficient visibility of fault messages, gate position, and rising water level; the response added local operation, continuous technical coverage, an extra acoustic/visual rising-level signal, and training. <https://www.rijkswaterstaat.nl/nieuws/archief/2024/09/rijkswaterstaat-neemt-maatregelen-na-evaluatie-incident-spuikokers-van-spuien-gemaalcomplex-ijmuiden>
+20. Inspectie Leefomgeving en Transport, *ILT Jaarverslag 2024*, p. 37 — the regulator's summary concludes that poor functioning of the IJmuiden discharge and pumping complex increases high-water safety risk and required Rijkswaterstaat to report recurrence-prevention measures. <https://www.ilent.nl/site/binaries/site-content/collections/documents/2025/05/21/jaarverslag-2024/000.192_ILT%2BJaarverslag%2B2024_TG.pdf>
+21. UK Health and Safety Executive, *Alarm management* and *Control systems* guidance — alarms should be useful, relevant, actionable, and timely; safety-related alarm claims require suitable independence, procedures, training, workload assessment, and persistent presentation, while control systems need defined responses and diagnostics for abnormal, out-of-range, and stuck signals. <https://www.hse.gov.uk/humanfactors/topics/alarm-management.htm> and <https://www.hse.gov.uk/comah/sragtech/techmeascontsyst.htm>
+
+## Public failure example — IJmuiden, 2 November 2023
+
+During a rising tide, a fault at the IJmuiden discharge and pumping complex switched the discharge gates to manual operation and they did not close. The official evaluation says operators at the remote Schellingwoude operating position could not notice the open gates soon enough because they lacked sufficient visibility of the fault messages, gate positions, and rising canal level [18, 19]. Coordinated intervention prevented the Amsterdam level from becoming problematic; the exact initiating technical cause had not been established when Rijkswaterstaat published the evaluation [18, 19].
+
+Rijkswaterstaat's corrective measures are direct alarm-design evidence: it moved operation to the site, placed a contractor there continuously, added a separate acoustic and visual signal for rising canal level, and retrained operators and maintenance staff [19]. ILT separately identified the increased high-water safety risk and required recurrence-prevention measures [20]. The user-supplied [NL Times account](https://nltimes.nl/2024/09/03/tech-failure-nearly-caused-massive-flood-amsterdam-city-center-november-2023) is retained as the public-facing example; the requirements rely on the official evaluations.
+
+The product implication is broader than a high-level alarm. The operator must see a consequential transition away from automatic control, confirmed final-element position, process trend and rate of change, signal quality, and the causal order in one workflow. Acknowledgment records awareness but cannot make the active hazard disappear. Where hazard analysis requires automatic action, the alarm-and-operator path is not itself the protective function [21].
 
 ## Supported findings
 
@@ -91,9 +103,9 @@ What would need contract work or a recorded decision before implementation:
 
 ## Proposed DCS implications
 
-*All items in this section are proposals, not decided behavior.*
+The accepted requirements in `docs/requirements/water-wastewater.md` now make the following direction planning authority. Detailed site policy remains customer-configured.
 
-- Keep the decision-38 two-flag lifecycle for the reference station: the owner evidence for managed states, priorities, and flood handling exists at alarm-program scale [8, 14], while the station-class specifications require the alarm set and its delivery [10, 11]. Deferral stands absent a client alarm philosophy.
+- Preserve the implemented two-flag acknowledgment axis as the compatible base, then add the declared rationalization metadata, managed-state visibility, and lifecycle behavior required by `WW-ALM-001` and `WW-ALM-002`. The IJmuiden scenario supplies observable evidence for `WW-ALM-003` without prescribing one client's priority names or colours [18, 19].
 - If `WW-ALM-001` is promoted, land each managed state as a per-kind sibling preserving the `in`/`ack`/`alarm`/`unacknowledged` vocabulary plus managed-state `Out` ports — a shelving kind with declared maximum shelve ticks and automatic return [15], an out-of-service kind with manual-only return [1 §11.8] — so the summary pane, history, and checkpoints consume them as ordinary status-role ports and journaled writes.
 - Keep designed and state-based suppression as declared wiring rather than a kind: the station's availability and mode states are the engineered suppression conditions [5 §6.3], and per-plant wiring is where suppression-by-design belongs — with the managed-state visibility caveat above recorded for the planner.
 - Carry priority as descriptor/parameter metadata first [9]; promote it to a status port only if a client requires state-driven priority changes [5 §6.4] or live priority on the pane.
@@ -102,7 +114,7 @@ What would need contract work or a recorded decision before implementation:
 
 ## Assumptions needing customer validation
 
-- Whether the first client operates an alarm philosophy conforming to ISA-18.2/IEC 62682 — an owner alarm standard exists in the market [8] but small-station specifications define alarm lists and telemetry, not managed states [10, 11]. This is the gating question for promoting `WW-ALM-001`.
+- Whether the first client operates an alarm philosophy conforming to ISA-18.2/IEC 62682, and which site-specific vocabulary and administrative rules it uses. This configures the accepted alarm capability; it no longer gates its place in the water foundation.
 - Which alarms must latch until acknowledged — the station note's open question; the only owner datapoint is the latched high-level alarm reset [10].
 - The required priority scheme: number of levels, colour and indication conventions, whether a per-alarm criticality mark like [9]'s suffices, and whether priority is static or state-driven [5 §6.4].
 - If shelving is required at all: which alarms may be shelved, per-alarm maximum shelve times including non-shelvable alarms, shelving authority and reason capture, and the shift-review workflow [15, 2 §14.3] — or whether shelving is unwanted on an unattended station.
