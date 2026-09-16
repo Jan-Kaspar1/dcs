@@ -31,6 +31,23 @@ Its `README.md` walks the full customer path:
    `surface-incompatible`, `tooling-rejected`,
    `manifest-fingerprint-mismatch`, …) rather than silent misbehavior.
 
+The served operator surface a monitoring or UI consumer can rely on —
+proved by the check's `surface` stage against the emitted model — is:
+
+- **`GET /schema`** — the block-interface registry: one versioned
+  interface per declared component covering its ports as
+  measurement/state resources, its parameters as configuration, and
+  its command/event vocabulary.
+- **Declared commands** — a kind's declared commands submit through
+  `POST /command`'s `invoke` variant and answer a structured receipt
+  that settles through the journaled `command_settled` record.
+- **Emitted events** — a kind's declared events reach the
+  consumer-visible record: `GET /journal`'s `event_emitted` entries
+  and the per-instance `events` of `GET /resources`.
+- **`GET /signals`, `GET /journal`, and the snapshot descriptors** —
+  the signal index, the run's recorded transitions, and the composed
+  `<kind>:<id>` inventory.
+
 The boundary is proven from the workspace by
 `crates/dcs-build/tests/reference_plant.rs`, which materializes the
 tree outside the workspace and runs its own clean-CI check green.

@@ -2,9 +2,12 @@
 
 Each scenario drives the redundant controller pair through the monitor
 endpoints documented in docs/packaging.md (GET /role, /signals,
-/snapshot, /receipts, /journal; POST /command, /demote, /promote) and
-returns one report-schema scenario case. Stdlib only — the Lenovo host
-needs nothing but Python and Docker.
+/snapshot, /receipts, /journal, /schema, /resources; POST /command,
+/demote, /promote) and returns one report-schema scenario case. Stdlib
+only — the Lenovo host needs nothing but Python and Docker. The
+restart scenario also triggers the runner-owned container lifecycle
+action ctx['restart_controller'] carries and reads the per-controller
+--journal-file the rig bind-mounts into the run directory.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -18,6 +21,14 @@ from pathlib import Path
 
 SCENARIO_TIMEOUT = 120  # per-scenario wall clock bound
 POLL_INTERVAL = 2.0
+RESTART_POLL = 1.0              # cadence watching the pair mid-restart
+RESTART_RETURN_DEADLINE = 60  # bound on the restarted monitor's return
+RESTART_SETTLE_DEADLINE = 60  # bound on active/standby roles settling
+RESTART_JOURNAL_DEADLINE = 30  # bound on the run-boundary record landing
+# Scans the persisted checkpoint may lag the last served snapshot: the
+# state file is written at the end of each completed scan cycle, so a
+# /snapshot answer can interleave before that cycle's write lands.
+RESTART_SLACK_TICKS = 4
 
 
 class Case:
@@ -140,6 +151,49 @@ def _settled_active(ctx):
     return None
 
 
+def _writable_bool_point(signals):
+    """The scenarios' command target out of a SignalIndex: the
+    pump-station 'p101-oos' writable bool in-point when the model
+    declares it, else any writable bool input."""
+    target = None
+    for entry in signals.get('points', []):
+        if entry.get('name') == 'p101-oos' and entry.get('writable'):
+            return entry
+        if target is None and entry.get('writable') \
+                and entry.get('direction') == 'in' \
+                and entry.get('value_type') == 'bool':
+            target = entry
+    return target
+
+
+def _journal_records(path):
+    """The ordered records of a `--journal-file`: {'boundary': {'run',
+    'tick'}} markers and {'seq': n} entry lines. A torn final line — a
+    crash mid-append — is skipped; any earlier unparseable or
+    unrecognized line raises."""
+    items = []
+    lines = Path(path).read_text().splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == len(lines) - 1:
+                continue
+            raise ValueError('journal file ' + str(path) + ' line '
+                             + str(index + 1) + ' does not parse')
+        if isinstance(record, dict) and 'run_boundary' in record:
+            items.append({'boundary': record['run_boundary']})
+        elif isinstance(record, dict) and 'entry' in record:
+            items.append({'seq': (record['entry'] or {}).get('seq')})
+        else:
+            raise ValueError('journal file ' + str(path) + ' line '
+                             + str(index + 1)
+                             + ' is not a journal record')
+    return items
+
+
 def scenario_controller_active(ctx):
     """The launched active peer owns the field and produces telemetry."""
     case = Case('controller-active',
@@ -219,15 +273,7 @@ def scenario_operator_command(ctx):
         ref = save_evidence(ctx['evidence_dir'],
                             'operator-command-signals.json', signals)
         case.evidence('file', ref, 'SignalIndex naming writable points')
-        target = None
-        for entry in signals.get('points', []):
-            if entry.get('name') == 'p101-oos' and entry.get('writable'):
-                target = entry
-        if target is None:
-            for entry in signals.get('points', []):
-                if entry.get('writable') and entry.get('direction') == 'in' \
-                        and entry.get('value_type') == 'bool':
-                    target = entry
+        target = _writable_bool_point(signals)
         if target is None:
             return case.finish('inconclusive',
                                'no writable bool point in the model')
@@ -346,16 +392,7 @@ def scenario_evidence_capture(ctx):
         # A writable bool input — the same target the operator-command
         # case picks.
         _, signals = http_json('GET', ctx[active] + '/signals')
-        target = None
-        for entry in signals.get('points', []):
-            if entry.get('name') == 'p101-oos' and entry.get('writable'):
-                target = entry
-        if target is None:
-            for entry in signals.get('points', []):
-                if entry.get('writable') \
-                        and entry.get('direction') == 'in' \
-                        and entry.get('value_type') == 'bool':
-                    target = entry
+        target = _writable_bool_point(signals)
         if target is None:
             return case.finish('inconclusive',
                                'no writable bool point in the model')
@@ -468,6 +505,835 @@ def scenario_evidence_capture(ctx):
 
 
 # --------------------------------------------------------------------
+# The lone-controller recovery contract (WW-LCM-001's restart clause,
+# decision 35's --state-file and decision 36's --journal-file): the
+# runner-owned restart action stops the active peer's container and
+# starts it again, and the resumed process must continue the persisted
+# run — the tick domain, the operator state the checkpoint carried,
+# and the journal file's seq numbering all continue across the two
+# process lifetimes, and the pair settles back to active/standby.
+
+
+def scenario_controller_restart(ctx):
+    """Stop the active peer's container and restart it: the run resumes
+    from --state-file rather than cold-starting."""
+    case = Case('controller-restart',
+                'Restarted controller resumes its persisted run',
+                'stopping and starting the active controller container '
+                'leaves the resumed run continuing the persisted tick '
+                'domain rather than restarting at zero, the '
+                'pre-restart point write still applied, the journal '
+                'file carrying a run_boundary marker with continuing '
+                'seqs across both process lifetimes, and the pair '
+                'settled back to active/standby')
+    try:
+        restart = ctx.get('restart_controller')
+        if restart is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no controller-restart action')
+        # Whichever endpoint currently reports active is the restart
+        # target — in suite order this runs ahead of the failover case,
+        # so it is ctrl-a; a lone replay finds the fresh rig the same
+        # way.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        case.observe('restart target: ' + active + ' (' + base + ')')
+
+        # Establish the operator state the checkpoint must carry — the
+        # same writable bool point the command scenarios use.
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'controller-restart-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the '
+                      'state-carryover target')
+        target = _writable_bool_point(signals)
+        if target is None:
+            return case.finish('inconclusive',
+                               'no writable bool point in the model')
+        point = target['point']
+        command = {'command': {'write_value': {
+            'point': point, 'kind': 'bool', 'value': {'bool': True}}},
+            'actor': 'qa-lane'}
+        status, receipt = http_json('POST', base + '/command', command)
+        if status != 200:
+            return case.finish('failed', 'pre-restart command refused: '
+                             + str(receipt))
+        applied = wait_for(
+            lambda: _point_value(_try_snapshot(ctx, base) or {}, point)
+            is True or None, time.monotonic() + 30)
+        if not applied:
+            return case.finish('failed', 'the pre-restart write never '
+                               'applied at point ' + str(point))
+        before = _snapshot(ctx, base)
+        tick0 = before.get('tick') or 0
+        ref = save_evidence(ctx['evidence_dir'],
+                            'controller-restart-before.json',
+                            {'tick': tick0, 'point': point,
+                             'receipt': receipt})
+        case.evidence('file', ref, 'pre-restart tick and applied write')
+        case.observe('point ' + str(point) + ' applied true at tick '
+                     + str(tick0))
+
+        # The runner-owned lifecycle action: docker stop + start on the
+        # already-running container, recorded on the run's timeline.
+        try:
+            restart(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the restart action '
+                               'never completed: ' + str(exc)[:300])
+        case.observe('controller restart action returned')
+
+        # Wait for the restarted peer's monitor while watching the
+        # other endpoint for a spurious promotion.
+        promoted = []
+
+        def returned():
+            try:
+                report = _role(ctx, peer_base)
+            except Exception:
+                report = {}
+            if report.get('role') == 'active':
+                promoted.append(report)
+            try:
+                report = _role(ctx, base)
+            except Exception:
+                return None
+            return report if report.get('role') == 'active' else None
+
+        back = wait_for(returned,
+                        time.monotonic() + RESTART_RETURN_DEADLINE,
+                        interval=RESTART_POLL)
+        if promoted:
+            ref = save_evidence(ctx['evidence_dir'],
+                                'controller-restart-roles.json',
+                                {'peer': promoted[0]})
+            case.evidence('file', ref)
+            return case.finish('failed', 'the peer reported active '
+                               'while the restarted controller was '
+                               'down: ' + json.dumps(promoted[0])[:400])
+        if back is None:
+            return case.finish('inconclusive', 'the restarted '
+                               'controller never returned')
+        case.observe('restarted peer serving again, role '
+                     + str(back.get('role')) + ' at tick '
+                     + str(back.get('tick')))
+
+        # The resumed run's tick domain continues the persisted
+        # checkpoint: a cold start or a stale resume answers below the
+        # pre-restart mark, and a resumed run keeps advancing.
+        resumed = _snapshot(ctx, base)
+        tick1 = resumed.get('tick') or 0
+        grown = wait_for(
+            lambda: (s.get('tick', 0) > tick1 and s or None)
+            if (s := _try_snapshot(ctx, base)) else None,
+            time.monotonic() + 30)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'controller-restart-snapshot.json',
+                            grown or resumed)
+        case.evidence('file', ref, 'resumed snapshot: tick '
+                      + str(tick0) + ' -> ' + str(tick1))
+        if tick1 + RESTART_SLACK_TICKS < tick0:
+            return case.finish('failed', 'tick regressed across the '
+                               'restart: ' + str(tick0) + ' -> '
+                               + str(tick1) + ' — cold-start or stale '
+                               'state file')
+        if not grown:
+            return case.finish('failed', 'the resumed run did not '
+                               'advance its tick')
+        if _point_value(grown, point) is not True:
+            return case.finish('failed', 'point ' + str(point)
+                               + ' lost its written value across the '
+                               'restart')
+        case.observe('resumed at tick ' + str(tick1) + ' (pre-restart '
+                     + str(tick0) + '), point ' + str(point)
+                     + ' still applied')
+
+        # The durable audit record: the journal file must hold a
+        # run_boundary marker opening the restarted lifetime at the
+        # restored tick, with entry seqs continuing across it. A fresh
+        # settled command guarantees a post-boundary entry exists.
+        status, receipt = http_json('POST', base + '/command',
+                                    {'command': {'write_value': {
+                                        'point': point, 'kind': 'bool',
+                                        'value': {'bool': False}}},
+                                     'actor': 'qa-lane'})
+        if status != 200:
+            return case.finish('failed', 'the post-restart command '
+                               'refused: ' + str(receipt))
+        journal = (ctx.get('journal_files') or {}).get(active)
+        if journal is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file path for '
+                               + active)
+        parsed = {}
+
+        def post_boundary():
+            try:
+                parsed['items'] = _journal_records(journal)
+            except (OSError, ValueError) as exc:
+                parsed['error'] = str(exc)
+                return None
+            items = parsed['items']
+            marks = [i for i, item in enumerate(items)
+                     if 'boundary' in item]
+            if len(marks) < 2:
+                return None
+            return [item['seq'] for item in items[marks[1] + 1:]
+                    if 'seq' in item] or None
+
+        post = wait_for(post_boundary,
+                        time.monotonic() + RESTART_JOURNAL_DEADLINE,
+                        interval=RESTART_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'controller-restart-journal.json',
+                            {'path': str(journal),
+                             'records': parsed.get('items'),
+                             'error': parsed.get('error')})
+        case.evidence('file', ref, 'the journal file across the '
+                      'restart')
+        items = parsed.get('items') or []
+        bounds = [item['boundary'] for item in items
+                  if 'boundary' in item]
+        seqs = [item['seq'] for item in items if 'seq' in item]
+        if len(bounds) < 2:
+            return case.finish('failed', 'the journal file lacks the '
+                               'run-boundary marker for the restarted '
+                               'lifetime: ' + str(parsed.get('error')
+                               or bounds))
+        if [b.get('run') for b in bounds] \
+                != list(range(1, len(bounds) + 1)):
+            return case.finish('failed', 'journal run numbering does '
+                               'not continue the file\'s lifetimes: '
+                               + json.dumps(bounds)[:400])
+        if not bounds[-1].get('tick'):
+            return case.finish('failed', 'the restarted lifetime\'s '
+                               'boundary records a cold start: '
+                               + json.dumps(bounds[-1]))
+        if not seqs or any(not isinstance(seq, int) for seq in seqs) \
+                or seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
+            return case.finish('failed', 'journal seqs do not '
+                               'continue across the restart: '
+                               + str(seqs[:20]))
+        if not post:
+            return case.finish('failed', 'no journaled entry follows '
+                               'the restarted lifetime\'s boundary '
+                               'marker')
+        case.observe('journal: ' + str(len(bounds)) + ' lifetimes, '
+                     'run ' + str(bounds[-1].get('run'))
+                     + ' resumed at tick ' + str(bounds[-1].get('tick'))
+                     + ', ' + str(len(seqs)) + ' entries with '
+                     'continuing seqs')
+
+        # The pair settles back: the restarted peer active, the other
+        # reporting standby — a tracking peer reconverged behind it.
+        def roles_settled():
+            try:
+                resumed_role = _role(ctx, base)
+                peer_role = _role(ctx, peer_base)
+            except Exception:
+                return None
+            if resumed_role.get('role') != 'active' \
+                    or peer_role.get('role') != 'standby':
+                return None
+            if peer == 'standby' and 'tracking' not in \
+                    (peer_role.get('sync') or {}):
+                return None
+            return {'restarted': resumed_role, 'peer': peer_role}
+
+        settled = wait_for(roles_settled,
+                           time.monotonic() + RESTART_SETTLE_DEADLINE,
+                           interval=RESTART_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'controller-restart-roles.json',
+                            settled or {})
+        case.evidence('file', ref, 'post-restart role reports')
+        if not settled:
+            return case.finish('failed', 'the pair did not settle '
+                               'back to active/standby after the '
+                               'restart')
+        case.observe('roles settled: restarted peer active, '
+                     + peer + ' standby'
+                     + (' tracking' if peer == 'standby' else ''))
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The served block-interface contract (WW-FND-003, decision 82): every
+# assessed run proves the schema-driven surface the tranche ships —
+# GET /schema's registry covering every kind the rig model declares
+# with all five collections, a declared command settling through the
+# receipted command path, and GET /resources' emitted-events view
+# reflecting a produced event.
+
+INTERFACE_COLLECTIONS = ('measurements', 'configuration', 'state',
+                         'commands', 'events')
+CONTRACT_DEADLINE = 30  # bound on the receipt and emitted-event waits
+
+
+def _command_for_spec(component, spec):
+    """The receipted-path command a served `commands` entry denotes,
+    rebuilt from the entry's declared provenance: `declared` entries
+    submit as `invoke` with the declared request schema's arguments,
+    `write_value` entries as the point write against the entry's bound
+    point, and `set_parameter` entries as the parameter tune. Returns
+    None for an entry this driver cannot translate."""
+    defaults = {'bool': {'bool': True}, 'int': {'int': 1},
+                'float': {'float': 1.0}}
+    request = spec.get('request') or []
+    adapted = spec.get('adapted')
+    if adapted == 'declared':
+        arguments = {}
+        for argument in request:
+            value = defaults.get(argument.get('kind'))
+            if value is None:
+                return None
+            arguments[argument['name']] = value
+        return {'invoke': {'component': component,
+                           'command': spec.get('name'),
+                           'arguments': arguments}}
+    if adapted == 'set_parameter' and ':' in str(spec.get('name')):
+        kind = request[0].get('kind') if request else None
+        value = defaults.get(kind)
+        if value is None:
+            return None
+        return {'set_parameter': {'component': component,
+                                  'name': str(spec['name']).split(':', 1)[1],
+                                  'value': value}}
+    if adapted == 'write_value' and spec.get('point') is not None:
+        kind = request[0].get('kind') if request else None
+        value = defaults.get(kind)
+        if value is None:
+            return None
+        return {'write_value': {'point': spec['point'], 'kind': kind,
+                                'value': value}}
+    return None
+
+
+def _pick_declared_command(interfaces, signals):
+    """The scenario's probe command out of the served `commands`
+    collections, in preference order: a kind-declared (`declared`-
+    provenance) entry a kind offers natively; then the `write_value`
+    adapted entry bound to the run's preferred writable bool point —
+    'p101-oos', the target the other command scenarios use; then any
+    writable bool point's entry; then any remaining translated entry
+    (a `set_parameter` tune, or a refused point write — a rejection is
+    still a receipted, journaled answer). Returns
+    (component, spec, submission) or None."""
+    writable = {entry.get('point')
+                for entry in signals.get('points', [])
+                if entry.get('writable')
+                and entry.get('direction') == 'in'
+                and entry.get('value_type') == 'bool'}
+    preferred = {entry.get('point')
+                 for entry in signals.get('points', [])
+                 if entry.get('name') == 'p101-oos'} & writable
+    best = None
+    for entry in interfaces:
+        component = entry.get('name')
+        for spec in (entry.get('interface') or {}).get('commands') or []:
+            submission = _command_for_spec(component, spec)
+            if submission is None:
+                continue
+            adapted = spec.get('adapted')
+            if adapted == 'declared':
+                rank = 0
+            elif adapted == 'write_value' \
+                    and spec.get('point') in preferred:
+                rank = 1
+            elif adapted == 'write_value' \
+                    and spec.get('point') in writable:
+                rank = 2
+            else:
+                rank = 3
+            if best is None or rank < best[0]:
+                best = (rank, component, spec, submission)
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def scenario_served_interface(ctx):
+    """The served block-interface contract against the rig: registry
+    coverage, a receipted declared command, and the emitted-events
+    view reflecting the produced event."""
+    case = Case('served-interface',
+                'Served block-interface contract covers the model',
+                'GET /schema covers every component kind the rig model '
+                'declares with all five collections, a declared command '
+                'submitted through POST /command returns a structured '
+                'receipt, and GET /resources attributes a produced '
+                'event to the issuing instance')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # replayed alone the rig is fresh (ctrl-a active), while the
+        # full suite reaches this case after the failover.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('served contract against ' + active
+                     + ' (' + base + ')')
+
+        # Each documented endpoint is part of the served contract: an
+        # answered error means the surface itself is missing — a
+        # failed check, where a monitor that cannot be reached at all
+        # stays inconclusive.
+        bodies = {}
+        for path in ('/signals', '/schema', '/resources'):
+            try:
+                _, bodies[path] = http_json('GET', base + path)
+            except urllib.error.HTTPError as exc:
+                return case.finish('failed', 'GET ' + path
+                                   + ' answered ' + str(exc.code))
+        signals, schema = bodies['/signals'], bodies['/schema']
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-signals.json', signals)
+        case.evidence('file', ref, 'declared component records')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-schema.json', schema)
+        case.evidence('file', ref, 'the served interface registry')
+
+        declared = signals.get('components') or []
+        if not declared:
+            return case.finish('inconclusive',
+                               'the signal index serves no component '
+                               'records to check coverage against')
+        served = {}
+        for entry in schema.get('interfaces') or []:
+            if isinstance(entry, dict):
+                served[entry.get('name')] = entry.get('interface') or {}
+        missing = [record for record in declared
+                   if (served.get(record.get('name')) or {}).get('kind')
+                   != record.get('kind')]
+        if missing:
+            return case.finish(
+                'failed', 'the served registry misses declared kinds '
+                + ', '.join(sorted({str(r.get('kind'))
+                                    for r in missing}))
+                + ' (instances: '
+                + ', '.join(str(r.get('name')) for r in missing[:8])
+                + ')')
+        short = {}
+        for entry in schema.get('interfaces') or []:
+            interface = (entry or {}).get('interface') or {}
+            absent = [name for name in INTERFACE_COLLECTIONS
+                      if not isinstance(interface.get(name), list)]
+            if absent:
+                short[str(entry.get('name'))] = absent
+        if short:
+            return case.finish(
+                'failed', 'served interfaces miss collections: '
+                + json.dumps(short, sort_keys=True)[:600])
+        kinds = sorted({str(record.get('kind')) for record in declared})
+        case.observe('registry covers ' + str(len(declared))
+                     + ' declared instances across '
+                     + str(len(kinds)) + ' kinds ('
+                     + ', '.join(kinds) + ') at publication '
+                     + str(schema.get('publication'))
+                     + ' tick ' + str(schema.get('tick')))
+
+        picked = _pick_declared_command(
+            schema.get('interfaces') or [], signals)
+        if picked is None:
+            return case.finish('inconclusive',
+                               'no served command translates to the '
+                               'receipted path')
+        component, spec, command = picked
+        case.observe('declared command: ' + str(component) + ' '
+                     + str(spec.get('name')) + ' -> '
+                     + json.dumps(command, sort_keys=True))
+        try:
+            status, receipt = http_json(
+                'POST', base + '/command',
+                {'command': command, 'actor': 'qa-lane'})
+        except urllib.error.HTTPError as exc:
+            return case.finish('failed', 'the declared command '
+                               'returned no receipt: HTTP '
+                               + str(exc.code))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the declared command\'s receipt')
+        outcome = receipt.get('outcome') \
+            if isinstance(receipt, dict) else None
+        if status != 200 or not isinstance(receipt, dict) \
+                or not isinstance(receipt.get('command'), dict) \
+                or not isinstance(outcome, dict) or not outcome:
+            return case.finish(
+                'failed', 'the declared command returned no '
+                'structured receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:400])
+        case.observe('receipt outcome: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        # The emitted-events view is the instance's attributed journal
+        # tail: the produced event is the submission's settled receipt
+        # — journaled whether it applied or refused — or a kind-
+        # emitted event the run produced.
+        observed = {'events': None, 'match': None}
+
+        def events_cover():
+            try:
+                _, view = http_json('GET', base + '/resources')
+            except urllib.error.HTTPError:
+                raise
+            except Exception:
+                return None
+            for entry in view.get('components') or []:
+                if entry.get('name') != component:
+                    continue
+                observed['events'] = entry.get('events') or []
+                for candidate in observed['events']:
+                    event = (candidate or {}).get('event') or {}
+                    settled = (event.get('command_settled') or {}) \
+                        .get('receipt') or {}
+                    if settled.get('command') == command \
+                            or event.get('event_emitted'):
+                        observed['match'] = candidate
+                        return True
+            return None
+
+        covered = wait_for(events_cover,
+                           time.monotonic() + CONTRACT_DEADLINE,
+                           interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'served-interface-events.json',
+            {'component': component, 'match': observed['match'],
+             'events': observed['events'] or []})
+        case.evidence('file', ref, 'emitted events attributed to '
+                      + str(component))
+        if not covered:
+            return case.finish(
+                'failed', 'the emitted-events view never reflected a '
+                'produced event for ' + str(component))
+        match = (observed['match'] or {}).get('event') or {}
+        case.observe('emitted-events view covers '
+                     + next(iter(match), '?') + ' for '
+                     + str(component) + ' ('
+                     + str(len(observed['events'] or []))
+                     + ' entries)')
+        return case.finish('passed')
+    except urllib.error.HTTPError as exc:
+        return case.finish('failed', 'the emitted-events view answered '
+                           + str(exc.code))
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# Receipted point forcing and release (WW-OPS-003's substituted
+# quality, WW-FND-004's settled receipts): `force_point` pins a
+# writable `In` point at Uncertain(Substituted) across scans and badges
+# it in the snapshot's `forces` list; `unforce_point` lifts it at a
+# scan boundary. The rig's target is its writable internal `In` point
+# p101-oos — the executor's force path accepts writable internal
+# points, the operator-setpoint surface, so the model declares no
+# writable loopback field point (a channel-bound `writable` mark is
+# exactly what the model lint names). Releasing an internal point
+# resumes the held-value rule — the last-stamped (forced) sample
+# persists — so the recovery leg restamps the held value through the
+# receipted write path: a force still standing would re-substitute on
+# the next scan, so the held value read at Good with an empty `forces`
+# list proves the release took.
+
+FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
+
+
+def _point_sample(snapshot, point):
+    for entry in (snapshot or {}).get('points', []):
+        if entry.get('point') == point:
+            return entry.get('sample') or {}
+    return {}
+
+
+def _point_quality(snapshot, point):
+    return _point_sample(snapshot, point).get('quality')
+
+
+def _forced_entry(snapshot, point):
+    """The snapshot's `forces` badge for `point`, or None."""
+    for entry in (snapshot or {}).get('forces', []):
+        if entry.get('point') == point:
+            return entry
+    return None
+
+
+def _settled_receipts(journal):
+    """The receipts the journal settled — `command_settled` payloads."""
+    return [entry.get('event', {}).get('command_settled', {})
+            .get('receipt') or {}
+            for entry in _journal_list(journal)]
+
+
+def scenario_force_release(ctx):
+    """A receipted force pins p101-oos at Substituted quality with the
+    control image following it; its release plus the restore write
+    return the held value at Good — every command journaled as a
+    settled, attributed receipt."""
+    case = Case('force-release',
+                'Receipted forcing and release on a writable point',
+                'force_point on the writable p101-oos point serves the '
+                'forced value at Uncertain(Substituted), lists the '
+                'point under snapshot.forces, and the inverted '
+                'p101-oos-ok carrier follows the forced value; '
+                'unforce_point clears the badge and the restored held '
+                'value reads at Good quality; both commands journal as '
+                'settled receipts attributed to qa-lane')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # replayed alone the rig is fresh (ctrl-a active), while the
+        # full suite reaches this case after the failover.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('forcing against ' + active + ' (' + base + ')')
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the force target')
+        target = follower = None
+        for entry in signals.get('points', []):
+            if entry.get('name') == 'p101-oos' and entry.get('writable') \
+                    and entry.get('direction') == 'in':
+                target = entry.get('point')
+            elif entry.get('name') == 'p101-oos-ok':
+                follower = entry.get('point')
+        if target is None or follower is None:
+            return case.finish(
+                'inconclusive',
+                'the rig model lacks the writable p101-oos point or '
+                'its p101-oos-ok in-service carrier')
+
+        # The held value the release leg restores — whatever the run's
+        # earlier commands left the operator point holding.
+        baseline = _snapshot(ctx, base)
+        held = _point_value(baseline, target)
+        if not isinstance(held, bool):
+            return case.finish(
+                'inconclusive',
+                'the force target holds no bool baseline: '
+                + json.dumps(_point_sample(baseline, target))[:300])
+        forced_value = not held
+        case.observe('force target: p101-oos point ' + str(target)
+                     + ' held ' + str(held) + '; control probe '
+                     'p101-oos-ok point ' + str(follower)
+                     + ' (the inverted in-service carrier)')
+
+        force_body = {'point': target, 'kind': 'bool',
+                      'value': {'bool': forced_value}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'force_point': force_body}, 'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-force-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the force submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'force refused: ' + str(status)
+                               + ' ' + json.dumps(receipt)[:400])
+        case.observe('force admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        observed = {}
+
+        def forced_state():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['forced'] = snap
+            badge = _forced_entry(snap, target)
+            if _point_value(snap, target) == forced_value \
+                    and _point_quality(snap, target) \
+                    == {'uncertain': 'substituted'} \
+                    and (badge or {}).get('value') \
+                    == {'bool': forced_value} \
+                    and _point_value(snap, follower) == held:
+                return snap
+            return None
+
+        forced = wait_for(forced_state, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-forced.json',
+                            observed.get('forced') or {})
+        case.evidence('file', ref, 'snapshot while the force stands')
+        if forced is None:
+            snap = observed.get('forced') or {}
+            unmet = []
+            if _point_value(snap, target) != forced_value:
+                unmet.append('the forced value ' + str(forced_value))
+            if _point_quality(snap, target) \
+                    != {'uncertain': 'substituted'}:
+                unmet.append('Uncertain(Substituted) quality')
+            if (_forced_entry(snap, target) or {}).get('value') \
+                    != {'bool': forced_value}:
+                unmet.append('a snapshot.forces entry')
+            if _point_value(snap, follower) != held:
+                unmet.append('control following the force '
+                             '(p101-oos-ok reading ' + str(held) + ')')
+            return case.finish('failed', 'forced telemetry never '
+                               'showed ' + ' + '.join(unmet))
+        case.observe('forced: point ' + str(target) + ' reads '
+                     + str(forced_value)
+                     + ' at Uncertain(Substituted), badged under '
+                     'snapshot.forces; p101-oos-ok follows at '
+                     + str(held))
+
+        unforce_body = {'point': target}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'unforce_point': unforce_body},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-release-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the release submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'release refused: '
+                               + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+        case.observe('release admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        def released():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['released'] = snap
+            return _forced_entry(snap, target) is None and snap
+
+        cleared = wait_for(released, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-released.json',
+                            observed.get('released') or {})
+        case.evidence('file', ref, 'snapshot after the release settled')
+        if not cleared:
+            return case.finish('failed',
+                               'the forces badge never cleared after '
+                               'unforce_point')
+
+        # The held-value rule resumed on release; restamping the held
+        # value through the receipted write path produces the Good read
+        # the case requires — a force still standing would re-substitute
+        # on the next scan, so this read persisting alongside an empty
+        # forces list is what proves the release took.
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': {
+                'point': target, 'kind': 'bool',
+                'value': {'bool': held}}},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-restore-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the restore-write submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'the restore write was '
+                               'refused: ' + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+
+        def recovered():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['recovered'] = snap
+            if _point_value(snap, target) == held \
+                    and _point_quality(snap, target) == 'good' \
+                    and _forced_entry(snap, target) is None \
+                    and _point_value(snap, follower) == forced_value:
+                return snap
+            return None
+
+        if not wait_for(recovered, time.monotonic() + FORCE_DEADLINE):
+            snap = observed.get('recovered') or {}
+            unmet = []
+            if _point_value(snap, target) != held:
+                unmet.append('the held value ' + str(held))
+            if _point_quality(snap, target) != 'good':
+                unmet.append('Good quality')
+            if _forced_entry(snap, target) is not None:
+                unmet.append('an empty forces list')
+            if _point_value(snap, follower) != forced_value:
+                unmet.append('control recovering (p101-oos-ok reading '
+                             + str(forced_value) + ')')
+            return case.finish('failed', 'telemetry did not recover '
+                               'after release: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-recovered.json',
+                            observed.get('recovered') or {})
+        case.evidence('file', ref, 'snapshot after the restore write')
+        case.observe('released and restored: point ' + str(target)
+                     + ' reads ' + str(held) + ' at Good, forces '
+                     'cleared, p101-oos-ok back at '
+                     + str(forced_value))
+
+        # Both commands must journal as settled receipts carrying the
+        # run's actor — the audit half of the receipted-command
+        # contract.
+        found = {'force': None, 'release': None}
+
+        def settled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since=0')
+            except Exception:
+                return None
+            observed['journal'] = journal
+            for entry in _settled_receipts(journal):
+                command = entry.get('command') or {}
+                if command.get('force_point') == force_body:
+                    found['force'] = entry
+                elif command.get('unforce_point') == unforce_body:
+                    found['release'] = entry
+            return (found['force'] is not None
+                    and found['release'] is not None) or None
+
+        wait_for(settled, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-journal.json',
+                            observed.get('journal') or [])
+        case.evidence('file', ref, 'journal tail with the settled '
+                      'receipts')
+        unmet = []
+        for name, entry in (('force', found['force']),
+                            ('release', found['release'])):
+            if entry is None:
+                unmet.append('no settled ' + name
+                             + ' receipt journaled')
+                continue
+            if entry.get('actor') != 'qa-lane':
+                unmet.append('the ' + name + ' receipt is unattributed '
+                             '(actor='
+                             + json.dumps(entry.get('actor')) + ')')
+            if 'applied' not in (entry.get('outcome') or {}):
+                unmet.append('the ' + name + ' receipt did not settle '
+                             'applied: '
+                             + json.dumps(entry.get('outcome'))[:200])
+        if unmet:
+            return case.finish('failed', 'journal audit: '
+                               + '; '.join(unmet))
+        case.observe('journal: force and release settled as applied '
+                     'receipts attributed to qa-lane')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
 # The consumer-failure schedule (WW-FND-004, decision 83): the lane's
 # per-revision proof that a slow, disconnected, malformed, or restarted
 # consumer can never reach the control loop. Every leg measures the
@@ -481,6 +1347,16 @@ LEG_POLL = 0.1      # measurement cadence inside a leg's window
 LEG_DEADLINE = 30   # bound on one leg's window or a settlement wait
 FLOOD_BATCH = 40    # journaled submissions per journal-flood round
 FLOOD_ROUNDS = 40   # rounds cap — 1600 submissions bound the roll
+
+# The command-admission flood (decision 83's bounded-ingress half):
+# each pipelined burst submits twice the served queue bound on one
+# keep-alive connection — the whole batch lands inside the server's
+# read buffer faster than a scan boundary can drain pending entries —
+# and rounds repeat until the named queue_full rejection appears. A
+# trickle keeps validated submissions arriving inside the measured leg.
+ADMISSION_ROUNDS = 8        # pipelined bursts before the flood is 'insufficient'
+ADMISSION_TRICKLE = 8       # submissions per poll round inside a flood leg
+ADMISSION_MAX_CAPACITY = 512  # a served bound past this is beyond the lane's reach
 
 # The malformed set the consumer schedules declare, each with the
 # status the documented endpoints answer: unparseable bodies and bad
@@ -536,6 +1412,78 @@ def _connect(base, timeout=5):
     hostname, _, port = host.rpartition(':')
     return socket.create_connection(
         (hostname or '127.0.0.1', int(port or 80)), timeout=timeout)
+
+
+def _parse_responses(raw):
+    """Split `raw` into as many complete HTTP responses as it holds.
+    Returns ([(status, json-body-or-None)], leftover) — a truncated or
+    unframed answer stays in leftover for the next chunk."""
+    replies = []
+    while raw:
+        head, sep, rest = raw.partition(b'\r\n\r\n')
+        if not sep:
+            break
+        lines = head.split(b'\r\n')
+        try:
+            status = int(lines[0].split(None, 2)[1])
+        except (IndexError, ValueError):
+            status = None
+        length = None
+        for line in lines[1:]:
+            name, colon, value = line.partition(b':')
+            if colon and name.strip().lower() == b'content-length':
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = None
+        if length is None or len(rest) < length:
+            break
+        payload, raw = rest[:length], rest[length:]
+        try:
+            replies.append((status, json.loads(payload)))
+        except ValueError:
+            replies.append((status, None))
+    return replies, raw
+
+
+def _pipelined_commands(base, commands, timeout=15):
+    """POST every command envelope on one keep-alive connection, all
+    requests sent back-to-back before the first answer is read — the
+    flood channel: submissions land inside the server's read buffer
+    faster than a scan boundary can drain the pending queue. Returns
+    [(status, receipt-or-None)] in submission order, one entry per
+    command; a missing or unparseable answer reads (None, None) — the
+    no-receipt case the admission contract forbids."""
+    bodies = [json.dumps(command).encode() for command in commands]
+    request = b''
+    for index, body in enumerate(bodies):
+        tail = b'Connection: close\r\n' if index == len(bodies) - 1 else b''
+        request += (b'POST /command HTTP/1.1\r\nHost: qa\r\n'
+                    b'Content-Type: application/json\r\nContent-Length: '
+                    + str(len(body)).encode() + b'\r\n' + tail + b'\r\n'
+                    + body)
+    stream = _connect(base, timeout=timeout)
+    try:
+        stream.sendall(request)
+        stream.settimeout(timeout)
+        replies, raw = [], b''
+        deadline = time.monotonic() + timeout
+        while len(replies) < len(commands) \
+                and time.monotonic() < deadline:
+            try:
+                chunk = stream.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            raw += chunk
+            found, raw = _parse_responses(raw)
+            replies += found
+        found, raw = _parse_responses(raw)
+        replies += found
+        return (replies + [(None, None)] * len(commands))[:len(commands)]
+    finally:
+        stream.close()
 
 
 def _publication(snapshot):
@@ -649,7 +1597,7 @@ class _Overlay:
     and deterministic, and its own measurement requests are never the
     interference under test."""
 
-    def __init__(self, kind, base, watch):
+    def __init__(self, kind, base, watch, flood=None):
         self.kind = kind
         self.base = base
         self.statuses = []    # every HTTP status the consumer read back
@@ -662,6 +1610,12 @@ class _Overlay:
         self.surfaces = ['/snapshot', '/receipts', '/journal?since=0',
                          '/history?point=' + str(watch) + '&since=0',
                          '/checkpoint', '/role', '/signals', '/']
+        # The command-flood leg's admission record: flood carries the
+        # served bound and the probe point; submissions logs every
+        # (status, normalized outcome, receipt-log index) the flood met.
+        self.flood = flood
+        self.submissions = []
+        self._receipts_base = None
 
     def _send(self, method, path, body=None):
         try:
@@ -729,6 +1683,37 @@ class _Overlay:
         finally:
             stream.close()
 
+    @property
+    def queue_fulls(self):
+        """The flood submissions the named queue_full rejection met."""
+        return sum(1 for submission in self.submissions
+                   if submission['outcome'] == 'rejected:queue_full')
+
+    def _flood_command(self):
+        return {'command': {'write_value': {
+            'point': self.flood['point'], 'kind': 'bool',
+            'value': {'bool': True}}},
+            'actor': 'qa-lane'}
+
+    def _record_submission(self, status, receipt):
+        """One flood submission's verdict: its HTTP status, its
+        receipt's normalized outcome, and the receipt-log index the
+        append-only log assigns it — every POST /command appends exactly
+        one receipt, in submission order."""
+        if status is not None:
+            self.statuses.append(status)
+        self.submissions.append({
+            'status': status,
+            'outcome': _outcome_key(receipt) if isinstance(receipt, dict)
+            else 'none',
+            'index': self._receipts_base + len(self.submissions)
+            if self._receipts_base is not None else None})
+
+    def _flood_burst(self, count):
+        for status, receipt in _pipelined_commands(
+                self.base, [self._flood_command()] * count):
+            self._record_submission(status, receipt)
+
     def start(self):
         if self.kind == 'stalled-reader':
             # Issue the request, then go silent without reading a byte
@@ -746,6 +1731,20 @@ class _Overlay:
                 status = self._send(method, path, body)
                 if status is not None:
                     self.malformed[method + ' ' + path] = status
+        elif self.kind == 'command-flood':
+            # The bounded admission flood: pipelined bursts of twice the
+            # served queue bound until the named queue_full rejection
+            # appears — the whole batch lands inside one server read
+            # buffer, faster than a scan boundary drains pending entries.
+            try:
+                _, body = http_json('GET', self.base + '/receipts')
+                self._receipts_base = len(_receipt_list(body))
+            except Exception as exc:
+                self.errors.append('receipts base: ' + str(exc)[:150])
+            rounds = 0
+            while rounds < ADMISSION_ROUNDS and not self.queue_fulls:
+                self._flood_burst(2 * self.flood['capacity'])
+                rounds += 1
 
     def poll(self):
         if self.kind == 'polling':
@@ -756,6 +1755,10 @@ class _Overlay:
             self._send('GET', self._next_surface())
             if self._index % 4 == 1:
                 self._raw_probes()
+        elif self.kind == 'command-flood':
+            # A small pipelined trickle each measurement round — the
+            # admission path stays loaded through the leg's scan window.
+            self._flood_burst(ADMISSION_TRICKLE)
 
     def finish(self):
         """Drains held resources and returns the leg's named evidence
@@ -810,6 +1813,71 @@ class _Overlay:
                 failures.append('malformed probes answered outside the '
                                 'declared limits: '
                                 + json.dumps(wrong, sort_keys=True)[:600])
+        if self.kind == 'command-flood':
+            if not self.submissions:
+                failures.append('the command flood never ran')
+            no_receipt = sum(1 for submission in self.submissions
+                             if submission['status'] is None)
+            if no_receipt:
+                failures.append(str(no_receipt) + ' flood submissions '
+                                'returned no receipt')
+            http_errors = sorted({submission['status']
+                                  for submission in self.submissions
+                                  if submission['status'] is not None
+                                  and submission['status'] != 200})
+            if http_errors:
+                failures.append('flood submissions met HTTP-layer '
+                                'errors: ' + str(http_errors))
+            outside = sorted({submission['outcome']
+                              for submission in self.submissions
+                              if submission['status'] == 200
+                              and submission['outcome'] not in
+                              ('accepted', 'applied',
+                               'rejected:queue_full')})
+            if outside:
+                failures.append('flood receipts answered outside the '
+                                'admission vocabulary: ' + str(outside))
+            if self.submissions and not self.queue_fulls:
+                failures.append('the named queue_full rejection never '
+                                'appeared under '
+                                + str(len(self.submissions))
+                                + ' submissions against the served '
+                                'capacity ' + str(self.flood['capacity']))
+            elif not any(submission['outcome'] == 'accepted'
+                         for submission in self.submissions):
+                failures.append('no flood submission was admitted')
+            if self._receipts_base is None:
+                failures.append('the receipt log was unreadable at '
+                                'flood start — settlement cannot be '
+                                'audited')
+            elif not (no_receipt or http_errors or outside):
+                # Every admitted command's receipt must settle applied
+                # at its scan boundary — the receipt log is append-only
+                # and each submission's index is known.
+                pending = [submission['index']
+                           for submission in self.submissions
+                           if submission['outcome'] == 'accepted']
+
+                def drained():
+                    try:
+                        _, body = http_json('GET',
+                                            self.base + '/receipts')
+                    except Exception:
+                        return None
+                    receipts = _receipt_list(body)
+                    for index in pending:
+                        if len(receipts) <= index \
+                                or _outcome_key(receipts[index]) \
+                                != 'applied':
+                            return None
+                    return True
+
+                if pending and not wait_for(
+                        drained, time.monotonic() + LEG_DEADLINE,
+                        interval=LEG_POLL):
+                    failures.append('admitted flood commands never '
+                                    'settled applied at a scan '
+                                    'boundary')
         if any(status >= 500 for status in self.statuses):
             failures.append('a consumer saw a server fault: '
                             + str(sorted(set(self.statuses))))
@@ -1107,9 +2175,156 @@ def scenario_consumer_schedule(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The bounded command-admission contract (decision 83's ingress half):
+# commands submitted faster than the scan boundary drains them must each
+# take a structured receipt — a settlement or the named queue_full
+# rejection — never a silent drop, a hang, or a server fault. The flood
+# volume derives from the snapshot's served command_queue.capacity, and
+# the flood leg's scan outputs and probe receipts must equal the
+# bracketing no-flood legs'.
+
+def scenario_command_admission(ctx):
+    """A bounded command flood meets the receipted admission contract —
+    decision 83's bounded-ingress half on the simulated rig."""
+    case = Case('command-admission',
+                'Bounded command admission under flood',
+                'a command flood past the served command_queue capacity '
+                'answers every submission with a receipted settlement '
+                'or the named queue_full rejection — never a silent '
+                'drop, a hang, or a server fault — admitted commands '
+                'settle applied at their scan boundary, and the leg\'s '
+                'scan outputs and probe receipts match the no-flood '
+                'legs')
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30, interval=LEG_POLL)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('command flood against ' + active
+                     + ' (' + base + ')')
+        _, signals = http_json('GET', base + '/signals')
+        targets = _signal_targets(signals)
+        if targets is None:
+            return case.finish('inconclusive',
+                               'no writable bool command point or '
+                               'non-writable point in the model')
+        snapshot = _snapshot(ctx, base)
+        queue = snapshot.get('command_queue') or {}
+        capacity = queue.get('capacity')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'command-admission-signals.json',
+                            {'signals': signals,
+                             'command_queue': queue})
+        case.evidence('file', ref, 'signal index and the served '
+                      'admission bound')
+        if not isinstance(capacity, int) or isinstance(capacity, bool) \
+                or capacity < 1:
+            return case.finish('inconclusive',
+                               'the served snapshot carries no '
+                               'command_queue capacity')
+        if capacity > ADMISSION_MAX_CAPACITY:
+            return case.finish(
+                'inconclusive', 'the served command_queue capacity '
+                + str(capacity) + ' is beyond the lane\'s flood reach '
+                '(bound ' + str(ADMISSION_MAX_CAPACITY) + ')')
+        case.observe('served command_queue capacity ' + str(capacity))
+
+        legs = []
+        signatures = {}
+        for index, kind in enumerate(
+                ('reference', 'command-flood', 'reference')):
+            name = 'reference-' + ('a' if not signatures else 'b') \
+                if kind == 'reference' else kind
+            flood = {'point': targets['write'], 'capacity': capacity} \
+                if kind == 'command-flood' else None
+            overlay = _Overlay(kind, base, targets['watch'], flood)
+            try:
+                signature, failures = _consumer_leg(
+                    ctx, base, targets, overlay, index % 2 == 0)
+            except Exception as exc:
+                # A flood leg that lost the monitor mid-run is the
+                # submission path reaching the plant — a named failure;
+                # a reference leg that cannot read the rig at all is
+                # inconclusive like the other scenarios.
+                if kind == 'reference':
+                    raise
+                signature, failures = None, ['leg errored: '
+                                             + str(exc)[:200]]
+            leg = {'leg': name, 'signature': signature,
+                   'statuses': overlay.statuses[:40],
+                   'errors': overlay.errors[:5]}
+            if overlay.submissions:
+                leg['submissions'] = len(overlay.submissions)
+                outcomes = {}
+                for submission in overlay.submissions:
+                    key = str(submission['status']) + ':' \
+                        + submission['outcome']
+                    outcomes[key] = outcomes.get(key, 0) + 1
+                leg['outcomes'] = outcomes
+            legs.append(leg)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'command-admission-legs.json', legs)
+            if len(legs) == 1:
+                case.evidence('file', ref)
+            if kind == 'command-flood':
+                snap = _try_snapshot(ctx, base) or {}
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'command-admission-flood.json',
+                    {'capacity': capacity,
+                     'submissions': len(overlay.submissions),
+                     'queue_full': overlay.queue_fulls,
+                     'command_queue': snap.get('command_queue')})
+                case.evidence('file', ref, 'flood outcome counts and '
+                              'the served queue metrics after the leg')
+            if failures:
+                return case.finish('failed',
+                                   name + ': ' + '; '.join(failures))
+            case.observe('leg ' + name + ': '
+                         + json.dumps(signature, sort_keys=True))
+            signatures[name] = signature
+            if kind == 'reference':
+                continue
+            if signature != signatures['reference-a']:
+                return case.finish(
+                    'failed',
+                    name + ' diverged from the no-flood legs: '
+                    + json.dumps(signature, sort_keys=True) + ' vs '
+                    + json.dumps(signatures['reference-a'],
+                                 sort_keys=True))
+        reference = signatures['reference-a']
+        for key, healthy in (('scan', True), ('applied', True),
+                             ('write', 'applied'),
+                             ('reject', 'rejected:not_writable')):
+            if reference[key] != healthy:
+                return case.finish(
+                    'failed', 'the no-flood reference leg is '
+                    'unhealthy at ' + key + ': '
+                    + json.dumps(reference, sort_keys=True))
+        if reference['history'] not in ('contiguous', 'gapped'):
+            return case.finish(
+                'failed', 'the no-flood reference leg is unhealthy '
+                'at history: ' + json.dumps(reference, sort_keys=True))
+        if signatures['reference-b'] != reference:
+            return case.finish('failed',
+                               'the post-flood reference leg '
+                               'diverged from the first')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# The restart case runs ahead of the failover case: the peer it stops
+# is ctrl-a — launched without --standby, so its resumed process comes
+# back active — while ctrl-b is the tracking standby the settle check
+# watches reconverge.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
-             scenario_operator_command, scenario_failover,
-             scenario_evidence_capture, scenario_consumer_schedule)
+             scenario_operator_command, scenario_controller_restart,
+             scenario_failover, scenario_evidence_capture,
+             scenario_served_interface, scenario_force_release,
+             scenario_consumer_schedule, scenario_command_admission)
 
 
 def run_all(ctx, timeline):
