@@ -2,6 +2,7 @@
 //! element stepping, and fault injection behind the [`IoDriver`] boundary.
 
 use crate::map::{ChannelMap, ConfigError, Direction, Loopback, ProcessElement};
+use crate::state::{FaultParticipation, capture_points, restore_points};
 use dcs_core::{
     IoDriver, IoError, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
     ValueKind,
@@ -319,7 +320,7 @@ pub(crate) fn decode_quality(code: i64) -> Option<Quality> {
 
 /// A [`Fault`] as a stable `i64` code: `0` disconnected, `1` timeout,
 /// `2 + quality code` for a substituted quality.
-fn encode_fault(fault: Fault) -> i64 {
+pub(crate) fn encode_fault(fault: Fault) -> i64 {
     match fault {
         Fault::Disconnected => 0,
         Fault::Timeout => 1,
@@ -327,7 +328,7 @@ fn encode_fault(fault: Fault) -> i64 {
     }
 }
 
-fn decode_fault(code: i64) -> Option<Fault> {
+pub(crate) fn decode_fault(code: i64) -> Option<Fault> {
     Some(match code {
         0 => Fault::Disconnected,
         1 => Fault::Timeout,
@@ -653,23 +654,13 @@ impl IoDriver for SimDriver {
         let state = self.state.lock().unwrap();
         let mut captured = StateMap::new();
         captured.insert("tick", Value::Int(state.tick.0 as i64));
-        let mut points: Vec<(&PointId, &PointState)> = state.points.iter().collect();
-        points.sort_by_key(|(point, _)| **point);
-        for (point, point_state) in points {
-            let prefix = format!("point.{}", point.0);
-            captured.insert(format!("{prefix}.value"), point_state.sample.value);
-            captured.insert(
-                format!("{prefix}.quality"),
-                Value::Int(encode_quality(point_state.sample.quality)),
-            );
-            captured.insert(
-                format!("{prefix}.tick"),
-                Value::Int(point_state.sample.tick.0 as i64),
-            );
-            if let Some(fault) = point_state.fault {
-                captured.insert(format!("{prefix}.fault"), Value::Int(encode_fault(fault)));
-            }
-        }
+        let mut points: Vec<(PointId, Sample)> = state
+            .points
+            .iter()
+            .map(|(&point, point_state)| (point, point_state.sample))
+            .collect();
+        points.sort_by_key(|(point, _)| *point);
+        capture_points(&mut captured, &points, |point| state.points[&point].fault);
         for element in &state.elements {
             let output = element.element.output().0;
             let field = format!("element.{output}");
@@ -733,41 +724,16 @@ impl IoDriver for SimDriver {
         // Collect every expected field name while validating, so the
         // final check rejects fields this driver never captured.
         let mut known = vec!["tick".to_string()];
-        let mut points = HashMap::with_capacity(current.points.len());
-        for (&point, point_state) in &current.points {
-            let prefix = format!("point.{}", point.0);
-            let value =
-                state.require_kind(STATE_ELEMENT, &format!("{prefix}.value"), point_state.kind)?;
-            let quality_code = state.require_i64(STATE_ELEMENT, &format!("{prefix}.quality"))?;
-            let quality = decode_quality(quality_code)
-                .ok_or_else(|| invalid(format!("{prefix}.quality"), Value::Int(quality_code)))?;
-            let sample_tick = state.require_i64(STATE_ELEMENT, &format!("{prefix}.tick"))?;
-            if sample_tick < 0 {
-                return Err(invalid(format!("{prefix}.tick"), Value::Int(sample_tick)));
-            }
-            let fault = match state.get(&format!("{prefix}.fault")) {
-                None => None,
-                Some(Value::Int(code)) => Some(
-                    decode_fault(code)
-                        .ok_or_else(|| invalid(format!("{prefix}.fault"), Value::Int(code)))?,
-                ),
-                Some(found) => {
-                    return Err(StateError::IncompatibleField {
-                        element: STATE_ELEMENT.to_string(),
-                        field: format!("{prefix}.fault"),
-                        expected: ValueKind::Int,
-                        found: found.kind(),
-                    });
-                }
-            };
-            known.extend([
-                format!("{prefix}.value"),
-                format!("{prefix}.quality"),
-                format!("{prefix}.tick"),
-                format!("{prefix}.fault"),
-            ]);
-            points.insert(point, (value, quality, sample_tick, fault));
-        }
+        let points = restore_points(
+            current
+                .points
+                .iter()
+                .map(|(&point, point_state)| (point, point_state.kind)),
+            state,
+            STATE_ELEMENT,
+            FaultParticipation::Participates,
+            &mut known,
+        )?;
 
         let mut ys = Vec::with_capacity(current.elements.len());
         for element in &current.elements {
@@ -845,10 +811,10 @@ impl IoDriver for SimDriver {
         state.ensure_known_fields(STATE_ELEMENT, &known_refs)?;
 
         current.tick = Tick(tick as u64);
-        for (point, (value, quality, sample_tick, fault)) in points {
+        for (point, restored) in points {
             let point_state = current.points.get_mut(&point).unwrap();
-            point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
-            point_state.fault = fault;
+            point_state.sample = restored.sample;
+            point_state.fault = restored.fault;
         }
         for (element, (y, v, rng, contact, delay_line)) in current.elements.iter_mut().zip(ys) {
             element.y = y;
