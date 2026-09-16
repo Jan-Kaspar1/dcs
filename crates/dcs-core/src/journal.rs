@@ -153,6 +153,16 @@ pub enum JournalEvent {
         /// The emitted event record.
         event: EmittedEvent,
     },
+    /// The field's single-writer claim was preempted while this
+    /// instance owned the field — the shared field fenced a write,
+    /// meaning another attachment now holds the claim. The redundant
+    /// pair's audit record that the owner lost the arbitration the
+    /// switchover semantics rely on: one entry per held claim, not one
+    /// per fenced write.
+    FieldClaimLost {
+        /// The point whose write the field fenced.
+        point: PointId,
+    },
 }
 
 /// One journaled event: its stream position, the tick it is attributed
@@ -285,6 +295,11 @@ mod tests {
             },
             JournalEntry {
                 seq: 10,
+                tick: Tick(13),
+                event: JournalEvent::FieldClaimLost { point: PointId(20) },
+            },
+            JournalEntry {
+                seq: 11,
                 tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
@@ -314,6 +329,7 @@ mod tests {
         assert!(json.contains("\"divergence_detected\""), "{json}");
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
+        assert!(json.contains("\"field_claim_lost\""), "{json}");
     }
 
     #[test]

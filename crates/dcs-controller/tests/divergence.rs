@@ -169,19 +169,37 @@ struct Outcome {
 fn run_scenario() -> Outcome {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
+
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     let active_driver = RemoteDriver::connect(plant_addr).unwrap();
     let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
+    let mut active = Peer::active(
         assemble(&model, &registry, &active_gate).unwrap(),
         Some(&active_gate),
-    );
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
     let active_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
     let active_client = MonitorClient::new(active_monitor.local_addr());
@@ -199,14 +217,17 @@ fn run_scenario() -> Outcome {
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map_err(|error| error.to_string())
+    });
     let standby_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
 
-    thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
+    let outcome = thread::scope(|scope| {
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -332,7 +353,10 @@ fn run_scenario() -> Outcome {
             resynced_sync,
             promoted_role: promoted.role,
         }
-    })
+    });
+    drop(_plant);
+    serving.join().unwrap();
+    outcome
 }
 
 #[test]

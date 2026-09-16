@@ -88,6 +88,15 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
     )
     .0;
 
+    // Observers on both shared plants — the fields the scenario asserts
+    // on. The setpoints land before the controllers spawn: the launched
+    // actives' startup claims fence these attachments from boot, so
+    // every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reference_field = RemoteDriver::connect(reference_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
+
     // The pair: the active first — the standby's --standby names its
     // monitoring address — then the standby, then the reference run on
     // its own plant.
@@ -101,13 +110,6 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let reference = MonitorClient::new(reference_process.addr);
-
-    // Observers on both shared plants — the field the scenario asserts
-    // on. The setpoint lands once, as the run's operating point.
-    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
-    let reference_field = RemoteDriver::connect(reference_plant.addr).unwrap();
-    field.write(SETPOINT, Value::Float(50.0)).unwrap();
-    reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Roles are visible on both monitor surfaces before any transfer:
     // the active, and an unsynchronized standby.

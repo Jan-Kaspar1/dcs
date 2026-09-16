@@ -254,6 +254,7 @@ fn check_rejects_run_mode_options_as_usage_errors() {
         vec!["--driven"],
         vec!["--auto-promote", "3"],
         vec!["--state-file", "/tmp/dcs-check-state.json"],
+        vec!["--owner-token", "7"],
     ] {
         let mut args = vec![TANK_LOOP, "--check"];
         args.extend(extra.iter());
