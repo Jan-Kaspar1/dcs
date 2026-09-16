@@ -50,7 +50,9 @@
 //!   so every kind the run instantiated serves its five-category schema
 //!   (measurements, configuration, state, commands, events) without the
 //!   consumer reconstructing it from scattered surfaces. The view
-//!   stamps the publication `seq`/`tick` it was derived from
+//!   stamps the publication `seq`/`tick` it was derived from; the
+//!   document's JSON Schema is `dcs-model interface-schema`'s emitted
+//!   artifact
 //! - `GET /resources` → `200` [`ResourceView`] — the same publication's
 //!   live half: per instance, each measurement's and state resource's
 //!   latest value and quality from the bound point's sample, each

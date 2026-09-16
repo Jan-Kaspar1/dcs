@@ -24,6 +24,10 @@
 //!   (draft 2020-12) for non-Rust tooling — covering the structural rules
 //!   the schema language can express while cross-reference and wiring
 //!   checks remain `validate`'s.
+//! - `dcs-model interface-schema` emits the served block-interface
+//!   registry's JSON Schema (draft 2020-12) — the document `GET /schema`
+//!   answers — so a non-Rust consumer can check the decision-82 contract
+//!   the same way.
 //!
 //! Malformed input — unreadable files, broken JSON, unsupported document
 //! versions, invalid models — produces error output naming the problem and
@@ -43,7 +47,8 @@ commands:
   signal-index <file>      print the point-to-signal index as JSON
   diff <old> <new>         report what a model revision changes; --json emits it as JSON
   lint <file>              report advisory engineering-quality findings; --strict exits nonzero on them
-  schema                   print the plant model's JSON Schema";
+  schema                   print the plant model's JSON Schema
+  interface-schema         print the served block-interface registry's JSON Schema";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,6 +77,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "diff" => diff(rest),
         "lint" => lint(rest),
         "schema" => schema(rest),
+        "interface-schema" => interface_schema(rest),
         _ => Err(format!("unknown command {command:?}\n{USAGE}")),
     }
 }
@@ -204,6 +210,18 @@ fn schema(args: &[String]) -> Result<String, String> {
         return Err(format!("schema takes no arguments\n{USAGE}"));
     }
     serde_json::to_string_pretty(&PlantModel::json_schema())
+        .map_err(|error| format!("cannot serialize the JSON Schema: {error}"))
+}
+
+/// `interface-schema` prints the served block-interface registry's JSON
+/// Schema — the [`SchemaView`](dcs_core::SchemaView) document
+/// `GET /schema` answers, serialized canonically so the output is
+/// deterministic across runs. It takes no file.
+fn interface_schema(args: &[String]) -> Result<String, String> {
+    if !args.is_empty() {
+        return Err(format!("interface-schema takes no arguments\n{USAGE}"));
+    }
+    serde_json::to_string_pretty(&dcs_core::SchemaView::json_schema())
         .map_err(|error| format!("cannot serialize the JSON Schema: {error}"))
 }
 

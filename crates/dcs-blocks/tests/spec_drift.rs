@@ -9,9 +9,12 @@
 //! adaptation every consumer uses — and asserts the five collections
 //! carry exactly the declared spec/descriptor surface, then derives the
 //! served schema through `block_interfaces` — the function `GET
-//! /schema` runs — and pins its complete five-category wire shape, so
-//! the build-time spec, the registry-constructed `describe()`, the
-//! registered kind set, and the served schema cannot drift.
+//! /schema` runs — and pins its complete five-category wire shape and
+//! its validity against the emitted registry JSON Schema
+//! (`SchemaView::json_schema`, the `dcs-model interface-schema`
+//! artifact), so the build-time spec, the registry-constructed
+//! `describe()`, the registered kind set, and the served schema cannot
+//! drift.
 //! `dcs-controller`'s registry test pins runtime registration to
 //! `dcs_blocks::KINDS`; the coverage assertion here pins every kind in
 //! that list to a checked spec, descriptor, derived interface, and
@@ -62,7 +65,7 @@ use dcs_core::{
     AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
     CommandDecl, ComponentDescriptor, ConfigCapability, Direction, EventDecl, EventEmission,
     EventField, EventFieldKind, EventRetention, INTERFACE_VERSION, ParameterRange, PointId,
-    PortDescriptor, PortRole, StatePersistence, Value, ValueKind,
+    PortDescriptor, PortRole, SchemaView, StatePersistence, Tick, Value, ValueKind,
 };
 use dcs_runtime::Component;
 
@@ -151,6 +154,45 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         interface,
         "kind {}'s served schema does not round-trip the contract",
         spec.kind()
+    );
+
+    // The emitted-registry-schema pin: the document `GET /schema`
+    // serves must satisfy the hand-maintained JSON Schema
+    // `dcs-model interface-schema` emits — the consumer-facing half of
+    // the served contract. This descriptor is kind-level, so annotate
+    // its ports with bound points and the measurements with units to
+    // exercise the served form's optional fields too, then wrap the
+    // interface in the `SchemaView` envelope the endpoint stamps.
+    let mut served_descriptor = descriptor.clone();
+    for (index, port) in served_descriptor.ports.iter_mut().enumerate() {
+        port.point = Some(PointId(index as u64 + 1));
+    }
+    let mut served = dcs_core::block_interfaces(std::slice::from_ref(&served_descriptor))
+        .into_iter()
+        .next()
+        .unwrap();
+    for measurement in &mut served.measurements {
+        measurement.unit = Some("u".to_string());
+    }
+    let registry_document = serde_json::to_value(&SchemaView {
+        publication: 1,
+        tick: Tick(0),
+        interfaces: vec![dcs_core::ComponentInterface {
+            name: served_descriptor.name.clone(),
+            interface: served,
+        }],
+    })
+    .unwrap();
+    let validator = registry_schema_validator();
+    assert!(
+        validator.is_valid(&registry_document),
+        "kind {}'s served interface fails the emitted registry schema: {}",
+        spec.kind(),
+        validator
+            .iter_errors(&registry_document)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
     );
 
     // Every port lands in exactly one collection — `state` when it
@@ -402,6 +444,16 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         assert_eq!(event.retention, declared.retention);
         assert_eq!(event.point, None);
     }
+}
+
+/// The compiled served-registry schema — built once; `check` runs it
+/// per kind.
+fn registry_schema_validator() -> &'static jsonschema::Validator {
+    static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> = std::sync::OnceLock::new();
+    VALIDATOR.get_or_init(|| {
+        jsonschema::validator_for(&SchemaView::json_schema())
+            .expect("the emitted registry schema must be a usable schema")
+    })
 }
 
 /// Asserts `spec` declares the same interface `descriptor` reports:

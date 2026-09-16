@@ -32,11 +32,12 @@ of this repository.
 |---|---|---|
 | `dcs-build` crate | The typed composition API — the consumer's engineering seam. Its public transitive surface (`dcs-core`, `dcs-model`) resolves with it. | Cargo `git` dependency: `dcs-build = { git = "<repo>", tag = "v<X.Y.Z>" }` or `rev = "<commit>"` |
 | `dcs-core`, `dcs-model` crates | The contract vocabulary (`Value`, `Direction`, ids) and the emitted `PlantModel` document type. A consumer may also declare them directly — e.g. to assert `dcs_model::MODEL_VERSION` — under the same pin. | Same `git` dependency form; identical tag or rev |
-| `dcs-model` CLI | `validate`, `summary`, `signal-index`, `diff`, `lint`, `schema` over a model document. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-model`, or a binary built from the tag |
+| `dcs-model` CLI | `validate`, `summary`, `signal-index`, `diff`, `lint`, `schema` over a model document; `interface-schema` emits the served-registry schema. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-model`, or a binary built from the tag |
 | `dcs-controller` binary | The generic controller; `--check` is the consumer's assemble-check (load, validate, resolve devices, construct components — no scan). | `cargo install --git <repo> --tag v<X.Y.Z> dcs-controller`, or the container image below |
 | `dcs-controller` image | The generic controller container (`Dockerfile`); runs any operator-supplied model (decision 46). | Image digest: `dcs-controller@sha256:<digest>` recorded in the release record; or `docker build` at the tag |
 | `dcs-plant-server` image | The shared simulated-plant container (`Dockerfile.plant`) for the consumer's simulation runs. | Image digest recorded in the release record; or `docker build -f Dockerfile.plant` at the tag |
 | Plant-model JSON Schema | `dcs-model schema`'s emitted draft 2020-12 schema for non-Rust tooling (decision 40). | Recorded in the release record at `docs/releases/<tag>/plant-model.schema.json`, fetchable at the tag; its sha256 is in the record |
+| Served-registry JSON Schema | `dcs-model interface-schema`'s emitted draft 2020-12 schema for the `GET /schema` block-interface registry document (decision 82's served contract) — a non-Rust consumer checks the served surface against it. | Recorded in the release record at `docs/releases/<tag>/block-interfaces.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Deployment manifest | The consumer-owned deployment declaration — the documented shape below. | A file in the consumer repository pinning the release's artifacts |
 
 All `git` pins resolve through Cargo's git support: a tag names the
@@ -67,9 +68,11 @@ compiles against:
 - The re-exported contract vocabulary: `Direction`, `PointId`,
   `SignalId`, `Value`, `ValueKind`, `PointType`, `ChannelRef`,
   `ComponentId`, `DeviceId`, `Endpoint`, `PortRef`, `Rationalization`,
-  `BuildError`; and from `dcs-model` the `PlantModel` document type,
-  `MODEL_VERSION`, `LoadError`, `SignalIndex`, `ModelDiff`,
-  `LintFinding`/`LintRule`, and `PlantModel::json_schema`.
+  `BuildError`; from `dcs-core` the served-registry types
+  (`SchemaView`, `BlockInterface`, `INTERFACE_VERSION`) and
+  `SchemaView::json_schema`; and from `dcs-model` the `PlantModel`
+  document type, `MODEL_VERSION`, `LoadError`, `SignalIndex`,
+  `ModelDiff`, `LintFinding`/`LintRule`, and `PlantModel::json_schema`.
 
 `dcs-build`'s `station`, `dosing`, `ijmuiden`, and `ethercat` modules
 are **platform-owned reference compositions**: they remain compilable
@@ -175,9 +178,11 @@ it follows:
 2. Tag the commit `v<version>`.
 3. Produce the release record `docs/releases/<tag>/`:
    - `record.md` — tag, commit sha, the release set's crate versions,
-     the schema's sha256, the published image digests, and the compat
-     notes the version bump owes.
+     each recorded schema's sha256, the published image digests, and
+     the compat notes the version bump owes.
    - `plant-model.schema.json` — `dcs-model schema` emitted at the tag.
+   - `block-interfaces.schema.json` — `dcs-model interface-schema`
+     emitted at the tag.
 4. Build and publish the `dcs-controller` and `dcs-plant-server`
    images; record their digests in `record.md`.
 
@@ -191,7 +196,10 @@ schema`'s output by the drift test in
 `crates/dcs-model/tests/schema.rs`. The reference plant pins
 `tag = "v0.1.0"` (or the recorded rev) for the crates and the recorded
 digests for the images. The tag itself and the record's image-digest
-fields are filled when the release is cut.
+fields are filled when the release is cut. `v0.1.0`'s recorded commit
+predates the served block-interface registry (#375), so its record
+carries no `block-interfaces.schema.json`; release records carry it
+from the first tag whose tooling emits it.
 
 ## The consumer-resolution check
 
