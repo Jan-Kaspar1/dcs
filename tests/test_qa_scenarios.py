@@ -7,9 +7,15 @@ silently stale data, a served registry missing a declared kind or
 collection, a declared command returning no receipt, an emitted-events
 view that never reflects the produced event, and a command flood whose
 submissions meet dropped receipts, HTTP-layer faults, unsettled
-admissions, or a bound that never fills."""
+admissions, or a bound that never fills — and the managed-alarm
+lifecycle against a stubbed monitor and a live plant-protocol peer:
+activation with journaled evidence, acknowledge, bounded shelve and
+expiry, the named NotWritable refusal, OOS-driven suppression, and the
+inconclusive answers a never-reporting status or a claimed field owe."""
 import json
+import socket
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -592,6 +598,450 @@ class CommandAdmissionTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never settled applied', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class ManagedPlant(threading.Thread):
+    """A simulated plant-protocol peer: the newline-delimited JSON
+    surface the scenario's field stimulus writes through. One request
+    per connection — exactly as `_plant_request` speaks it — and
+    `fence` answers writes the field-ownership verdict a promoted
+    controller's claim would produce."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.tick = 0
+        self.points = {120: {'direction': 'in',
+                             'value': {'bool': False}}}
+        self.fence = False
+        self.open = True
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET,
+                                 socket.SO_REUSEADDR, 1)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen()
+        self.listener.settimeout(0.2)
+        self.address = '127.0.0.1:' \
+            + str(self.listener.getsockname()[1])
+        self.start()
+
+    def _dispatch(self, request):
+        op = request.get('op')
+        point = request.get('point')
+        state = self.points.get(point)
+        if op == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': p, 'direction': d['direction'],
+                 'sample': {'value': d['value'], 'quality': 'good',
+                            'tick': self.tick}, 'fault': None}
+                for p, d in sorted(self.points.items())]}
+        if state is None:
+            return {'result': 'error', 'error': {'kind': 'io',
+                    'error': {'unknown_point': point}}}
+        if op == 'read':
+            return {'result': 'sample',
+                    'sample': {'value': state['value'],
+                               'quality': 'good', 'tick': self.tick}}
+        if op == 'write':
+            if self.fence:
+                return {'result': 'error', 'error': {'kind': 'io',
+                        'error': {'fenced': {'point': point}}}}
+            state['value'] = request['value']
+            self.tick += 1
+            return {'result': 'done'}
+        return {'result': 'error',
+                'error': {'kind': 'invalid_request',
+                          'detail': 'unsupported op ' + str(op)}}
+
+    def run(self):
+        while self.open:
+            try:
+                conn, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                data = b''
+                while not data.endswith(b'\n'):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if data:
+                    conn.sendall(json.dumps(
+                        self._dispatch(json.loads(data))).encode()
+                        + b'\n')
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+    def close(self):
+        self.open = False
+        self.listener.close()
+        self.join(timeout=2)
+
+
+class ManagedFeed:
+    """A stubbed monitor for the managed-alarm scenario, mirroring the
+    pump-station fixture's managed layout: the Bool alarm comp10 reads
+    its condition off the plant-held field point 120; comp5's `shelve`
+    binds a non-writable point (the never-shelvable refusal); comp6
+    shelves under max_shelve_ticks=8; comp21/comp35 carry the per-pump
+    OOS-driven suppression wiring (oos 302/334 -> suppress 331/363).
+
+    Every measurement-channel call is one completed scan: accepted
+    writes apply at their boundary, the image reads the field point,
+    the machines evaluate — latch on the Bool alarm's rising edge,
+    bounded shelve counting the request's scans, the OOS copy feeding
+    suppress — and each transition lands in the journal the real
+    monitor serves. Fault flags stage each named failure."""
+
+    WRITABLE = {1050, 1010, 1011, 302, 334}
+    # comp10's alarm/unacknowledged — the points the `status_absent`
+    # fault omits from the served snapshot.
+    ABSENT_UNDER_FAULT = {1053, 1054}
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.next_seq = 1
+        self.journal = []
+        self.receipts = []
+        self.values = {point: False for point in (
+            120, 202, 203, 302, 314, 331, 334, 346, 363,
+            1000, 1001, 1010, 1011, 1050, 1060, 1090,
+            1003, 1004, 1005, 1006, 1007, 1013, 1014, 1015, 1016, 1017,
+            1053, 1054, 1055, 1056, 1057,
+            1063, 1064, 1065, 1066, 1067,
+            1093, 1094, 1095, 1096, 1097)}
+        self.latched = {'10': False, '21': False, '35': False}
+        self.prev_alarm = dict(self.latched)
+        self.shelve_elapsed = 0
+        # Fault injection for the named-failure cases.
+        self.alarm_never = False    # the driven alarm never asserts
+        self.no_journal = False     # transitions never reach the journal
+        self.no_settle = False      # accepted commands never settle
+        self.no_release = False     # shelved never auto-releases
+        self.no_refusal = False     # the never-shelvable write applies
+        self.no_oos_status = False  # OOS-driven statuses never report
+        self.status_absent = False  # snapshot omits monitored statuses
+        self.no_managed = False     # /schema serves no managed alarms
+
+    def _set(self, point, want):
+        want = bool(want)
+        if self.values[point] == want:
+            return
+        self.values[point] = want
+        if self.no_journal:
+            return
+        self.journal.append({'seq': self.next_seq, 'tick': self.tick,
+                             'event': {'point_changed': {
+                                 'point': point,
+                                 'from': {'bool': not want},
+                                 'to': {'bool': want}}}})
+        self.next_seq += 1
+
+    def _journal_receipt(self, receipt):
+        self.journal.append({'seq': self.next_seq, 'tick': self.tick,
+                             'event': {'command_settled': {
+                                 'receipt': receipt}}})
+        self.next_seq += 1
+
+    def _admit(self, body):
+        write = body['command']['write_value']
+        if write['point'] in self.WRITABLE or self.no_refusal:
+            receipt = {'command': body['command'],
+                       'outcome': {'accepted': {
+                           'apply_tick': self.tick + 1}},
+                       'actor': body.get('actor')}
+        else:
+            receipt = {'command': body['command'],
+                       'outcome': {'rejected': {'reason': {
+                           'not_writable': {'point': write['point']}}}},
+                       'actor': body.get('actor')}
+            self._journal_receipt(receipt)
+        self.receipts.append(receipt)
+        return receipt
+
+    def _advance(self):
+        """One completed scan: apply the writes whose boundary has
+        arrived, read the field, evaluate the machines."""
+        self.tick += 1
+        for receipt in self.receipts:
+            accepted = receipt['outcome'].get('accepted')
+            if accepted and self.tick >= accepted['apply_tick']:
+                write = receipt['command']['write_value']
+                self._set(write['point'], write['value']['bool'])
+                if self.no_settle:
+                    continue
+                receipt['outcome'] = {'applied': {'tick': self.tick}}
+                self._journal_receipt(receipt)
+        # The field read: the image tracks the plant-held input.
+        state = self.plant.points.get(120)
+        self._set(120, state['value'].get('bool') if state else False)
+        # The OOS copy chain: the suppress inputs follow the OOS point.
+        self._set(331, self.values[302])
+        self._set(363, self.values[334])
+        # The Bool latching alarms: a rising edge latches
+        # unacknowledged; the level-observed ack clears it.
+        for key, in_pt, ack_pt, alarm_pt, unack_pt in (
+                ('10', 120, 1050, 1053, 1054),
+                ('21', 314, 1060, 1063, 1064),
+                ('35', 346, 1090, 1093, 1094)):
+            new = self.values[in_pt] and not self.alarm_never
+            if self.values[ack_pt]:
+                self.latched[key] = False
+            elif new and not self.prev_alarm[key]:
+                self.latched[key] = True
+            self._set(alarm_pt, new)
+            self._set(unack_pt, self.latched[key])
+            self.prev_alarm[key] = new
+        # comp6's bounded shelve: asserts on the request's first scan,
+        # releases at the declared bound while the request still stands
+        # — the `no_release` fault holds it asserted past the bound.
+        self.shelve_elapsed = self.shelve_elapsed + 1 \
+            if self.values[1011] else 0
+        self._set(1015, self.values[1011]
+                  and (self.no_release or self.shelve_elapsed <= 8))
+        # The OOS-driven statuses follow the declared wiring.
+        self._set(1067, self.values[302] and not self.no_oos_status)
+        self._set(1066, self.values[331] and not self.no_oos_status)
+        self._set(1097, self.values[334] and not self.no_oos_status)
+        self._set(1096, self.values[363] and not self.no_oos_status)
+
+    def _interface(self, kind, ports):
+        """One managed-alarm interface entry — port name to bound point
+        split across the measurements and state collections the way
+        the served registry lays them out."""
+        return {'name': ports['name'],
+                'interface': {'kind': kind,
+                              'measurements': [
+                                  {'name': name, 'direction': 'in',
+                                   'kind': 'bool', 'point': point}
+                                  for name, point in ports['m']],
+                              'state': [
+                                  {'name': name, 'direction': 'in',
+                                   'kind': 'bool', 'point': point}
+                                  for name, point in ports['s']]}}
+
+    def _interfaces(self):
+        entries = [
+            self._interface('managed-latching-alarm', {
+                'name': 'managed-latching-alarm:5',
+                'm': [('in', 202), ('ack', 1000), ('alarm', 1003),
+                      ('unacknowledged', 1004)],
+                's': [('shelve', 1001), ('shelved', 1005),
+                      ('suppressed', 1006), ('out_of_service', 1007)]}),
+            self._interface('managed-latching-alarm', {
+                'name': 'managed-latching-alarm:6',
+                'm': [('in', 203), ('ack', 1010), ('alarm', 1013),
+                      ('unacknowledged', 1014)],
+                's': [('shelve', 1011), ('shelved', 1015),
+                      ('suppressed', 1016), ('out_of_service', 1017)]}),
+            self._interface('managed-bool-latching-alarm', {
+                'name': 'managed-bool-latching-alarm:10',
+                'm': [('in', 120), ('ack', 1050), ('alarm', 1053),
+                      ('unacknowledged', 1054)],
+                's': [('shelved', 1055), ('suppressed', 1056),
+                      ('out_of_service', 1057)]}),
+            self._interface('managed-bool-latching-alarm', {
+                'name': 'managed-bool-latching-alarm:21',
+                'm': [('in', 314), ('ack', 1060), ('alarm', 1063),
+                      ('unacknowledged', 1064)],
+                's': [('oos', 302), ('suppress', 331),
+                      ('shelved', 1065), ('suppressed', 1066),
+                      ('out_of_service', 1067)]}),
+            self._interface('managed-bool-latching-alarm', {
+                'name': 'managed-bool-latching-alarm:35',
+                'm': [('in', 346), ('ack', 1090), ('alarm', 1093),
+                      ('unacknowledged', 1094)],
+                's': [('oos', 334), ('suppress', 363),
+                      ('shelved', 1095), ('suppressed', 1096),
+                      ('out_of_service', 1097)]})]
+        if self.no_managed:
+            return []
+        return entries
+
+    def http_json(self, method, url, body=None, timeout=10):
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._advance()
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': point, 'signal': None,
+                 'name': 'point-' + str(point), 'direction': 'in',
+                 'value_type': 'bool',
+                 'writable': point in self.WRITABLE}
+                for point in sorted(self.values)], 'components': []}
+        if (method, route) == ('GET', '/schema'):
+            return 200, {'tick': self.tick,
+                         'interfaces': self._interfaces()}
+        if (method, route) == ('GET', '/snapshot'):
+            points = [{'point': point,
+                       'sample': {'value': {'bool': value},
+                                  'quality': 'good'}}
+                      for point, value in sorted(self.values.items())]
+            if self.status_absent:
+                points = [entry for entry in points
+                          if entry['point']
+                          not in self.ABSENT_UNDER_FAULT]
+            return 200, {'tick': self.tick, 'points': points,
+                         'parameters': [
+                             {'name': 'managed-latching-alarm:5',
+                              'values': {'max_shelve_ticks':
+                                         {'int': 0}}},
+                             {'name': 'managed-latching-alarm:6',
+                              'values': {'max_shelve_ticks':
+                                         {'int': 8}}}]}
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts)
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1])
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/command'):
+            return 200, self._admit(body)
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class ManagedAlarmLifecycleTests(unittest.TestCase):
+    """scenario_managed_alarm_lifecycle against the stubbed monitor and
+    a live plant-protocol peer: each leg's pass shape plus the named
+    failures — an unasserted driven condition, missing journaled
+    evidence, an unsettled receipt, a shelve that never auto-releases,
+    a never-shelvable write that applies, OOS statuses that never
+    report — and the inconclusive answers the lane owes when a
+    monitored status never reports or the field is already claimed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = ManagedPlant()
+        self.feed = ManagedFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': self.plant.address,
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, 'ALARM_POLL', 0.001), \
+                patch.object(scenarios, 'ALARM_DEADLINE', 3.0):
+            return scenarios.scenario_managed_alarm_lifecycle(ctx)
+
+    def test_registered_before_failover(self):
+        # The plant write rides an unclaimed field; a promotion takes
+        # the single-writer claim, so the case runs ahead of failover.
+        order = list(scenarios.SCENARIOS)
+        self.assertLess(order.index(
+            scenarios.scenario_managed_alarm_lifecycle),
+            order.index(scenarios.scenario_failover))
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The lifecycle evidence: assert the shelve leg recorded the
+        # declared bound and the refusal leg the named rejection.
+        shelve = json.loads(
+            (self.evidence / 'managed-alarm-shelve.json').read_text())
+        self.assertEqual(shelve['max_shelve_ticks'], 8)
+        self.assertEqual(shelve['request_standing'], True)
+        refusal = json.loads(
+            (self.evidence / 'managed-alarm-refusal.json').read_text())
+        self.assertEqual(refusal['settled'], 'rejected:not_writable')
+        oos = json.loads(
+            (self.evidence / 'managed-alarm-oos.json').read_text())
+        self.assertEqual(oos['component'],
+                         'managed-bool-latching-alarm:21')
+
+    def test_driven_condition_unasserted_fails(self):
+        self.feed.alarm_never = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('unasserted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_activation_without_journal_evidence_fails(self):
+        self.feed.no_journal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no journaled point_changed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unsettled_receipt_fails(self):
+        self.feed.no_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never settled applied',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_shelve_never_releases_fails(self):
+        self.feed.no_release = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('auto-released', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_never_shelvable_applies_fails(self):
+        self.feed.no_refusal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not refuse NotWritable',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_oos_statuses_never_report_fails(self):
+        self.feed.no_oos_status = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('out_of_service/suppressed statuses',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_status_never_reports_is_inconclusive(self):
+        # A monitored status that never reports is an inconclusive
+        # answer, not the product failure the lane names.
+        self.feed.status_absent = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never report', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_claimed_field_is_inconclusive(self):
+        # The plant's write-ownership already claimed — the fencing
+        # verdict — is an environment answer, not a managed-alarm
+        # failure.
+        self.plant.fence = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('field-write ownership is already claimed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_oos_already_standing_uses_the_other_pump(self):
+        # With comp21's OOS point already standing — the shape an
+        # earlier suite leg leaves behind — the leg drives comp35's.
+        self.feed.values[302] = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        oos = json.loads(
+            (self.evidence / 'managed-alarm-oos.json').read_text())
+        self.assertEqual(oos['component'],
+                         'managed-bool-latching-alarm:35')
         report.validate_scenario(record)
 
 

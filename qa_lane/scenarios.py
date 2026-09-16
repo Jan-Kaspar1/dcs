@@ -3,8 +3,11 @@
 Each scenario drives the redundant controller pair through the monitor
 endpoints documented in docs/packaging.md (GET /role, /signals,
 /snapshot, /receipts, /journal, /schema, /resources; POST /command,
-/demote, /promote) and returns one report-schema scenario case. Stdlib
-only — the Lenovo host needs nothing but Python and Docker.
+/demote, /promote) — the managed-alarm case also speaks the plant
+protocol's documented request/response surface (`read`/`write`/
+`list_points` on the published plant port) for its field stimulus —
+and returns one report-schema scenario case. Stdlib only — the Lenovo
+host needs nothing but Python and Docker.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -260,6 +263,642 @@ def scenario_operator_command(ctx):
                                'point ' + str(point)
                                + ' did not read true in telemetry')
         case.observe('point ' + str(point) + ' reads true in telemetry')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The managed alarm lifecycle (WW-ALM-001/-002, decisions 71–74): one
+# leg per declared managed transition, each observed through the
+# active's monitor surface and transition journal. The alarm condition
+# enters through the plant protocol — a PlantRequest::write on a
+# plant-held field input the dynamics leave held — while every
+# lifecycle command travels the receipted POST /command path against
+# the bound point the model marks writable.
+#
+# The case must run while the field's write-ownership is unclaimed: a
+# promotion takes the plant's single-writer claim and fences a
+# scenario-side write thereafter, so the case sits ahead of the
+# failover leg in SCENARIOS.
+
+ALARM_POLL = 0.1    # lifecycle transitions land within a few scans
+ALARM_DEADLINE = 30  # bound on one leg's settle/status wait
+MANAGED_ALARM_KINDS = ('managed-latching-alarm',
+                      'managed-bool-latching-alarm')
+
+
+def _plant_request(ctx, request, timeout=10):
+    """One request/response exchange on the rig's plant protocol — the
+    newline-delimited JSON `dcs-sim-net`'s PlantServer serves: write
+    one PlantRequest line, read back exactly one PlantResponse line."""
+    address = ctx['plant']
+    host, _, port = address.rpartition(':')
+    with socket.create_connection(
+            (host or '127.0.0.1', int(port)), timeout=timeout) as conn:
+        conn.sendall(json.dumps(request).encode() + b'\n')
+        data = b''
+        while not data.endswith(b'\n'):
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise ConnectionError('plant closed the connection')
+            data += chunk
+    return json.loads(data)
+
+
+def _plant_points(ctx):
+    """The plant's served point census — `{point: direction}` for the
+    channel-bound field points a PlantRequest reaches. `list_points`
+    stays open to every attachment, claimed writer or not."""
+    response = _plant_request(ctx, {'op': 'list_points'})
+    if response.get('result') != 'points':
+        raise RuntimeError('plant list_points answered '
+                           + json.dumps(response)[:200])
+    return {entry.get('point'): entry.get('direction')
+            for entry in response.get('points') or []}
+
+
+def _plant_write(ctx, point, value):
+    return _plant_request(ctx, {'op': 'write', 'point': point,
+                                'value': value})
+
+
+def _plant_read(ctx, point):
+    return _plant_request(ctx, {'op': 'read', 'point': point})
+
+
+def _managed_instances(schema):
+    """The served managed-alarm instances in scan order — one record
+    per instance whose interface kind is a managed alarm, mapping each
+    declared port's name to its bound point across the measurements
+    and state collections."""
+    found = []
+    for entry in schema.get('interfaces') or []:
+        interface = (entry or {}).get('interface') or {}
+        if interface.get('kind') not in MANAGED_ALARM_KINDS:
+            continue
+        ports = {}
+        for collection in ('measurements', 'state'):
+            for prop in interface.get(collection) or []:
+                if prop.get('point') is not None:
+                    ports[prop.get('name')] = prop['point']
+        found.append({'name': entry.get('name'),
+                      'kind': interface.get('kind'), 'ports': ports})
+    return found
+
+
+def _live_int(snapshot, component, name):
+    """A component's live Int parameter out of the snapshot's
+    `parameters` section — None while it declares none."""
+    for entry in snapshot.get('parameters') or []:
+        if entry.get('name') == component:
+            value = (entry.get('values') or {}).get(name)
+            if isinstance(value, dict):
+                return value.get('int')
+    return None
+
+
+def _as_bool(payload):
+    """The Bool inside a served Value payload, else None."""
+    return payload.get('bool') if isinstance(payload, dict) else None
+
+
+def _point_changed(entries, point):
+    """The journal's point_changed transitions for `point`, as
+    {'tick','from','to'} records in stream order."""
+    out = []
+    for entry in _journal_list(entries):
+        change = (entry.get('event') or {}).get('point_changed')
+        if isinstance(change, dict) and change.get('point') == point:
+            out.append({'tick': entry.get('tick'),
+                        'from': change.get('from'),
+                        'to': change.get('to')})
+    return out
+
+
+def _settled_receipt(entries, command):
+    """The journaled command_settled receipt for `command`, or None."""
+    for entry in _journal_list(entries):
+        receipt = ((entry.get('event') or {})
+                   .get('command_settled') or {}).get('receipt')
+        if isinstance(receipt, dict) \
+                and receipt.get('command') == command:
+            return receipt
+    return None
+
+
+def _journal_since(ctx, base, cursor):
+    _, body = http_json('GET', base + '/journal?since=' + str(cursor))
+    return _journal_list(body)
+
+
+def _submit_bool(ctx, base, point, want=True):
+    """A write_value submission through POST /command — the receipted
+    path every commanded lifecycle transition must travel. Returns
+    (status, receipt, receipt_index, command): the index is the
+    receipt's position in the append-only log, captured before the
+    submission."""
+    _, body = http_json('GET', base + '/receipts')
+    index = len(_receipt_list(body))
+    command = {'write_value': {'point': point, 'kind': 'bool',
+                               'value': {'bool': want}}}
+    status, receipt = http_json('POST', base + '/command',
+                                {'command': command, 'actor': 'qa-lane'})
+    return status, receipt, index, command
+
+
+def _await_points(ctx, base, expects, deadline):
+    """Poll the snapshot until every {point: want} reads as wanted.
+
+    Returns 'met', 'unmet' (every wanted point reports, at least one
+    never the wanted value — the product failure), or 'absent' (a
+    wanted point never appears in the served points — the monitored
+    status that never reports, an inconclusive answer)."""
+    seen = set()
+
+    def check():
+        snap = _try_snapshot(ctx, base)
+        if snap is None:
+            return None
+        met = True
+        for point, want in expects.items():
+            if any(entry.get('point') == point and entry.get('sample')
+                   for entry in snap.get('points', [])):
+                seen.add(point)
+            if _point_value(snap, point) != want:
+                met = False
+        return met or None
+
+    if wait_for(check, deadline, interval=ALARM_POLL):
+        return 'met'
+    return 'unmet' if seen >= set(expects) else 'absent'
+
+
+def _await_journal(ctx, base, cursor, predicate, deadline):
+    """Poll `/journal?since=cursor` until `predicate(entries)` holds —
+    returns the latest fetched entries either way, so the caller lands
+    them as evidence and names the missing transition itself. The
+    journal records every transition, so a wait keyed on it cannot
+    miss a short-lived flag a snapshot poll could."""
+    out = {'entries': []}
+
+    def check():
+        out['entries'] = _journal_since(ctx, base, cursor)
+        return predicate(out['entries']) or None
+
+    wait_for(check, deadline, interval=ALARM_POLL)
+    return out['entries']
+
+
+def _lifecycle_status(case, verdict, what):
+    """Map an _await_points verdict onto the case's outcome: 'met' is
+    handled by the caller; 'absent' is a monitored status that never
+    reports — inconclusive; 'unmet' is the named product failure."""
+    if verdict == 'absent':
+        return case.finish('inconclusive', what
+                           + ' never reports in the served snapshot')
+    return case.finish('failed', what + ' never reported')
+
+
+def scenario_managed_alarm_lifecycle(ctx):
+    """Activation, ack, bounded shelve and auto-release, the
+    never-shelvable refusal, and pump out-of-service suppression — the
+    managed lifecycle end to end on the simulated rig."""
+    case = Case('managed-alarm-lifecycle',
+                'Managed alarm lifecycle on the simulated rig',
+                'a plant-held field input trips a managed alarm with '
+                'journaled point_changed evidence; the ack clears '
+                'unacknowledged through a settled receipt; the '
+                'shelvable alarm shelves and auto-releases at its '
+                'declared max_shelve_ticks; a never-shelvable shelve '
+                'refuses NotWritable with no state change; and a pump '
+                'out-of-service write reports out_of_service and '
+                'suppressed with journaled lifecycle entries')
+    evidence_dir = ctx['evidence_dir']
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30, interval=ALARM_POLL)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('managed lifecycle against ' + active
+                     + ' (' + base + ')')
+        if not ctx.get('plant'):
+            return case.finish('inconclusive',
+                               'the run context carries no plant '
+                               'address')
+        _, signals = http_json('GET', base + '/signals')
+        _, schema = http_json('GET', base + '/schema')
+        ref = save_evidence(evidence_dir, 'managed-alarm-model.json',
+                            {'signals': signals, 'schema': schema})
+        case.evidence('file', ref,
+                      'signal index and served interface registry')
+        writable = {entry.get('point')
+                    for entry in signals.get('points', [])
+                    if entry.get('writable')}
+        instances = _managed_instances(schema)
+        if not instances:
+            return case.finish('inconclusive', 'the served schema '
+                               'declares no managed alarm instances')
+
+        # The plant-side census: which declared inputs the shared
+        # plant actually holds. list_points stays open to every
+        # attachment; a write rides the same protocol.
+        plant_points = _plant_points(ctx)
+        ref = save_evidence(evidence_dir, 'managed-alarm-plant.json',
+                            {'points': {str(k): v for k, v
+                                        in plant_points.items()}})
+        case.evidence('file', ref,
+                      'the plant protocol\'s point census')
+
+        # Leg 1 — activation: drive a managed alarm's declared
+        # condition true through a PlantRequest::write on a plant-held
+        # input the dynamics leave held. The bool-latching alarms'
+        # fault/feedback inputs qualify; whichever declared input
+        # keeps the written level carries the leg.
+        candidates = [record for record in instances
+                      if record['kind'] == 'managed-bool-latching-alarm'
+                      and {'in', 'ack', 'alarm', 'unacknowledged'}
+                      <= set(record['ports'])
+                      and plant_points.get(record['ports'].get('in'))
+                      == 'in']
+        driven = None
+        attempts = []
+        for record in candidates:
+            ports = record['ports']
+            source = ports['in']
+            cursor = _journal_cursor(ctx, base)
+            answer = _plant_write(ctx, source, {'bool': True})
+            attempt = {'component': record['name'], 'point': source,
+                       'write': answer}
+            if answer.get('result') != 'done':
+                attempt['held'] = None
+                attempts.append(attempt)
+                if 'fenced' in json.dumps(answer):
+                    ref = save_evidence(
+                        evidence_dir, 'managed-alarm-activation.json',
+                        {'attempts': attempts})
+                    case.evidence('file', ref)
+                    return case.finish(
+                        'inconclusive', 'the plant refused the drive — '
+                        'its field-write ownership is already claimed: '
+                        + json.dumps(answer)[:300])
+                continue
+            # The dynamics reclaim a driven output at the next plant
+            # step; a held input keeps the written level. Sample the
+            # field across several steps before trusting the stimulus.
+            held = None
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                answer = _plant_read(ctx, source)
+                held = _as_bool((answer.get('sample') or {})
+                                .get('value'))
+                if held is not True:
+                    break
+                time.sleep(ALARM_POLL)
+            attempt['held'] = held
+            if held is not True:
+                _plant_write(ctx, source, {'bool': False})
+                attempts.append(attempt)
+                continue
+            verdict = _await_points(
+                ctx, base, {ports['alarm']: True,
+                            ports['unacknowledged']: True},
+                time.monotonic() + ALARM_DEADLINE)
+            attempt['alarm'] = verdict
+            attempts.append(attempt)
+            if verdict == 'met':
+                driven = (record, cursor)
+                break
+            if verdict == 'absent':
+                return case.finish(
+                    'inconclusive', record['name'] + "'s alarm/"
+                    'unacknowledged statuses never report in the '
+                    'served snapshot')
+            _plant_write(ctx, source, {'bool': False})
+            return case.finish(
+                'failed', 'the driven condition on point '
+                + str(source) + ' left ' + record['name']
+                + ' unasserted')
+        ref = save_evidence(evidence_dir, 'managed-alarm-activation.json',
+                            {'attempts': attempts,
+                             'driven': driven and driven[0]['name']})
+        case.evidence('file', ref, 'plant-protocol stimulus attempts')
+        if driven is None:
+            return case.finish(
+                'inconclusive', 'no managed alarm input is a '
+                'plant-held field point the write can drive')
+        record, cursor = driven
+        ports = record['ports']
+        case.observe('drove ' + record['name'] + ' through plant point '
+                     + str(ports['in']) + ': alarm and unacknowledged '
+                     'asserted')
+
+        entries = _await_journal(
+            ctx, base, cursor,
+            lambda items: any(_as_bool(t['to']) is True
+                              for t in _point_changed(items,
+                                                      ports['alarm']))
+            and any(_as_bool(t['to']) is True
+                    for t in _point_changed(items,
+                                            ports['unacknowledged'])),
+            time.monotonic() + ALARM_DEADLINE)
+        ref = save_evidence(evidence_dir,
+                            'managed-alarm-activation-journal.json',
+                            {'entries': entries})
+        case.evidence('file', ref,
+                      'journaled activation transitions')
+        if not any(_as_bool(t['to']) is True
+                   for t in _point_changed(entries, ports['alarm'])) \
+                or not any(_as_bool(t['to']) is True
+                           for t in _point_changed(
+                               entries, ports['unacknowledged'])):
+            return case.finish(
+                'failed', 'the asserted alarm produced no journaled '
+                'point_changed evidence on the lifecycle points')
+
+        # Leg 2 — acknowledge through the receipted command path on
+        # the managed `ack` point: the write settles applied at a scan
+        # boundary, the latch clears, and the journal carries both the
+        # settled receipt and the unacknowledged transition.
+        cursor = _journal_cursor(ctx, base)
+        status, receipt, index, command = _submit_bool(
+            ctx, base, ports['ack'], True)
+        if status != 200 or not isinstance(receipt, dict) \
+                or not receipt.get('outcome'):
+            return case.finish(
+                'failed', 'the ack write returned no structured '
+                'receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:300])
+        settled = wait_for(lambda: _settled_outcome(ctx, base, index),
+                           time.monotonic() + ALARM_DEADLINE,
+                           interval=ALARM_POLL)
+        verdict = _await_points(
+            ctx, base, {ports['unacknowledged']: False},
+            time.monotonic() + ALARM_DEADLINE)
+        entries = _journal_since(ctx, base, cursor)
+        journaled = _settled_receipt(entries, command)
+        unack_transitions = _point_changed(
+            entries, ports['unacknowledged'])
+        ref = save_evidence(
+            evidence_dir, 'managed-alarm-ack.json',
+            {'receipt': receipt, 'settled': settled,
+             'journaled_receipt': journaled,
+             'unacknowledged': unack_transitions})
+        case.evidence('file', ref,
+                      'the acknowledgment\'s receipt and journal')
+        if settled != 'applied':
+            return case.finish(
+                'failed', 'the ack write never settled applied: '
+                + str(settled))
+        if journaled is None:
+            return case.finish(
+                'failed', 'the ack settlement was never journaled')
+        if not any(_as_bool(t['to']) is False
+                   for t in unack_transitions):
+            return case.finish(
+                'failed', 'no journaled point_changed records the '
+                'unacknowledged clear')
+        if verdict != 'met':
+            return _lifecycle_status(
+                case, verdict, 'the acknowledged latch')
+        case.observe(record['name'] + ' acknowledged: receipt applied, '
+                     'unacknowledged cleared and journaled')
+        # Level-observed input: return `ack` to false so a later trip
+        # latches afresh.
+        _submit_bool(ctx, base, ports['ack'], False)
+
+        # Leg 3 — bounded shelving on the alarm whose `shelve` binds a
+        # writable point and whose live max_shelve_ticks is non-zero:
+        # `shelved` asserts on the request's first scan and drops at
+        # the declared bound while the request still stands.
+        shelvable = None
+        snapshot = _snapshot(ctx, base)
+        for candidate in instances:
+            shelve = candidate['ports'].get('shelve')
+            if shelve is None or shelve not in writable:
+                continue
+            bound = _live_int(snapshot, candidate['name'],
+                              'max_shelve_ticks')
+            if bound \
+                    and candidate['ports'].get('shelved') is not None:
+                shelvable = (candidate, shelve, bound)
+                break
+        if shelvable is None:
+            return case.finish(
+                'inconclusive', 'no managed alarm exposes a writable '
+                'shelve under a declared max_shelve_ticks')
+        shelvable, shelve_point, max_ticks = shelvable
+        shelved_point = shelvable['ports']['shelved']
+        cursor = _journal_cursor(ctx, base)
+        status, receipt, index, command = _submit_bool(
+            ctx, base, shelve_point, True)
+        if status != 200 or not isinstance(receipt, dict) \
+                or not receipt.get('outcome'):
+            return case.finish(
+                'failed', 'the shelve write returned no structured '
+                'receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:300])
+        settled = wait_for(lambda: _settled_outcome(ctx, base, index),
+                           time.monotonic() + ALARM_DEADLINE,
+                           interval=ALARM_POLL)
+        if settled != 'applied':
+            return case.finish(
+                'failed', 'the shelve write never settled applied: '
+                + str(settled))
+
+        def shelve_recorded(items):
+            transitions = _point_changed(items, shelved_point)
+            return len(transitions) >= 2 \
+                and _as_bool(transitions[0]['to']) is True \
+                and _as_bool(transitions[-1]['to']) is False
+
+        entries = _await_journal(
+            ctx, base, cursor, shelve_recorded,
+            time.monotonic() + ALARM_DEADLINE + max_ticks)
+        transitions = _point_changed(entries, shelved_point)
+        standing = _point_value(_try_snapshot(ctx, base) or {},
+                                shelve_point)
+        journaled = _settled_receipt(entries, command)
+        ref = save_evidence(
+            evidence_dir, 'managed-alarm-shelve.json',
+            {'component': shelvable['name'], 'receipt': receipt,
+             'journaled_receipt': journaled,
+             'shelved': transitions, 'max_shelve_ticks': max_ticks,
+             'request_standing': standing})
+        case.evidence('file', ref,
+                      'the shelve request\'s settled receipt and the '
+                      'shelved flag\'s assert/release transitions')
+        if journaled is None:
+            return case.finish(
+                'failed', 'the shelve settlement was never journaled')
+        if not transitions \
+                or _as_bool(transitions[0]['to']) is not True:
+            return case.finish(
+                'failed', 'the shelve request never asserted '
+                + shelvable['name'] + '\'s shelved flag')
+        if _as_bool(transitions[-1]['to']) is not False:
+            return case.finish(
+                'failed', shelvable['name'] + ' never auto-released '
+                'shelved at its declared max_shelve_ticks '
+                + str(max_ticks))
+        released = transitions[-1]['tick'] - transitions[0]['tick'] \
+            if isinstance(transitions[-1]['tick'], int) \
+            and isinstance(transitions[0]['tick'], int) else None
+        if released != max_ticks:
+            return case.finish(
+                'failed', shelvable['name'] + ' released shelved after '
+                + str(released) + ' scans, not the declared '
+                'max_shelve_ticks ' + str(max_ticks))
+        if standing is not True:
+            return case.finish(
+                'failed', 'the shelve request was no longer standing '
+                'at release — the flag did not auto-expire')
+        case.observe(shelvable['name'] + ' shelved and auto-released '
+                     'at the declared bound (' + str(max_ticks)
+                     + ' scans)')
+        # Cycle the request through false so a later shelve re-arms.
+        _submit_bool(ctx, base, shelve_point, False)
+
+        # Leg 4 — the never-shelvable refusal: a `shelve` bound to a
+        # point the model does not mark writable answers the named
+        # NotWritable rejection at submission and applies nothing.
+        refuse = None
+        for candidate in instances:
+            shelve = candidate['ports'].get('shelve')
+            if shelve is not None and shelve not in writable:
+                refuse = (candidate, shelve)
+                break
+        if refuse is None:
+            return case.finish(
+                'inconclusive', 'no managed alarm binds a shelve '
+                'request to a non-writable point')
+        refuse, refuse_point = refuse
+        cursor = _journal_cursor(ctx, base)
+        status, receipt, index, command = _submit_bool(
+            ctx, base, refuse_point, True)
+        outcome = _outcome_key(receipt)
+        settled = wait_for(lambda: _settled_outcome(ctx, base, index),
+                           time.monotonic() + ALARM_DEADLINE,
+                           interval=ALARM_POLL)
+        entries = _journal_since(ctx, base, cursor)
+        journaled = _settled_receipt(entries, command)
+        shelved_pt = refuse['ports'].get('shelved')
+        drift = _point_changed(entries, shelved_pt) \
+            if shelved_pt is not None else []
+        still = _point_value(_try_snapshot(ctx, base) or {}, shelved_pt)
+        ref = save_evidence(
+            evidence_dir, 'managed-alarm-refusal.json',
+            {'component': refuse['name'], 'receipt': receipt,
+             'settled': settled, 'journaled_receipt': journaled,
+             'shelved': still, 'shelved_transitions': drift})
+        case.evidence('file', ref,
+                      'the never-shelvable shelve\'s named refusal')
+        if status != 200 or not isinstance(receipt, dict) \
+                or not receipt.get('outcome'):
+            return case.finish(
+                'failed', 'the never-shelvable shelve returned no '
+                'structured receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:300])
+        if outcome != 'rejected:not_writable':
+            return case.finish(
+                'failed', 'the never-shelvable shelve on '
+                + refuse['name'] + ' did not refuse NotWritable: '
+                + outcome)
+        if settled != 'rejected:not_writable':
+            return case.finish(
+                'failed', 'the refused shelve never settled in the '
+                'receipt log: ' + str(settled))
+        if journaled is None:
+            return case.finish(
+                'failed', 'the refused shelve was never journaled')
+        if drift or still:
+            return case.finish(
+                'failed', 'the refused shelve still moved '
+                + refuse['name'] + '\'s shelved flag')
+        case.observe(refuse['name'] + ' refused shelve by name '
+                     '(not_writable) with no state change')
+
+        # Leg 5 — out of service: a pump OOS write drives the alarm's
+        # declared `oos`/`suppress` wiring — both statuses report and
+        # every transition journals. Prefer an OOS point still reading
+        # false so the write is a real transition; the suite's earlier
+        # command cases may already stand one.
+        oos_instance = None
+        snapshot = _snapshot(ctx, base)
+        for candidate in instances:
+            oos_point = candidate['ports'].get('oos')
+            if oos_point in writable \
+                    and 'suppress' in candidate['ports'] \
+                    and 'suppressed' in candidate['ports'] \
+                    and 'out_of_service' in candidate['ports'] \
+                    and _point_value(snapshot, oos_point) is not True:
+                oos_instance = (candidate, oos_point)
+                break
+        if oos_instance is None:
+            return case.finish(
+                'inconclusive', 'no managed alarm binds a writable '
+                'oos point that still reads false')
+        oos_instance, oos_point = oos_instance
+        oos_ports = oos_instance['ports']
+        cursor = _journal_cursor(ctx, base)
+        status, receipt, index, command = _submit_bool(
+            ctx, base, oos_point, True)
+        if status != 200 or not isinstance(receipt, dict) \
+                or not receipt.get('outcome'):
+            return case.finish(
+                'failed', 'the oos write returned no structured '
+                'receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:300])
+        settled = wait_for(lambda: _settled_outcome(ctx, base, index),
+                           time.monotonic() + ALARM_DEADLINE,
+                           interval=ALARM_POLL)
+        verdict = _await_points(
+            ctx, base, {oos_ports['out_of_service']: True,
+                        oos_ports['suppressed']: True},
+            time.monotonic() + ALARM_DEADLINE)
+        entries = _journal_since(ctx, base, cursor)
+        journaled = _settled_receipt(entries, command)
+        lifecycle = {name: _point_changed(entries, oos_ports[name])
+                     for name in ('out_of_service', 'suppressed')}
+        driven_oos = _point_changed(entries, oos_point)
+        ref = save_evidence(
+            evidence_dir, 'managed-alarm-oos.json',
+            {'component': oos_instance['name'], 'receipt': receipt,
+             'settled': settled, 'journaled_receipt': journaled,
+             'oos_point': driven_oos, 'statuses': lifecycle})
+        case.evidence('file', ref,
+                      'the OOS write\'s receipt and journaled '
+                      'lifecycle entries')
+        if settled != 'applied':
+            return case.finish(
+                'failed', 'the oos write never settled applied: '
+                + str(settled))
+        if journaled is None:
+            return case.finish(
+                'failed', 'the oos settlement was never journaled')
+        if not any(_as_bool(t['to']) is True for t in driven_oos):
+            return case.finish(
+                'failed', 'the oos point\'s transition was never '
+                'journaled')
+        if verdict != 'met':
+            return _lifecycle_status(
+                case, verdict, 'the OOS-driven out_of_service/'
+                'suppressed statuses')
+        for name, transitions in lifecycle.items():
+            if not any(_as_bool(t['to']) is True
+                       for t in transitions):
+                return case.finish(
+                    'failed', 'no journaled point_changed records '
+                    + name + ' asserting')
+        case.observe(oos_instance['name'] + ' reports out_of_service '
+                     'and suppressed under the OOS write')
+        # Return the pump to service through the same receipted path.
+        _submit_bool(ctx, base, oos_point, False)
+
+        # Restore the field stimulus: the driven input returns false,
+        # the alarm clears on the next scan.
+        _plant_write(ctx, ports['in'], {'bool': False})
         return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
@@ -1715,9 +2354,10 @@ def scenario_command_admission(ctx):
 
 
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
-             scenario_operator_command, scenario_failover,
-             scenario_evidence_capture, scenario_served_interface,
-             scenario_consumer_schedule, scenario_command_admission)
+             scenario_operator_command, scenario_managed_alarm_lifecycle,
+             scenario_failover, scenario_evidence_capture,
+             scenario_served_interface, scenario_consumer_schedule,
+             scenario_command_admission)
 
 
 def run_all(ctx, timeline):
