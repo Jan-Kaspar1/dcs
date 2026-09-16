@@ -786,7 +786,14 @@ Repair context: {repair}
                 self.state.set('last_error', 'Planner produced no proposal; inspect its permission/output log')
                 self.log('Planner produced no proposal; inspect its permission/output log')
                 return
-            proposal = planning.validate(json.loads(Path(current['output']).read_text()))
+            try:
+                proposal = planning.validate(json.loads(Path(current['output']).read_text()))
+            except ValueError as exc:
+                self.state.set('planner_feedback', str(exc))
+                self.state.set('last_error', 'Planner proposal rejected: ' + str(exc)[:500])
+                self.log('Planner proposal rejected: ' + str(exc))
+                return
+            self.state.set('planner_feedback', None)
             self.state.set('pending_proposal', proposal)
         if self.state.paused():
             return
@@ -800,7 +807,15 @@ Repair context: {repair}
                 self.state.set('last_error', 'Discarded malformed pending proposal')
                 self.log('Discarded malformed pending proposal')
                 return
-            pending = planning.validate(pending)
+            try:
+                pending = planning.validate(pending)
+            except ValueError as exc:
+                self.state.set('pending_proposal', None)
+                self.state.set('planner_feedback', str(exc))
+                self.state.set('last_error', 'Discarded malformed pending proposal: ' + str(exc)[:500])
+                self.log('Discarded malformed pending proposal: ' + str(exc))
+                return
+            self.state.set('planner_feedback', None)
             ready_count = sum('agent:ready' in [l['name'] for l in i.get('labels', [])] and i.get('state') == 'OPEN' for i in issues)
             known = {}
             for issue in issues:
@@ -837,7 +852,7 @@ Repair context: {repair}
         clone = self.runtime.prepare_clone('coordinator')
         output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
         output.parent.mkdir(parents=True, exist_ok=True)
-        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input()))
+        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')))
         self.state.set('planner', {'process': process, 'output': str(output)})
         self.state.set('last_plan', now)
         self.log('Planner started')

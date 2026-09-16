@@ -33,6 +33,14 @@ class PlanningTests(unittest.TestCase):
     def test_limit(self):
         with self.assertRaises(ValueError): validate({'issues':[self.item()]*21})
 
+    def test_tests_list_normalized_to_string(self):
+        item=self.item(); item['tests']=['Unit tests','  Wire-shape pins ']
+        self.assertEqual(validate({'issues':[item]})['issues'][0]['tests'],'Unit tests\nWire-shape pins')
+        item['tests']=[]
+        with self.assertRaises(ValueError): validate({'issues':[item]})
+        item['tests']=['ok',3]
+        with self.assertRaises(ValueError): validate({'issues':[item]})
+
     def test_improvement_roundtrip(self):
         item=self.item(); item['improvement']='deepen-executor'
         proposal=validate({'issues':[item]})
@@ -72,5 +80,11 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('never plan fire-and-forget commands', text)
         self.assertIn('direct reuse of LGPL QiTech implementation code', text)
         self.assertIn('batch control as deferred', text)
+
+    def test_prompt_includes_rejection_feedback(self):
+        text = prompt([], [], '/tmp/proposal.json', feedback='Missing or oversized text: tests')
+        self.assertIn('rejected during validation', text)
+        self.assertIn('Missing or oversized text: tests', text)
+        self.assertNotIn('rejected during validation', prompt([], [], '/tmp/proposal.json'))
 
 if __name__ == '__main__': unittest.main()
