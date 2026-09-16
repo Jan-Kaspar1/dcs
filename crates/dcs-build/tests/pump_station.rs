@@ -51,8 +51,8 @@ use dcs_build::station::{
 };
 use dcs_build::{PointId, Value};
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, JournalEvent,
-    Quality, QualityReason, Sample, ValueKind,
+    AdaptedCommand, Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, JournalEntry,
+    JournalEvent, Quality, QualityReason, Sample, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
@@ -68,6 +68,17 @@ const MODEL_JSON: &str = concat!(
 const DYNAMICS_JSON: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-demo/fixtures/pump_station_dynamics.json"
+);
+/// The consumer tree's emitted duty/standby model — the external
+/// reference plant's checked-in artifact.
+const REFERENCE_MODEL_JSON: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../reference-plant/model/plant.json"
+);
+/// Its matching dynamics declaration.
+const REFERENCE_DYNAMICS_JSON: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../reference-plant/model/dynamics.json"
 );
 
 /// The plant step each scan period covers, in seconds.
@@ -99,16 +110,21 @@ fn dynamics() -> Vec<ProcessElement> {
 }
 
 /// Builds the driver side of `model` through the standard
-/// [`DriverRegistry`], merging the checked-in dynamics into the shared
-/// sim map exactly as `dcs-plant-server --dynamics` does — each element
-/// lands through `with_element` and revalidates the map.
-fn build_driver(model: &PlantModel) -> FanoutDriver {
+/// [`DriverRegistry`], merging `dynamics` into the shared sim map
+/// exactly as `dcs-plant-server --dynamics` does — each element lands
+/// through `with_element` and revalidates the map.
+fn build_driver_with(model: &PlantModel, dynamics: Vec<ProcessElement>) -> FanoutDriver {
     let mut plan = resolve_drivers(model, &DriverRegistry::standard()).unwrap();
-    for element in dynamics() {
+    for element in dynamics {
         plan.sim_map = plan.sim_map.with_element(element);
         plan.sim_map.validate().unwrap();
     }
     plan.build().unwrap()
+}
+
+/// The checked-in document's driver.
+fn build_driver(model: &PlantModel) -> FanoutDriver {
+    build_driver_with(model, dynamics())
 }
 
 /// Writes `value` to `point` through the operator command path.
@@ -1427,6 +1443,297 @@ fn managed_lifecycle_lands_in_the_durable_record_in_seq_order() {
         )),
         "a command went unrecorded: {settled:?}"
     );
+}
+
+/// Serves `model`'s monitor and runs `body` against its client — the
+/// shared rig for the schema-surface proofs below.
+fn with_station_monitor(
+    model: &PlantModel,
+    dynamics: Vec<ProcessElement>,
+    body: impl FnOnce(&MonitorClient),
+) {
+    let driver = build_driver_with(model, dynamics);
+    let executor = assemble(model, &dcs_controller::registry(), &driver).unwrap();
+    let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
+    let result = thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&client)));
+        monitor.shutdown();
+        result
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+/// The schema-driven-interface decision's monitor-side sweep —
+/// model-agnostic, so it runs identically over the platform's
+/// conformance fixture and the consumer tree's emitted
+/// `reference-plant/model/plant.json`: the served page carries the
+/// generic renderers, every component's five `BlockInterface`
+/// categories arrive with parallel live resource collections, and the
+/// surfaced commands operate the plant through the receipted path.
+fn assert_five_category_surface(client: &MonitorClient) {
+    client.advance(1).unwrap();
+
+    // The served page carries the generic renderers — every
+    // faceplate's five categories come from the schema and resource
+    // views, never from kind-specific markup.
+    let page = client.page().unwrap();
+    for needle in [
+        "interfaceMarkup(descriptor.name, generic)",
+        "resourceTable(\"measurements\", iface.measurements",
+        "configTable(name, iface.configuration",
+        "resourceTable(\"state\", iface.state",
+        "commandTable(name, iface.commands",
+        "eventList(resources && resources.events)",
+        "class=\\\"invoke\\\"",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+
+    let snapshot = client.snapshot().unwrap();
+    let schema = client.schema().unwrap();
+    let resources = client.resources().unwrap();
+    assert_eq!(schema.interfaces.len(), snapshot.descriptors.len());
+    assert_eq!(resources.components.len(), snapshot.descriptors.len());
+
+    // Every served instance carries all five categories and the live
+    // view's collections are parallel — the generic renderer joins
+    // them by index without kind knowledge.
+    for (entry, live) in schema.interfaces.iter().zip(&resources.components) {
+        assert_eq!(entry.name, live.name);
+        assert_eq!(live.kind, entry.interface.kind);
+        assert_eq!(live.measurements.len(), entry.interface.measurements.len());
+        assert_eq!(
+            live.configuration.len(),
+            entry.interface.configuration.len()
+        );
+        assert_eq!(live.state.len(), entry.interface.state.len());
+        assert_eq!(live.commands.len(), entry.interface.commands.len());
+        assert!(
+            entry.interface.events.len() >= 2,
+            "{} serves no event vocabulary",
+            entry.name
+        );
+    }
+
+    // The station's kinds cover the populated case of each category
+    // somewhere: measurements and commands on every instance, runtime
+    // state on the Status-ported kinds, tunable configuration on the
+    // parameterized kinds.
+    assert!(
+        schema
+            .interfaces
+            .iter()
+            .all(|entry| !entry.interface.measurements.is_empty())
+    );
+    assert!(
+        schema
+            .interfaces
+            .iter()
+            .all(|entry| !entry.interface.commands.is_empty())
+    );
+    assert!(
+        schema
+            .interfaces
+            .iter()
+            .any(|entry| !entry.interface.state.is_empty())
+    );
+    assert!(
+        schema
+            .interfaces
+            .iter()
+            .any(|entry| !entry.interface.configuration.is_empty())
+    );
+
+    // The wire documents carry the complete five-category shape on
+    // every entry — the page's renderers never special-case a kind.
+    for (path, key) in [("/schema", "interfaces"), ("/resources", "components")] {
+        let (status, body) = client.request("GET", path, None).unwrap();
+        assert_eq!(status, 200, "{body}");
+        let document: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for served in document[key].as_array().unwrap() {
+            let carrier = if key == "interfaces" {
+                &served["interface"]
+            } else {
+                served
+            };
+            for category in [
+                "measurements",
+                "configuration",
+                "state",
+                "commands",
+                "events",
+            ] {
+                assert!(
+                    carrier.get(category).is_some(),
+                    "{path} entry lacks {category:?}: {served}"
+                );
+            }
+        }
+    }
+
+    // Every surfaced command row's name matches its declaration and
+    // an unavailable row always carries the named refusal the generic
+    // command table renders. The first available `write_value` row is
+    // the generic operability probe below.
+    let mut operated = None;
+    for (entry, live) in schema.interfaces.iter().zip(&resources.components) {
+        for (spec, state) in entry.interface.commands.iter().zip(&live.commands) {
+            assert_eq!(state.name, spec.name);
+            if !state.available {
+                assert!(
+                    state.refusal.is_some(),
+                    "{}.{} reports unavailable without a named refusal",
+                    entry.name,
+                    spec.name
+                );
+            }
+            if operated.is_none() && state.available && spec.adapted == AdaptedCommand::WriteValue {
+                operated = Some((
+                    entry.name.clone(),
+                    spec.point.expect("a write_value row binds a point"),
+                    spec.request[0].kind,
+                ));
+            }
+        }
+    }
+
+    // An available surfaced command applies through the receipted
+    // path, and its settled receipt lands attributed in the
+    // component's events list — what the generic recent-events
+    // renderer shows.
+    let (component, point, kind) =
+        operated.expect("no component surfaces an available write_value");
+    let command = Command::WriteValue {
+        point,
+        kind,
+        value: match kind {
+            ValueKind::Bool => Value::Bool(true),
+            ValueKind::Int => Value::Int(1),
+            ValueKind::Float => Value::Float(1.0),
+        },
+    };
+    let receipt = client.command(&command).unwrap();
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    client.advance(1).unwrap();
+    let view = client.resources().unwrap();
+    let live = view
+        .components
+        .iter()
+        .find(|entry| entry.name == component)
+        .unwrap_or_else(|| panic!("no resource entry for {component}"));
+    assert!(live.events.iter().any(|entry| matches!(
+        &entry.event,
+        JournalEvent::CommandSettled { receipt }
+            if matches!(
+                receipt.command,
+                Command::WriteValue { point: settled, .. } if settled == point
+            ) && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+    )));
+}
+
+/// The schema-driven-interface decision's reference slice: the
+/// duty/standby station's monitor serves every component's five
+/// `BlockInterface` categories and the matching live resource state,
+/// so the page's generic faceplate renders the full surface with no
+/// kind-specific markup required — and the surfaced commands operate
+/// the station through the receipted path.
+#[test]
+fn the_reference_station_renders_every_components_five_categories_generically() {
+    let model = fixture_model();
+    let layout = ids();
+    with_station_monitor(&model, dynamics(), |client| {
+        assert_five_category_surface(client);
+        let resources = client.resources().unwrap();
+
+        // The fault alarm's `write_value:ack` row is the ordinary
+        // receipted writable-point path — available, applied at the
+        // next boundary, its settled receipt attributed to the
+        // instance's events list.
+        let alarm = format!(
+            "managed-bool-latching-alarm:{}",
+            layout.pumps[0].fault_alarm.component.0
+        );
+        let live = resources
+            .components
+            .iter()
+            .find(|entry| entry.name == alarm)
+            .unwrap_or_else(|| panic!("no resource entry for {alarm}"));
+        let ack = live
+            .commands
+            .iter()
+            .find(|command| command.name == "write_value:ack")
+            .expect("the alarm's ack port adapts a write command");
+        assert!(ack.available);
+        assert_eq!(ack.point, Some(layout.pumps[0].fault_alarm.ack));
+        let receipt = client
+            .command(&Command::WriteValue {
+                point: layout.pumps[0].fault_alarm.ack,
+                kind: ValueKind::Bool,
+                value: Value::Bool(true),
+            })
+            .unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        client.advance(1).unwrap();
+        let view = client.resources().unwrap();
+        let live = view
+            .components
+            .iter()
+            .find(|entry| entry.name == alarm)
+            .unwrap();
+        assert!(live.events.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::CommandSettled { receipt }
+                if matches!(
+                    receipt.command,
+                    Command::WriteValue { point, .. }
+                        if point == layout.pumps[0].fault_alarm.ack
+                ) && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+        )));
+
+        // A declared-unavailable command reports its refusal without
+        // an attempt: the never-shelvable high-level alarm's
+        // `write_value:shelve` binds a non-writable point — the
+        // served state is `available: false` carrying the
+        // not_writable reason the row renders.
+        let alarm = format!(
+            "managed-latching-alarm:{}",
+            layout.high_level_alarm.component.0
+        );
+        let live = view
+            .components
+            .iter()
+            .find(|entry| entry.name == alarm)
+            .unwrap();
+        let shelve = live
+            .commands
+            .iter()
+            .find(|command| command.name == "write_value:shelve")
+            .expect("the alarm's shelve port adapts a write command");
+        assert!(!shelve.available);
+        assert_eq!(
+            shelve.refusal.as_deref(),
+            Some(
+                CommandError::NotWritable {
+                    point: layout.high_level_alarm.shelve.unwrap()
+                }
+                .to_string()
+                .as_str()
+            )
+        );
+    });
+}
+
+/// The consumer tree's checked-in `reference-plant/model/plant.json`
+/// gets the identical generic surface — the rendering proof never
+/// depended on the platform's own fixture.
+#[test]
+fn the_consumer_plants_emitted_model_serves_the_same_generic_surface() {
+    let model = PlantModel::load(&std::fs::read_to_string(REFERENCE_MODEL_JSON).unwrap()).unwrap();
+    let dynamics: Vec<ProcessElement> =
+        serde_json::from_str(&std::fs::read_to_string(REFERENCE_DYNAMICS_JSON).unwrap()).unwrap();
+    with_station_monitor(&model, dynamics, assert_five_category_surface);
 }
 
 #[test]

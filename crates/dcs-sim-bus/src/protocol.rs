@@ -32,6 +32,8 @@ const OP_CLAIM_WRITER: u8 = 0x05;
 const OP_RELEASE_WRITER: u8 = 0x06;
 const OP_INJECT_QUALITY: u8 = 0x07;
 const OP_CLEAR_QUALITY: u8 = 0x08;
+const OP_EXCHANGE: u8 = 0x09;
+const OP_SCRIPT_EXCHANGE: u8 = 0x0a;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -40,6 +42,19 @@ const RESP_REGISTERS: u8 = 0x03;
 const RESP_STEPPED: u8 = 0x04;
 const RESP_ERROR: u8 = 0x05;
 const RESP_DONE: u8 = 0x06;
+const RESP_EXCHANGED: u8 = 0x07;
+
+// Scripted exchange-outcome tags on the wire, in `ExchangeOutcome`
+// declaration order.
+const OUTCOME_COMPLETE: u8 = 0x01;
+const OUTCOME_MISS: u8 = 0x02;
+const OUTCOME_LATE: u8 = 0x03;
+const OUTCOME_SHORT_STATION: u8 = 0x04;
+const OUTCOME_SHORT_REGISTERS: u8 = 0x05;
+
+// Flags byte on an exchanged answer: bit 0 marks the late exchange a
+// deadline miss counts against.
+const FLAG_LATE: u8 = 0x01;
 
 // Error codes on the wire.
 const ERR_UNKNOWN_REGISTER: u8 = 0x01;
@@ -73,7 +88,7 @@ const REASON_CONFIGURATION_FAULT: u8 = 0x07;
 /// [`IoDriver`](dcs_core::IoDriver) accesses, mapped through the
 /// driver's point-to-register table — plus the register census and the
 /// explicit step advancing the device's logical tick.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum BusRequest {
     /// Reads one register's stored sample.
@@ -156,6 +171,93 @@ pub enum BusRequest {
         /// The register address.
         register: u16,
     },
+    /// The cyclic image exchange a `sim-cyclic` driver's
+    /// [`CyclicIoDriver::exchange`](dcs_core::CyclicIoDriver::exchange)
+    /// runs once per scan: `outputs` carries the whole staged output
+    /// image — every register the staging writer touched since the
+    /// last completed exchange — and the answer carries the device's
+    /// register census, the input image the scan then latches.
+    ///
+    /// The exchange is atomic at the bank: every carried output whose
+    /// register the answer serves is applied before the census is
+    /// read, so a completed exchange publishes and latches one image.
+    /// A request carrying outputs an attachment not holding the
+    /// write-ownership claim staged is refused [`BusError::Fenced`]
+    /// without touching the bank; a census naming every served
+    /// register is open to any attachment, so a tracking standby's
+    /// exchange — which stages nothing — always completes.
+    ///
+    /// The answer need not serve every register: a station-attributed
+    /// short exchange — see [`BusRequest::ScriptExchange`] — withholds
+    /// one declared station's registers, which is how a real cyclic
+    /// bus's per-station working counter shows up on the wire.
+    Exchange {
+        /// The staged output image: register/value pairs the exchange
+        /// publishes.
+        outputs: Vec<RegisterWrite>,
+    },
+    /// Appends `outcomes` to the device's scripted exchange queue —
+    /// the development harness that decides what the next
+    /// [`BusRequest::Exchange`] requests observe: a completed
+    /// exchange, a missed one, a late one, or a station-attributed
+    /// short one. The queue is FIFO; when it runs empty every further
+    /// exchange completes — the device's steady-state answer.
+    ///
+    /// Scripting is development tooling, not field ownership: like
+    /// quality injection it is never fenced, so the scenario writer
+    /// drives outcomes from its own attachment while a controller
+    /// pair owns the field. A script naming a station the device does
+    /// not declare, or a register it does not serve, is refused
+    /// [`BusError::InvalidRequest`] and nothing is queued.
+    ScriptExchange {
+        /// The outcomes to queue, consumed one per exchange request.
+        outcomes: Vec<ExchangeOutcome>,
+    },
+}
+
+/// One register/value pair in the staged output image an
+/// [`BusRequest::Exchange`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RegisterWrite {
+    /// The register address.
+    pub register: u16,
+    /// The staged value to publish; its kind must match the
+    /// register's declared kind.
+    pub value: Value,
+}
+
+/// One scripted exchange outcome [`BusRequest::ScriptExchange`]
+/// queues — what the next exchange request observes on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ExchangeOutcome {
+    /// The exchange completes: every carried output publishes, the
+    /// answer serves every register.
+    Complete,
+    /// The exchange never answers: the server drops the connection
+    /// without a frame, the link failure a dead device presents. The
+    /// staged image stays unpublished, the input census unlatched.
+    Miss,
+    /// The exchange completes but answers late: the response carries
+    /// the full image and the late mark the driver's
+    /// `missed_deadlines` counter reads.
+    Late,
+    /// The exchange completes short of `station`'s registers: the
+    /// answer withholds every register the named station declares and
+    /// the carried outputs to those registers do not publish — the
+    /// per-station working-counter shortfall a real cyclic bus
+    /// reports. `station` must name a station the device declares.
+    ShortStation {
+        /// The station whose registers the exchange withholds.
+        station: String,
+    },
+    /// The exchange completes short of `registers` — the explicit
+    /// address list form for shortfalls no declared station
+    /// attributes. Every named address must be a served register.
+    ShortRegisters {
+        /// The register addresses the exchange withholds.
+        registers: Vec<u16>,
+    },
 }
 
 /// The server's answer to one [`BusRequest`].
@@ -186,6 +288,17 @@ pub enum BusResponse {
     Stepped {
         /// The tick the step advanced to.
         tick: Tick,
+    },
+    /// Answer to [`BusRequest::Exchange`]: the input image the
+    /// completed exchange latched — every register the exchange
+    /// served, ordered by address. A short exchange serves fewer
+    /// registers than the bank declares; `late` carries the scripted
+    /// deadline miss the driver's `missed_deadlines` counter reads.
+    Exchanged {
+        /// The register census the exchange latched.
+        registers: Vec<RegisterInfo>,
+        /// Whether the exchange completed after its deadline.
+        late: bool,
     },
     /// Answer to [`BusRequest::ClaimWriter`],
     /// [`BusRequest::ReleaseWriter`], [`BusRequest::InjectQuality`],
@@ -392,6 +505,27 @@ impl<'a> Reader<'a> {
         String::from_utf8(self.take(length)?.to_vec()).ok()
     }
 
+    /// One scripted [`ExchangeOutcome`].
+    fn outcome(&mut self) -> Option<ExchangeOutcome> {
+        Some(match self.u8()? {
+            OUTCOME_COMPLETE => ExchangeOutcome::Complete,
+            OUTCOME_MISS => ExchangeOutcome::Miss,
+            OUTCOME_LATE => ExchangeOutcome::Late,
+            OUTCOME_SHORT_STATION => ExchangeOutcome::ShortStation {
+                station: self.text()?,
+            },
+            OUTCOME_SHORT_REGISTERS => {
+                let count = self.u16()? as usize;
+                let mut registers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    registers.push(self.u16()?);
+                }
+                ExchangeOutcome::ShortRegisters { registers }
+            }
+            _ => return None,
+        })
+    }
+
     /// Whether the payload is fully consumed — a well-formed frame
     /// carries no trailing bytes.
     fn done(&self) -> bool {
@@ -461,7 +595,7 @@ fn frame(body: &[u8]) -> Vec<u8> {
 /// Serializes `request` into one wire frame.
 pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
     let mut body = Vec::with_capacity(16);
-    match *request {
+    match request {
         BusRequest::ReadRegister { register } => {
             body.push(OP_READ_REGISTER);
             body.extend_from_slice(&register.to_be_bytes());
@@ -469,7 +603,7 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
         BusRequest::WriteRegister { register, value } => {
             body.push(OP_WRITE_REGISTER);
             body.extend_from_slice(&register.to_be_bytes());
-            push_value(&mut body, value);
+            push_value(&mut body, *value);
         }
         BusRequest::ListRegisters => body.push(OP_LIST_REGISTERS),
         BusRequest::Step { dt } => {
@@ -484,14 +618,50 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
         BusRequest::InjectQuality { register, quality } => {
             body.push(OP_INJECT_QUALITY);
             body.extend_from_slice(&register.to_be_bytes());
-            push_quality(&mut body, quality);
+            push_quality(&mut body, *quality);
         }
         BusRequest::ClearQuality { register } => {
             body.push(OP_CLEAR_QUALITY);
             body.extend_from_slice(&register.to_be_bytes());
         }
+        BusRequest::Exchange { outputs } => {
+            body.push(OP_EXCHANGE);
+            body.extend_from_slice(&(outputs.len() as u16).to_be_bytes());
+            for output in outputs {
+                body.extend_from_slice(&output.register.to_be_bytes());
+                push_value(&mut body, output.value);
+            }
+        }
+        BusRequest::ScriptExchange { outcomes } => {
+            body.push(OP_SCRIPT_EXCHANGE);
+            body.extend_from_slice(&(outcomes.len() as u16).to_be_bytes());
+            for outcome in outcomes {
+                push_outcome(&mut body, outcome);
+            }
+        }
     }
     frame(&body)
+}
+
+/// Serializes one scripted [`ExchangeOutcome`].
+fn push_outcome(out: &mut Vec<u8>, outcome: &ExchangeOutcome) {
+    match outcome {
+        ExchangeOutcome::Complete => out.push(OUTCOME_COMPLETE),
+        ExchangeOutcome::Miss => out.push(OUTCOME_MISS),
+        ExchangeOutcome::Late => out.push(OUTCOME_LATE),
+        ExchangeOutcome::ShortStation { station } => {
+            out.push(OUTCOME_SHORT_STATION);
+            out.extend_from_slice(&(station.len() as u16).to_be_bytes());
+            out.extend_from_slice(station.as_bytes());
+        }
+        ExchangeOutcome::ShortRegisters { registers } => {
+            out.push(OUTCOME_SHORT_REGISTERS);
+            out.extend_from_slice(&(registers.len() as u16).to_be_bytes());
+            for register in registers {
+                out.extend_from_slice(&register.to_be_bytes());
+            }
+        }
+    }
 }
 
 /// Serializes `response` into one wire frame.
@@ -512,6 +682,15 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
         }
         BusResponse::Registers { registers } => {
             body.push(RESP_REGISTERS);
+            body.extend_from_slice(&(registers.len() as u16).to_be_bytes());
+            for info in registers {
+                body.extend_from_slice(&info.register.to_be_bytes());
+                push_sample(&mut body, info.sample);
+            }
+        }
+        BusResponse::Exchanged { registers, late } => {
+            body.push(RESP_EXCHANGED);
+            body.push(if *late { FLAG_LATE } else { 0 });
             body.extend_from_slice(&(registers.len() as u16).to_be_bytes());
             for info in registers {
                 body.extend_from_slice(&info.register.to_be_bytes());
@@ -587,6 +766,25 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
         OP_CLEAR_QUALITY => BusRequest::ClearQuality {
             register: reader.u16().ok_or_else(short)?,
         },
+        OP_EXCHANGE => {
+            let count = reader.u16().ok_or_else(short)? as usize;
+            let mut outputs = Vec::with_capacity(count);
+            for _ in 0..count {
+                outputs.push(RegisterWrite {
+                    register: reader.u16().ok_or_else(short)?,
+                    value: reader.value().ok_or_else(short)?,
+                });
+            }
+            BusRequest::Exchange { outputs }
+        }
+        OP_SCRIPT_EXCHANGE => {
+            let count = reader.u16().ok_or_else(short)? as usize;
+            let mut outcomes = Vec::with_capacity(count);
+            for _ in 0..count {
+                outcomes.push(reader.outcome().ok_or_else(short)?);
+            }
+            BusRequest::ScriptExchange { outcomes }
+        }
         tag => return Err(format!("unknown request tag {tag:#04x}")),
     };
     if !reader.done() {
@@ -622,6 +820,23 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
         RESP_STEPPED => BusResponse::Stepped {
             tick: Tick(reader.u64().ok_or_else(short)?),
         },
+        RESP_EXCHANGED => {
+            let late = match reader.u8().ok_or_else(short)? {
+                flags if flags & !FLAG_LATE != 0 => {
+                    return Err(format!("unknown exchanged flags {flags:#04x}"));
+                }
+                flags => flags & FLAG_LATE != 0,
+            };
+            let count = reader.u16().ok_or_else(short)?;
+            let mut registers = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                registers.push(RegisterInfo {
+                    register: reader.u16().ok_or_else(short)?,
+                    sample: reader.sample().ok_or_else(short)?,
+                });
+            }
+            BusResponse::Exchanged { registers, late }
+        }
         RESP_DONE => BusResponse::Done,
         RESP_ERROR => {
             let error = match reader.u8().ok_or_else(short)? {
@@ -704,6 +919,32 @@ mod tests {
                 quality: Quality::Good,
             },
             BusRequest::ClearQuality { register: 4 },
+            BusRequest::Exchange {
+                outputs: vec![
+                    RegisterWrite {
+                        register: 4,
+                        value: Value::Float(9.5),
+                    },
+                    RegisterWrite {
+                        register: 7,
+                        value: Value::Bool(true),
+                    },
+                ],
+            },
+            BusRequest::Exchange { outputs: vec![] },
+            BusRequest::ScriptExchange {
+                outcomes: vec![
+                    ExchangeOutcome::Complete,
+                    ExchangeOutcome::Miss,
+                    ExchangeOutcome::Late,
+                    ExchangeOutcome::ShortStation {
+                        station: "inlet".to_string(),
+                    },
+                    ExchangeOutcome::ShortRegisters {
+                        registers: vec![4, 9],
+                    },
+                ],
+            },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -777,6 +1018,59 @@ mod tests {
         assert_eq!(
             encode_request(&BusRequest::ClearQuality { register: 4 }),
             vec![0, 3, 0x08, 0, 4]
+        );
+        // An exchange is tag, output count, then register/value pairs —
+        // a float write to 4 and a bool write to 7. A scripted
+        // station-short outcome is its tag plus a length-prefixed name.
+        assert_eq!(
+            encode_request(&BusRequest::Exchange {
+                outputs: vec![
+                    RegisterWrite {
+                        register: 4,
+                        value: Value::Float(1.0),
+                    },
+                    RegisterWrite {
+                        register: 7,
+                        value: Value::Bool(true),
+                    },
+                ],
+            }),
+            [
+                &[0, 18, 0x09, 0, 2, 0, 4, 0x03][..],
+                &1.0f64.to_be_bytes()[..],
+                &[0, 7, 0x01, 1][..],
+            ]
+            .concat()
+        );
+        assert_eq!(
+            encode_request(&BusRequest::ScriptExchange {
+                outcomes: vec![ExchangeOutcome::ShortStation {
+                    station: "inlet".to_string(),
+                }],
+            }),
+            vec![0, 11, 0x0a, 0, 1, 0x04, 0, 5, b'i', b'n', b'l', b'e', b't']
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::Exchange {
+                outputs: vec![RegisterWrite {
+                    register: 4,
+                    value: Value::Float(1.0),
+                }],
+            })
+            .unwrap(),
+            r#"{"op":"exchange","outputs":[{"register":4,"value":{"float":1.0}}]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ScriptExchange {
+                outcomes: vec![
+                    ExchangeOutcome::Miss,
+                    ExchangeOutcome::ShortStation {
+                        station: "inlet".to_string(),
+                    },
+                ],
+            })
+            .unwrap(),
+            r#"{"op":"script_exchange","outcomes":[{"outcome":"miss"},{"outcome":"short_station","station":"inlet"}]}"#
         );
     }
 
@@ -855,6 +1149,17 @@ mod tests {
                     detail: "another attachment owns register writes".to_string(),
                 },
             },
+            BusResponse::Exchanged {
+                registers: vec![RegisterInfo {
+                    register: 4,
+                    sample: Sample::good(Value::Float(1.5), Tick(3)),
+                }],
+                late: false,
+            },
+            BusResponse::Exchanged {
+                registers: vec![],
+                late: true,
+            },
         ];
         for response in responses {
             let json = serde_json::to_string(&response).unwrap();
@@ -913,6 +1218,31 @@ mod tests {
                 0x02, 0x02,
             ]
         );
+        // An exchanged answer is tag, the flags byte, then the census —
+        // flag bit 0 carries the scripted late mark.
+        assert_eq!(
+            encode_response(&BusResponse::Exchanged {
+                registers: vec![RegisterInfo {
+                    register: 4,
+                    sample: Sample::good(Value::Bool(true), Tick(2)),
+                }],
+                late: true,
+            }),
+            vec![
+                0, 17, 0x07, 0x01, 0, 1, 0, 4, 0x01, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0x01
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusResponse::Exchanged {
+                registers: vec![RegisterInfo {
+                    register: 4,
+                    sample: Sample::good(Value::Bool(true), Tick(2)),
+                }],
+                late: true,
+            })
+            .unwrap(),
+            r#"{"result":"exchanged","registers":[{"register":4,"sample":{"value":{"bool":true},"quality":"good","tick":2}}],"late":true}"#
+        );
     }
 
     #[test]
@@ -940,6 +1270,12 @@ mod tests {
             &[0x07, 0, 4, 0x02, 0x09][..],          // inject, unknown reason
             &[0x08][..],                            // clear, missing register
             &[0x08, 0, 4, 0][..],                   // trailing byte after clear
+            &[0x09][..],                            // exchange, missing count
+            &[0x09, 0, 1][..],                      // exchange, missing output
+            &[0x09, 0, 1, 0, 4][..],                // exchange, missing value
+            &[0x0a, 0, 1, 0x09][..],                // script, unknown outcome tag
+            &[0x0a, 0, 1, 0x04][..],                // script, missing station name
+            &[0x0a, 0, 1, 0x05][..],                // script, missing register count
         ] {
             assert!(decode_request(body).is_err(), "{body:02x?}");
         }
@@ -950,6 +1286,10 @@ mod tests {
             &[0x04, 0][..],       // stepped, truncated tick
             &[0x05, 0x04, 0][..], // fenced error, truncated detail
             &[0x06, 0][..],       // trailing byte after done
+            &[0x07][..],          // exchanged, missing flags
+            &[0x07, 0x09][..],    // exchanged, unknown flag bits
+            &[0x07, 0][..],       // exchanged, missing count
+            &[0x07, 0, 0, 1][..], // exchanged, missing register entry
             // Sample carrying value and tick but no quality.
             &[0x01, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
             // Sample with an unknown quality severity.

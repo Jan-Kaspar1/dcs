@@ -102,7 +102,7 @@ impl BusError {
     /// The [`IoError`] this protocol-reported failure presents as at
     /// `point` — the point the caller addressed, whose register the
     /// error names.
-    fn at_point(&self, point: PointId) -> IoError {
+    pub(crate) fn at_point(&self, point: PointId) -> IoError {
         match *self {
             Self::UnknownRegister { .. } => IoError::UnknownPoint(point),
             Self::KindMismatch {
@@ -123,7 +123,7 @@ impl BusError {
 /// Collapses a server-reported refusal on a non-point request into the
 /// link vocabulary: the fencing verdict is its own named variant;
 /// anything else is a request the server could not serve.
-fn refused(error: BusError) -> LinkError {
+pub(crate) fn refused(error: BusError) -> LinkError {
     match error {
         BusError::Fenced { .. } => LinkError::Fenced,
         other => LinkError::InvalidRequest(format!("{other:?}")),
@@ -138,7 +138,7 @@ struct Connection {
 
 /// Writes the request frame and reads the response frame on `stream`,
 /// translating `io::Error`s into the transport vocabulary.
-fn exchange(
+pub(crate) fn exchange(
     stream: &mut BufReader<TcpStream>,
     request: &BusRequest,
 ) -> Result<BusResponse, LinkError> {
