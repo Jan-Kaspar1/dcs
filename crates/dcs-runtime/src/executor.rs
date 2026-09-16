@@ -15,9 +15,9 @@ use crate::revision::CarryoverError;
 use dcs_core::{
     CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandQueueDiagnostics,
     CommandReceipt, ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction,
-    DroppedElement, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
-    PointTelemetry, Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    DroppedElement, EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
+    ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
+    TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -522,6 +522,13 @@ enum Resolved {
     Force { point: PointId, value: Value },
     /// `UnforcePoint` on a mapped writable `In` point.
     Unforce { point: PointId },
+    /// `Invoke` of the declared command `command` on the component at
+    /// this scan-order index, carrying the validated argument map.
+    Invoke {
+        component: usize,
+        command: String,
+        arguments: BTreeMap<String, Value>,
+    },
 }
 
 /// The default bound on the pending-command queue — how many accepted
@@ -625,6 +632,23 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// the next scan, where a component-side refusal turns the receipt
 /// `Rejected` without changing anything.
 ///
+/// A [`Command::Invoke`] rides the same boundary and the same bounded
+/// queue: submission validates it against the component's declared
+/// [`CommandDecl`](dcs_core::CommandDecl)s — the component must exist,
+/// the command must be declared, and every supplied argument must carry
+/// its declared kind — and the applying scan dispatches it to the
+/// component's [`invoke_command`](Component::invoke_command) hook, where
+/// the declared availability predicate or a kind invariant settles the
+/// receipt `Rejected` with the declared refusal reason.
+///
+/// A component's declared [`EventDecl`](dcs_core::EventDecl) surface is
+/// the sibling output side: [`drain_events`](Component::drain_events)
+/// empties each component's emitted events after its `step` — a step's
+/// failure does not strand them — and the scan's emitted record is
+/// readable through [`emitted_events`](Executor::emitted_events) for the
+/// monitor's journal pass, which stamps each entry with the producing
+/// scan's tick.
+///
 /// Ingress is bounded — the controller-owns-execution decision's
 /// command half: the pending queue holds at most `command_capacity`
 /// accepted commands (default [`DEFAULT_COMMAND_QUEUE_CAPACITY`],
@@ -685,6 +709,13 @@ pub struct Executor<'d> {
     /// receipt log they measure — the pair's one command-ingress audit.
     command_admission: CommandAdmissionCounts,
     receipts: Vec<CommandReceipt>,
+    /// The events components emitted during the most recent scan —
+    /// drained per component after its `step`, in scan and emission
+    /// order — awaiting the scan's recording. Cleared when the next
+    /// scan starts and by a checkpoint apply, which converges the run
+    /// to a line that does not carry the abandoned scan's emissions, so
+    /// the buffer always holds exactly one scan's events.
+    emitted: Vec<EmittedEvent>,
     /// The executor-collected half of the snapshot's `io_health` section:
     /// the boundary counters and the fed overrun count. Its `driver`
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
@@ -814,6 +845,7 @@ impl<'d> Executor<'d> {
             command_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
+            emitted: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
             model_fingerprint: None,
@@ -1147,6 +1179,18 @@ impl<'d> Executor<'d> {
         &self.receipts
     }
 
+    /// The events the last completed scan's components emitted, in the
+    /// order they were drained — component scan order, then each
+    /// component's own emission order — each stamped with the producing
+    /// component's registered name. The recording layer attributes them
+    /// to the producing scan's tick and routes them by their declared
+    /// [`EventRetention`](dcs_core::EventRetention). Empty before the
+    /// first scan and after a checkpoint apply converged the run — the
+    /// adopted line's emissions are its own, not the abandoned scan's.
+    pub fn emitted_events(&self) -> &[EmittedEvent] {
+        &self.emitted
+    }
+
     /// Records one scan cycle that overran its wall-clock period — the
     /// documented write path by which the pacing shell (the controller's
     /// scan loop) feeds the snapshot's `io_health.scan_overruns`.
@@ -1181,6 +1225,7 @@ impl<'d> Executor<'d> {
         self.tick = Tick(self.tick.0 + 1);
         let tick = self.tick;
 
+        self.emitted.clear();
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
@@ -1395,6 +1440,9 @@ impl<'d> Executor<'d> {
         // The checkpoint's force set is authoritative: the standby
         // forces exactly what the active forced — no more, no less.
         self.forces.clone_from(&checkpoint.forces);
+        // The last scan's drained emissions belong to the abandoned
+        // line: the adopted run's record starts empty.
+        self.emitted.clear();
         self.adopt_receipts(checkpoint);
         Ok(())
     }
@@ -1550,6 +1598,7 @@ impl<'d> Executor<'d> {
         }
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
+        self.emitted.clear();
         self.adopt_receipts(checkpoint);
 
         let initialized = self
@@ -1704,10 +1753,13 @@ impl<'d> Executor<'d> {
     /// against the component's declared commands: an undeclared command
     /// is [`CommandError::UnknownCommand`] and a supplied argument whose
     /// kind differs from its declaration is
-    /// [`CommandError::ArgumentTypeMismatch`]. Dispatch itself is the
-    /// `named-command-event-runtime` tranche — a well-formed invocation
-    /// is refused [`CommandError::CommandRefused`] naming the gap rather
-    /// than accepted and left unsettled.
+    /// [`CommandError::ArgumentTypeMismatch`]. A well-formed invocation
+    /// resolves to [`Resolved::Invoke`], which the applying scan
+    /// dispatches to the component's
+    /// [`invoke_command`](Component::invoke_command) hook — the declared
+    /// availability predicate and the kind's own invariants decide
+    /// there, and a refusal settles the receipt
+    /// [`CommandError::CommandRefused`] carrying the kind's reason.
     fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
         match command {
             Command::WriteValue { point, kind, value }
@@ -1827,10 +1879,10 @@ impl<'d> Executor<'d> {
                         });
                     }
                 }
-                Err(CommandError::CommandRefused {
-                    component: component.clone(),
+                Ok(Resolved::Invoke {
+                    component: index,
                     command: name.clone(),
-                    reason: "the runtime does not dispatch declared commands".to_string(),
+                    arguments: arguments.clone(),
                 })
             }
         }
@@ -1866,6 +1918,14 @@ impl<'d> Executor<'d> {
     /// [`apply_parameter`](Component::apply_parameter) hook at this same
     /// boundary; a hook refusal settles the receipt `Rejected` and
     /// changes nothing.
+    ///
+    /// An `Invoke` lands on the component's
+    /// [`invoke_command`](Component::invoke_command) hook here too: the
+    /// submission-time declaration checks have already run, so the
+    /// hook's `Err` is the declared availability predicate or a kind
+    /// invariant speaking — the receipt settles `Rejected` with a
+    /// [`CommandError::CommandRefused`] carrying the kind's reason
+    /// verbatim.
     ///
     /// A `ForcePoint` records the force — this scan's input phase already
     /// substitutes the value at `Substituted` quality — and an
@@ -1920,6 +1980,23 @@ impl<'d> Executor<'d> {
                     self.forces.remove(&point);
                     CommandOutcome::Applied { tick }
                 }
+                Ok(Resolved::Invoke {
+                    component,
+                    command,
+                    arguments,
+                }) => match self.components[component]
+                    .component
+                    .invoke_command(&command, &arguments)
+                {
+                    Ok(()) => CommandOutcome::Applied { tick },
+                    Err(reason) => CommandOutcome::Rejected {
+                        reason: CommandError::CommandRefused {
+                            component: self.components[component].component.name().to_string(),
+                            command,
+                            reason,
+                        },
+                    },
+                },
             };
         }
     }
@@ -2046,7 +2123,11 @@ impl<'d> Executor<'d> {
     }
 
     /// Steps each component in scan order over an image view scoped to its
-    /// declared points. A failing step is recorded and the scan continues.
+    /// declared points, then drains its emitted events into the scan's
+    /// emitted record — in the component's own emission order, stamped
+    /// with its registered name. A failing step is recorded and the scan
+    /// continues, and the drain runs on the failure path too: events the
+    /// step emitted before reporting are not stranded.
     fn step_components(&mut self, tick: Tick) {
         let image = &self.image;
         for entry in &mut self.components {
@@ -2062,6 +2143,11 @@ impl<'d> Executor<'d> {
                     entry.last_error = Some(error.to_string());
                 }
             }
+            self.emitted
+                .extend(entry.component.drain_events().into_iter().map(|mut event| {
+                    event.component = entry.component.name().to_string();
+                    event
+                }));
         }
     }
 
@@ -2118,8 +2204,9 @@ mod tests {
     use super::*;
     use crate::{ComponentIoExt, StepError};
     use dcs_core::{
-        ComponentDescriptor, DriverDiagnostics, ExchangeDiagnostics, Input, LinkState, Output,
-        ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
+        CommandArgument, CommandAvailability, CommandDecl, ComponentDescriptor, DriverDiagnostics,
+        EventDecl, EventField, EventFieldKind, EventRetention, EventValue, ExchangeDiagnostics,
+        Input, LinkState, Output, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -7156,5 +7243,708 @@ mod tests {
         executor.run(3).unwrap();
         assert_eq!(executor.snapshot().io_health.failed_exchanges, 0);
         assert_eq!(executor.snapshot().io_health.driver, None);
+    }
+
+    /// A component serving the declared-command surface: `load {to}`
+    /// replaces its checkpointed `count` and `bump {by}` adds to it —
+    /// `by` defaults to 1, must be at least 1, and is refused once the
+    /// count reaches the declared limit, the kind's
+    /// `KindDeclared`-availability analogue. `step` reports the count on
+    /// its `Out` `Int` point.
+    struct Commanded {
+        name: &'static str,
+        output: PointId,
+        count: i64,
+    }
+
+    impl Commanded {
+        /// The kind's declared `bump` ceiling.
+        const LIMIT: i64 = 100;
+
+        fn commands() -> Vec<CommandDecl> {
+            vec![
+                CommandDecl {
+                    name: "load".to_string(),
+                    request: vec![CommandArgument {
+                        name: "to".to_string(),
+                        kind: ValueKind::Int,
+                    }],
+                    availability: CommandAvailability::Always,
+                },
+                CommandDecl {
+                    name: "bump".to_string(),
+                    request: vec![CommandArgument {
+                        name: "by".to_string(),
+                        kind: ValueKind::Int,
+                    }],
+                    availability: CommandAvailability::KindDeclared,
+                },
+            ]
+        }
+    }
+
+    impl Component for Commanded {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            vec![IoRequirement::output::<i64>("count", self.output)]
+        }
+
+        fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            io.write_typed(self.output, self.count)?;
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "commanded".to_string(),
+                label: self.name.to_string(),
+                ports: vec![PortDescriptor {
+                    name: "count".to_string(),
+                    direction: Direction::Out,
+                    kind: ValueKind::Int,
+                    role: None,
+                    point: None,
+                }],
+                parameters: Vec::new(),
+                commands: Self::commands(),
+                events: Vec::new(),
+            }
+        }
+
+        fn invoke_command(
+            &mut self,
+            command: &str,
+            arguments: &BTreeMap<String, Value>,
+        ) -> Result<(), String> {
+            match command {
+                "load" => {
+                    self.count = match arguments.get("to") {
+                        Some(Value::Int(to)) => *to,
+                        _ => 0,
+                    };
+                    Ok(())
+                }
+                "bump" => {
+                    if self.count >= Self::LIMIT {
+                        return Err("the counter is at its limit".to_string());
+                    }
+                    let by = match arguments.get("by") {
+                        Some(Value::Int(by)) => *by,
+                        None => 1,
+                        _ => unreachable!("submission validates the declared argument kind"),
+                    };
+                    if by < 1 {
+                        return Err("by must be at least 1".to_string());
+                    }
+                    self.count += by;
+                    Ok(())
+                }
+                _ => unreachable!("submission validates the declared command name"),
+            }
+        }
+
+        fn capture_state(&self) -> StateMap {
+            let mut state = StateMap::new();
+            state.insert("count", Value::Int(self.count));
+            state
+        }
+
+        fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+            state.ensure_known_fields(self.name, &["count"])?;
+            self.count = state.require_i64(self.name, "count")?;
+            Ok(())
+        }
+    }
+
+    /// A component declaring a command its kind does not serve — the
+    /// default `invoke_command` settles every invocation refused.
+    struct DeclaresOnly {
+        name: &'static str,
+    }
+
+    impl Component for DeclaresOnly {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            Vec::new()
+        }
+
+        fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "declares-only".to_string(),
+                label: self.name.to_string(),
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                commands: vec![CommandDecl {
+                    name: "ping".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::Always,
+                }],
+                events: Vec::new(),
+            }
+        }
+    }
+
+    /// A component emitting declared events during `step`: one `fired`
+    /// (`Journal`-retained) then one `beat` (`Latest`-retained) per
+    /// scan, the payload's `n` counting emissions — the pair pins
+    /// per-component emission order. `fail` reports the step error
+    /// after emitting, so the drain-on-failure path is exercised.
+    struct Emitter {
+        name: &'static str,
+        n: i64,
+        fail: bool,
+    }
+
+    impl Emitter {
+        fn event(event: &str, n: i64) -> EmittedEvent {
+            EmittedEvent {
+                event: event.to_string(),
+                component: String::new(),
+                fields: [("n".to_string(), EventValue::Value(Value::Int(n)))]
+                    .into_iter()
+                    .collect(),
+            }
+        }
+    }
+
+    impl Component for Emitter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            Vec::new()
+        }
+
+        fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            self.n += 1;
+            if self.fail {
+                return Err("the step reported a fault".into());
+            }
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            let event = |name: &str, retention: EventRetention| EventDecl {
+                name: name.to_string(),
+                payload: vec![EventField {
+                    name: "n".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention,
+            };
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "emitter".to_string(),
+                label: self.name.to_string(),
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                commands: Vec::new(),
+                events: vec![
+                    event("fired", EventRetention::Journal),
+                    event("beat", EventRetention::Latest),
+                ],
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<EmittedEvent> {
+            if self.n == 0 {
+                return Vec::new();
+            }
+            vec![Self::event("fired", self.n), Self::event("beat", self.n)]
+        }
+    }
+
+    fn invoke(component: &str, command: &str, arguments: &[(&str, Value)]) -> Command {
+        Command::Invoke {
+            component: component.to_string(),
+            command: command.to_string(),
+            arguments: arguments
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value))
+                .collect(),
+        }
+    }
+
+    /// Invoke rig: `Commanded` ("ctr") drives `Out` `Int` point 40 with
+    /// its count; `Scale` ("a") rides along as the component declaring
+    /// no command surface.
+    fn commanded_rig(driver: &StubDriver) -> Executor<'_> {
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(40), Direction::Out, ValueKind::Int);
+        Executor::new(
+            driver,
+            map,
+            vec![
+                Box::new(Commanded {
+                    name: "ctr",
+                    output: PointId(40),
+                    count: 0,
+                }),
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 1.0,
+                }),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn invoke_applies_a_declared_command_at_the_scan_boundary() {
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+        let command = invoke("ctr", "bump", &[("by", Value::Int(3))]);
+
+        let receipt = executor.submit_command(command.clone());
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command,
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(1)
+                },
+                actor: None,
+            }
+        );
+        // Queued, not yet applied: the count still reports its start.
+        assert_eq!(driver_value(&driver, 40), Value::Int(0));
+
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 40), Value::Int(3));
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+    }
+
+    #[test]
+    fn invoke_rejections_name_the_component_command_and_argument() {
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+
+        // The component name resolves nothing registered.
+        let receipt = executor.submit_command(invoke("nope", "bump", &[]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownComponent {
+                    component: "nope".to_string()
+                }
+            }
+        );
+
+        // A component declaring no command surface names the command.
+        let receipt = executor.submit_command(invoke("a", "bump", &[]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownCommand {
+                    component: "a".to_string(),
+                    command: "bump".to_string(),
+                }
+            }
+        );
+
+        // The declaring component still refuses an undeclared name.
+        let receipt = executor.submit_command(invoke("ctr", "spin", &[]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownCommand {
+                    component: "ctr".to_string(),
+                    command: "spin".to_string(),
+                }
+            }
+        );
+
+        // A supplied argument's kind must match its declaration.
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[("by", Value::Bool(true))]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::ArgumentTypeMismatch {
+                    component: "ctr".to_string(),
+                    command: "bump".to_string(),
+                    argument: "by".to_string(),
+                    expected: ValueKind::Int,
+                    found: ValueKind::Bool,
+                }
+            }
+        );
+
+        // All four refused at admission — nothing reached the queue.
+        assert_eq!(executor.receipts().len(), 4);
+        assert_eq!(executor.snapshot().command_queue.depth, 0);
+    }
+
+    #[test]
+    fn invoke_commands_apply_in_submission_order() {
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+
+        // `load` then `bump`: the count lands at 5 + 3.
+        executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(5))]));
+        executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 40), Value::Int(8));
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(
+            executor.receipts()[1].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The swapped order settles differently — submission order, not
+        // command kind, decides: `bump` then `load` lands at 5.
+        executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
+        executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(5))]));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 40), Value::Int(5));
+    }
+
+    #[test]
+    fn invoke_boundary_refusals_settle_rejected_with_the_kinds_reason() {
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+
+        // A kind invariant the schema cannot express: `by` below 1.
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(0))]));
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::CommandRefused {
+                    component: "ctr".to_string(),
+                    command: "bump".to_string(),
+                    reason: "by must be at least 1".to_string(),
+                }
+            }
+        );
+        // A refused invocation changed nothing.
+        assert_eq!(driver_value(&driver, 40), Value::Int(0));
+
+        // The declared-availability side: at the limit `bump` is
+        // refused while `load` — `Always`-available — still serves.
+        executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
+        executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(1))]));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts()[1].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            executor.receipts()[2].outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::CommandRefused {
+                    component: "ctr".to_string(),
+                    command: "bump".to_string(),
+                    reason: "the counter is at its limit".to_string(),
+                }
+            }
+        );
+        assert_eq!(driver_value(&driver, 40), Value::Int(100));
+    }
+
+    #[test]
+    fn the_default_hook_refuses_a_declared_command() {
+        // A kind whose descriptor declares a command it does not serve:
+        // the invocation still settles — `command_refused` naming the
+        // gap — rather than silently succeeding.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(DeclaresOnly { name: "declares" })],
+        )
+        .unwrap();
+
+        let receipt = executor.submit_command(invoke("declares", "ping", &[]));
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::CommandRefused {
+                    component: "declares".to_string(),
+                    command: "ping".to_string(),
+                    reason: "the kind does not serve the declared command \"ping\"".to_string(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn invoke_rides_the_bounded_command_queue() {
+        // The #365 bound applies unchanged: a validated invoke past the
+        // capacity gets the named `queue_full` rejection, and validation
+        // still precedes admission on a full queue.
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver).with_command_queue_capacity(1);
+
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(2))]));
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        assert_eq!(executor.snapshot().command_queue.depth, 1);
+
+        // Past the bound: `queue_full` naming no point — the invoke
+        // targets a component.
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: None,
+                    capacity: 1,
+                }
+            }
+        );
+
+        // An invalid invoke on the full queue still takes its own named
+        // rejection — validation precedes admission.
+        let receipt = executor.submit_command(invoke("ctr", "spin", &[]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownCommand {
+                    component: "ctr".to_string(),
+                    command: "spin".to_string(),
+                }
+            }
+        );
+
+        // The scan drains the queue: the admitted invoke applies and
+        // settles; admission re-opens.
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 40), Value::Int(2));
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(executor.snapshot().command_queue.depth, 0);
+    }
+
+    #[test]
+    fn invoke_effects_ride_the_checkpoint_to_a_restored_component() {
+        // `bump` mutates only checkpointed run state: the restored
+        // component continues from the adopted count.
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+        executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(7))]));
+        executor.scan().unwrap();
+        assert_eq!(driver_value(&driver, 40), Value::Int(7));
+        let checkpoint = executor.checkpoint();
+        assert_eq!(
+            checkpoint.components["ctr"].get("count"),
+            Some(Value::Int(7))
+        );
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut standby = Executor::restore(
+            &standby_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(40), Direction::Out, ValueKind::Int),
+            vec![
+                Box::new(Commanded {
+                    name: "ctr",
+                    output: PointId(40),
+                    count: 0,
+                }),
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 1.0,
+                }),
+            ],
+            &checkpoint,
+            None,
+        )
+        .unwrap();
+
+        standby.scan().unwrap();
+        assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
+    }
+
+    #[test]
+    fn a_tracking_standby_replays_pending_and_applied_invokes() {
+        // Switchover with an invoke still in flight: the checkpoint
+        // carries the accepted entry, the tracking standby re-queues it,
+        // and its next boundary applies it exactly as the active's did —
+        // post-promotion behavior identical to the pre-switchover run.
+        let active_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut active = commanded_rig(&active_driver);
+        active.submit_command(invoke("ctr", "bump", &[("by", Value::Int(7))]));
+        active.scan().unwrap();
+        // Still pending when the checkpoint is taken.
+        active.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
+        let checkpoint = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut standby = commanded_rig(&standby_driver);
+        standby.apply(&checkpoint).unwrap();
+
+        // The standby's boundary replays the carried invoke; the active
+        // applies it at its own — the pair's outputs agree.
+        active.scan().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(driver_value(&active_driver, 40), Value::Int(10));
+        assert_eq!(driver_value(&standby_driver, 40), Value::Int(10));
+        assert_eq!(standby.receipts().len(), active.receipts().len());
+        assert_eq!(
+            standby.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+    }
+
+    #[test]
+    fn emitted_events_drain_in_scan_and_emission_order() {
+        // Two emitters bracket a non-emitting component: the scan's
+        // record is component scan order then each component's own
+        // emission order, every entry stamped with the producing
+        // component's registered name.
+        let driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let map = PointMap::new()
+            .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![
+                Box::new(Emitter {
+                    name: "first",
+                    n: 0,
+                    fail: false,
+                }),
+                Box::new(Scale {
+                    name: "a",
+                    input: PointId(10),
+                    output: PointId(20),
+                    gain: 1.0,
+                }),
+                Box::new(Emitter {
+                    name: "second",
+                    n: 0,
+                    fail: false,
+                }),
+            ],
+        )
+        .unwrap();
+
+        assert!(executor.emitted_events().is_empty());
+        executor.scan().unwrap();
+        let emitted: Vec<(&str, &str)> = executor
+            .emitted_events()
+            .iter()
+            .map(|event| (event.component.as_str(), event.event.as_str()))
+            .collect();
+        assert_eq!(
+            emitted,
+            [
+                ("first", "fired"),
+                ("first", "beat"),
+                ("second", "fired"),
+                ("second", "beat"),
+            ]
+        );
+        assert_eq!(
+            executor.emitted_events()[0].fields["n"],
+            EventValue::Value(Value::Int(1))
+        );
+
+        // The next scan's record replaces the last — the buffer always
+        // holds exactly one scan's emissions.
+        executor.scan().unwrap();
+        assert_eq!(executor.emitted_events().len(), 4);
+        assert_eq!(
+            executor.emitted_events()[0].fields["n"],
+            EventValue::Value(Value::Int(2))
+        );
+    }
+
+    #[test]
+    fn emitted_events_drain_after_a_failing_step() {
+        // The step emitted before reporting its fault: the drain runs
+        // on the failure path too, so the scan's record carries the
+        // emissions beside the counted step error.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Emitter {
+                name: "em",
+                n: 0,
+                fail: true,
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        let emitted: Vec<&str> = executor
+            .emitted_events()
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect();
+        assert_eq!(emitted, ["fired", "beat"]);
+        let diagnostics = &executor.snapshot().components[0];
+        assert_eq!(diagnostics.step_errors, 1);
+        assert_eq!(
+            diagnostics.last_error.as_deref(),
+            Some("the step reported a fault")
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_apply_starts_the_emitted_record_empty() {
+        // The drained emissions belong to the abandoned scan line: an
+        // `apply` converging the run leaves the record empty rather than
+        // replaying events the adopted line never produced.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(Emitter {
+                name: "em",
+                n: 0,
+                fail: false,
+            })],
+        )
+        .unwrap();
+
+        executor.scan().unwrap();
+        assert_eq!(executor.emitted_events().len(), 2);
+        let checkpoint = executor.checkpoint();
+        executor.apply(&checkpoint).unwrap();
+        assert!(executor.emitted_events().is_empty());
     }
 }
