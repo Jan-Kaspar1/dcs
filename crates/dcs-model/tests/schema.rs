@@ -229,6 +229,31 @@ fn schema_output_is_deterministic_across_runs() {
 }
 
 #[test]
+fn recorded_release_schema_matches_the_emitted_output() {
+    // The v0.1.0 release record (docs/release-contract.md's release
+    // procedure) carries `dcs-model schema`'s output at the recorded
+    // commit; the recorded file must stay byte-identical to what the
+    // subcommand emits now or the published schema silently diverges
+    // from the code before the tag is cut. Regenerate it with
+    // `dcs-model schema > docs/releases/v0.1.0/plant-model.schema.json`
+    // whenever the emitted schema legitimately changes.
+    let output = run_schema_subcommand();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded =
+        std::fs::read(workspace_root().join("docs/releases/v0.1.0/plant-model.schema.json"))
+            .expect("the v0.1.0 release record's schema file must exist");
+    assert_eq!(
+        recorded, output.stdout,
+        "docs/releases/v0.1.0/plant-model.schema.json drifted from \
+         `dcs-model schema`'s emitted output — regenerate the record file"
+    );
+}
+
+#[test]
 fn schema_rejects_documents_with_structural_violations() {
     let schema = PlantModel::json_schema();
     let validator = jsonschema::validator_for(&schema).unwrap();
