@@ -21,6 +21,20 @@ Plan the gate as narrow ordered slices:
 
 Done when the separate reference-plant repository passes those checks from a clean checkout, its manifests contain no path into the DCS source tree, the generic image runs its mounted model without a customer-specific rebuild, and the platform repository's fixtures are described only as conformance tests rather than customer-project examples.
 
+## Next foundation tranche: schema-driven blocks and disposable UI
+
+Requirements `WW-FND-003` and `WW-FND-004` plus decisions 82–83 make two QiTech-inspired ideas explicit implementation work, not optional UI polish. DCS copies the architectural separation, not the LGPL-3.0 implementation, its YAML format, or its session-shutdown policy. Finish the real cross-repository publication and clean-CI proof for `WW-ENG-003`, then execute this tranche before planning broad new component kinds; already-active water slices and concrete reliability or field-hardware prerequisites may finish.
+
+Plan the tranche as ordered slices:
+
+1. Define the additive, versioned `BlockInterface` contract in the shared layer and map the existing `ComponentDescriptor`, typed ports, parameter descriptors, signal metadata, writable points, and journal vocabulary into its five explicit collections: measurements, configuration, runtime state, named commands, and emitted events. Pin `dcs-build` specs, registry construction, runtime registration, and the served schema with one drift test.
+2. Add the missing behavior contracts: named commands with typed request data and capability/refusal metadata, settling through the existing bounded scan-boundary receipt path; typed emitted events with stable identities, payload schema, sequence, and declared retention. Do not turn commands into writable magic points or fire-and-forget messages.
+3. Move monitoring reads onto immutable post-scan publications and bounded history/event storage outside the executor lock. Add sequence/freshness/gap reporting, bounded command admission with a named full-queue rejection, and overload metrics. No socket operation or consumer serialization may hold the executor across a scan.
+4. Render the current reference plant from the served schema and live resource state with no kind-specific UI required for measurements, state, configuration, commands, or events. Custom presentation may enhance the generic result but cannot be required to operate a declared block.
+5. Prove the boundary end to end from the external customer-shaped reference plant: identical deterministic outputs and command receipts with no UI, normal polling, a stalled reader, disconnect/reconnect, malformed/flooded traffic within declared limits, and a UI process restart. The controller remains active throughout; slow readers see coalescing or an explicit gap.
+
+Done when every registered kind passes interface-schema drift coverage, the generic UI exposes all five resource categories for the reference plant, command admission remains validated and receipted under overload, and the non-interference test proves UI delivery cannot pace or terminate plant execution.
+
 ## Milestones
 
 ### M1: Simulated single-controller loop — done

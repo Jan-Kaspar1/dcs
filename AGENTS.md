@@ -11,6 +11,8 @@ The library should encapsulate the difficult parts: communication, diagnostics, 
 
 Adding a new device should follow the same model. Once its device integration and library component exist, I can instantiate it in the plant model, connect its I/O, and automatically obtain the corresponding control behavior, monitoring information, diagnostics, and UI representation without engineering each layer separately.
 
+Each reusable block declares one typed, machine-readable interface covering measurements, configuration, runtime state, commands, and events. The controller runtime owns the authoritative plant state and execution; monitoring and UI processes are replaceable consumers whose slowness, disconnection, or restart must not delay or stop a control scan. Commands enter only through a bounded, validated, receipted path, while telemetry delivery may coalesce or expose gaps without changing plant behavior.
+
 Customer plant code is a consumer of this platform, not part of the platform implementation. A plant project must be able to live in its own repository, depend only on versioned DCS release artifacts, compose its model from the supported engineering API, and deploy that model with the generic controller runtime. Platform-owned fixtures may remain in this repository for conformance testing, but they are not the customer-project boundary and must not be the only proof that the public interfaces work.
 
 ## Agent workflow
