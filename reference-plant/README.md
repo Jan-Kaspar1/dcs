@@ -10,9 +10,12 @@ it as the starting point for your own plant repository.
 The station: a wet well with a failover-selected level measurement
 (primary and backup instruments), a threshold chain turning level into
 pump demand, a two-pump duty/standby `pump-group`, per-pump manual
-takeover and out-of-service declarations, and the managed alarm set —
+takeover and out-of-service declarations, the managed alarm set —
 a never-shelvable high-level alarm, a shelvable low-level alarm, and
-the equipment alarms the site policy declares.
+the equipment alarms the site policy declares — and a small exercise
+program (`sequencer`) whose kind-declared `advance`/`reset` commands
+and kind-emitted `step_completed` event carry the declared
+command/event surface the clean check proves.
 
 ## Layout
 
@@ -28,7 +31,9 @@ model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
 ci/simulate.py         the deterministic scripted-simulation runner;
-                       --surface asserts the served operator surface
+                       --surface asserts the served operator surface —
+                       signal index, interface registry, declared
+                       commands, emitted events
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/deploy_rig.py       the rig-definition consistency check —
@@ -50,8 +55,8 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by immutable revision:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
 ```
 
 `tag = "v0.1.0"` names the identical commit once the release tag
@@ -86,7 +91,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev a2b1b13… \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev b85eaa4… \
     dcs-model dcs-controller dcs-plant
 ```
 
@@ -106,12 +111,25 @@ operator surface against the emitted model's declaration: `GET
 /signals` must serve exactly the declared signal index, so every
 writable command point the composition declares (the alarm
 `ack`/`shelve`/`oos` points, the per-pump `mode`/`hand`/`oos` takeover
-points) appears `writable: true` while the never-shelvable high-level
-alarm's `shelve` point stays read-only, and every named signal carries
-its declared group; `GET /` must serve the monitoring page; the
-snapshot's `descriptors` must cover every composed component; and
-`GET /journal` must answer the run's recorded transitions. A
-divergence fails `surface-mismatch`.
+points, the exercise program's `run` request) appears `writable: true`
+while the never-shelvable high-level alarm's `shelve` point stays
+read-only, and every named signal carries its declared group; `GET /`
+must serve the monitoring page; `GET /schema` must serve the
+block-interface registry — one versioned interface per declared
+component covering its declared ports as measurement/state resources
+with their resolved bound points, its declared parameters as
+configuration with their `set_parameter` commands, and the adapted
+point-command verbs on every `In` port; every kind-declared command a
+served interface carries — the exercise `sequencer`'s `advance` and
+`reset` — must answer a structured receipt through `POST /command`'s
+`invoke` variant and settle `applied` through the journaled
+`command_settled` record; every kind-emitted event — the sequencer's
+`step_completed` — must reach the consumer-visible record once the run
+drives its declaring component to emission, appearing in `GET
+/journal`'s `event_emitted` entries and the instance-attributed
+`events` of `GET /resources`; the snapshot's `descriptors` must cover
+every composed component; and `GET /journal` must answer the run's
+recorded transitions. A divergence fails `surface-mismatch`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the

@@ -2,9 +2,11 @@
 # not a workspace member of the platform repository: its own
 # `[workspace]` table makes it a self-contained package whose only DCS
 # dependencies are the pinned release crates. The pin is the release
-# contract's recorded mechanism: `git = "<published origin>"` at the
-# revision `docs/release-contract.md` records for v0.1.0 — a `rev` pin
-# names the identical immutable commit the `v0.1.0` tag names.
+# contract's recorded mechanism: `git = "<published origin>"` at an
+# immutable revision on the release line — the rev recorded below is
+# the newest 0.1-series commit whose tooling serves the block-interface
+# registry, declared commands, and emitted events the clean check
+# proves; `docs/release-contract.md` records the mechanism.
 [package]
 name = "pump-station"
 version = "0.1.0"
@@ -16,6 +18,6 @@ description = "Reference duty/standby lift station — a DCS consumer plant"
 [workspace]
 
 [dependencies]
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13e7b4273b133bc0fff55cb97e16c5d3197" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13e7b4273b133bc0fff55cb97e16c5d3197" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4355520594eaeb3b5e77561062e9789ace" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4355520594eaeb3b5e77561062e9789ace" }
 serde_json = "1"
