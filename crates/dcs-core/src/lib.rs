@@ -69,10 +69,10 @@ pub use io::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
     LinkState, Output, PointType, TypedSample,
 };
-pub use journal::{EmittedEvent, EventValue, JournalEntry, JournalEvent};
+pub use journal::{EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent};
 pub use resources::{
-    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceSample,
-    ResourceView, SchemaView,
+    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceEvent,
+    ResourceSample, ResourceView, SchemaView,
 };
 pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{

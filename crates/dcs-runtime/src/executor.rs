@@ -7525,8 +7525,9 @@ mod tests {
     }
 
     /// A component emitting declared events during `step`: one `fired`
-    /// (`Journal`-retained) then one `beat` (`Latest`-retained) per
-    /// scan, the payload's `n` counting emissions — the pair pins
+    /// (`Journal`-retained), one `shift` (`History`-retained), then one
+    /// `beat` (`Latest`-retained) per scan — one per declared channel —
+    /// the payload's `n` counting emissions — the trio pins
     /// per-component emission order. `fail` reports the step error
     /// after emitting, so the drain-on-failure path is exercised.
     struct Emitter {
@@ -7583,6 +7584,7 @@ mod tests {
                 commands: Vec::new(),
                 events: vec![
                     event("fired", EventRetention::Journal),
+                    event("shift", EventRetention::History),
                     event("beat", EventRetention::Latest),
                 ],
             }
@@ -7592,7 +7594,11 @@ mod tests {
             if self.n == 0 {
                 return Vec::new();
             }
-            vec![Self::event("fired", self.n), Self::event("beat", self.n)]
+            vec![
+                Self::event("fired", self.n),
+                Self::event("shift", self.n),
+                Self::event("beat", self.n),
+            ]
         }
 
         fn capture_state(&self) -> StateMap {
@@ -8006,8 +8012,10 @@ mod tests {
             emitted,
             [
                 ("first", "fired"),
+                ("first", "shift"),
                 ("first", "beat"),
                 ("second", "fired"),
+                ("second", "shift"),
                 ("second", "beat"),
             ]
         );
@@ -8019,7 +8027,7 @@ mod tests {
         // The next scan's record replaces the last — the buffer always
         // holds exactly one scan's emissions.
         executor.scan().unwrap();
-        assert_eq!(executor.emitted_events().len(), 4);
+        assert_eq!(executor.emitted_events().len(), 6);
         assert_eq!(
             executor.emitted_events()[0].fields["n"],
             EventValue::Value(Value::Int(2))
@@ -8052,7 +8060,7 @@ mod tests {
             .iter()
             .map(|event| event.event.as_str())
             .collect();
-        assert_eq!(emitted, ["fired", "beat"]);
+        assert_eq!(emitted, ["fired", "shift", "beat"]);
         let diagnostics = &executor.snapshot().components[0];
         assert_eq!(diagnostics.step_errors, 1);
         assert_eq!(
@@ -8082,10 +8090,44 @@ mod tests {
         .unwrap();
 
         executor.scan().unwrap();
-        assert_eq!(executor.emitted_events().len(), 2);
+        assert_eq!(executor.emitted_events().len(), 3);
         let checkpoint = executor.checkpoint();
         executor.apply(&checkpoint).unwrap();
         assert!(executor.emitted_events().is_empty());
+    }
+
+    #[test]
+    fn drained_emissions_resolve_each_declared_retention_channel() {
+        // Every emission the scan drains resolves against the
+        // descriptor's declared retention — the channel the serving
+        // layer routes the record to: `fired` → `Journal`, `shift` →
+        // `History`, `beat` → `Latest`, all three declared channels
+        // exercised in one scan.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = emitter_rig(&driver);
+        executor.scan().unwrap();
+
+        let descriptor = &executor.snapshot().descriptors[0];
+        let retention_of = |event: &EmittedEvent| {
+            descriptor
+                .events
+                .iter()
+                .find(|decl| decl.name == event.event)
+                .map(|decl| decl.retention)
+        };
+        let routed: Vec<(&str, EventRetention)> = executor
+            .emitted_events()
+            .iter()
+            .map(|event| (event.event.as_str(), retention_of(event).unwrap()))
+            .collect();
+        assert_eq!(
+            routed,
+            [
+                ("fired", EventRetention::Journal),
+                ("shift", EventRetention::History),
+                ("beat", EventRetention::Latest),
+            ]
+        );
     }
 
     /// Emission rig: one `Emitter` ("em") and no I/O surface — the

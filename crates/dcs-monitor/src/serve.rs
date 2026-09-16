@@ -2,10 +2,11 @@
 //! `GET /resources` — decision 82's serving half.
 //!
 //! Both views read only the [`Publication`]'s materialized snapshot and
-//! the store's retained journal tail plus the model's [`SignalIndex`] —
-//! never the executor — so they inherit the published-read-model
-//! boundary: a read derives from one immutable publication and stamps
-//! its `seq`/`tick`, matching a concurrently fetched `/snapshot`.
+//! the store's retained journal tail plus routed event stores and the
+//! model's [`SignalIndex`] — never the executor — so they inherit the
+//! published-read-model boundary: a read derives from one immutable
+//! publication and stamps its `seq`/`tick`, matching a concurrently
+//! fetched `/snapshot`.
 //!
 //! [`schema_view`] is the served block-interface registry: every
 //! component instance's [`BlockInterface`](dcs_core::BlockInterface),
@@ -20,14 +21,15 @@
 //! `parameters` section's current value, each command the availability
 //! its [`CommandAvailability`](dcs_core::CommandAvailability) rule
 //! reads live — the `writable` mark through the signal index —
-//! and each instance the retained journal tail's entries attributed to
-//! it.
+//! and each instance its attributed events: the retained journal
+//! tail's entries beside the routed `History`/`Latest` emissions it
+//! produced.
 
-use crate::store::Publication;
+use crate::store::{Publication, RoutedEvents};
 use dcs_core::{
     CommandAvailability, CommandError, CommandSpec, CommandState, ComponentInterface,
-    ComponentResources, ConfigValue, Direction, JournalEntry, JournalEvent, PointId,
-    ResourceSample, ResourceView, Sample, SchemaView, Value,
+    ComponentResources, ConfigValue, Direction, EventRecord, EventRetention, JournalEntry,
+    JournalEvent, PointId, ResourceEvent, ResourceSample, ResourceView, Sample, SchemaView, Value,
 };
 use dcs_model::SignalIndex;
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,14 +66,18 @@ pub(crate) fn schema_view(publication: &Publication, signals: &SignalIndex) -> S
 /// `GET /resources`'s view over `publication`: per-instance live
 /// resource state — values from the snapshot's points and parameters
 /// sections, command availability read against the signal index's
-/// `writable` marks, and `journal`'s retained tail attributed per
+/// `writable` marks, and the store's event streams attributed per
 /// instance. `journal` is the store's served ring — the same stream
-/// `GET /journal` answers — so recently emitted events include the
-/// control-plane entries journaled between scans.
+/// `GET /journal` answers — so recent events include the control-plane
+/// entries journaled between scans; `routed` is the bounded
+/// event-history ring and the latest-emission view the declared
+/// `History`/`Latest` emissions landed in, each entry carrying the
+/// `retention` mark that tells it from the durable record.
 pub(crate) fn resource_view(
     publication: &Publication,
     signals: &SignalIndex,
     journal: &[JournalEntry],
+    routed: &RoutedEvents,
 ) -> ResourceView {
     let snapshot = &publication.snapshot;
     let samples: BTreeMap<PointId, Option<Sample>> = snapshot
@@ -126,11 +132,12 @@ pub(crate) fn resource_view(
                     .iter()
                     .map(|command| command_state(command, signals))
                     .collect(),
-                events: journal
-                    .iter()
-                    .filter(|entry| attributed(entry, &descriptor.name, &bound))
-                    .cloned()
-                    .collect(),
+                events: attributed_events(
+                    journal,
+                    routed,
+                    &descriptor.name,
+                    &bound,
+                ),
             }
         })
         .collect();
@@ -181,6 +188,61 @@ fn command_state(spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
         available,
         refusal,
     }
+}
+
+/// The component's `events` collection: the journal tail's attributed
+/// entries beside the routed `History`/`Latest` records the instance
+/// emitted — `record.event.component == name` is the routed record's
+/// attribution, the emission-side counterpart of the journal rule —
+/// ordered by attributed tick, each stream's own order kept within a
+/// tick: the durable record first, then the event-history ring, then
+/// the latest view. Every routed emission carries its
+/// [`EmittedEvent`](dcs_core::EmittedEvent) under
+/// [`JournalEvent::EventEmitted`] so the collection keeps one `event`
+/// vocabulary.
+fn attributed_events(
+    journal: &[JournalEntry],
+    routed: &RoutedEvents,
+    name: &str,
+    points: &BTreeSet<PointId>,
+) -> Vec<ResourceEvent> {
+    let emitted = |record: &EventRecord| ResourceEvent {
+        seq: record.seq,
+        tick: record.tick,
+        retention: record.retention,
+        event: JournalEvent::EventEmitted {
+            event: record.event.clone(),
+        },
+    };
+    let mut events: Vec<ResourceEvent> = journal
+        .iter()
+        .filter(|entry| attributed(entry, name, points))
+        .map(|entry| ResourceEvent {
+            seq: entry.seq,
+            tick: entry.tick,
+            retention: EventRetention::Journal,
+            event: entry.event.clone(),
+        })
+        .chain(
+            routed
+                .history
+                .iter()
+                .filter(|record| record.event.component == name)
+                .map(emitted),
+        )
+        .chain(
+            routed
+                .latest
+                .iter()
+                .filter(|record| record.event.component == name)
+                .map(emitted),
+        )
+        .collect();
+    // The journal tail is seq-ordered and each routed stream append-
+    // ordered; a stable merge by attributed tick keeps the collection
+    // newest-last like the journal pane reads it.
+    events.sort_by_key(|entry| entry.tick);
+    events
 }
 
 /// Whether a retained journal entry is attributed to the component —

@@ -518,18 +518,19 @@ fn schema_prints_the_served_interface_registry() {
 #[test]
 fn events_print_each_components_recent_emissions() {
     with_monitor(|driver, addr, client| {
-        // Before the first scan the retained journal tail is empty —
+        // Before the first scan the attributed event record is empty —
         // the empty case prints an empty list for a served component.
-        let events: Vec<dcs_core::JournalEntry> =
+        let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
         assert!(events.is_empty());
 
         // Holding `run` through a scan completes the one-tick step: the
         // kind-emitted `step_completed` journals attributed to `seq` —
-        // the emitted event the run produced reflected in `events`.
+        // the emitted event the run produced reflected in `events`,
+        // marked `journal`-retained: the durable record's mark.
         driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
         client.advance(1).unwrap();
-        let events: Vec<dcs_core::JournalEntry> =
+        let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
         assert!(events.iter().any(|entry| matches!(
             &entry.event,
@@ -538,6 +539,11 @@ fn events_print_each_components_recent_emissions() {
                     && event.component == "seq"
                     && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
         )));
+        assert!(
+            events
+                .iter()
+                .all(|entry| entry.retention == dcs_core::EventRetention::Journal)
+        );
 
         // The all-components form keys every served instance's list by
         // name — `seq`'s carries the same tail, and `level-pid`'s the
@@ -547,7 +553,7 @@ fn events_print_each_components_recent_emissions() {
             assert!(all.get(name).is_some(), "{name} missing: {all}");
         }
         assert_eq!(
-            serde_json::from_value::<Vec<dcs_core::JournalEntry>>(all["seq"].clone()).unwrap(),
+            serde_json::from_value::<Vec<dcs_core::ResourceEvent>>(all["seq"].clone()).unwrap(),
             events
         );
         assert!(all["level-pid"].as_array().unwrap().iter().any(|entry| {

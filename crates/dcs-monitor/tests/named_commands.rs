@@ -64,8 +64,9 @@ impl IoDriver for StubDriver {
 }
 
 /// A component emitting declared events during `step`: `fired` —
-/// `Journal`-retained — then `beat` — `Latest`-retained — each scan,
-/// the payload's `n` counting emissions. `fail` reports the step error
+/// `Journal`-retained — then `shift` — `History`-retained — then
+/// `beat` — `Latest`-retained — each scan, the payload's `n` counting
+/// emissions. `fail` reports the step error
 /// after emitting, so a failing step's events still drain.
 struct Emitter {
     name: &'static str,
@@ -121,13 +122,18 @@ impl Component for Emitter {
             commands: Vec::new(),
             events: vec![
                 event("fired", EventRetention::Journal),
+                event("shift", EventRetention::History),
                 event("beat", EventRetention::Latest),
             ],
         }
     }
 
     fn drain_events(&mut self) -> Vec<EmittedEvent> {
-        vec![Self::event("fired", self.n), Self::event("beat", self.n)]
+        vec![
+            Self::event("fired", self.n),
+            Self::event("shift", self.n),
+            Self::event("beat", self.n),
+        ]
     }
 }
 

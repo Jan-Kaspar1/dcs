@@ -13,9 +13,14 @@
 //!   order (the input read and step phases produced them), then value
 //!   transitions over the declared-`journaled` points in the same
 //!   ascending point order — the durable transition record the
-//!   lifecycle-audit decision adds — then the kind-declared events the
-//!   step phase emitted, in emission order — then component step
-//!   failures in scan order.
+//!   lifecycle-audit decision adds — then the `Journal`-retained and
+//!   undeclared kind-declared events the step phase emitted, in
+//!   emission order — then component step failures in scan order.
+//!   Emissions declared `History` or `Latest` never journal: they
+//!   route to the store's bounded event-history ring and the
+//!   latest-emission view — the newest record per (component,
+//!   declared event) — which the resource view's per-instance
+//!   `events` joins beside the journal tail.
 //!
 //! A scan aborted by a [`ScanError`](dcs_runtime::ScanError) is not
 //! recorded: the run ends at it. Both streams evict oldest-first past the
@@ -44,6 +49,11 @@ pub struct MonitorConfig {
     pub history_capacity: usize,
     /// Entries retained in the transition journal; `0` retains none.
     pub journal_capacity: usize,
+    /// Records retained in the event-history ring — the bounded store
+    /// `History`-declared emissions route to; `0` retains none. The
+    /// `Latest` view needs no bound: it stands one record per
+    /// (component, declared event) identity.
+    pub event_history_capacity: usize,
     /// Publications retained in the read-model window a seq-cursor
     /// consumer pages through; `0` retains only the latest. Bounded
     /// regardless of consumer count — a window that fills evicts
@@ -69,6 +79,7 @@ impl Default for MonitorConfig {
         Self {
             history_capacity: 1024,
             journal_capacity: 1024,
+            event_history_capacity: 1024,
             publication_capacity: 16,
             journal_file: None,
         }
@@ -125,6 +136,7 @@ impl Recorder {
             config.history_capacity,
             config.journal_capacity,
             config.publication_capacity,
+            config.event_history_capacity,
         );
         for entry in replay.entries {
             store.push_journal(entry);
@@ -306,13 +318,15 @@ impl Recorder {
         }
 
         // The kind-declared events the scan's components emitted — the
-        // executor drained each after its `step` — journal here in
+        // executor drained each after its `step` — route here in
         // emission order at the producing scan's tick. Retention is the
         // serving-side read of the declared `EventRetention`: `Journal`
         // events — and an emission the descriptor never declares, which
         // the audit record still carries — land as `event_emitted`;
-        // `History`/`Latest` emissions follow their declared channel and
-        // are not duplicated into the durable journal.
+        // `History` emissions join the store's bounded event-history
+        // ring and `Latest` emissions the latest-emission view — the
+        // routed stores the resource view's `events` joins beside the
+        // journal tail, each emission recorded exactly once.
         for event in executor.emitted_events() {
             let retention = snapshot
                 .descriptors
@@ -325,13 +339,19 @@ impl Recorder {
                         .find(|decl| decl.name == event.event)
                 })
                 .map(|decl| decl.retention);
-            if matches!(retention, None | Some(EventRetention::Journal)) {
-                self.push(
+            match retention {
+                None | Some(EventRetention::Journal) => self.push(
                     scan_tick,
                     JournalEvent::EventEmitted {
                         event: event.clone(),
                     },
-                );
+                ),
+                Some(EventRetention::History) => {
+                    self.store.push_event_history(event.clone(), scan_tick)
+                }
+                Some(EventRetention::Latest) => {
+                    self.store.push_latest_event(event.clone(), scan_tick)
+                }
             }
         }
 
