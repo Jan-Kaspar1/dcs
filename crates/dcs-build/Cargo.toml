@@ -18,3 +18,6 @@ dcs-ethercat = { path = "../dcs-ethercat" }
 dcs-monitor = { path = "../dcs-monitor" }
 dcs-runtime = { path = "../dcs-runtime" }
 dcs-sim = { path = "../dcs-sim" }
+# The Wago cyclic-binding test parses the emitted station layout and
+# miss threshold under the served contract's own parameter grammar.
+dcs-sim-bus = { path = "../dcs-sim-bus" }

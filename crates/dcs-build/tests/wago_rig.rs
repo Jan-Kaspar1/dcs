@@ -1,28 +1,35 @@
 //! The Wago EtherCAT QA rig's emitted documents — issue #335's
-//! artifact for the HQ-4 "EtherCAT field path" milestone.
+//! artifact for the HQ-4 "EtherCAT field path" milestone, extended by
+//! #412's cyclic simulation binding.
 //!
 //! The checked-in documents live at `crates/dcs-demo/fixtures/`:
 //! `wago_rig.json` is the `ethercat` binding — one hardware-bound
 //! device declaring the manifest's expected 750-354 station identity,
 //! bus, channel mapping, miss threshold, safe outputs, and startup
-//! policy — and `wago_rig_sim.json` is the identical control path
+//! policy — `wago_rig_sim.json` is the identical control path
 //! re-emitted over a local `sim` device plus the declared `di1` ←
-//! `do1` loopback wire the simulation plays. These tests assert the
-//! helper re-emits both documents byte-for-byte, that they validate,
+//! `do1` loopback wire the simulation plays, and
+//! `wago_rig_cyclic.json` is the same control path re-emitted over a
+//! `sim-cyclic` device: the coupler station declared as the register
+//! bank the manifest's channel layout maps onto, the miss threshold
+//! carried as device-parameter data. These tests assert the helper
+//! re-emits all three documents byte-for-byte, that they validate,
 //! lint clean, and serde-roundtrip deterministically, and that
 //! wrong-typed and unmapped channel bindings are rejected by named
-//! errors before the first scan on both bindings.
+//! errors before the first scan on every binding.
 
 use dcs_assembly::{AssemblyError, DriverRegistry, resolve_drivers};
 use dcs_build::wago::{
-    ECAT_BUS, EXCHANGE_MISS_THRESHOLD, RigBinding, WAGO_PRODUCT, WAGO_REVISION, WAGO_VENDOR,
-    channels, points, station_identity, wago_rig,
+    COUPLER_STATION, CYCLIC_ADDRESS_PLACEHOLDER, CYCLIC_KIND, ECAT_BUS,
+    EXCHANGE_MISS_THRESHOLD, RigBinding, WAGO_PRODUCT, WAGO_REVISION, WAGO_VENDOR, channels, points,
+    registers, station_identity, wago_rig,
 };
 use dcs_build::{Direction, PlantBuilder, PointId, ValueKind};
 use dcs_core::Value;
 use dcs_ethercat::{ChannelDecl, DeviceParameters, StartupPolicy};
 use dcs_model::{Endpoint, PlantModel, ValidationError};
 use dcs_sim::Loopback;
+use dcs_sim_bus::CyclicDeviceParameters;
 use std::collections::BTreeMap;
 
 /// The checked-in `ethercat`-bound document.
@@ -35,6 +42,11 @@ const SIM_JSON: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-demo/fixtures/wago_rig_sim.json"
 );
+/// The checked-in `sim-cyclic`-bound document.
+const CYCLIC_JSON: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-demo/fixtures/wago_rig_cyclic.json"
+);
 
 fn emit(binding: RigBinding) -> PlantModel {
     wago_rig(binding).unwrap().model
@@ -46,13 +58,17 @@ fn fixture(binding: RigBinding) -> String {
     let path = match binding {
         RigBinding::Ethercat => ETHERCAT_JSON,
         RigBinding::Sim => SIM_JSON,
+        RigBinding::Cyclic => CYCLIC_JSON,
     };
     std::fs::read_to_string(path).unwrap()
 }
 
+/// Every emitted binding.
+const BINDINGS: [RigBinding; 3] = [RigBinding::Ethercat, RigBinding::Sim, RigBinding::Cyclic];
+
 #[test]
 fn emission_matches_the_checked_in_documents() {
-    for binding in [RigBinding::Ethercat, RigBinding::Sim] {
+    for binding in BINDINGS {
         let built = emit(binding);
         // Byte-for-byte, not just semantically equal: the checked-in
         // artifact is the document the QA lane mounts.
@@ -72,7 +88,7 @@ fn emission_matches_the_checked_in_documents() {
 
 #[test]
 fn re_emission_is_byte_identical() {
-    for binding in [RigBinding::Ethercat, RigBinding::Sim] {
+    for binding in BINDINGS {
         let first = serde_json::to_string_pretty(&emit(binding)).unwrap();
         let second = serde_json::to_string_pretty(&emit(binding)).unwrap();
         assert_eq!(
@@ -186,8 +202,123 @@ fn the_ethercat_declaration_parses_under_the_real_contract() {
 }
 
 #[test]
+fn the_cyclic_binding_declares_the_identical_control_path() {
+    let ethercat = emit(RigBinding::Ethercat);
+    let cyclic = emit(RigBinding::Cyclic);
+
+    // Same points, signals, components — and the hardware document's
+    // own connections: the cyclic document declares no point-to-point
+    // wire either, because the loopback is the served register bank's
+    // field wiring, not a controller-side route.
+    assert_eq!(cyclic.io_points, ethercat.io_points);
+    assert_eq!(cyclic.signals, ethercat.signals);
+    assert_eq!(cyclic.components, ethercat.components);
+    assert_eq!(cyclic.connections, ethercat.connections);
+}
+
+#[test]
+fn the_cyclic_declaration_parses_under_the_real_contract() {
+    let model = emit(RigBinding::Cyclic);
+    let device = &model.devices[0];
+    assert_eq!(device.kind, CYCLIC_KIND);
+    assert!(
+        !device.hardware,
+        "the cyclic binding is a simulated device, never hardware-bound"
+    );
+
+    let channel_kinds: BTreeMap<String, ValueKind> = device
+        .channels
+        .iter()
+        .map(|(name, channel)| (name.clone(), channel.value_type))
+        .collect();
+    let parsed = CyclicDeviceParameters::parse(&device.parameters, &channel_kinds).unwrap();
+
+    // The address is the placeholder a run substitutes its bound
+    // device server for; the miss threshold is the declared cyclic
+    // contract's, carried as device-parameter data.
+    assert_eq!(parsed.address, CYCLIC_ADDRESS_PLACEHOLDER);
+    assert_eq!(parsed.exchange_miss_threshold, EXCHANGE_MISS_THRESHOLD);
+
+    // The one station is the manifest's coupler; its register bank
+    // lays the channels out in rail order — the 750-501's outputs
+    // first, then the 750-400's inputs.
+    assert_eq!(parsed.stations.len(), 1);
+    let coupler = &parsed.stations[COUPLER_STATION];
+    assert_eq!(coupler.len(), 4);
+    for (name, register) in [
+        (channels::DO1, registers::DO1),
+        (channels::DO2, registers::DO2),
+        (channels::DI1, registers::DI1),
+        (channels::DI2, registers::DI2),
+    ] {
+        assert_eq!(
+            coupler[name].register, register,
+            "channel {name:?}'s station placement"
+        );
+        // And the flat lookup resolves the same placement — the
+        // driver-side view the factory binds points through.
+        let (station, declaration) = parsed.channel_register(name).unwrap();
+        assert_eq!(station, COUPLER_STATION);
+        assert_eq!(declaration.register, register);
+    }
+
+    // The served-side views of the same declaration: one register
+    // decl per channel, and the station's attribution map.
+    let decls = parsed.register_decls(&channel_kinds);
+    assert_eq!(decls.len(), 4);
+    assert_eq!(
+        parsed.station_registers(),
+        BTreeMap::from([(
+            COUPLER_STATION.to_string(),
+            [registers::DO1, registers::DO2, registers::DI1, registers::DI2]
+                .into_iter()
+                .collect()
+        )])
+    );
+}
+
+#[test]
+fn the_cyclic_binding_fails_honestly_without_a_device_server() {
+    // The checked-in address is the placeholder: it parses, then the
+    // connect-time resolution fails — a `sim-cyclic` device is never
+    // silently substituted by a local simulation.
+    match resolve_drivers(&emit(RigBinding::Cyclic), &DriverRegistry::standard()) {
+        Err(AssemblyError::InvalidDeviceParameters { kind, detail, .. }) => {
+            assert_eq!(kind, CYCLIC_KIND);
+            assert!(detail.contains(CYCLIC_ADDRESS_PLACEHOLDER), "{detail}");
+        }
+        Err(other) => panic!("expected InvalidDeviceParameters, got {other:?}"),
+        Ok(_) => panic!("expected InvalidDeviceParameters, got a resolved driver plan"),
+    }
+
+    // The grammar's own rules apply to the emitted declaration: a
+    // station entry naming a channel the device does not declare is a
+    // named parameter error at resolution — before any scan.
+    let mut model = emit(RigBinding::Cyclic);
+    model.devices[0]
+        .parameters
+        .get_mut("stations")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .get_mut(COUPLER_STATION)
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("di9".to_string(), serde_json::json!(9));
+    match resolve_drivers(&model, &DriverRegistry::standard()) {
+        Err(AssemblyError::InvalidDeviceParameters { kind, detail, .. }) => {
+            assert_eq!(kind, CYCLIC_KIND);
+            assert!(detail.contains("di9"), "{detail}");
+        }
+        Err(other) => panic!("expected InvalidDeviceParameters, got {other:?}"),
+        Ok(_) => panic!("a station placing an undeclared channel resolved"),
+    }
+}
+
+#[test]
 fn emitted_documents_validate_lint_and_serde_roundtrip() {
-    for binding in [RigBinding::Ethercat, RigBinding::Sim] {
+    for binding in BINDINGS {
         let model = emit(binding);
         assert!(
             model.validate().is_empty(),
@@ -262,7 +393,7 @@ fn unmapped_channel(model: &mut PlantModel, point: PointId) {
 
 #[test]
 fn wrong_typed_channel_bindings_fail_before_the_first_scan() {
-    for binding in [RigBinding::Ethercat, RigBinding::Sim] {
+    for binding in BINDINGS {
         let mut model = emit(binding);
         wrong_typed_channel(&mut model, channels::DI1);
         let errors = model.validate();
@@ -301,7 +432,7 @@ fn wrong_typed_channel_bindings_fail_before_the_first_scan() {
 
 #[test]
 fn unmapped_channel_bindings_fail_before_the_first_scan() {
-    for binding in [RigBinding::Ethercat, RigBinding::Sim] {
+    for binding in BINDINGS {
         let mut model = emit(binding);
         unmapped_channel(&mut model, points::DI1);
         let errors = model.validate();
@@ -343,7 +474,7 @@ fn unmapped_channel_bindings_fail_before_the_first_scan() {
 }
 
 #[test]
-fn the_hardware_marker_is_enforced_on_both_bindings() {
+fn the_hardware_marker_is_enforced_on_every_binding() {
     // An `ethercat` device missing `"hardware": true` cannot be served
     // by a simulated backend.
     let mut model = emit(RigBinding::Ethercat);
@@ -356,15 +487,22 @@ fn the_hardware_marker_is_enforced_on_both_bindings() {
         Ok(_) => panic!("an ethercat device without the hardware marker resolved"),
     }
 
-    // A `sim` device carrying `"hardware": true` is the mirror-image
-    // dishonesty: a simulated factory cannot serve a hardware-bound
-    // declaration.
-    let mut model = emit(RigBinding::Sim);
-    model.devices[0].hardware = true;
-    match resolve_drivers(&model, &DriverRegistry::standard()) {
-        Err(AssemblyError::InvalidDeviceParameters { kind, .. }) => assert_eq!(kind, "sim"),
-        Err(other) => panic!("expected InvalidDeviceParameters, got {other:?}"),
-        Ok(_) => panic!("a sim device with the hardware marker resolved"),
+    // A simulated device carrying `"hardware": true` is the
+    // mirror-image dishonesty: a simulated factory cannot serve a
+    // hardware-bound declaration.
+    for (binding, kind) in [
+        (RigBinding::Sim, "sim"),
+        (RigBinding::Cyclic, CYCLIC_KIND),
+    ] {
+        let mut model = emit(binding);
+        model.devices[0].hardware = true;
+        match resolve_drivers(&model, &DriverRegistry::standard()) {
+            Err(AssemblyError::InvalidDeviceParameters { kind: rejected, .. }) => {
+                assert_eq!(rejected, kind)
+            }
+            Err(other) => panic!("expected InvalidDeviceParameters, got {other:?}"),
+            Ok(_) => panic!("a {kind} device with the hardware marker resolved"),
+        }
     }
 }
 

@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-cyclic",
+      "channels": {
+        "di1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "di2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "do1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "do2": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      },
+      "parameters": {
+        "address": "__BUS_ADDR__",
+        "exchange_miss_threshold": 3,
+        "stations": {
+          "750-354": {
+            "di1": 2,
+            "di2": 3,
+            "do1": 0,
+            "do2": 1
+          }
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 1,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "di1"
+      }
+    },
+    {
+      "id": 2,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "di2"
+      }
+    },
+    {
+      "id": 3,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "do1"
+      }
+    },
+    {
+      "id": 4,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "do2"
+      }
+    },
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 11,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 10001,
+      "name": "rig-di1",
+      "source": 1,
+      "unit": "",
+      "description": "750-400 ch1 digital input — DO1 loopback witness; physical wiring unverified until supervised commissioning confirms it",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10002,
+      "name": "rig-di2",
+      "source": 2,
+      "unit": "",
+      "description": "750-400 ch2 digital input — channel-independence witness; physical wiring unverified until supervised commissioning",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10003,
+      "name": "rig-do1",
+      "source": 3,
+      "unit": "",
+      "description": "750-501 ch1 digital output — declared process-image mapping verified at supervised commissioning",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10004,
+      "name": "rig-do2",
+      "source": 4,
+      "unit": "",
+      "description": "750-501 ch2 digital output — declared process-image mapping; held at its declared safe state by this composition",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10010,
+      "name": "rig-do1-command",
+      "source": 10,
+      "unit": "",
+      "description": "operator command for 750-501 DO1 — the receipted write surface the commissioning sequence drives",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10011,
+      "name": "rig-di1-witness",
+      "source": 11,
+      "unit": "",
+      "description": "digital-input-conditioned copy of rig-di1 — the observed loopback transition",
+      "group": "wago-rig"
+    },
+    {
+      "id": 10012,
+      "name": "rig-di2-witness",
+      "source": 12,
+      "unit": "",
+      "description": "digital-input-conditioned copy of rig-di2 — stays clear while DO1 toggles",
+      "group": "wago-rig"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "digital-output",
+      "parameters": {},
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "digital-input",
+      "parameters": {},
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "digital-input",
+      "parameters": {},
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 3
+      }
+    },
+    {
+      "from": {
+        "point": 1
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 11
+      }
+    },
+    {
+      "from": {
+        "point": 2
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 12
+      }
+    }
+  ]
+}
