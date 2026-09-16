@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -200,6 +201,18 @@ class SupervisorTests(unittest.TestCase):
         self.runtime.recover.return_value=[record]
         s.recover_processes()
         self.assertEqual(s.state.get('process:1'),record)
+
+    def test_rejected_proposal_feeds_back_to_next_planner(self):
+        s=self.supervisor
+        out = Path(self.tmp.name)/'proposal.json'
+        out.write_text(json.dumps({'issues':[],'dispositions':[{'id':'x','disposition':'resolved','reason':'r'}]}))
+        s.state.set('planner', {'process':{'key':'p'},'output':str(out)})
+        s.planner([], [])
+        self.assertIsNone(s.state.get('pending_proposal'))
+        self.assertIn('disposition', s.state.get('planner_feedback'))
+        s.state.set('last_plan', 0)
+        s.planner([], [])
+        self.assertIn('Invalid disposition fields', self.runtime.spawn.call_args[0][2])
 
     def test_unowned_running_invocation_pauses(self):
         self.runtime.recover.return_value=[{'invocation':'orphan','key':'unknown'}]
