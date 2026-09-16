@@ -7,7 +7,12 @@
 //! DO1/DO2 and 750-400 DI1/DI2 channel mapping, miss threshold, safe
 //! outputs, and the `fail` startup policy); `wago_rig_sim.json`
 //! declares the identical control path over a local `sim` device plus
-//! the `di1` ← `do1` field wire the simulation plays.
+//! the `di1` ← `do1` field wire the simulation plays; and
+//! `wago_rig_cyclic.json` declares the same control path over a
+//! `sim-cyclic` device — the coupler station as the register bank the
+//! manifest's channel layout maps onto, the miss threshold carried as
+//! device-parameter data — the exchange-per-scan contract the
+//! `ethercat` driver implements, rehearsed in software.
 //!
 //! The scripted run is the commissioning sequence's software half —
 //! `docs/wago-ethercat-rig-manifest.md`'s loopback plan, step 1 and 3:
@@ -21,24 +26,41 @@
 //!    witness;
 //! 6. the release transition repeating the sequence downward.
 //!
-//! Both bindings run the identical monitor-backed script — the sim
-//! document through the standard registry, the ethercat document
+//! All three bindings run the identical monitor-backed script — the
+//! sim document through the standard registry, the ethercat document
 //! through `with_ethercat_buses` over a fake transport playing the
-//! rig's wiring — and must produce the identical receipted-command →
-//! staged-output → exchange → telemetry sequence. The recorded
-//! published output images are the ethercat binding's own evidence of
-//! step 3.
+//! rig's wiring, and the cyclic document over a `BusServer` sharing
+//! the coupler station's register bank whose declared `do1` → `di1`
+//! field wire plays the same physical loopback — and must produce the
+//! identical receipted-command → staged-output → exchange → telemetry
+//! sequence. The recorded published output images are the ethercat
+//! binding's own evidence of step 3; on the cyclic binding the wire
+//! lands each published `do1` on `di1`'s register inside the same
+//! exchange, so the answered census itself latches the transition —
+//! the exchange-per-scan semantics the hardware driver will ride.
+//! The missed-exchange leg then proves the contract's failure half on
+//! the same rig: a scripted missed exchange holds the held input
+//! image rather than aborting the scan, escalates the device's reads
+//! at the declared `exchange_miss_threshold`, and retains the staged
+//! output image until the next completed exchange publishes it.
 
 use dcs_assembly::{AssemblyError, DriverRegistry, FanoutDriver, assemble, resolve_drivers};
-use dcs_build::wago::{ECAT_BUS, WAGO_PRODUCT, WAGO_REVISION, WAGO_VENDOR, points};
+use dcs_build::wago::{
+    COUPLER_STATION, CYCLIC_ADDRESS_PLACEHOLDER, ECAT_BUS, EXCHANGE_MISS_THRESHOLD, WAGO_PRODUCT,
+    WAGO_REVISION, WAGO_VENDOR, points, registers,
+};
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, PointId, Sample, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    Command, CommandOutcome, CommandReceipt, PointId, Quality, QualityReason, Sample,
+    TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_ethercat::{BusTransport, CycleOutcome, DiscoveredStation, EthercatBuses, TransportError};
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
-use std::collections::BTreeMap;
+use dcs_sim_bus::{
+    BusDriver, BusRequest, BusResponse, BusServer, ExchangeOutcome, PointRegister, RegisterBank,
+    RegisterDecl,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -51,6 +73,11 @@ const ETHERCAT_JSON: &str = concat!(
 const SIM_JSON: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-demo/fixtures/wago_rig_sim.json"
+);
+/// The checked-in `sim-cyclic`-bound document.
+const CYCLIC_JSON: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-demo/fixtures/wago_rig_cyclic.json"
 );
 
 /// The scripted run length — baseline, the assert and release
@@ -246,19 +273,121 @@ fn ethercat_driver(model: &PlantModel, published: Arc<Mutex<Vec<Vec<u8>>>>) -> F
     resolve_drivers(model, &registry).unwrap().build().unwrap()
 }
 
-/// The monitor-backed scripted run — the receipted operator path the
-/// commissioning sequence names. `driver` paces the simulated plant
-/// after each scan (a no-op on the ethercat binding: the field
-/// advances itself inside the scan's exchange).
-fn scripted_run(model: &PlantModel, driver: &FanoutDriver) -> Run {
-    let executor = assemble(model, &dcs_controller::registry(), driver).unwrap();
-    let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
-    let client = MonitorClient::new(monitor.local_addr());
+/// The cyclic binding's field side: a `BusServer` sharing the coupler
+/// station's register bank — the manifest's channel layout in rail
+/// order — whose declared `do1` → `di1` field wire plays the rig's
+/// physical loopback: every published `do1` write lands on `di1`'s
+/// register inside the same exchange, so the answered census latches
+/// the transition — the register-bank analogue of `WireTransport`'s
+/// byte-level wire. Returns the server, the checked-in document with
+/// its `__BUS_ADDR__` placeholder substituted for the bound address,
+/// and the observer attachment the exchange scripter goes through.
+fn cyclic_field() -> (BusServer, PlantModel, BusDriver) {
+    let bank = RegisterBank::new([
+        RegisterDecl {
+            register: registers::DO1,
+            initial: Value::Bool(false),
+        },
+        RegisterDecl {
+            register: registers::DO2,
+            initial: Value::Bool(false),
+        },
+        RegisterDecl {
+            register: registers::DI1,
+            initial: Value::Bool(false),
+        },
+        RegisterDecl {
+            register: registers::DI2,
+            initial: Value::Bool(false),
+        },
+    ])
+    .unwrap()
+    .with_wires([(registers::DO1, registers::DI1)])
+    .unwrap();
+    let server = BusServer::bind_stationed(
+        "127.0.0.1:0",
+        bank,
+        BTreeMap::from([(
+            COUPLER_STATION.to_string(),
+            BTreeSet::from([
+                registers::DO1,
+                registers::DO2,
+                registers::DI1,
+                registers::DI2,
+            ]),
+        )]),
+    )
+    .unwrap();
+    let mut model = fixture(CYCLIC_JSON);
+    let declared = model.devices[0].parameters.get_mut("address").unwrap();
+    assert_eq!(
+        declared.as_str().unwrap(),
+        CYCLIC_ADDRESS_PLACEHOLDER,
+        "the checked-in document must carry the address placeholder"
+    );
+    *declared = serde_json::json!(server.local_addr().unwrap().to_string());
+    let observer = BusDriver::connect(
+        server.local_addr().unwrap(),
+        &[
+            PointRegister {
+                point: points::DI1,
+                register: registers::DI1,
+                kind: ValueKind::Bool,
+            },
+            PointRegister {
+                point: points::DI2,
+                register: registers::DI2,
+                kind: ValueKind::Bool,
+            },
+            PointRegister {
+                point: points::DO1,
+                register: registers::DO1,
+                kind: ValueKind::Bool,
+            },
+            PointRegister {
+                point: points::DO2,
+                register: registers::DO2,
+                kind: ValueKind::Bool,
+            },
+        ],
+    )
+    .unwrap();
+    (server, model, observer)
+}
 
+/// Builds the `sim-cyclic` binding's driver side through the standard
+/// registry — the `CyclicBusDriver` attaching to the served register
+/// bank, exchanging the whole image once per scan.
+fn cyclic_driver(model: &PlantModel) -> FanoutDriver {
+    resolve_drivers(model, &DriverRegistry::standard())
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// The monitor-backed scripted run — the receipted operator path the
+/// commissioning sequence names. `driver` builds the driver side
+/// inside the served scope: a cyclic backend's connect-time census
+/// needs its device server already answering, so `field`'s serve loop
+/// starts first. The driver's `step` paces the simulated plant after
+/// each scan (a no-op on the ethercat binding: the field advances
+/// itself inside the scan's exchange).
+fn scripted_run(
+    model: &PlantModel,
+    driver: impl FnOnce() -> FanoutDriver,
+    field: Option<&BusServer>,
+) -> Run {
     let result = thread::scope(|scope| {
+        if let Some(server) = field {
+            scope.spawn(move || server.serve());
+        }
+        let driver = driver();
+        let executor = assemble(model, &dcs_controller::registry(), &driver).unwrap();
+        let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
+        let client = MonitorClient::new(monitor.local_addr());
         scope.spawn(|| monitor.serve());
         // A failing assertion must not deadlock the scope join: catch
-        // the panic so the server is always shut down first.
+        // the panic so the servers are always shut down first.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut scans = Vec::with_capacity(SCANS as usize);
             for scan in 1..=SCANS {
@@ -291,6 +420,9 @@ fn scripted_run(model: &PlantModel, driver: &FanoutDriver) -> Run {
             }
         }));
         monitor.shutdown();
+        if let Some(server) = field {
+            server.shutdown();
+        }
         result
     });
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -305,25 +437,40 @@ fn outcomes(receipts: &[CommandReceipt]) -> Vec<CommandOutcome> {
 }
 
 #[test]
-fn the_rig_control_path_runs_identically_on_both_bindings() {
+fn the_rig_control_path_runs_identically_on_every_binding() {
     let sim_model = fixture(SIM_JSON);
     let ethercat_model = fixture(ETHERCAT_JSON);
+    let (server, cyclic_model, _observer) = cyclic_field();
 
     let published = Arc::new(Mutex::new(Vec::new()));
-    let sim_run = scripted_run(&sim_model, &sim_driver(&sim_model));
+    let sim_run = scripted_run(&sim_model, || sim_driver(&sim_model), None);
     let ethercat_run = scripted_run(
         &ethercat_model,
-        &ethercat_driver(&ethercat_model, Arc::clone(&published)),
+        || ethercat_driver(&ethercat_model, Arc::clone(&published)),
+        None,
     );
+    let cyclic_run = scripted_run(&cyclic_model, || cyclic_driver(&cyclic_model), Some(&server));
 
     // The WW-FND-002 proof: identical telemetry transition sequences
-    // and identical receipted-command outcomes on both bindings — no
-    // component-logic change, one model's control path.
+    // and identical receipted-command outcomes on all three bindings —
+    // no component-logic change, one model's control path. The cyclic
+    // binding's sequence rides the exchange-per-scan contract the
+    // hardware driver implements: the staged `do1` publishes in the
+    // next scan's exchange and the field wire's `di1` transition
+    // latches in that exchange's own census — the documented one-scan
+    // actuation delay between the command-settled tick and the
+    // observed transition, the same command-to-observation sequence
+    // the commissioning steps expect.
     assert_eq!(
         sim_run.scans, ethercat_run.scans,
-        "the bindings produced different telemetry sequences"
+        "the sim and ethercat bindings produced different telemetry sequences"
+    );
+    assert_eq!(
+        sim_run.scans, cyclic_run.scans,
+        "the cyclic binding produced a different telemetry sequence"
     );
     assert_eq!(sim_run.receipts, ethercat_run.receipts);
+    assert_eq!(sim_run.receipts, cyclic_run.receipts);
 
     // The commissioning sequence itself, scan by scan: three baseline
     // scans, the assert's one-exchange actuation delay, the held
@@ -378,8 +525,8 @@ fn the_rig_control_path_runs_identically_on_both_bindings() {
         "the exchange did not publish the staged sequence"
     );
 
-    // No component failed a step on either binding.
-    for run in [&sim_run, &ethercat_run] {
+    // No component failed a step on any binding.
+    for run in [&sim_run, &ethercat_run, &cyclic_run] {
         assert!(
             serde_json::from_str::<serde_json::Value>(&run.snapshot).unwrap()["components"]
                 .as_array()
@@ -389,6 +536,139 @@ fn the_rig_control_path_runs_identically_on_both_bindings() {
             "a component failed to step"
         );
     }
+
+    // Repeated runs over the cyclic binding produce identical records:
+    // the exchange-per-scan contract is as deterministic as the
+    // point-wise and fake-transport legs.
+    let (rerun_server, rerun_model, _observer) = cyclic_field();
+    let rerun = scripted_run(
+        &rerun_model,
+        || cyclic_driver(&rerun_model),
+        Some(&rerun_server),
+    );
+    assert_eq!(rerun.scans, cyclic_run.scans);
+    assert_eq!(rerun.receipts, cyclic_run.receipts);
+    assert_eq!(rerun.snapshot, cyclic_run.snapshot);
+}
+
+/// The cyclic binding's missed-exchange leg — the contract's failure
+/// half on the same rig: scripted missed exchanges hold the held input
+/// image below the declared `exchange_miss_threshold`, escalate the
+/// device's reads at it, and never abort the scan — while the staged
+/// output image a mid-miss command produces is retained until the next
+/// completed exchange publishes it.
+#[test]
+fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
+    let (server, model, observer) = cyclic_field();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let driver = cyclic_driver(&model);
+        let executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
+        let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
+        let client = MonitorClient::new(monitor.local_addr());
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Baseline: assert DO1 through the receipted path and
+            // observe the loopback — the run stands at scan 5 with DI1
+            // high.
+            for _ in 0..3 {
+                client.advance(1).unwrap();
+                driver.step(DT).unwrap();
+            }
+            operator_write(&client, points::DO1_COMMAND, true);
+            client.advance(1).unwrap();
+            driver.step(DT).unwrap();
+            let snapshot = client.advance(1).unwrap();
+            driver.step(DT).unwrap();
+            assert!(
+                bool_(monitor_sample(&snapshot, points::DI1)),
+                "the loopback did not observe the published output"
+            );
+
+            // The declared threshold's worth of consecutive missed
+            // exchanges, scripted on the device server — each consumed
+            // by the next scan's exchange.
+            match observer.request(&BusRequest::ScriptExchange {
+                outcomes: vec![ExchangeOutcome::Miss; EXCHANGE_MISS_THRESHOLD as usize],
+            }) {
+                Ok(BusResponse::Done) => {}
+                other => panic!("script-exchange was refused: {other:?}"),
+            }
+
+            // Below the threshold the held input image keeps serving —
+            // DI1 reads its last latched value, Good, and the scan
+            // completes normally rather than aborting.
+            for misses in 1..EXCHANGE_MISS_THRESHOLD {
+                let snapshot = client.advance(1).unwrap();
+                driver.step(DT).unwrap();
+                assert_eq!(snapshot.io_health.failed_exchanges, misses);
+                assert_eq!(snapshot.io_health.failed_reads, 0);
+                let di1 = monitor_sample(&snapshot, points::DI1);
+                assert_eq!(
+                    di1.quality,
+                    Quality::Good,
+                    "miss {misses}: the held image must keep serving"
+                );
+                assert!(
+                    bool_(di1),
+                    "miss {misses}: DI1 lost its held value"
+                );
+            }
+
+            // The retained staged image: the release command submitted
+            // inside the miss window applies at the next boundary and
+            // stages DO1 low, but the missed exchange publishes
+            // nothing.
+            operator_write(&client, points::DO1_COMMAND, false);
+            let snapshot = client.advance(1).unwrap();
+            driver.step(DT).unwrap();
+            assert_eq!(
+                snapshot.io_health.failed_exchanges, EXCHANGE_MISS_THRESHOLD,
+                "the third consecutive miss reaches the declared threshold"
+            );
+            assert_eq!(
+                snapshot.io_health.failed_reads, 2,
+                "the threshold escalates the device's field inputs"
+            );
+            for point in [points::DI1, points::DI2] {
+                assert_eq!(
+                    monitor_sample(&snapshot, point).quality,
+                    Quality::Bad(QualityReason::CommunicationFault),
+                    "point {point:?} must escalate at the miss threshold"
+                );
+            }
+
+            // Recovery: the script exhausted, the next exchange
+            // reconnects and completes — the retained release publishes,
+            // the field wire lands it, and DI1 falls in the same
+            // census, all without the scan ever having aborted.
+            let snapshot = client.advance(1).unwrap();
+            driver.step(DT).unwrap();
+            assert_eq!(
+                snapshot.io_health.failed_exchanges, EXCHANGE_MISS_THRESHOLD,
+                "a completed exchange ends the miss streak"
+            );
+            let di1 = monitor_sample(&snapshot, points::DI1);
+            assert_eq!(di1.quality, Quality::Good);
+            assert!(
+                !bool_(di1),
+                "the retained staged image must publish on recovery"
+            );
+
+            // Both operator writes receipted at their scan boundaries.
+            assert_eq!(
+                outcomes(&client.receipts().unwrap()),
+                vec![
+                    CommandOutcome::Applied { tick: Tick(4) },
+                    CommandOutcome::Applied { tick: Tick(8) },
+                ]
+            );
+        }));
+        monitor.shutdown();
+        server.shutdown();
+        result
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 #[test]
