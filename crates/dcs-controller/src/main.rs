@@ -97,7 +97,12 @@
 //! `--standby ADDR --listen ADDR` pulls checkpoints from the active at
 //! the first address, one per scan cycle, applies each to its running
 //! executor — aligning at the checkpointed tick and continuing
-//! deterministically — and serves its own monitor at the second, where
+//! deterministically — and serves its own monitor at the second. The
+//! fetch runs on a dedicated pull thread ([`CheckpointPuller`]), each
+//! scan cycle consuming the latest completed pull non-blockingly: an
+//! unreachable or wedged active stalls neither the scan cadence nor
+//! the monitor's request serving, and a cycle whose pull produced no
+//! checkpoint is the heartbeat miss the failover budget counts. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -149,7 +154,7 @@ use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
-use dcs_monitor::{Driven, Monitor, MonitorClient, MonitorConfig};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
@@ -802,7 +807,15 @@ fn main() -> ExitCode {
             Ok(active_addr) => active_addr,
             Err(error) => return fail(error),
         };
-        let client = MonitorClient::new(active_addr);
+        // The fetch worker the tracking cycles pull from: checkpoint
+        // fetches run on its own thread, each scan cycle consuming the
+        // latest completed pull non-blockingly — an unreachable or
+        // wedged active stalls neither the scan cadence nor the
+        // monitor's request serving, and a cycle whose pull produced
+        // no checkpoint is the heartbeat miss the failover budget
+        // counts, so the promotion window stays budget × scan period
+        // whatever the fetch latency.
+        let mut puller = CheckpointPuller::new(active_addr);
         match &options.listen {
             Some(addr) => {
                 let monitor = match Monitor::bind_paced_peer_with(
@@ -830,12 +843,10 @@ fn main() -> ExitCode {
                         // sequence — `Peer::track_once` under the
                         // monitor's lock, its queued transitions
                         // journaled by the recorder; the report is the
-                        // loop's log lines.
-                        let report = monitor.track_cycle(|| {
-                            client
-                                .checkpoint()
-                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
-                        });
+                        // loop's log lines. The pull consumes the fetch
+                        // worker's latest result — the network wait
+                        // itself runs off the lock and off the cycle.
+                        let report = monitor.track_cycle(|| puller.poll());
                         report_tracking(&report, active_addr);
                         monitor.paced_scan()
                     },
@@ -856,12 +867,11 @@ fn main() -> ExitCode {
                         // The same tracking cycle the monitored loop
                         // runs through `track_cycle`, here directly on
                         // the peer; without a recorder the transition
-                        // queues drain into the log instead.
-                        let report = peer.track_once(|| {
-                            client
-                                .checkpoint()
-                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
-                        });
+                        // queues drain into the log instead. The pull
+                        // consumes the fetch worker's latest result —
+                        // the network wait itself runs off the scan
+                        // cycle's critical path.
+                        let report = peer.track_once(|| puller.poll());
                         report_tracking(&report, active_addr);
                         for divergence in peer.take_divergences() {
                             eprintln!(
