@@ -42,9 +42,19 @@
 //!   emit `point_changed` where the model marks it `journaled`, every
 //!   command settles through `command_settled`, and the component's own
 //!   `step` failures surface as `step_failed`.
+//! - Kind-declared vocabulary sits beside the adapted entries under
+//!   the `Declared` provenance: a [`CommandDecl`](crate::CommandDecl)
+//!   becomes a `commands` entry an
+//!   [`Invoke`](crate::Command::Invoke) submission addresses, and an
+//!   [`EventDecl`](crate::EventDecl) becomes an `events` entry whose
+//!   emissions journal as
+//!   [`EventEmitted`](crate::JournalEvent::EventEmitted). Names are
+//!   unique across each collection.
 //!
-//! This slice declares the schema only: named-command execution and
-//! typed event emission are later tranches. Everything here is
+//! Named-command execution and typed event emission are the runtime
+//! tranche: this slice declares the contract surface — the invoke
+//! command, the named refusals, the declared-provenance entries, and
+//! the emitted-event journal record. Everything here is
 //! serde-additive — a document carrying fields this version does not
 //! know still deserializes, matching the optional-field convention the
 //! rest of the contract follows.
@@ -204,6 +214,13 @@ pub enum CommandAvailability {
     /// mark; a submission against an unmarked point is refused
     /// `not_writable`, and `Out` points are never command targets.
     BoundPointWritable,
+    /// Submittable when the kind's own availability predicate permits —
+    /// the declared-refusal form a [`CommandDecl`](crate::CommandDecl)
+    /// reports: the component's kind decides per submission, and a
+    /// refusal is answered
+    /// [`CommandRefused`](crate::CommandError::CommandRefused) carrying
+    /// the kind's declared refusal reason.
+    KindDeclared,
 }
 
 /// The generic [`Command`](crate::Command) variant a [`CommandSpec`]
@@ -224,6 +241,11 @@ pub enum AdaptedCommand {
     /// [`Command::SetParameter`](crate::Command::SetParameter) against
     /// the named configuration property.
     SetParameter,
+    /// The kind declares the command natively — a
+    /// [`CommandDecl`](crate::CommandDecl) entry invoked through
+    /// [`Command::Invoke`](crate::Command::Invoke), not adapted from a
+    /// generic variant.
+    Declared,
 }
 
 /// A named command a block accepts: one entry of
@@ -256,7 +278,9 @@ pub struct CommandSpec {
     /// The submission condition — a submission outside it is refused
     /// with the named reason.
     pub availability: CommandAvailability,
-    /// The generic command variant this entry is adapted from.
+    /// The generic command variant this entry is adapted from —
+    /// [`Declared`](AdaptedCommand::Declared) when the kind declares
+    /// the command natively.
     pub adapted: AdaptedCommand,
     /// The logical point a port-adapted command targets — the port's
     /// bound point, `None` in a kind-level interface and for
@@ -325,6 +349,12 @@ pub enum EventEmission {
     /// Emitted when a component `step` reports an error — the scan
     /// continues per the executor's contract.
     OnStepFailure,
+    /// Emitted by the component's kind itself during a scan — the
+    /// kind-emitted form an [`EventDecl`](crate::EventDecl) reports;
+    /// a durable-retention emission journals as
+    /// [`EventEmitted`](crate::JournalEvent::EventEmitted) at the
+    /// producing scan's tick.
+    KindEmitted,
 }
 
 /// The [`JournalEvent`](crate::JournalEvent) variant an [`EventSpec`]
@@ -345,6 +375,11 @@ pub enum AdaptedEvent {
     /// [`JournalEvent::StepFailed`](crate::JournalEvent::StepFailed) —
     /// the component's `step` returned an error.
     StepFailed,
+    /// The kind declares the event natively — an
+    /// [`EventDecl`](crate::EventDecl) entry emitted as an
+    /// [`EmittedEvent`](crate::EmittedEvent), not adapted from a
+    /// journaled transition.
+    Declared,
 }
 
 /// An event a block may emit: one entry of
@@ -368,7 +403,9 @@ pub struct EventSpec {
     pub retention: EventRetention,
     /// The emission condition.
     pub emission: EventEmission,
-    /// The journaled transition this entry is adapted from.
+    /// The journaled transition this entry is adapted from —
+    /// [`Declared`](AdaptedEvent::Declared) when the kind declares the
+    /// event natively.
     pub adapted: AdaptedEvent,
     /// The logical point a port-adapted event reports on — the port's
     /// bound point, `None` in a kind-level interface and for
@@ -559,6 +596,19 @@ impl BlockInterface {
             });
         }
 
+        // Kind-declared commands sit beside the adapted entries under
+        // the `Declared` provenance, carrying the declaration's request
+        // schema and availability verbatim.
+        for declared in &descriptor.commands {
+            commands.push(CommandSpec {
+                name: declared.name.clone(),
+                request: declared.request.clone(),
+                availability: declared.availability,
+                adapted: AdaptedCommand::Declared,
+                point: None,
+            });
+        }
+
         // Block-level events: every command's settlement and the
         // component's own step failures already journal through the
         // existing transitions.
@@ -586,6 +636,43 @@ impl BlockInterface {
             adapted: AdaptedEvent::StepFailed,
             point: None,
         });
+
+        // Kind-declared events sit beside the adapted entries under
+        // the `Declared` provenance — the kind emits them itself, so
+        // the emission condition is `KindEmitted` and the record lands
+        // in the journal as `event_emitted`.
+        for declared in &descriptor.events {
+            events.push(EventSpec {
+                name: declared.name.clone(),
+                payload: declared.payload.clone(),
+                retention: declared.retention,
+                emission: EventEmission::KindEmitted,
+                adapted: AdaptedEvent::Declared,
+                point: None,
+            });
+        }
+
+        // Names are each collection's stable resource identity — a
+        // declaration colliding with an adapted entry or a sibling
+        // declaration is a kind-authoring error.
+        debug_assert!(
+            commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == commands.len(),
+            "interface command names must be unique"
+        );
+        debug_assert!(
+            events
+                .iter()
+                .map(|event| event.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == events.len(),
+            "interface event names must be unique"
+        );
 
         BlockInterface {
             version: INTERFACE_VERSION,
@@ -676,6 +763,8 @@ mod tests {
                     range: None,
                 },
             ],
+            commands: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -913,6 +1002,155 @@ mod tests {
             .find(|e| e.name == "command_settled")
             .unwrap();
         assert_eq!(settled.point, None);
+    }
+
+    #[test]
+    fn declared_commands_and_events_sit_beside_adapted_entries() {
+        // A kind-declared command and event land in the same
+        // collections as the adapted entries under the `Declared`
+        // provenance — distinct and machine-readable.
+        let mut descriptor = descriptor();
+        descriptor.commands.push(crate::CommandDecl {
+            name: "stroke_test".to_string(),
+            request: vec![CommandArgument {
+                name: "ticks".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        });
+        descriptor.events.push(crate::EventDecl {
+            name: "stroke_complete".to_string(),
+            payload: vec![EventField {
+                name: "ticks".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::Journal,
+        });
+        let interface = BlockInterface::from_descriptor(&descriptor);
+
+        let command = interface
+            .commands
+            .iter()
+            .find(|c| c.name == "stroke_test")
+            .unwrap();
+        assert_eq!(command.adapted, AdaptedCommand::Declared);
+        assert_eq!(command.availability, CommandAvailability::KindDeclared);
+        assert_eq!(
+            command.request,
+            [CommandArgument {
+                name: "ticks".to_string(),
+                kind: ValueKind::Int,
+            }]
+        );
+        assert_eq!(command.point, None);
+        // The adapted entries are untouched beside it.
+        assert!(
+            interface
+                .commands
+                .iter()
+                .any(|c| c.name == "write_value:cmd" && c.adapted == AdaptedCommand::WriteValue)
+        );
+
+        let event = interface
+            .events
+            .iter()
+            .find(|e| e.name == "stroke_complete")
+            .unwrap();
+        assert_eq!(event.adapted, AdaptedEvent::Declared);
+        assert_eq!(event.emission, EventEmission::KindEmitted);
+        assert_eq!(event.retention, EventRetention::Journal);
+        assert_eq!(event.point, None);
+        assert!(
+            interface
+                .events
+                .iter()
+                .any(|e| e.name == "command_settled" && e.adapted == AdaptedEvent::CommandSettled)
+        );
+    }
+
+    #[test]
+    fn declared_provenance_uses_the_documented_wire_shapes() {
+        // The declared-provenance forms: `adapted` spells `declared`,
+        // availability `kind_declared`, emission `kind_emitted` —
+        // beside the unchanged adapted spellings.
+        let mut descriptor = descriptor();
+        descriptor.commands.push(crate::CommandDecl {
+            name: "stroke_test".to_string(),
+            request: vec![CommandArgument {
+                name: "ticks".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        });
+        descriptor.events.push(crate::EventDecl {
+            name: "stroke_complete".to_string(),
+            payload: vec![EventField {
+                name: "ticks".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::Journal,
+        });
+        let interface = BlockInterface::from_descriptor(&descriptor);
+        let command = interface
+            .commands
+            .iter()
+            .find(|c| c.name == "stroke_test")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(command).unwrap(),
+            r#"{"name":"stroke_test","request":[{"name":"ticks","kind":"int"}],"availability":"kind_declared","adapted":"declared"}"#
+        );
+        let event = interface
+            .events
+            .iter()
+            .find(|e| e.name == "stroke_complete")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(event).unwrap(),
+            r#"{"name":"stroke_complete","payload":[{"name":"ticks","kind":{"value":"int"}}],"retention":"journal","emission":"kind_emitted","adapted":"declared"}"#
+        );
+        // The adapted spellings are unchanged beside them.
+        let write = interface
+            .commands
+            .iter()
+            .find(|c| c.name == "write_value:cmd")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(write).unwrap(),
+            r#"{"name":"write_value:cmd","request":[{"name":"value","kind":"bool"}],"availability":"bound_point_writable","adapted":"write_value"}"#
+        );
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic)]
+    fn declared_names_must_not_collide_with_adapted_entries() {
+        let mut descriptor = descriptor();
+        descriptor.commands.push(crate::CommandDecl {
+            name: "write_value:cmd".to_string(),
+            request: Vec::new(),
+            availability: CommandAvailability::KindDeclared,
+        });
+        let _ = BlockInterface::from_descriptor(&descriptor);
+    }
+
+    #[test]
+    fn interface_documents_predating_declared_provenance_deserialize() {
+        // A `commands`/`events` collection written before the
+        // `Declared` provenance existed carries only adapted entries;
+        // it deserializes unchanged.
+        let command: CommandSpec = serde_json::from_str(
+            r#"{"name":"write_value:cmd","request":[{"name":"value","kind":"bool"}],"availability":"bound_point_writable","adapted":"write_value","point":10}"#,
+        )
+        .unwrap();
+        assert_eq!(command.adapted, AdaptedCommand::WriteValue);
+        assert_eq!(command.point, Some(PointId(10)));
+        let event: EventSpec = serde_json::from_str(
+            r#"{"name":"command_settled","payload":[{"name":"receipt","kind":"receipt"}],"retention":"journal","emission":"on_command_settled","adapted":"command_settled"}"#,
+        )
+        .unwrap();
+        assert_eq!(event.adapted, AdaptedEvent::CommandSettled);
     }
 
     #[test]

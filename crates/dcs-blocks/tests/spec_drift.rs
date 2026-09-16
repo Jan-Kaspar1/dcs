@@ -43,7 +43,6 @@ use dcs_blocks::{
     SurgeGuardConfig, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds,
     Valve, ZoneIo,
 };
-use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BlowerGroupSpec,
     BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DemandFallbackSpec, DeviationMonitorSpec,
@@ -54,10 +53,12 @@ use dcs_build::specs::{
     RateLimiterSpec, RateOfRiseSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
     ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
+use dcs_build::{DynamicSpec, Spec, port};
 use dcs_core::{
-    AdaptedCommand, AdaptedEvent, BlockInterface, CommandAvailability, ComponentDescriptor,
-    ConfigCapability, Direction, EventEmission, EventField, EventFieldKind, EventRetention,
-    INTERFACE_VERSION, ParameterRange, PointId, PortRole, StatePersistence, Value, ValueKind,
+    AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
+    CommandDecl, ComponentDescriptor, ConfigCapability, Direction, EventDecl, EventEmission,
+    EventField, EventFieldKind, EventRetention, INTERFACE_VERSION, ParameterRange, PointId,
+    PortDescriptor, PortRole, StatePersistence, Value, ValueKind,
 };
 use dcs_runtime::Component;
 
@@ -79,6 +80,25 @@ fn check_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) -> Strin
         .map(|port| (port.name.clone(), port.direction, port.kind))
         .collect();
     assert_eq!(spec_ports, descriptor_ports, "port vocabulary drifted");
+
+    // The declared behavior vocabulary: where the spec enumerates the
+    // kind's native commands and events, they must equal the
+    // descriptor's — a `None` set is instance-dependent and unchecked,
+    // matching `declared_parameters`' convention.
+    if let Some(declared) = spec.declared_commands() {
+        assert_eq!(
+            declared,
+            descriptor.commands.as_slice(),
+            "declared command vocabulary drifted"
+        );
+    }
+    if let Some(declared) = spec.declared_events() {
+        assert_eq!(
+            declared,
+            descriptor.events.as_slice(),
+            "declared event vocabulary drifted"
+        );
+    }
 
     check_block_interface(spec, descriptor);
 
@@ -167,9 +187,10 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         );
     }
 
-    // Commands adapt the generic surface: the point-command triple on
+    // Commands adapt the generic surface — the point-command triple on
     // every `In` port plus `set_parameter` per configuration entry —
-    // and nothing else.
+    // and the kind's declared commands sit beside them under the
+    // `Declared` provenance. Names are unique across the collection.
     let in_ports: Vec<_> = descriptor
         .ports
         .iter()
@@ -177,8 +198,18 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         .collect();
     assert_eq!(
         interface.commands.len(),
-        in_ports.len() * 3 + descriptor.parameters.len(),
+        in_ports.len() * 3 + descriptor.parameters.len() + descriptor.commands.len(),
         "command surface drifted"
+    );
+    let command_names: BTreeSet<_> = interface
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(
+        command_names.len(),
+        interface.commands.len(),
+        "command names must be unique"
     );
     for port in &in_ports {
         for (verb, adapted, arguments) in [
@@ -219,11 +250,30 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         assert_eq!(command.request[0].name, "value");
         assert_eq!(command.request[0].kind, parameter.kind);
     }
+    // Every declared command surfaces verbatim — name, request schema,
+    // availability — with `Declared` provenance and no bound point.
+    for declared in &descriptor.commands {
+        let command = interface
+            .commands
+            .iter()
+            .find(|command| command.name == declared.name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "declared command {:?} missing from interface",
+                    declared.name
+                )
+            });
+        assert_eq!(command.adapted, AdaptedCommand::Declared);
+        assert_eq!(command.request, declared.request);
+        assert_eq!(command.availability, declared.availability);
+        assert_eq!(command.point, None);
+    }
 
     // Events adapt the journaled transitions: `point_changed` on the
     // `Bool`/`Int` ports the model may mark `journaled`,
     // `quality_changed` on every port, `command_settled`, and
-    // `step_failed` — all durable-journal retention.
+    // `step_failed` — all durable-journal retention — plus the kind's
+    // declared events under the `Declared` provenance.
     let journaled_ports = descriptor
         .ports
         .iter()
@@ -231,8 +281,18 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         .count();
     assert_eq!(
         interface.events.len(),
-        descriptor.ports.len() + journaled_ports + 2,
+        descriptor.ports.len() + journaled_ports + 2 + descriptor.events.len(),
         "event surface drifted"
+    );
+    let event_names: BTreeSet<_> = interface
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert_eq!(
+        event_names.len(),
+        interface.events.len(),
+        "event names must be unique"
     );
     for port in &descriptor.ports {
         let quality_changed = interface
@@ -288,6 +348,21 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
         assert_eq!(event.adapted, adapted);
         assert_eq!(event.emission, emission);
         assert_eq!(event.retention, EventRetention::Journal);
+    }
+    // Every declared event surfaces verbatim — name, payload schema,
+    // retention — with `Declared` provenance, `KindEmitted` emission,
+    // and no bound point.
+    for declared in &descriptor.events {
+        let event = interface
+            .events
+            .iter()
+            .find(|event| event.name == declared.name)
+            .unwrap_or_else(|| panic!("declared event {:?} missing from interface", declared.name));
+        assert_eq!(event.adapted, AdaptedEvent::Declared);
+        assert_eq!(event.emission, EventEmission::KindEmitted);
+        assert_eq!(event.payload, declared.payload);
+        assert_eq!(event.retention, declared.retention);
+        assert_eq!(event.point, None);
     }
 }
 
@@ -1309,4 +1384,125 @@ fn bool_gate_spec_tracks_input_count() {
             &component.describe(),
         );
     }
+}
+
+/// A kind declaring native commands and events: the descriptor's
+/// `commands`/`events` — mirrored by the spec's `declared_commands`/
+/// `declared_events` — surface in the derived [`BlockInterface`]
+/// beside the adapted entries under the `Declared` provenance, so the
+/// spec, descriptor, and served schema cannot fork.
+#[test]
+fn declared_vocabulary_surfaces_in_the_derived_interface() {
+    let descriptor = ComponentDescriptor {
+        name: "drv".to_string(),
+        kind: "drive".to_string(),
+        label: "drv".to_string(),
+        ports: vec![
+            PortDescriptor {
+                name: "run".to_string(),
+                direction: Direction::In,
+                kind: ValueKind::Bool,
+                role: Some(PortRole::Setpoint),
+                point: None,
+            },
+            PortDescriptor {
+                name: "tripped".to_string(),
+                direction: Direction::Out,
+                kind: ValueKind::Bool,
+                role: Some(PortRole::Status),
+                point: None,
+            },
+        ],
+        parameters: Vec::new(),
+        commands: vec![CommandDecl {
+            name: "stroke_test".to_string(),
+            request: vec![CommandArgument {
+                name: "ticks".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        }],
+        events: vec![EventDecl {
+            name: "stroke_complete".to_string(),
+            payload: vec![
+                EventField {
+                    name: "ticks".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "detail".to_string(),
+                    kind: EventFieldKind::Text,
+                    optional: true,
+                },
+            ],
+            retention: EventRetention::Journal,
+        }],
+    };
+    let mut spec = DynamicSpec::new(
+        "drive",
+        vec![
+            port("run", Direction::In, ValueKind::Bool),
+            port("tripped", Direction::Out, ValueKind::Bool),
+        ],
+    );
+    spec.declared_commands = Some(descriptor.commands.clone());
+    spec.declared_events = Some(descriptor.events.clone());
+
+    check_interface(&spec, &descriptor);
+
+    // The declared command sits beside the adapted `run`-port triple
+    // under its own provenance; the declared event beside the adapted
+    // transitions and block-level entries.
+    let interface = descriptor.interface();
+    let command = interface
+        .commands
+        .iter()
+        .find(|command| command.name == "stroke_test")
+        .unwrap();
+    assert_eq!(command.adapted, AdaptedCommand::Declared);
+    assert_eq!(command.availability, CommandAvailability::KindDeclared);
+    assert_eq!(
+        command.request,
+        [CommandArgument {
+            name: "ticks".to_string(),
+            kind: ValueKind::Int,
+        }]
+    );
+    assert_eq!(command.point, None);
+    let event = interface
+        .events
+        .iter()
+        .find(|event| event.name == "stroke_complete")
+        .unwrap();
+    assert_eq!(event.adapted, AdaptedEvent::Declared);
+    assert_eq!(event.emission, EventEmission::KindEmitted);
+    assert_eq!(event.retention, EventRetention::Journal);
+    assert_eq!(event.point, None);
+}
+
+#[test]
+#[should_panic(expected = "declared command vocabulary drifted")]
+fn a_spec_missing_the_declared_vocabulary_fails_the_drift_guard() {
+    // The drift authority's other half: a descriptor declaring a
+    // native command the spec does not mirror must fail. A static spec
+    // gets this for free — `Spec::declared_commands` defaults to
+    // `Some(&[])` — while a `DynamicSpec` opts in by enumerating the
+    // (here empty) set.
+    let descriptor = ComponentDescriptor {
+        name: "drv".to_string(),
+        kind: "drive".to_string(),
+        label: "drv".to_string(),
+        ports: Vec::new(),
+        parameters: Vec::new(),
+        commands: vec![CommandDecl {
+            name: "stroke_test".to_string(),
+            request: Vec::new(),
+            availability: CommandAvailability::KindDeclared,
+        }],
+        events: Vec::new(),
+    };
+    let mut spec = DynamicSpec::new("drive", Vec::new());
+    spec.declared_commands = Some(Vec::new());
+    check_interface(&spec, &descriptor);
 }
