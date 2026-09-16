@@ -1,10 +1,11 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import runner, state as qa_state
+from qa_lane import revision, runner, state as qa_state
 
 
 SHA_A = 'a' * 40
@@ -194,6 +195,7 @@ class RestartActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-restart'])
 
 
+<<<<<<< HEAD
 class LifecycleActionTests(unittest.TestCase):
     """The scenario-callable stop/start pair: each action records its
     own attempt and completion on the run's action timeline, so a
@@ -201,12 +203,21 @@ class LifecycleActionTests(unittest.TestCase):
     instead of taking the whole restart as one step."""
 
     def test_stop_and_start_record_their_own_events(self):
+=======
+class PlantActionTests(unittest.TestCase):
+    """The scenario-callable plant stop/start: the run's shared-plant
+    container cycled mid-run, each half recorded on the run's action
+    timeline."""
+
+    def test_stop_and_start_recorded_on_timeline(self):
+>>>>>>> origin/main
         calls, events = [], []
 
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             return Result('')
 
+<<<<<<< HEAD
         timeline = lambda event, detail=None: events.append(event)
         with patch.object(runner, 'docker', fake_docker):
             runner.stop_controller('qa-1', 'active', timeline)
@@ -217,6 +228,35 @@ class LifecycleActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-stop', 'controller-stopped',
                                   'controller-start',
                                   'controller-started'])
+=======
+        with patch.object(runner, 'docker', fake_docker):
+            timeline = lambda event, detail=None: events.append(
+                (event, detail))
+            runner.stop_plant('qa-1', timeline)
+            runner.start_plant('qa-1', timeline)
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
+                    ('start', 'dcs-hw-qa-1-plant')])
+        self.assertEqual([event for event, _ in events],
+                         ['plant-stop', 'plant-stopped',
+                          'plant-start', 'plant-started'])
+        self.assertIn('dcs-hw-qa-1-plant', events[0][1])
+
+    def test_failed_stop_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'stop' and check:
+                raise RuntimeError('docker stop failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-stop'])
+>>>>>>> origin/main
 
     def test_failed_start_raises_after_recording_the_attempt(self):
         events = []
@@ -228,10 +268,39 @@ class LifecycleActionTests(unittest.TestCase):
 
         with patch.object(runner, 'docker', raising):
             with self.assertRaises(RuntimeError):
+<<<<<<< HEAD
                 runner.start_controller(
                     'qa-1', 'active',
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['controller-start'])
+=======
+                runner.start_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-start'])
+
+    def test_scenario_ctx_carries_plant_actions_and_address(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                dict(runner.DEFAULT_CONFIG), record, Path('src'),
+                Path('run'), 'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['stop_plant']()
+            ctx['start_plant']()
+        self.assertEqual(ctx['plant'], '127.0.0.1:19001')
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
+                    ('start', 'dcs-hw-qa-1-plant')])
+        self.assertEqual(events, ['plant-stop', 'plant-stopped',
+                                  'plant-start', 'plant-started'])
+>>>>>>> origin/main
 
 
 class RigStateFileTests(unittest.TestCase):
@@ -323,7 +392,7 @@ class RigStateFileTests(unittest.TestCase):
         record = self._record()
         with patch.object(runner, 'docker', fake_docker):
             ctx = runner._scenario_ctx(
-                self.cfg, record, self.run_dir,
+                self.cfg, record, self.src, self.run_dir,
                 self.run_dir / 'evidence', 0,
                 lambda event, detail=None: events.append(event))
             ctx['restart_controller']('active')
@@ -363,6 +432,235 @@ class RigStateFileTests(unittest.TestCase):
         finally:
             st.close()
         self.assertFalse(self.run_dir.exists())
+
+
+class DcsCtlBuildTests(unittest.TestCase):
+    """The dcs-ctl host-binary seam: the bounded image build compiles
+    the operator CLI beside the image binaries, _scenario_ctx hands its
+    path to the dcs-ctl case, and a build that produces no binary fails
+    loudly rather than leaving the case to run against a phantom
+    tool."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-ctl')):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                target = Path(self.cfg['state_dir']) / 'build-cache' \
+                    / 'target' / 'release'
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in binaries:
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def test_build_compiles_dcs_ctl_beside_the_images(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event), 'qa-1')
+        build = next(args for args in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('-p dcs-monitor --bin dcs-ctl', build[-1])
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        self.assertIn('tool-built', events)
+
+    def test_build_fails_loudly_without_the_binary(self):
+        with patch.object(runner, 'docker',
+                          self._fake_docker(
+                              [], binaries=('dcs-controller',
+                                            'dcs-plant-server'))):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+
+    def test_scenario_ctx_hands_the_binary_to_the_case(self):
+        ctx = runner._scenario_ctx(self.cfg, {'run_id': 'qa-1'},
+                                   self.src, self.run_dir,
+                                   self.run_dir / 'evidence', 0,
+                                   lambda e, d=None: None)
+        self.assertEqual(ctx['dcs_ctl'],
+                         str(Path(self.cfg['state_dir']) / 'build-cache'
+                             / 'target' / 'release' / 'dcs-ctl'))
+
+
+class ModelRevisionActionTests(unittest.TestCase):
+    """The scenario-callable model-revision action: the runner derives
+    the run's revised model document through the checked-in recipe and
+    launches the run's third labeled controller on it with
+    --standby --revised, both halves recorded on the run's action
+    timeline and the container reconciled by the run-label teardown."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps(
+            {'version': 1,
+             'devices': [{'id': 1, 'kind': 'sim-di',
+                          'channels': [{'name': 'ch0',
+                                        'direction': 'in',
+                                        'value_type': 'bool'}]}],
+             'io_points': [
+                 {'id': 10, 'direction': 'in', 'value_type': 'bool',
+                  'channel': {'device': 1, 'channel': 'ch0'}},
+                 {'id': 300, 'direction': 'in', 'value_type': 'bool',
+                  'writable': True, 'initial': {'bool': False}}],
+             'signals': [{'id': 10300, 'name': 'oos', 'source': 300}],
+             'components': [], 'connections': []}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_third_controller_launches_standby_revised(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-c', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertIn('--standby', launch)
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+        self.assertIn('--revised', launch)
+        self.assertIn('--listen', launch)
+        self.assertIn('0.0.0.0:8082', launch)
+        self.assertIn('127.0.0.1:' + str(self.cfg['revised_port'])
+                      + ':8082', launch)
+        self.assertIn(runner.CONTAINER_STATE_FILE, launch)
+        self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        document = str(self.run_dir / 'model-revised.json')
+        self.assertIn(document + ':/model/revised.json:ro', launch)
+        self.assertIn('/model/revised.json', launch)
+        self.assertIn(str(self.run_dir / 'controllers' / 'c')
+                      + ':' + runner.CONTAINER_RUN_DIR, launch)
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-c')
+        self.assertEqual(info['document'], document)
+        self.assertEqual(info['added_points'], [900])
+        self.assertEqual(info['added_signals'], [10900])
+        revised = json.loads(Path(document).read_text())
+        self.assertEqual(len(revised['io_points']), 3)
+        self.assertEqual(len(revised['signals']), 2)
+        self.assertEqual(revision.lint(revised), [])
+        self.assertEqual([event for event, _ in events],
+                         ['model-revision-start', 'model-revision-up'])
+        self.assertIn('--revised', events[0][1])
+
+    def test_active_endpoint_standbys_on_ctrl_a(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'revised', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['model-revision-start'])
+        # The derivation still ran — the document is on disk.
+        self.assertTrue(
+            (self.run_dir / 'model-revised.json').is_file())
+
+    def test_teardown_reconciles_the_third_container(self):
+        # The launched -c container carries the run label like the rest
+        # of the rig, so the shared teardown removes it with them.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'ps':
+                return Result('aaa qa-1\nbbb qa-1\nccc qa-1\n'
+                              'ppp qa-1\n')
+            if args[:2] == ('network', 'ls'):
+                return Result('nnn qa-1\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            failures = runner._teardown_rig(
+                'qa-1', lambda e, d=None: None)
+        self.assertEqual(failures, [])
+        removed = [c for c in calls if c[0] == 'rm']
+        self.assertEqual(len(removed), 4)
+        self.assertTrue(any('ccc' in c for c in removed))
+        self.assertTrue(
+            any(c[:2] == ('network', 'rm') for c in calls))
+
+    def test_scenario_ctx_carries_revision_action_and_endpoint(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_revised']('standby')
+        self.assertEqual(ctx['revised'],
+                         'http://127.0.0.1:' + str(
+                             self.cfg['revised_port']))
+        self.assertEqual(ctx['plant'],
+                         '127.0.0.1:' + str(self.cfg['plant_host_port']))
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-c')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--revised', launch)
+        # The third peer's state/journal paths sit inside the run dir.
+        self.assertTrue(Path(ctx['journal_files']['revised'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(ctx['state_files']['revised'])
+                        .is_relative_to(self.run_dir))
 
 
 if __name__ == '__main__':

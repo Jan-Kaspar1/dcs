@@ -3,7 +3,7 @@
 //! `docs/lenovo-hardware-qa-plan.md`'s supervised commissioning
 //! sequence.
 //!
-//! [`wago_rig`] emits the rig's [`PlantModel`] document. Two
+//! [`wago_rig`] emits the rig's [`PlantModel`] document. Three
 //! checked-in emissions live at `crates/dcs-demo/fixtures/` — the
 //! established builder-fixture location this issue names:
 //!
@@ -18,6 +18,16 @@
 //!   declaration: the `di1` ← `do1` point-to-point wire playing the
 //!   rig's loopback — the simulated binding #328's regression clause
 //!   exercises.
+//! - `wago_rig_cyclic.json` — the same control path re-emitted over a
+//!   `sim-cyclic` device (#406's simulated cyclic kind): the coupler
+//!   station declared as the register bank the manifest's channel
+//!   layout maps onto, `exchange_miss_threshold` carried as
+//!   device-parameter data like `sim-bus`'s addressing, and the
+//!   server `address` left as the `__BUS_ADDR__` placeholder a run
+//!   substitutes its bound device server for. The software rehearsal
+//!   rides the same exchange-per-scan contract the `ethercat` driver
+//!   implements — the whole process image moving once per scan —
+//!   instead of the `sim` binding's point-wise approximation.
 //!
 //! ## What the hardware document does not declare
 //!
@@ -26,10 +36,17 @@
 //! do not infer one". The `ethercat` document therefore declares the
 //! channel mapping and the commissioning control path only; it carries
 //! no point-to-point wire, because no software route may substitute
-//! for a physical check. The simulation document declares the wire the
+//! for a physical check. The `sim` document declares the wire the
 //! supervised physical check verifies — DI1 follows DO1, DI2 stays
 //! clear — so the scripted run's telemetry sequence is exactly the
-//! sequence commissioning expects to observe on the rig.
+//! sequence commissioning expects to observe on the rig. The cyclic
+//! document, like the hardware one, declares no point-to-point wire:
+//! on the exchange contract a model-level `di1` ← `do1` link would
+//! resolve to a controller-side route that re-publishes the held
+//! input a scan late, so the loopback is the device's own field
+//! wiring — the served register bank lands each exchange-published
+//! `do1` write on `di1` in the same census, the register-bank
+//! analogue of the fake EtherCAT transport's byte-level wire.
 //!
 //! The station `identity` fields are the manifest's expected values —
 //! vendor `0x21` (Wago) is datasheet-derived; product and revision are
@@ -86,6 +103,21 @@ pub const EXCHANGE_MISS_THRESHOLD: u64 = 3;
 /// `SimDriver`'s `sim` family.
 pub const SIM_KIND: &str = "sim";
 
+/// The device kind the cyclic simulation binding declares — the
+/// register-image family `dcs-sim-bus`'s `CyclicBusDriver` speaks,
+/// exchanging the whole image once per scan.
+pub const CYCLIC_KIND: &str = "sim-cyclic";
+
+/// The server address the cyclic document declares — the placeholder
+/// a run substitutes its bound `dcs-sim-bus-device`-equivalent's
+/// address for, as the checked-in `sim-bus` documents carry.
+pub const CYCLIC_ADDRESS_PLACEHOLDER: &str = "__BUS_ADDR__";
+
+/// The station name the cyclic document's register bank declares —
+/// the manifest's expected coupler, the one station the rig's
+/// terminals answer through.
+pub const COUPLER_STATION: &str = "750-354";
+
 /// The monitor display group every rig signal files under.
 pub const GROUP: &str = "wago-rig";
 
@@ -116,8 +148,8 @@ pub mod points {
     pub const DI2_WITNESS: PointId = PointId(12);
 }
 
-/// The channel names the device declares — identical on both bindings,
-/// so the point wiring binds unchanged.
+/// The channel names the device declares — identical on all three
+/// bindings, so the point wiring binds unchanged.
 pub mod channels {
     /// 750-400 channel 1 — `di1`.
     pub const DI1: &str = "di1";
@@ -127,6 +159,21 @@ pub mod channels {
     pub const DO1: &str = "do1";
     /// 750-501 channel 2 — `do2`.
     pub const DO2: &str = "do2";
+}
+
+/// The register addresses the cyclic binding lays the channels out on
+/// inside the coupler station's bank — the manifest's rail order:
+/// the 750-501's two output channels, then the 750-400's two input
+/// channels.
+pub mod registers {
+    /// 750-501 channel 1 — `do1`.
+    pub const DO1: u16 = 0;
+    /// 750-501 channel 2 — `do2`.
+    pub const DO2: u16 = 1;
+    /// 750-400 channel 1 — `di1`.
+    pub const DI1: u16 = 2;
+    /// 750-400 channel 2 — `di2`.
+    pub const DI2: u16 = 3;
 }
 
 /// Which field binding [`wago_rig`] emits the document for.
@@ -139,13 +186,18 @@ pub enum RigBinding {
     /// device plus the declared `di1` ← `do1` loopback wire —
     /// `wago_rig_sim.json`.
     Sim,
+    /// The cyclic simulation binding: the same channels on a
+    /// `sim-cyclic` device — the coupler station declared as the
+    /// register bank the manifest's channel layout maps onto —
+    /// `wago_rig_cyclic.json`.
+    Cyclic,
 }
 
 /// Where everything the composition declares landed — the ids the
 /// scripted run, the monitor, and any embedding surface address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WagoRigLayout {
-    /// The declared field device's id (`1` on both bindings).
+    /// The declared field device's id (`1` on every binding).
     pub device: DeviceId,
     /// The DI1 field `In` point — the loopback witness.
     pub di1: PointId,
@@ -193,7 +245,10 @@ pub fn station_identity() -> StationIdentity {
 /// The device's four channel declarations, binding-specific: the
 /// `ethercat` arm records each channel's process-image offset (and the
 /// outputs' declared safe states) in the device parameters; the `sim`
-/// arm declares the same names and directions with no parameters.
+/// arm declares the same names and directions with no parameters; the
+/// `sim-cyclic` arm declares the coupler station's register bank — the
+/// manifest's channel layout in rail order — plus the device server's
+/// address placeholder and the miss threshold as parameter data.
 fn declare_channels(
     plant: &mut PlantBuilder,
     binding: RigBinding,
@@ -241,16 +296,48 @@ fn declare_channels(
                 plant.channel::<bool>(device, channels::DO2, Direction::Out),
             )
         }
+        RigBinding::Cyclic => {
+            let device = plant.device(CYCLIC_KIND);
+            device.parameters.extend([
+                (
+                    "address".to_string(),
+                    serde_json::json!(CYCLIC_ADDRESS_PLACEHOLDER),
+                ),
+                (
+                    "exchange_miss_threshold".to_string(),
+                    serde_json::json!(EXCHANGE_MISS_THRESHOLD),
+                ),
+                (
+                    "stations".to_string(),
+                    serde_json::json!({
+                        COUPLER_STATION: {
+                            channels::DO1: registers::DO1,
+                            channels::DO2: registers::DO2,
+                            channels::DI1: registers::DI1,
+                            channels::DI2: registers::DI2,
+                        }
+                    }),
+                ),
+            ]);
+            let device = device.id;
+            (
+                device,
+                plant.channel::<bool>(device, channels::DI1, Direction::In),
+                plant.channel::<bool>(device, channels::DI2, Direction::In),
+                plant.channel::<bool>(device, channels::DO1, Direction::Out),
+                plant.channel::<bool>(device, channels::DO2, Direction::Out),
+            )
+        }
     }
 }
 
 /// Composes the Wago rig under `binding` and emits its [`PlantModel`].
 ///
-/// Both bindings share the channel names, the point/signal/component
-/// sets, and the control-path wiring — only the device declaration and,
-/// on [`RigBinding::Sim`], the appended field wire differ, so the
-/// emitted documents prove the identical control path against two
-/// registered driver kinds.
+/// All three bindings share the channel names, the
+/// point/signal/component sets, and the control-path wiring — only the
+/// device declaration and, on [`RigBinding::Sim`], the appended field
+/// wire differ, so the emitted documents prove the identical control
+/// path against three registered driver kinds.
 pub fn wago_rig(binding: RigBinding) -> Result<WagoRig, BuildError> {
     let mut plant = PlantBuilder::new();
 

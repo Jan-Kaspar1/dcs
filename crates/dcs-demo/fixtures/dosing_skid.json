@@ -17,6 +17,10 @@
           "direction": "in",
           "value_type": "float"
         },
+        "injection-rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
         "net-draw": {
           "direction": "in",
           "value_type": "float"
@@ -179,6 +183,15 @@
       "channel": {
         "device": 1,
         "name": "tank-refill"
+      }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "injection-rate"
       }
     },
     {
@@ -1407,6 +1420,14 @@
       "source": 15,
       "unit": "L/scan",
       "description": "Tank refill inflow — the delivery line",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10016,
+      "name": "injection-rate",
+      "source": 16,
+      "unit": "g/h",
+      "description": "Injected chemical rate at the injection point — upstream of the transport delay to the discharge measurement",
       "group": "dosing-skid"
     },
     {

@@ -25,18 +25,27 @@
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
 #                the fingerprint propagated into the controller
-#                invocations, listen addresses, and the pair's standby
-#                wiring — parsed and validated through
-#                `docker compose config` or the fallback parser
+#                invocations, listen addresses, the pair's standby
+#                wiring, and the optional per-controller persistence
+#                paths (state_file/journal_file) backed by writable
+#                mounts and flags — parsed and validated through
+#                `docker compose config` or the fallback parser, with
+#                the fields' divergence cases exercised against
+#                doctored copies
 #                (rig-invalid, rig-unverifiable, rig-mismatch)
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
 #   surface      the served operator surface — the signal index, the
-#                monitoring page, the snapshot's descriptors, and the
-#                journal — matches the emitted model's declaration, in
-#                the same deterministic --driven run the simulate stage
-#                performs (surface-mismatch)
+#                monitoring page, the snapshot's descriptors, the
+#                block-interface registry covering every declared
+#                component, the kind-declared commands answering
+#                structured receipts through POST /command, and the
+#                kind-emitted events reaching the journal and the
+#                per-instance resource view — matches the emitted
+#                model's declaration, in the same deterministic
+#                --driven run the simulate stage performs
+#                (surface-mismatch)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -59,8 +68,11 @@
 #                from (default: the published origin below). The
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
-#   DCS_REV      the pinned revision (default: the v0.1.0 rev this
-#                repository's manifest records).
+#   DCS_REV      the pinned revision (default: the release-line rev
+#                this repository's manifest records — the newest 0.1
+#                commit whose tooling serves the interface registry,
+#                declared commands, and emitted events the surface
+#                stage proves).
 #   DCS_UPGRADE_REV
 #                the later compatible revision the upgrade stage repins
 #                to (default: $DCS_REV — a same-revision repin, still
@@ -78,13 +90,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-a2b1b13e7b4273b133bc0fff55cb97e16c5d3197}"
+DCS_REV="${DCS_REV:-b85eaa4355520594eaeb3b5e77561062e9789ace}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
 INSTALL_ROOTS=""
+RIG_DIR=""
 
 fail() {
     echo "$1" >&2
@@ -93,6 +106,7 @@ fail() {
 
 cleanup() {
     if [ -n "$UPGRADE_DIR" ]; then rm -rf "$UPGRADE_DIR"; fi
+    if [ -n "$RIG_DIR" ]; then rm -rf "$RIG_DIR"; fi
     for dir in $INSTALL_ROOTS; do rm -rf "$dir"; done
 }
 trap cleanup EXIT
@@ -212,6 +226,102 @@ echo "== deploy =="
 # diagnostics (rig-invalid, rig-unverifiable, rig-mismatch) on stderr.
 python3 ci/deploy_rig.py
 
+# The persistence fields' divergence cases, exercised against doctored
+# scratch copies so the checked-in pair stays pristine: each must
+# report rig-mismatch — a declared path missing its mount or flag, a
+# flag or writable mount the manifest does not declare, a persistence
+# mount left read-only — while the fields omitted outright (with their
+# mounts and flags) stay a valid deployment.
+RIG_DIR="$(mktemp -d)"
+mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
+cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
+cp ci/deploy_rig.py "$RIG_DIR/ci/"
+cp model/plant.json model/dynamics.json "$RIG_DIR/model/"
+cp "$RIG_DIR/deploy/compose.yaml" "$RIG_DIR/compose.pristine.yaml"
+cp "$RIG_DIR/deploy/manifest.json" "$RIG_DIR/manifest.pristine.json"
+
+rig_case() {
+    cp "$RIG_DIR/compose.pristine.yaml" "$RIG_DIR/deploy/compose.yaml"
+    cp "$RIG_DIR/manifest.pristine.json" "$RIG_DIR/deploy/manifest.json"
+    python3 - "$RIG_DIR" "$1" <<'PY'
+import json
+import sys
+
+root, case = sys.argv[1], sys.argv[2]
+compose_path = root + "/deploy/compose.yaml"
+manifest_path = root + "/deploy/manifest.json"
+compose = open(compose_path).read()
+manifest = open(manifest_path).read()
+if case == "persistence-mount-divergence":
+    # ctrl-a's writable volume moves off the declared paths.
+    compose = compose.replace(
+        "ctrl-a-data:/var/tmp", "ctrl-a-data:/srv/other", 1)
+elif case == "persistence-flag-divergence":
+    # ctrl-a's --journal-file argument diverges from the manifest.
+    compose = compose.replace(
+        "- /var/tmp/journal.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-mount-read-only":
+    compose = compose.replace(
+        "ctrl-a-data:/var/tmp", "ctrl-a-data:/var/tmp:ro", 1)
+elif case == "undeclared-persistence-flag":
+    # ctrl-a keeps its --journal-file while the manifest drops the
+    # field — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][0]["journal_file"]
+    manifest = json.dumps(document, indent=2)
+elif case == "undeclared-writable-mount":
+    # ctrl-a gains writable storage the manifest declares nothing
+    # under.
+    compose = compose.replace(
+        "      - ctrl-a-data:/var/tmp",
+        "      - ctrl-a-data:/var/tmp\n      - ctrl-a-scratch:/scratch",
+        1,
+    )
+    compose = compose.replace(
+        "volumes:\n  ctrl-a-data:",
+        "volumes:\n  ctrl-a-data:\n  ctrl-a-scratch:",
+        1,
+    )
+elif case == "persistence-omitted":
+    # Both fields omitted together with their flags and mounts — the
+    # optional deployment a consumer without durable storage declares.
+    document = json.loads(manifest)
+    for controller in document["controllers"]:
+        controller.pop("state_file", None)
+        controller.pop("journal_file", None)
+    manifest = json.dumps(document, indent=2)
+    for line in (
+        "      - ctrl-a-data:/var/tmp\n",
+        "      - ctrl-b-data:/var/tmp\n",
+        "      - --state-file\n      - /var/tmp/state.json\n",
+        "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
+    ):
+        compose = compose.replace(line, "")
+else:
+    sys.exit("unknown rig case " + case)
+open(compose_path, "w").write(compose)
+open(manifest_path, "w").write(manifest)
+PY
+    local out
+    if out="$(cd "$RIG_DIR" && python3 ci/deploy_rig.py 2>&1)"; then
+        [ "$1" = "persistence-omitted" ] \
+            || fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
+        echo "  $1: declared fields optional — the pair still agrees"
+        return
+    fi
+    [ "$1" = "persistence-omitted" ] \
+        && fail "rig-mismatch-unchecked: omitting the persistence fields reported: $out"
+    echo "$out" | grep -q "rig-mismatch" \
+        || fail "rig-mismatch-unchecked: the $1 divergence did not report rig-mismatch: $out"
+    echo "  $1 refused: rig-mismatch"
+}
+
+for divergence in persistence-mount-divergence persistence-flag-divergence \
+        persistence-mount-read-only undeclared-persistence-flag \
+        undeclared-writable-mount persistence-omitted; do
+    rig_case "$divergence"
+done
+
 echo "== simulate =="
 run_simulation() {
     python3 ci/simulate.py \
@@ -235,14 +345,14 @@ python3 ci/simulate.py \
     --model model/plant.json \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
-    || fail "surface-mismatch: the served operator surface does not match the emitted model's declared surface"
+    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, emitted events — does not match the emitted model's declared surface"
 
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py README.md; do
+for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

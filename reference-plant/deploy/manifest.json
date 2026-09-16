@@ -6,7 +6,7 @@
   },
   "model": {
     "path": "model/plant.json",
-    "fingerprint": "68b94d7a876ecc3d"
+    "fingerprint": "cfadf0f3c4136c44"
   },
   "dynamics": {
     "path": "model/dynamics.json"
@@ -17,12 +17,16 @@
   "controllers": [
     {
       "name": "ctrl-a",
-      "listen": "0.0.0.0:8080"
+      "listen": "0.0.0.0:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     },
     {
       "name": "ctrl-b",
       "listen": "0.0.0.0:8081",
-      "standby": "ctrl-a:8080"
+      "standby": "ctrl-a:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     }
   ]
 }

@@ -7,13 +7,28 @@ endpoints documented in docs/packaging.md (GET /role, /signals,
 only — the Lenovo host needs nothing but Python and Docker. The
 restart scenario also triggers the runner-owned container lifecycle
 action ctx['restart_controller'] carries and reads the per-controller
---journal-file the rig bind-mounts into the run directory.
+--journal-file the rig bind-mounts into the run directory; the
+model-revision scenario likewise triggers ctx['start_revised'] — the
+runner action that derives the recipe's revised model and launches the
+run's third controller on it — and reads field-side truth off the
+simulated plant's sim-net service at ctx['plant']. The link-loss
+scenario drives the runner-owned plant stop/start actions
+ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
+server directly on ctx['plant'] — the field's own fencing evidence.
+
+The field-fault case additionally opens one plant-protocol connection
+to the run's published plant port — the newline-JSON request/response
+surface crates/dcs-sim-net/src/protocol.rs documents — to inject and
+clear per-point faults on the shared simulated field.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
 """
 import json
+import math
+import os
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -176,8 +191,12 @@ def _journal_covers(journal, point):
 
 def _settled_active(ctx):
     """The ctx endpoint key whose peer currently reports role=active,
-    or None while the pair is mid-transition."""
-    for name in ('active', 'standby'):
+    or None while the pair is mid-transition. The model-revision
+    case's third endpoint answers on 'revised' once its action ran —
+    an unlaunched key reads as a refused connection and is skipped."""
+    for name in ('active', 'standby', 'revised'):
+        if ctx.get(name) is None:
+            continue
         try:
             if _role(ctx, ctx[name]).get('role') == 'active':
                 return name
@@ -350,11 +369,23 @@ def scenario_failover(ctx):
     """Demote the active, promote the converged standby."""
     case = Case('failover',
                 'Demote/promote switchover preserves the field',
-                'POST /demote on ctrl-a then POST /promote on ctrl-b leaves '
-                'ctrl-b active with telemetry advancing')
+                'POST /demote on the settled active then POST /promote '
+                'on the converged peer leaves ctrl-b active with '
+                'telemetry advancing')
     try:
-        status, body = http_json('POST', ctx['active'] + '/demote')
-        case.observe('demote ctrl-a: ' + str(status) + ' '
+        # The demote target is whichever endpoint reports settled
+        # active: a lone replay finds ctrl-a, while the suite reaches
+        # this case after the parameter-tune case already ran the a->b
+        # switch — the leg then re-cycles ctrl-b through its own
+        # demote, reconvergence on ctrl-a's checkpoints, and
+        # promote-back. ctrl-b stays the promote target either way: it
+        # is the rig's only checkpoint-tracking peer.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        status, body = http_json('POST', ctx[active] + '/demote')
+        case.observe('demote ' + active + ': ' + str(status) + ' '
                      + json.dumps(body))
         if status != 200:
             return case.finish('failed', 'demote refused: ' + str(body))
@@ -399,6 +430,863 @@ def scenario_failover(ctx):
             return case.finish('failed',
                                'promoted peer telemetry did not advance')
         case.observe('ctrl-b active, tick advancing after switchover')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The receipted parameter-tuning path and its carryover across
+# promotion — WW-OPS-001's bounded, validated, receipted tuning clause
+# and WW-LCM-001's runtime-tuning continuity. A descriptor-declared
+# Float parameter out of the served registry is retuned through
+# POST /command; the settled receipt, the served parameter report, and
+# the transition journal must all reflect it; an out-of-range tune
+# must meet the named out_of_range rejection and change nothing; and
+# the promoted peer's parameter report must still carry the tuned
+# value — the tuned state rode the checkpoint the tracking standby
+# adopted rather than re-initializing to the model default.
+#
+# The case must run while ctrl-a is still the active: ctrl-b is the
+# rig's only checkpoint-tracking peer (its --standby source is ctrl-a),
+# so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b.
+# The switch it performs is also the run's one promotion — once ctrl-b
+# claims the plant's single-writer claim, ctrl-a can never take the
+# field back — so the case sits immediately ahead of the failover leg,
+# which then re-cycles the surviving peer.
+
+TUNE_DEADLINE = 30  # bound on the receipt, report, and switch waits
+
+
+def _parameter_value(snapshot, component, name):
+    """The live value a snapshot's `parameters` section reports for one
+    descriptor-declared parameter — the section the checkpoint's
+    component state reports through — or None when absent."""
+    for entry in snapshot.get('parameters') or []:
+        if entry.get('name') == component:
+            value = (entry.get('values') or {}).get(name)
+            if isinstance(value, dict):
+                return next(iter(value.values()), None)
+            return value
+    return None
+
+
+def _float_tune_plan(schema, snapshot):
+    """The scenario's tune target out of the served registry and live
+    parameter report: (component, parameter, current, tuned, outside)
+    for the first descriptor-declared Float whose inclusive [min, max]
+    bounds hold a changed finite in-range value and admit a finite
+    out-of-range submission. Returns None when no served parameter can
+    exercise both legs."""
+    reported = {entry.get('name'): entry.get('values') or {}
+                for entry in snapshot.get('parameters') or []}
+    for entry in schema.get('interfaces') or []:
+        component = entry.get('name')
+        values = reported.get(component)
+        if not isinstance(values, dict):
+            continue
+        for prop in (entry.get('interface') or {}) \
+                .get('configuration') or []:
+            if prop.get('kind') != 'float' \
+                    or prop.get('capability', 'tunable') != 'tunable':
+                continue
+            bounds = prop.get('range') or {}
+            lo = (bounds.get('min') or {}).get('float')
+            hi = (bounds.get('max') or {}).get('float')
+            name = prop.get('name')
+            raw = values.get(name)
+            current = raw.get('float') if isinstance(raw, dict) \
+                else None
+            if lo is None or hi is None or name is None \
+                    or current is None or not lo < hi:
+                continue
+            tuned = next(
+                (c for c in (lo + 1.0, current + 1.0, hi - 1.0,
+                             (lo + hi) / 2.0, lo, hi)
+                 if math.isfinite(c) and lo <= c <= hi
+                 and c != current), None)
+            if tuned is None:
+                continue
+            below = lo - 1.0
+            if not below < lo:
+                below = math.nextafter(lo, -math.inf)
+            above = hi + 1.0
+            if not above > hi:
+                above = math.nextafter(hi, math.inf)
+            outside = below if below < lo \
+                else above if above > hi else None
+            if outside is None or not math.isfinite(outside):
+                continue
+            return component, name, current, tuned, outside
+    return None
+
+
+def _journal_covers_parameter(journal, component, name):
+    """Whether a `GET /journal` payload recorded the scenario
+    `set_parameter` command's settlement."""
+    for entry in _journal_list(journal):
+        receipt = entry.get('event', {}).get('command_settled', {}) \
+            .get('receipt', {})
+        tune = receipt.get('command', {}).get('set_parameter', {})
+        if tune.get('component') == component \
+                and tune.get('name') == name:
+            return True
+    return False
+
+
+# --------------------------------------------------------------------
+# The rolling model-revision contract (WW-LCM-001's deployment-update
+# clause, the rolling model-revision decision): a site deploys an
+# updated plant model by launching a third controller on the revised
+# document with `--standby <active> --revised`; once the peer reports
+# the named `reinitialized` convergence carrying its carryover report,
+# the documented demote-then-promote order moves the field writer onto
+# the revised model's fingerprint while field writes, receipts, and
+# the durable journal continue across the boundary — and the demoted
+# peer settles rather than resuming writes (the plant's single-writer
+# fence meets any leaked attempt).
+
+REVISION_CONVERGE_DEADLINE = 120  # bound on the revised peer's crossing
+REVISION_SETTLE_DEADLINE = 60     # bound on demote/promote role settles
+REVISION_FIELD_ROUNDS = 6         # field/telemetry reads after the roll
+REVISION_POLL = 0.5               # cadence watching the roll's peers
+
+
+def _field_request(ctx, request):
+    """One newline-delimited request against the simulated plant's
+    sim-net service — the field-side truth below the monitor layer.
+    `ctx['plant']` carries the plant's loopback host:port."""
+    host, _, port = str(ctx['plant']).rpartition(':')
+    stream = socket.create_connection((host or '127.0.0.1',
+                                       int(port or 0)), timeout=5)
+    try:
+        stream.sendall(json.dumps(request).encode() + b'\n')
+        data = b''
+        while not data.endswith(b'\n'):
+            chunk = stream.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        stream.close()
+    return json.loads(data) if data else None
+
+
+def _field_sample(ctx, point):
+    """The plant's stored sample for `point` — `{'value', 'quality',
+    'tick'}` — or None when the read dropped; a lost observation, never
+    the leg's verdict."""
+    try:
+        body = _field_request(ctx, {'op': 'read', 'point': point})
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body.get('sample')
+
+
+def _field_out_points(ctx):
+    """Every field `out` point the simulated plant serves — the points
+    a field-owning scan writes — from the plant's own census."""
+    body = _field_request(ctx, {'op': 'list_points'})
+    points = (body or {}).get('points') or []
+    return [entry['point'] for entry in points
+            if isinstance(entry, dict)
+            and entry.get('direction') == 'out']
+
+
+def _journal_entries(path):
+    """The parsed records of a `--journal-file` with their full bodies:
+    `{'run_boundary': {...}}` markers and `{'entry': {'seq', 'tick',
+    'event'}}` lines. A torn final line — a crash mid-append — is
+    skipped; any earlier unparseable or unrecognized line raises."""
+    items = []
+    lines = Path(path).read_text().splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == len(lines) - 1:
+                continue
+            raise ValueError('journal file ' + str(path) + ' line '
+                             + str(index + 1) + ' does not parse')
+        if isinstance(record, dict) \
+                and ('run_boundary' in record or 'entry' in record):
+            items.append(record)
+        else:
+            raise ValueError('journal file ' + str(path) + ' line '
+                             + str(index + 1)
+                             + ' is not a journal record')
+    return items
+
+
+def scenario_model_revision(ctx):
+    """Roll a revised model in through a third `--revised` controller."""
+    case = Case('model-revision',
+                'In-service model revision rolls the field writer',
+                'a third controller launched --standby <active> '
+                '--revised on the recipe-derived revised model converges '
+                'reporting reinitialized with its carryover report, the '
+                'demote-then-promote order moves the field writer onto '
+                'the revised fingerprint, field writes continue '
+                'bumplessly, receipts and the journal file continue '
+                'their sequence, and the demoted peer settles without '
+                'serving writes')
+    try:
+        start = ctx.get('start_revised')
+        revised = ctx.get('revised')
+        if start is None or revised is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no model-revision action or '
+                               'revised endpoint')
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('field writer: ' + active + ' (' + base + ')')
+
+        # The operator state the carryover must name: one applied
+        # write to the run's writable bool point, plus the audit
+        # positions the roll must continue — the active's model
+        # fingerprint, its receipt log, and the field's outputs.
+        _, signals = http_json('GET', base + '/signals')
+        target = _writable_bool_point(signals)
+        if target is None:
+            return case.finish('inconclusive',
+                               'no writable bool point in the model')
+        point = target['point']
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': {
+                'point': point, 'kind': 'bool',
+                'value': {'bool': True}}},
+             'actor': 'qa-lane'})
+        if status != 200:
+            return case.finish('failed', 'the pre-roll command '
+                               'refused: ' + str(receipt))
+        applied = wait_for(
+            lambda: _point_value(_try_snapshot(ctx, base) or {}, point)
+            is True or None, time.monotonic() + 30)
+        if not applied:
+            return case.finish('failed', 'the pre-roll write never '
+                               'applied at point ' + str(point))
+        _, checkpoint = http_json('GET', base + '/checkpoint')
+        from_fp = checkpoint.get('model_fingerprint')
+        if from_fp is None:
+            return case.finish('failed', 'the active peer serves no '
+                               'model fingerprint')
+        _, body = http_json('GET', base + '/receipts')
+        receipts0 = _receipt_list(body)
+        commands0 = [(r.get('command'), r.get('actor'))
+                     for r in receipts0]
+        demoted_health0 = (_try_snapshot(ctx, base) or {}) \
+            .get('io_health') or {}
+        try:
+            field_points = _field_out_points(ctx)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'is unreachable: ' + str(exc)[:200])
+        if not field_points:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'serves no field output to watch')
+        watch = min(field_points)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'model-revision-before.json',
+            {'active': active, 'model_fingerprint': from_fp,
+             'tick': checkpoint.get('tick'),
+             'receipts': len(receipts0),
+             'field': {str(p): _field_sample(ctx, p)
+                       for p in field_points}})
+        case.evidence('file', ref, 'the pre-roll audit positions')
+        case.observe('pre-roll: fingerprint ' + str(from_fp) + ', '
+                     + str(len(receipts0)) + ' receipts, watching '
+                     'field point ' + str(watch))
+
+        # The runner-owned action: derive the revised document through
+        # the checked-in recipe and launch the third labeled controller
+        # on it as --standby <active> --revised.
+        try:
+            info = start(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the model-revision '
+                               'action never completed: '
+                               + str(exc)[:300])
+        added = info.get('added_points') or []
+        case.observe('revised peer ' + str(info.get('container'))
+                     + ' launched; the recipe added points '
+                     + str(added))
+        document = json.loads(Path(info['document']).read_text())
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-document.json', document)
+        case.evidence('file', ref, 'the recipe-derived revised model '
+                      'document')
+
+        # Convergence: the revised peer must report the named
+        # reinitialized state — a foreign-fingerprint checkpoint
+        # applied through the carryover rule. A same-model `tracking`
+        # or a `diverged` report is an outright contract violation; a
+        # transient `degraded` is a retryable pull failure that only
+        # fails the case when it persists to the deadline; and a peer
+        # still unsynchronized then never converged — inconclusive.
+        last = {}
+
+        def converged():
+            role = _try_role(ctx, revised)
+            if role is None:
+                return None
+            last['role'] = role
+            sync = role.get('sync')
+            if isinstance(sync, dict) and set(sync) & {
+                    'reinitialized', 'diverged', 'tracking'}:
+                return role
+            return None
+
+        settled = wait_for(converged,
+                           time.monotonic() + REVISION_CONVERGE_DEADLINE,
+                           interval=REVISION_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-role.json',
+                            last.get('role') or {})
+        case.evidence('file', ref, 'the revised peer\'s convergence')
+        if settled is None:
+            sync = (last.get('role') or {}).get('sync')
+            if isinstance(sync, dict) and 'degraded' in sync:
+                return case.finish('failed', 'the revised peer never '
+                                   'converged — its pulls stay '
+                                   'degraded: '
+                                   + json.dumps(sync)[:300])
+            return case.finish('inconclusive', 'the revised peer never '
+                               'converged: ' + json.dumps(sync)[:300])
+        sync = settled.get('sync') or {}
+        if 'reinitialized' not in sync:
+            return case.finish('failed', 'the revised peer did not '
+                               'converge as reinitialized: '
+                               + json.dumps(sync)[:400])
+        report = sync['reinitialized'].get('report') or {}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-carryover.json', report)
+        case.evidence('file', ref, 'the carryover report')
+        to_fp = report.get('to')
+        if report.get('from') != from_fp or not to_fp \
+                or to_fp == from_fp:
+            return case.finish('failed', 'the carryover report does '
+                               'not name the mounted and revised '
+                               'fingerprints: ' + json.dumps(
+                                   {'from': report.get('from'),
+                                    'to': to_fp,
+                                    'mounted': from_fp}))
+        carried = report.get('carried') or []
+        if not any(c.get('point') == point
+                   and c.get('value') == {'bool': True}
+                   for c in carried):
+            return case.finish('failed', 'the carryover report does '
+                               'not name the carried operator write at '
+                               'point ' + str(point) + ': carried '
+                               + json.dumps(carried)[:400])
+        initialized = report.get('initialized') or []
+        missing = [p for p in added if p not in initialized]
+        if missing:
+            return case.finish('failed', 'the recipe\'s added points '
+                               'never initialized: ' + str(missing))
+        if not report.get('reinitialized'):
+            return case.finish('failed', 'the carryover report '
+                               'reinitialized no components')
+        case.observe('reinitialized at tick '
+                     + str(report.get('resumed_at')) + ': '
+                     + str(len(carried)) + ' carried, '
+                     + str(len(initialized)) + ' initialized, '
+                     + str(len(report.get('reinitialized') or []))
+                     + ' components reinitialized')
+
+        # The documented order: demote the field's owner first — its
+        # write gate closes at the request's scan boundary — then
+        # promote the reinitialized peer. The writer-less window must
+        # hold the field's last write exactly.
+        try:
+            status, body = http_json('POST', base + '/demote')
+        except urllib.error.HTTPError as exc:
+            return case.finish('failed', 'demote refused: HTTP '
+                               + str(exc.code))
+        case.observe('demote ' + active + ': ' + str(status) + ' '
+                     + json.dumps(body)[:200])
+        if status != 200:
+            return case.finish('failed', 'demote refused: '
+                               + str(body))
+        held = _field_sample(ctx, watch)
+        regressions = []
+
+        def demoted_settled():
+            sample = _field_sample(ctx, watch)
+            if held is not None and sample is not None \
+                    and sample != held:
+                regressions.append(sample)
+            role = _try_role(ctx, base)
+            return role if role and role.get('role') == 'standby' \
+                else None
+
+        demoted = wait_for(demoted_settled,
+                           time.monotonic() + REVISION_SETTLE_DEADLINE,
+                           interval=REVISION_POLL)
+        if regressions:
+            return case.finish('failed', 'the field moved during the '
+                               'writer-less window after demote: '
+                               + json.dumps(regressions[:3])[:400])
+        if not demoted:
+            return case.finish('failed', 'the demoted peer never '
+                               'settled standby')
+        try:
+            status, body = http_json('POST', revised + '/promote')
+        except urllib.error.HTTPError as exc:
+            return case.finish('failed', 'promote refused: HTTP '
+                               + str(exc.code))
+        case.observe('promote revised: ' + str(status) + ' '
+                     + json.dumps(body)[:200])
+        if status != 200:
+            return case.finish('failed', 'promote refused: '
+                               + str(body))
+        promoted = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _try_role(ctx, revised)) else None,
+            time.monotonic() + REVISION_SETTLE_DEADLINE,
+            interval=REVISION_POLL)
+        if not promoted:
+            return case.finish('failed', 'the revised peer did not '
+                               'settle active')
+
+        # The promoted peer scans on the revised fingerprint — the
+        # boundary's `to` — and the run ends there.
+        _, after = http_json('GET', revised + '/checkpoint')
+        if after.get('model_fingerprint') != to_fp:
+            return case.finish('failed', 'the promoted peer does not '
+                               'run the revised fingerprint: '
+                               + str(after.get('model_fingerprint'))
+                               + ' != ' + str(to_fp))
+        first = _snapshot(ctx, revised)
+        grown = wait_for(
+            lambda: (s.get('tick', 0) > first.get('tick', 0)
+                     and s or None)
+            if (s := _try_snapshot(ctx, revised)) else None,
+            time.monotonic() + 30)
+        if not grown:
+            return case.finish('failed', 'the promoted peer\'s '
+                               'telemetry did not advance')
+
+        # Bumpless writes: every field read through the post-roll
+        # window carries the promoted peer's staged image (allowing
+        # one scan of observation lag), and the demoted peer's write
+        # gate holds — a demoted peer still attempting writes meets
+        # the plant's fence, which counts the rejections in its
+        # io_health.
+        baseline = demoted_health0.get('failed_writes') or 0
+        trace = []
+        consecutive = 0
+        quiesce_violation = None
+        for _ in range(REVISION_FIELD_ROUNDS):
+            promoted_snap = _try_snapshot(ctx, revised) or {}
+            demoted_snap = _try_snapshot(ctx, base) or {}
+            sample = _field_sample(ctx, watch)
+            staged = _point_value(promoted_snap, watch)
+            value = (sample or {}).get('value')
+            if isinstance(value, dict):
+                value = next(iter(value.values()), None)
+            health = demoted_snap.get('io_health') or {}
+            trace.append({'field': value,
+                          'promoted_staged': staged,
+                          'demoted_staged': _point_value(demoted_snap,
+                                                         watch),
+                          'demoted_failed_writes':
+                              health.get('failed_writes')})
+            if (health.get('failed_writes') or 0) > baseline \
+                    or health.get('last_error'):
+                quiesce_violation = health
+            if value is not None and staged is not None \
+                    and value != staged:
+                consecutive += 1
+            else:
+                consecutive = 0
+            time.sleep(REVISION_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-field.json',
+                            {'watch': watch, 'held': held,
+                             'trace': trace})
+        case.evidence('file', ref, 'field reads across the roll')
+        if consecutive >= 2:
+            return case.finish('failed', 'the field regressed across '
+                               'the roll — field reads do not follow '
+                               'the promoted peer\'s image: '
+                               + json.dumps(trace[-3:])[:400])
+        if quiesce_violation is not None:
+            return case.finish('failed', 'the demoted peer kept '
+                               'serving writes — the plant fenced '
+                               'them: '
+                               + json.dumps(quiesce_violation)[:300])
+
+        # The audit trail crosses the boundary verbatim: the promoted
+        # peer's receipt log opens with the old run's receipts in
+        # order, and new submissions continue the sequence.
+        _, body = http_json('GET', revised + '/receipts')
+        receipts1 = _receipt_list(body)
+        commands1 = [(r.get('command'), r.get('actor'))
+                     for r in receipts1]
+        if commands1[:len(commands0)] != commands0:
+            return case.finish('failed', 'the receipt log did not '
+                               'carry across the roll: '
+                               + str(len(commands0)) + ' pre-roll '
+                               'commands vs '
+                               + json.dumps(commands1[:len(commands0)
+                                                     + 1])[:300])
+        status, receipt = http_json(
+            'POST', revised + '/command',
+            {'command': {'write_value': {
+                'point': point, 'kind': 'bool',
+                'value': {'bool': False}}},
+             'actor': 'qa-lane'})
+        if status != 200:
+            return case.finish('failed', 'the post-roll command '
+                               'refused: ' + str(receipt))
+        _, body = http_json('GET', revised + '/receipts')
+        receipts2 = _receipt_list(body)
+        if len(receipts2) <= len(receipts1):
+            return case.finish('failed', 'the post-roll command did '
+                               'not extend the receipt log')
+
+        # The durable journal files: the revised peer's file records
+        # the crossing (the reinitialized entry) and its promotion in
+        # its one lifetime's continuing seqs; the demoted peer's file
+        # keeps appending continuing seqs through the demotion — the
+        # roll never restarts a process.
+        journals = ctx.get('journal_files') or {}
+        parsed = {}
+
+        def journals_ready():
+            try:
+                parsed['revised'] = _journal_entries(
+                    journals['revised'])
+                parsed['demoted'] = _journal_entries(
+                    journals[active])
+            except (KeyError, OSError, ValueError) as exc:
+                parsed['error'] = str(exc)
+                return None
+            parsed.pop('error', None)
+            crossed = any('reinitialized' in
+                          ((r.get('entry') or {}).get('event') or {})
+                          for r in parsed['revised'])
+            settled_down = any(
+                ((r.get('entry') or {}).get('event') or {})
+                .get('role_changed', {}).get('to') == 'standby'
+                for r in parsed['demoted'])
+            return parsed if crossed and settled_down else None
+
+        ready = wait_for(journals_ready,
+                         time.monotonic() + RESTART_JOURNAL_DEADLINE,
+                         interval=REVISION_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-journals.json',
+                            {'revised': parsed.get('revised'),
+                             'demoted': parsed.get('demoted'),
+                             'error': parsed.get('error')})
+        case.evidence('file', ref, 'the journal files across the roll')
+        if parsed.get('error'):
+            return case.finish('inconclusive', 'the journal files are '
+                               'unreadable: ' + str(parsed['error']))
+        if not ready:
+            return case.finish('failed', 'the journal files did not '
+                               'record the crossing and the demotion')
+        for name in ('revised', 'demoted'):
+            seqs = [(r.get('entry') or {}).get('seq')
+                    for r in parsed[name] if 'entry' in r]
+            bounds = [r['run_boundary'] for r in parsed[name]
+                      if 'run_boundary' in r]
+            if len(bounds) != 1:
+                return case.finish('failed', name + ' journal file '
+                                   'holds ' + str(len(bounds))
+                                   + ' lifetimes — the roll must not '
+                                   'restart a process')
+            if not seqs or any(not isinstance(s, int) for s in seqs) \
+                    or seqs != sorted(seqs) \
+                    or len(set(seqs)) != len(seqs):
+                return case.finish('failed', 'journal seqs do not '
+                                   'continue across the roll on '
+                                   + name + ': ' + str(seqs[:20]))
+
+        # The run ends on the revised fingerprint: the field writer is
+        # the revised peer, the demoted peer a settled standby.
+        roles = {name: _try_role(ctx, ctx[name])
+                 for name in (active, 'revised')}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'model-revision-after.json',
+                            {'roles': roles,
+                             'model_fingerprint':
+                                 after.get('model_fingerprint'),
+                             'receipts': len(receipts2)})
+        case.evidence('file', ref, 'the post-roll pair state')
+        if (roles.get('revised') or {}).get('role') != 'active':
+            return case.finish('failed', 'the revised peer did not '
+                               'stay active')
+        if (roles.get(active) or {}).get('role') != 'standby':
+            return case.finish('failed', 'the demoted peer did not '
+                               'stay standby')
+        case.observe('rolled: ' + active + ' demoted, revised peer '
+                     'active on fingerprint ' + str(to_fp))
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+def scenario_parameter_tune_carryover(ctx):
+    """A descriptor-declared Float parameter retuned through the
+    receipted path survives the pair's promotion."""
+    case = Case('parameter-tune-carryover',
+                'Receipted parameter tune carries across promotion',
+                'a descriptor-declared Float parameter retuned through '
+                'POST /command settles applied, the served parameter '
+                'report and the journal reflect it, an out-of-range '
+                'tune meets the named out_of_range rejection and '
+                'leaves the value unchanged, and the promoted peer\'s '
+                'parameter report still carries the tuned value rather '
+                'than the model-declared default')
+    try:
+        # In suite order the settled active is ctrl-a — the peer whose
+        # checkpoints the tracking standby pulls — and the peer must
+        # report tracking convergence for the promotion leg to carry
+        # anything. A lone replay on a fresh rig finds the same layout.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        case.observe('tuning against ' + active + ' (' + base + ')')
+
+        def converged():
+            try:
+                report = _role(ctx, peer_base)
+            except Exception:
+                return None
+            sync = report.get('sync') or {}
+            return report if 'tracking' in sync else None
+
+        tracking = wait_for(converged, time.monotonic() + TUNE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-roles.json',
+                            {'peer': tracking})
+        case.evidence('file', ref, 'the tracking peer\'s role report')
+        if not tracking:
+            return case.finish('inconclusive', 'the peer never '
+                               'reported tracking convergence — the '
+                               'promotion leg cannot be exercised')
+
+        # The tune target: a descriptor-declared Float parameter whose
+        # declared range holds a changed value and refuses a finite
+        # out-of-range one, with its live value in the served report.
+        _, schema = http_json('GET', base + '/schema')
+        snapshot = _snapshot(ctx, base)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-interface.json',
+                            {'schema': schema, 'snapshot': snapshot})
+        case.evidence('file', ref, 'the served registry and live '
+                      'parameter report the target is discovered from')
+        plan = _float_tune_plan(schema, snapshot)
+        if plan is None:
+            return case.finish('inconclusive', 'no descriptor-declared '
+                               'Float parameter with a violatable range '
+                               'is served')
+        component, name, current, tuned, outside = plan
+        case.observe('tune target: ' + str(component) + ' '
+                     + str(name) + ' ' + str(current) + ' -> '
+                     + str(tuned) + ' (out-of-range probe '
+                     + str(outside) + ')')
+
+        # The receipted in-range tune: one submission, one receipt, the
+        # settlement lands at the next scan boundary.
+        command = {'command': {'set_parameter': {
+            'component': component, 'name': name,
+            'value': {'float': tuned}}}, 'actor': 'qa-lane'}
+        _, before = http_json('GET', base + '/receipts')
+        index = len(_receipt_list(before))
+        status, receipt = http_json('POST', base + '/command', command)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-submission.json',
+                            {'command': command, 'status': status,
+                             'receipt': receipt})
+        case.evidence('file', ref, 'the in-range tune submission and '
+                      'its receipt')
+        if status != 200:
+            return case.finish('failed', 'the in-range tune was '
+                               'refused: ' + str(status) + ' '
+                               + json.dumps(receipt)[:300])
+        settled = wait_for(
+            lambda: _settled_outcome(ctx, base, index),
+            time.monotonic() + TUNE_DEADLINE)
+        if settled != 'applied':
+            return case.finish('failed', 'the in-range tune lacks a '
+                               'settled receipt: '
+                               + str(settled or 'never settled'))
+        case.observe('tune receipt settled ' + settled)
+
+        # The served parameter report reflects the standing tune — the
+        # live read of the same fields the checkpoint captures.
+        reflected = wait_for(
+            lambda: (_parameter_value(s, component, name) == tuned
+                     and s or None)
+            if (s := _try_snapshot(ctx, base)) else None,
+            time.monotonic() + TUNE_DEADLINE)
+        report_snapshot = _try_snapshot(ctx, base) or {}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-report.json',
+                            report_snapshot.get('parameters'))
+        case.evidence('file', ref, 'the parameter report after the '
+                      'tune settled')
+        if not reflected:
+            return case.finish('inconclusive', 'the served parameter '
+                               'report never reflected the tune: '
+                               + str(component) + ' ' + str(name)
+                               + ' still reads '
+                               + str(_parameter_value(report_snapshot,
+                                                      component, name)))
+        case.observe('the parameter report reads ' + str(tuned))
+
+        # The run's audit: the settled tune's receipt is journaled.
+        def journaled():
+            try:
+                _, journal = http_json('GET', base + '/journal')
+            except Exception:
+                return None
+            journaled.last = journal
+            return _journal_covers_parameter(journal, component, name) \
+                or None
+
+        journaled.last = []
+        covered = wait_for(journaled, time.monotonic() + TUNE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-journal.json',
+                            journaled.last)
+        case.evidence('file', ref, 'the active\'s journal after the '
+                      'tune settled')
+        if not covered:
+            return case.finish('failed', 'the journaled evidence '
+                               'misses the receipted tune')
+
+        # The out-of-range tune meets the named validation rejection at
+        # submission — the descriptor range speaks before the queue —
+        # and the standing tune is untouched.
+        probe = {'command': {'set_parameter': {
+            'component': component, 'name': name,
+            'value': {'float': outside}}}, 'actor': 'qa-lane'}
+        status, receipt = http_json('POST', base + '/command', probe)
+        held = _parameter_value(_try_snapshot(ctx, base) or {},
+                                component, name)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-rejection.json',
+                            {'command': probe, 'status': status,
+                             'receipt': receipt, 'reported': held})
+        case.evidence('file', ref, 'the out-of-range submission, its '
+                      'receipt, and the parameter report')
+        outcome = _outcome_key(receipt if isinstance(receipt, dict)
+                               else {})
+        if status != 200 or outcome != 'rejected:out_of_range':
+            return case.finish('failed', 'the out-of-range tune was '
+                               'not rejected by name: ' + str(status)
+                               + ' ' + json.dumps(receipt)[:300])
+        if held != tuned:
+            return case.finish('failed', 'the rejected out-of-range '
+                               'tune changed the parameter: '
+                               + str(held))
+        case.observe('out-of-range tune rejected by name; '
+                     + str(name) + ' still reads ' + str(held))
+
+        # The tuned value must reach the tracking peer through the
+        # checkpoint stream before the switch — the carryover the
+        # promotion is about to prove.
+        carried = wait_for(
+            lambda: (_parameter_value(s, component, name) == tuned
+                     and s or None)
+            if (s := _try_snapshot(ctx, peer_base)) else None,
+            time.monotonic() + TUNE_DEADLINE)
+        standby_snapshot = _try_snapshot(ctx, peer_base) or {}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-standby.json',
+                            standby_snapshot.get('parameters'))
+        case.evidence('file', ref, 'the tracking peer\'s parameter '
+                      'report before the switch')
+        if not carried:
+            return case.finish('inconclusive', 'the tracking peer\'s '
+                               'parameter report never reflected the '
+                               'tune — the checkpoint carryover cannot '
+                               'be observed')
+
+        # The switch: demote the tuned active, promote the converged
+        # standby, and read the promoted peer's own parameter report.
+        status, body = http_json('POST', base + '/demote')
+        case.observe('demote ' + active + ': ' + str(status) + ' '
+                     + json.dumps(body))
+        if status != 200:
+            return case.finish('failed', 'demote refused: '
+                               + str(body))
+        promoted = None
+        deadline = time.monotonic() + TUNE_DEADLINE
+        while time.monotonic() < deadline and promoted is None:
+            try:
+                status, body = http_json('POST', peer_base + '/promote')
+                if status == 200:
+                    promoted = body
+                else:
+                    time.sleep(POLL_INTERVAL)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 409:
+                    time.sleep(POLL_INTERVAL)
+                else:
+                    raise
+        settled_role = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _role(ctx, peer_base)) else None,
+            time.monotonic() + TUNE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-promotion.json',
+                            {'demoted': active, 'promote': promoted,
+                             'role': settled_role})
+        case.evidence('file', ref, 'the demote/promote responses and '
+                      'the promoted peer\'s role')
+        if promoted is None:
+            return case.finish('failed', 'the converged standby never '
+                               'promoted within ' + str(TUNE_DEADLINE)
+                               + 's')
+        if not settled_role:
+            return case.finish('failed', 'the promoted peer did not '
+                               'settle active')
+
+        promoted_report = wait_for(
+            lambda: (_parameter_value(s, component, name) == tuned
+                     and s or None)
+            if (s := _try_snapshot(ctx, peer_base)) else None,
+            time.monotonic() + TUNE_DEADLINE)
+        last = _try_snapshot(ctx, peer_base)
+        if last is None:
+            return case.finish('inconclusive', 'the promoted peer\'s '
+                               'monitor never served a parameter '
+                               'report')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'parameter-tune-promoted.json',
+                            last.get('parameters'))
+        case.evidence('file', ref, 'the promoted peer\'s parameter '
+                      'report')
+        if not promoted_report:
+            found = _parameter_value(last, component, name)
+            if found == current:
+                return case.finish('failed', 'the promoted peer '
+                                   'reverted ' + str(name) + ' to the '
+                                   'model-declared default '
+                                   + str(current) + ' — the tune did '
+                                   'not ride the checkpoint')
+            return case.finish('failed', 'the promoted peer lost the '
+                               'tuned value: ' + str(name)
+                               + ' reads ' + str(found))
+        case.observe('the promoted peer still reports ' + str(name)
+                     + ' = ' + str(tuned) + ' — the tune crossed the '
+                     'checkpoint')
         return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
@@ -799,6 +1687,7 @@ def scenario_controller_restart(ctx):
 
 
 # --------------------------------------------------------------------
+<<<<<<< HEAD
 # The declared freshness budget (WW-OPS-003's stale-data surface,
 # WW-ALM-003's rule that stale data never presents as a healthy
 # last-known value): the rig model's `net-flow` field input carries a
@@ -856,12 +1745,127 @@ def scenario_stale_freshness(ctx):
                                'no controller stop/start action — the '
                                'writer-loss induction has no documented '
                                'seam')
+=======
+# The plant-link boundary (WW-OPS-003's communication confidence and
+# WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss
+# checks): the runner-owned plant stop/start action severs both
+# controllers' remote-driver connections mid-run — the non-cyclic
+# remote form of decision 78's exchange-loss shape, and unlike a
+# per-point fault a dead plant fails every field point at once at the
+# link boundary. The active's telemetry must degrade honestly — held
+# values re-marked past the read boundary, the driver link reporting
+# disconnected with counted per-direction failures and a last_error —
+# while scans keep running and the pair's roles hold: the standby's
+# checkpoint-pull heartbeat is peer-to-peer, not field traffic, so it
+# never promotes on field loss. A restarted plant is a new server
+# lifetime — its single-writer claim died with the old process — so
+# recovery means the field owner re-attaches and re-claims: reads Good
+# again, a third attachment's mutation fenced, and the outage's
+# failures still counted in io_health rather than silently reset.
+
+LINK_POLL = 1.0                # cadence watching the pair mid-outage
+LINK_DEGRADE_DEADLINE = 45     # bound on the telemetry degrading
+LINK_SETTLE = 6.0              # extra role watch once degradation shows
+LINK_RECOVERY_DEADLINE = 90    # bound on the plant's return + re-claim
+
+
+def _try_role(ctx, base):
+    """`/role` or None — for the outage watch a dropped read is one
+    lost poll, not the leg's verdict."""
+    try:
+        return _role(ctx, base)
+    except Exception:
+        return None
+
+
+def _plant_probe(ctx, request, timeout=5):
+    """One request/response against the run's plant server on a fresh
+    connection — the `dcs-sim-net` wire protocol on the published
+    endpoint ctx['plant'] carries. The link-loss scenario uses it for
+    the field's own evidence: `list_points` is the census of points the
+    boundary fails at once, and a `step` mutation is the fencing probe
+    — answered `fenced` while any attachment holds the plant's
+    single-writer claim, `stepped` while nobody does. Each probe takes
+    a new connection because the outage it watches is exactly a dead
+    listener; the probe never sends `claim_writer` — claiming from
+    here would preempt the field owner it is checking for."""
+    stream = _plant_connect(ctx, timeout=timeout)
+    try:
+        stream.settimeout(timeout)
+        return _plant_request(stream, request)
+    finally:
+        stream.close()
+
+
+def _try_plant(ctx, request):
+    """`_plant_probe` or None — a refused probe is one lost poll, not
+    the leg's verdict."""
+    try:
+        return _plant_probe(ctx, request)
+    except Exception:
+        return None
+
+
+def _fenced(response):
+    """Whether a fencing probe's answer says a writer claim stands —
+    the shared field refused a third attachment's mutation."""
+    return (response or {}).get('error', {}).get('kind') == 'fenced'
+
+
+def _sample_quality(snapshot, point):
+    """The point's latest served quality flattened for comparison —
+    'good', 'uncertain:stale', 'bad:communication_fault' — or None when
+    no sample exists."""
+    for entry in snapshot.get('points', []):
+        if entry.get('point') == point and entry.get('sample'):
+            quality = entry['sample'].get('quality')
+            if isinstance(quality, dict):
+                kind, reason = next(iter(quality.items()))
+                return kind + ':' + str(reason)
+            return quality
+    return None
+
+
+def scenario_plant_link_loss(ctx):
+    """Stop the run's plant container mid-run, prove the link-loss
+    degradation through the monitor surface, then restart it and prove
+    the field owner's re-claim and recovery."""
+    case = Case('plant-link-loss',
+                'Plant-link loss degrades honestly and recovers',
+                'stopping the run\'s plant container leaves the active '
+                'scanning with its field reads marked down at the link '
+                'boundary — io_health counting the per-direction '
+                'failures, the driver link reporting disconnected, a '
+                'last_error recorded — the standby never promoting, '
+                'and restarting the plant recovering Good reads under '
+                'a re-claimed writer claim with the outage\'s failures '
+                'still counted')
+
+    def role_violation(name, report, expected_roles, seen):
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-roles.json',
+                            {'expected': expected_roles,
+                             'offender': report, 'seen': seen})
+        case.evidence('file', ref)
+        return case.finish('failed', 'field loss moved ' + name
+                           + ' to role ' + str(report.get('role'))
+                           + ': ' + json.dumps(report)[:300])
+
+    try:
+        stop = ctx.get('stop_plant')
+        start = ctx.get('start_plant')
+        if stop is None or start is None or not ctx.get('plant'):
+            return case.finish('inconclusive', 'the run context '
+                               'carries no plant stop/start action or '
+                               'plant address')
+>>>>>>> origin/main
         active = wait_for(lambda: _settled_active(ctx),
                           time.monotonic() + 30)
         if active is None:
             return case.finish('failed', 'no peer reports role=active')
         peer = 'standby' if active == 'active' else 'active'
         base, peer_base = ctx[active], ctx[peer]
+<<<<<<< HEAD
         budget = ctx.get('failover_misses')
         case.observe('seam=writer-stop: stop ' + active + ' (' + base
                      + '), observe ' + peer + ' (' + peer_base + ')'
@@ -1153,6 +2157,238 @@ def scenario_stale_freshness(ctx):
                                    'writer never returned')
             case.observe('the restarted writer is serving as active '
                          'at tick ' + str(back.get('tick')))
+=======
+        expected = {active: 'active', peer: 'standby'}
+        case.observe('field owner: ' + active + ' (' + base + ')')
+
+        # The baseline: the field census names the points the link
+        # boundary fails at once, and the fencing probe proves the
+        # writer claim the outage must lose and recovery must re-take.
+        census = _try_plant(ctx, {'op': 'list_points'})
+        points = (census or {}).get('points', [])
+        field_in = sorted(entry.get('point') for entry in points
+                          if entry.get('direction') == 'in')
+        field_out = any(entry.get('direction') == 'out'
+                        for entry in points)
+        probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+        before = _try_snapshot(ctx, base)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-baseline.json',
+                            {'census': census, 'probe': probe,
+                             'qualities': {
+                                 point: _sample_quality(before or {},
+                                                        point)
+                                 for point in field_in}})
+        case.evidence('file', ref, 'the plant census, the pre-outage '
+                      'fencing probe, and the baseline qualities')
+        if census is None:
+            return case.finish('inconclusive', 'the plant did not '
+                               'answer its point census')
+        if not field_in:
+            return case.finish('inconclusive', 'the plant census '
+                               'lists no field input points')
+        if not _fenced(probe):
+            return case.finish('failed', 'the field held no writer '
+                               'claim before the outage — a third '
+                               'attachment\'s mutation probe answered '
+                               + json.dumps(probe)[:300])
+        fresh = {point: _sample_quality(before or {}, point)
+                 for point in field_in}
+        if before is None or any(q != 'good' for q in fresh.values()):
+            return case.finish('inconclusive', 'the rig never showed '
+                               'a healthy field baseline: '
+                               + json.dumps(fresh, sort_keys=True))
+        case.observe('field inputs ' + json.dumps(field_in)
+                     + ' reading good under the active\'s claim')
+
+        # The runner-owned lifecycle action: docker stop on the run's
+        # plant container, recorded on the run's action timeline.
+        try:
+            stop()
+        except Exception as exc:
+            return case.finish('inconclusive', 'the plant stop action '
+                               'never completed: ' + str(exc)[:300])
+        case.observe('plant container stopped; watching the pair '
+                     'through the outage')
+
+        outage = {'roles': {}, 'snapshots': 0, 'silent': 0,
+                  'tail_silent': 0, 'first_tick': None, 'tick': None,
+                  'qualities': {}, 'health': None}
+        degraded_at = None
+        deadline = time.monotonic() + LINK_DEGRADE_DEADLINE
+        while time.monotonic() < deadline:
+            for name, url in ((active, base), (peer, peer_base)):
+                report = _try_role(ctx, url)
+                if report is None:
+                    continue
+                outage['roles'][name] = report
+                if report.get('role') != expected[name]:
+                    return role_violation(name, report, expected,
+                                          outage['roles'])
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                outage['silent'] += 1
+                outage['tail_silent'] += 1
+            else:
+                outage['snapshots'] += 1
+                outage['tail_silent'] = 0
+                tick = snap.get('tick') or 0
+                if outage['first_tick'] is None:
+                    outage['first_tick'] = tick
+                outage['tick'] = tick
+                outage['qualities'] = {
+                    point: _sample_quality(snap, point)
+                    for point in field_in}
+                outage['health'] = snap.get('io_health')
+            if outage['snapshots'] == 0 and outage['silent'] >= 3:
+                break  # the monitor is gone — the run aborted
+            health = outage['health'] or {}
+            degraded = outage['snapshots'] > 0 \
+                and outage['tick'] > outage['first_tick'] \
+                and all(q not in (None, 'good')
+                        for q in outage['qualities'].values()) \
+                and health.get('failed_reads', 0) > 0 \
+                and (health.get('driver') or {}).get('link') \
+                == 'disconnected'
+            if degraded:
+                if degraded_at is None:
+                    degraded_at = time.monotonic()
+                elif time.monotonic() - degraded_at > LINK_SETTLE:
+                    break
+            time.sleep(LINK_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-outage.json', outage)
+        case.evidence('file', ref, 'the pair\'s served state through '
+                      'the outage')
+        health = outage['health'] or {}
+        if outage['snapshots'] == 0:
+            return case.finish('failed', 'the active\'s monitor never '
+                               'answered after the plant stop — field '
+                               'loss aborted the run rather than '
+                               'degrading its telemetry')
+        if outage['tail_silent']:
+            return case.finish('failed', 'the active\'s monitor '
+                               'stopped answering during the outage — '
+                               'the run aborted on field loss')
+        if not outage['tick'] > outage['first_tick']:
+            return case.finish('failed', 'the active\'s scans did not '
+                               'continue through the outage — the '
+                               'served tick held at '
+                               + str(outage['tick']))
+        still_fresh = [str(point) for point, q
+                       in outage['qualities'].items() if q == 'good']
+        if still_fresh:
+            return case.finish('failed', 'field inputs kept reading '
+                               'good through the outage: '
+                               + ','.join(still_fresh))
+        if health.get('failed_reads', 0) == 0 \
+                or (health.get('driver') or {}).get('link') \
+                != 'disconnected' \
+                or not health.get('last_error'):
+            return case.finish('failed', 'io_health lacks the counted '
+                               'link failure: '
+                               + json.dumps(health)[:400])
+        if field_out and health.get('failed_writes', 0) == 0:
+            return case.finish('failed', 'io_health counted the read '
+                               'failures but no write failures though '
+                               'the field serves output points: '
+                               + json.dumps(health)[:400])
+        outage_reads = health.get('failed_reads', 0)
+        outage_writes = health.get('failed_writes', 0)
+        case.observe('degradation confirmed by tick '
+                     + str(outage['tick']) + ': '
+                     + json.dumps(outage['qualities'], sort_keys=True)
+                     + ', io_health ' + json.dumps(health)[:300])
+
+        # The recovery half: the plant container comes back as a new
+        # server lifetime, so the single-writer claim is gone until the
+        # field owner re-attaches and re-claims it.
+        try:
+            start()
+        except Exception as exc:
+            return case.finish('inconclusive', 'the plant start '
+                               'action never completed: '
+                               + str(exc)[:300])
+        case.observe('plant container started; waiting for the '
+                     're-claim and Good reads')
+
+        recovery = {'plant': False, 'probe': None, 'snapshot': None,
+                    'roles': {}, 'first_tick': None, 'tick_grew': False}
+        deadline = time.monotonic() + LINK_RECOVERY_DEADLINE
+        while time.monotonic() < deadline:
+            for name, url in ((active, base), (peer, peer_base)):
+                report = _try_role(ctx, url)
+                if report is None:
+                    continue
+                recovery['roles'][name] = report
+                if report.get('role') != expected[name]:
+                    return role_violation(name, report, expected,
+                                          recovery['roles'])
+            if _try_plant(ctx, {'op': 'list_points'}) is not None:
+                recovery['plant'] = True
+            probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+            if probe is not None:
+                recovery['probe'] = probe
+            snap = _try_snapshot(ctx, base)
+            if snap is not None:
+                recovery['snapshot'] = snap
+                tick = snap.get('tick') or 0
+                if recovery['first_tick'] is None:
+                    recovery['first_tick'] = tick
+                elif tick > recovery['first_tick']:
+                    recovery['tick_grew'] = True
+            snap_health = (snap or {}).get('io_health') or {}
+            if recovery['plant'] and _fenced(probe) \
+                    and snap is not None and recovery['tick_grew'] \
+                    and all(_sample_quality(snap, point) == 'good'
+                            for point in field_in) \
+                    and (snap_health.get('driver') or {}).get('link') \
+                    == 'connected':
+                break
+            time.sleep(LINK_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-recovery.json', recovery)
+        case.evidence('file', ref, 'the plant\'s return, the fencing '
+                      'probe, and the recovered snapshot')
+        if not recovery['plant']:
+            return case.finish('inconclusive', 'the restarted plant '
+                               'container never served again')
+        if not _fenced(recovery['probe']):
+            return case.finish('failed', 'the restarted plant never '
+                               're-armed the single-writer claim — a '
+                               'third attachment\'s mutation answered '
+                               + json.dumps(recovery['probe'])[:300])
+        snap = recovery['snapshot'] or {}
+        recovered = {point: _sample_quality(snap, point)
+                     for point in field_in}
+        if any(q != 'good' for q in recovered.values()):
+            return case.finish('failed', 'reads never returned to '
+                               'Good after the plant\'s return: '
+                               + json.dumps(recovered,
+                                            sort_keys=True))
+        if not recovery['tick_grew']:
+            return case.finish('failed', 'the active\'s scans stalled '
+                               'across the plant\'s return — the '
+                               'served tick held at '
+                               + str(snap.get('tick')))
+        health = snap.get('io_health') or {}
+        if (health.get('driver') or {}).get('link') != 'connected':
+            return case.finish('failed', 'the driver link never '
+                               'reported connected after the plant\'s '
+                               'return: ' + json.dumps(health)[:400])
+        if health.get('failed_reads', 0) < outage_reads \
+                or health.get('failed_writes', 0) < outage_writes \
+                or not health.get('last_error'):
+            return case.finish('failed', 'io_health lost the '
+                               'outage\'s recorded failures — the '
+                               'counters reset across the recovery: '
+                               + json.dumps(health)[:400])
+        case.observe('recovered: reads Good, the writer claim '
+                     're-armed, io_health still records '
+                     + str(health.get('failed_reads')) + ' failed '
+                     'reads and ' + str(health.get('failed_writes'))
+                     + ' failed writes')
+>>>>>>> origin/main
         return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
@@ -1418,6 +2654,312 @@ def scenario_served_interface(ctx):
     except urllib.error.HTTPError as exc:
         return case.finish('failed', 'the emitted-events view answered '
                            + str(exc.code))
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# Receipted point forcing and release (WW-OPS-003's substituted
+# quality, WW-FND-004's settled receipts): `force_point` pins a
+# writable `In` point at Uncertain(Substituted) across scans and badges
+# it in the snapshot's `forces` list; `unforce_point` lifts it at a
+# scan boundary. The rig's target is its writable internal `In` point
+# p101-oos — the executor's force path accepts writable internal
+# points, the operator-setpoint surface, so the model declares no
+# writable loopback field point (a channel-bound `writable` mark is
+# exactly what the model lint names). Releasing an internal point
+# resumes the held-value rule — the last-stamped (forced) sample
+# persists — so the recovery leg restamps the held value through the
+# receipted write path: a force still standing would re-substitute on
+# the next scan, so the held value read at Good with an empty `forces`
+# list proves the release took.
+
+FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
+
+
+def _point_sample(snapshot, point):
+    for entry in (snapshot or {}).get('points', []):
+        if entry.get('point') == point:
+            return entry.get('sample') or {}
+    return {}
+
+
+def _point_quality(snapshot, point):
+    return _point_sample(snapshot, point).get('quality')
+
+
+def _forced_entry(snapshot, point):
+    """The snapshot's `forces` badge for `point`, or None."""
+    for entry in (snapshot or {}).get('forces', []):
+        if entry.get('point') == point:
+            return entry
+    return None
+
+
+def _settled_receipts(journal):
+    """The receipts the journal settled — `command_settled` payloads."""
+    return [entry.get('event', {}).get('command_settled', {})
+            .get('receipt') or {}
+            for entry in _journal_list(journal)]
+
+
+def scenario_force_release(ctx):
+    """A receipted force pins p101-oos at Substituted quality with the
+    control image following it; its release plus the restore write
+    return the held value at Good — every command journaled as a
+    settled, attributed receipt."""
+    case = Case('force-release',
+                'Receipted forcing and release on a writable point',
+                'force_point on the writable p101-oos point serves the '
+                'forced value at Uncertain(Substituted), lists the '
+                'point under snapshot.forces, and the inverted '
+                'p101-oos-ok carrier follows the forced value; '
+                'unforce_point clears the badge and the restored held '
+                'value reads at Good quality; both commands journal as '
+                'settled receipts attributed to qa-lane')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # replayed alone the rig is fresh (ctrl-a active), while the
+        # full suite reaches this case after the failover.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('forcing against ' + active + ' (' + base + ')')
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the force target')
+        target = follower = None
+        for entry in signals.get('points', []):
+            if entry.get('name') == 'p101-oos' and entry.get('writable') \
+                    and entry.get('direction') == 'in':
+                target = entry.get('point')
+            elif entry.get('name') == 'p101-oos-ok':
+                follower = entry.get('point')
+        if target is None or follower is None:
+            return case.finish(
+                'inconclusive',
+                'the rig model lacks the writable p101-oos point or '
+                'its p101-oos-ok in-service carrier')
+
+        # The held value the release leg restores — whatever the run's
+        # earlier commands left the operator point holding.
+        baseline = _snapshot(ctx, base)
+        held = _point_value(baseline, target)
+        if not isinstance(held, bool):
+            return case.finish(
+                'inconclusive',
+                'the force target holds no bool baseline: '
+                + json.dumps(_point_sample(baseline, target))[:300])
+        forced_value = not held
+        case.observe('force target: p101-oos point ' + str(target)
+                     + ' held ' + str(held) + '; control probe '
+                     'p101-oos-ok point ' + str(follower)
+                     + ' (the inverted in-service carrier)')
+
+        force_body = {'point': target, 'kind': 'bool',
+                      'value': {'bool': forced_value}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'force_point': force_body}, 'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-force-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the force submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'force refused: ' + str(status)
+                               + ' ' + json.dumps(receipt)[:400])
+        case.observe('force admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        observed = {}
+
+        def forced_state():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['forced'] = snap
+            badge = _forced_entry(snap, target)
+            if _point_value(snap, target) == forced_value \
+                    and _point_quality(snap, target) \
+                    == {'uncertain': 'substituted'} \
+                    and (badge or {}).get('value') \
+                    == {'bool': forced_value} \
+                    and _point_value(snap, follower) == held:
+                return snap
+            return None
+
+        forced = wait_for(forced_state, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-forced.json',
+                            observed.get('forced') or {})
+        case.evidence('file', ref, 'snapshot while the force stands')
+        if forced is None:
+            snap = observed.get('forced') or {}
+            unmet = []
+            if _point_value(snap, target) != forced_value:
+                unmet.append('the forced value ' + str(forced_value))
+            if _point_quality(snap, target) \
+                    != {'uncertain': 'substituted'}:
+                unmet.append('Uncertain(Substituted) quality')
+            if (_forced_entry(snap, target) or {}).get('value') \
+                    != {'bool': forced_value}:
+                unmet.append('a snapshot.forces entry')
+            if _point_value(snap, follower) != held:
+                unmet.append('control following the force '
+                             '(p101-oos-ok reading ' + str(held) + ')')
+            return case.finish('failed', 'forced telemetry never '
+                               'showed ' + ' + '.join(unmet))
+        case.observe('forced: point ' + str(target) + ' reads '
+                     + str(forced_value)
+                     + ' at Uncertain(Substituted), badged under '
+                     'snapshot.forces; p101-oos-ok follows at '
+                     + str(held))
+
+        unforce_body = {'point': target}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'unforce_point': unforce_body},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-release-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the release submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'release refused: '
+                               + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+        case.observe('release admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        def released():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['released'] = snap
+            return _forced_entry(snap, target) is None and snap
+
+        cleared = wait_for(released, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-released.json',
+                            observed.get('released') or {})
+        case.evidence('file', ref, 'snapshot after the release settled')
+        if not cleared:
+            return case.finish('failed',
+                               'the forces badge never cleared after '
+                               'unforce_point')
+
+        # The held-value rule resumed on release; restamping the held
+        # value through the receipted write path produces the Good read
+        # the case requires — a force still standing would re-substitute
+        # on the next scan, so this read persisting alongside an empty
+        # forces list is what proves the release took.
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': {
+                'point': target, 'kind': 'bool',
+                'value': {'bool': held}}},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-restore-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the restore-write submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'the restore write was '
+                               'refused: ' + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+
+        def recovered():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['recovered'] = snap
+            if _point_value(snap, target) == held \
+                    and _point_quality(snap, target) == 'good' \
+                    and _forced_entry(snap, target) is None \
+                    and _point_value(snap, follower) == forced_value:
+                return snap
+            return None
+
+        if not wait_for(recovered, time.monotonic() + FORCE_DEADLINE):
+            snap = observed.get('recovered') or {}
+            unmet = []
+            if _point_value(snap, target) != held:
+                unmet.append('the held value ' + str(held))
+            if _point_quality(snap, target) != 'good':
+                unmet.append('Good quality')
+            if _forced_entry(snap, target) is not None:
+                unmet.append('an empty forces list')
+            if _point_value(snap, follower) != forced_value:
+                unmet.append('control recovering (p101-oos-ok reading '
+                             + str(forced_value) + ')')
+            return case.finish('failed', 'telemetry did not recover '
+                               'after release: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-recovered.json',
+                            observed.get('recovered') or {})
+        case.evidence('file', ref, 'snapshot after the restore write')
+        case.observe('released and restored: point ' + str(target)
+                     + ' reads ' + str(held) + ' at Good, forces '
+                     'cleared, p101-oos-ok back at '
+                     + str(forced_value))
+
+        # Both commands must journal as settled receipts carrying the
+        # run's actor — the audit half of the receipted-command
+        # contract.
+        found = {'force': None, 'release': None}
+
+        def settled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since=0')
+            except Exception:
+                return None
+            observed['journal'] = journal
+            for entry in _settled_receipts(journal):
+                command = entry.get('command') or {}
+                if command.get('force_point') == force_body:
+                    found['force'] = entry
+                elif command.get('unforce_point') == unforce_body:
+                    found['release'] = entry
+            return (found['force'] is not None
+                    and found['release'] is not None) or None
+
+        wait_for(settled, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-journal.json',
+                            observed.get('journal') or [])
+        case.evidence('file', ref, 'journal tail with the settled '
+                      'receipts')
+        unmet = []
+        for name, entry in (('force', found['force']),
+                            ('release', found['release'])):
+            if entry is None:
+                unmet.append('no settled ' + name
+                             + ' receipt journaled')
+                continue
+            if entry.get('actor') != 'qa-lane':
+                unmet.append('the ' + name + ' receipt is unattributed '
+                             '(actor='
+                             + json.dumps(entry.get('actor')) + ')')
+            if 'applied' not in (entry.get('outcome') or {}):
+                unmet.append('the ' + name + ' receipt did not settle '
+                             'applied: '
+                             + json.dumps(entry.get('outcome'))[:200])
+        if unmet:
+            return case.finish('failed', 'journal audit: '
+                               + '; '.join(unmet))
+        case.observe('journal: force and release settled as applied '
+                     'receipts attributed to qa-lane')
+        return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
 
@@ -2265,6 +3807,401 @@ def scenario_consumer_schedule(ctx):
 
 
 # --------------------------------------------------------------------
+# The field-fault schedule (WW-OPS-003's signal-confidence clause and
+# WW-FND-002's remote-I/O degradation path): the lane drives the same
+# per-point failure surface the hardware lane will grade for channel
+# faults — InjectFault/ClearFault over the plant's newline-JSON
+# protocol on the run's published plant port. A quality fault must
+# present the point degraded — the substituted quality stamped on the
+# stored field value, never a silently healthy last-known — and
+# clearing it must restore the field value at Good; an error fault must
+# surface through the driver's IoError path into io_health (the
+# per-direction counters, last_error with tick and direction) while the
+# scan continues and no role change follows — field faults are not
+# peer loss.
+
+FAULT_DEADLINE = 30   # bound on one injection surfacing or a clear
+FAULT_PROBE = 1.0     # plant-step window between stability probes
+PLANT_MAX_MESSAGE = 64 * 1024  # the protocol's documented line bound
+
+
+def _quality_key(quality):
+    """A served quality's comparable form: 'good', or
+    'bad:<reason>'/'uncertain:<reason>' for a degraded stamp."""
+    if quality == 'good':
+        return 'good'
+    if isinstance(quality, dict) and quality:
+        name = next(iter(quality))
+        return str(name) + ':' + str(quality[name])
+    return 'unknown'
+
+
+def _point_sample(snapshot, point):
+    """The served sample of one point in a /snapshot payload, or None."""
+    for entry in snapshot.get('points', []):
+        if entry.get('point') == point:
+            return entry.get('sample')
+    return None
+
+
+def _plant_connect(ctx, timeout=5):
+    """A TCP connection to the run's published plant-protocol endpoint —
+    ctx['plant'] carries the published 'host:port'."""
+    host, _, port = str(ctx['plant']).rpartition(':')
+    return socket.create_connection(
+        (host or '127.0.0.1', int(port or 0)), timeout=timeout)
+
+
+def _plant_request(stream, request):
+    """One plant-protocol round trip: write the request object plus the
+    newline delimiter, read back exactly one response line, enforcing
+    the protocol's message bound."""
+    stream.sendall(json.dumps(request).encode() + b'\n')
+    line = b''
+    while not line.endswith(b'\n'):
+        chunk = stream.recv(PLANT_MAX_MESSAGE)
+        if not chunk:
+            raise ConnectionError('the plant server closed the '
+                                  'connection mid-request')
+        line += chunk
+        if len(line) > PLANT_MAX_MESSAGE:
+            raise ConnectionError('a plant response exceeded the '
+                                  'protocol message bound')
+    return json.loads(line)
+
+
+def _plant_read(stream, point):
+    """The stored field sample for `point` — `{"op":"read"}` answered
+    as a `sample` result."""
+    response = _plant_request(stream, {'op': 'read', 'point': point})
+    if response.get('result') != 'sample':
+        raise ConnectionError('plant read on point ' + str(point)
+                              + ' answered '
+                              + json.dumps(response)[:300])
+    return response.get('sample') or {}
+
+
+def _field_inputs(stream):
+    """{point: PointInfo entry} for every 'in'-direction point the
+    plant serves — the list_points census, which is the field side's
+    own account of what the scenario may fault."""
+    response = _plant_request(stream, {'op': 'list_points'})
+    if response.get('result') != 'points':
+        raise ConnectionError('plant list_points answered '
+                              + json.dumps(response)[:300])
+    return {entry.get('point'): entry
+            for entry in response.get('points') or []
+            if entry.get('direction') == 'in'}
+
+
+def scenario_field_fault(ctx):
+    """Injected field-point faults degrade through the monitor and
+    clear — never masquerading as healthy, never costing the active
+    its role."""
+    case = Case('field-fault',
+                'Injected field faults degrade, recover, and keep role',
+                'a quality fault injected on a field In point serves '
+                'the point with the substituted quality stamped — '
+                'never a silently Good value — clearing it restores '
+                'the simulated field value at Good quality, and a '
+                'disconnected-class fault on a second field point '
+                'surfaces on io_health (failed_reads, last_error with '
+                'tick and direction) while the scan continues and no '
+                'role change follows')
+    stream = None
+    injected = []
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # whichever peer reports settled active is the observed surface.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        if ctx.get('plant') is None:
+            return case.finish('inconclusive',
+                               'the run publishes no plant endpoint')
+        stream = _plant_connect(ctx)
+        case.observe('plant protocol at ' + str(ctx['plant'])
+                     + '; observing ' + active + ' (' + base + ')')
+
+        # Fault targets must be points the field itself holds still:
+        # only a stable stored value can prove the clear restored the
+        # field value rather than a moved one. Two list_points probes
+        # straddling a few plant steps find them, and each must already
+        # read Good on the monitor — a forced or degraded point cannot
+        # evidence a fault it would mask.
+        first = _field_inputs(stream)
+        time.sleep(FAULT_PROBE)
+        second = _field_inputs(stream)
+        snap = _snapshot(ctx, base)
+        served_good = {
+            entry.get('point') for entry in snap.get('points', [])
+            if _quality_key((entry.get('sample') or {}).get('quality'))
+            == 'good'}
+        stable = sorted(
+            point for point, info in first.items()
+            if point in second and point in served_good
+            and _quality_key((info.get('sample') or {}).get('quality'))
+            == 'good'
+            and _quality_key((second[point].get('sample') or {})
+                             .get('quality')) == 'good'
+            and (info.get('sample') or {}).get('value')
+            == (second[point].get('sample') or {}).get('value'))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'field-fault-points.json',
+                            {'served': sorted(second), 'stable': stable})
+        case.evidence('file', ref, 'the list_points census and the '
+                      'stability probe')
+        if not stable:
+            return case.finish('inconclusive',
+                               'no stable healthy field In point to '
+                               'fault')
+        quality_point = stable[0]
+        alternates = [point for point in stable if point != quality_point]
+        if not alternates:
+            alternates = sorted(point for point in second
+                                if point != quality_point)
+        if not alternates:
+            return case.finish('inconclusive',
+                               'no second field In point to fault')
+        error_point = alternates[0]
+        case.observe('fault targets: quality point '
+                     + str(quality_point) + ', error point '
+                     + str(error_point))
+        last = {}
+
+        # Leg 1: a quality fault substitutes the served quality, leaving
+        # the stored field value — the bad-data-confidence clause's
+        # "degraded, never silently healthy" half.
+        field_value = _plant_read(stream, quality_point).get('value')
+        verdict = _plant_request(
+            stream, {'op': 'inject_fault', 'point': quality_point,
+                     'fault': {'quality': {'bad': 'device_fault'}}})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'inject_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.append(quality_point)
+
+        def degraded():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, quality_point)
+            if sample and _quality_key(sample.get('quality')) \
+                    == 'bad:device_fault':
+                return sample
+            return None
+
+        hit = wait_for(degraded, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-degraded.json',
+            {'point': quality_point,
+             'sample': hit or _point_sample(last.get('snap') or {},
+                                          quality_point)})
+        case.evidence('file', ref, 'the faulted point under injection')
+        if not hit:
+            return case.finish(
+                'failed', 'the quality fault on point '
+                + str(quality_point) + ' never surfaced: the served '
+                'sample stayed '
+                + json.dumps(_point_sample(last.get('snap') or {},
+                                           quality_point))[:300])
+        if hit.get('value') != field_value:
+            return case.finish(
+                'failed', 'the degraded sample replaced the field '
+                'value ' + json.dumps(field_value) + ' with '
+                + json.dumps(hit.get('value')))
+        case.observe('point ' + str(quality_point)
+                     + ' serves bad:device_fault over the stored field '
+                     'value ' + json.dumps(field_value))
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'a quality fault moved the '
+                               'active role — a field fault is not '
+                               'peer loss')
+
+        verdict = _plant_request(stream, {'op': 'clear_fault',
+                                          'point': quality_point})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'clear_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.remove(quality_point)
+
+        def recovered():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, quality_point)
+            if not sample or _quality_key(sample.get('quality')) \
+                    != 'good':
+                return None
+            try:
+                field = _plant_read(stream, quality_point)
+            except Exception:
+                return None
+            if sample.get('value') == field.get('value'):
+                return sample
+            return None
+
+        hit = wait_for(recovered, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-recovered.json',
+            {'point': quality_point,
+             'sample': hit or _point_sample(last.get('snap') or {},
+                                          quality_point)})
+        case.evidence('file', ref, 'the point after clearing')
+        if not hit:
+            return case.finish(
+                'failed', 'clearing the fault on point '
+                + str(quality_point) + ' never restored the field '
+                'value at Good quality; last served '
+                + json.dumps(_point_sample(last.get('snap') or {},
+                                           quality_point))[:300])
+        case.observe('point ' + str(quality_point)
+                     + ' recovered to the field value at Good')
+
+        # Leg 2: an error fault answers the driver's read with an
+        # IoError — the remote-I/O degradation path. It must surface on
+        # io_health attributed to the point and the in direction, the
+        # served sample must degrade rather than pose as healthy
+        # last-known, the link must stay up (a point fault is not link
+        # loss), the scan must not stall, and the role must not move.
+        def healthy_second():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, error_point)
+            if sample and _quality_key(sample.get('quality')) \
+                    == 'good':
+                return snap
+            return None
+
+        # The second leg's baseline: the target must read healthy ahead
+        # of its injection, so the counters it moves are attributable.
+        before = wait_for(healthy_second,
+                          time.monotonic() + FAULT_DEADLINE)
+        if not before:
+            return case.finish(
+                'inconclusive', 'the error-fault target point '
+                + str(error_point) + ' never read healthy ahead of '
+                'injection')
+        health0 = before.get('io_health') or {}
+        tick0 = before.get('tick') or 0
+        verdict = _plant_request(
+            stream, {'op': 'inject_fault', 'point': error_point,
+                     'fault': 'disconnected'})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'inject_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.append(error_point)
+
+        def surfaced():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            health = snap.get('io_health') or {}
+            fault = health.get('last_error') or {}
+            if (health.get('failed_reads') or 0) \
+                    > (health0.get('failed_reads') or 0) \
+                    and fault.get('point') == error_point \
+                    and fault.get('direction') == 'in' \
+                    and fault.get('error') \
+                    == {'disconnected': error_point}:
+                return snap
+            return None
+
+        snap = wait_for(surfaced, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-io-health.json',
+            {'point': error_point,
+             'io_health': (last.get('snap') or {}).get('io_health'),
+             'sample': _point_sample(last.get('snap') or {},
+                                     error_point)})
+        case.evidence('file', ref, 'io_health under the error fault')
+        if not snap:
+            return case.finish(
+                'failed', 'the error fault on point '
+                + str(error_point) + ' never surfaced on io_health: '
+                + json.dumps((last.get('snap') or {})
+                             .get('io_health'))[:400])
+        health = snap.get('io_health') or {}
+        fault = health.get('last_error') or {}
+        if (fault.get('tick') or 0) < tick0:
+            return case.finish('failed', 'last_error predates the '
+                               'injection: ' + json.dumps(fault)[:300])
+        if (health.get('failed_writes') or 0) \
+                != (health0.get('failed_writes') or 0):
+            return case.finish('failed', 'an in-point read fault '
+                               'moved the out-direction counter: '
+                               + json.dumps(health)[:400])
+        link = (health.get('driver') or {}).get('link')
+        if link != 'connected':
+            return case.finish('failed', 'a point fault presented as '
+                               'link loss: ' + str(link))
+        sample = _point_sample(snap, error_point)
+        if _quality_key((sample or {}).get('quality')) \
+                != 'bad:communication_fault':
+            return case.finish(
+                'failed', 'the error-faulted point did not serve '
+                'degraded: ' + json.dumps(sample)[:300])
+        if (snap.get('tick') or 0) <= tick0:
+            return case.finish('failed', 'the scan did not advance '
+                               'past the injection')
+        case.observe('io_health attributes point ' + str(error_point)
+                     + ': failed_reads '
+                     + str(health0.get('failed_reads') or 0) + ' -> '
+                     + str(health.get('failed_reads'))
+                     + ', last_error ' + json.dumps(fault)
+                     + ', link ' + str(link))
+        grown = wait_for(
+            lambda: (s.get('tick', 0) > snap.get('tick', 0) and s
+                     or None)
+            if (s := _try_snapshot(ctx, base)) else None,
+            time.monotonic() + FAULT_DEADLINE)
+        if not grown:
+            return case.finish('failed', 'the scan stalled while the '
+                               'error fault stood')
+        roles = {}
+        for name in ('active', 'standby'):
+            try:
+                roles[name] = _role(ctx, ctx[name])
+            except Exception as exc:
+                roles[name] = {'unreachable': str(exc)[:200]}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'field-fault-roles.json', roles)
+        case.evidence('file', ref, 'roles while the error fault stands')
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'an error fault moved the '
+                               'active role — a field fault is not '
+                               'peer loss: ' + json.dumps(roles)[:300])
+        case.observe('scan advancing (tick ' + str(snap.get('tick'))
+                     + ' -> ' + str(grown.get('tick'))
+                     + '), ' + active + ' still active under the '
+                     'error fault')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+    finally:
+        if stream is not None:
+            # The injected points are the run's shared field: a case
+            # that leaves them faulted poisons every later scenario.
+            for point in injected:
+                try:
+                    _plant_request(stream, {'op': 'clear_fault',
+                                            'point': point})
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+# --------------------------------------------------------------------
 # The bounded command-admission contract (decision 83's ingress half):
 # commands submitted faster than the scan boundary drains them must each
 # take a structured receipt — a settlement or the named queue_full
@@ -2405,16 +4342,419 @@ def scenario_command_admission(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The shipped operator CLI as an external consumer (WW-FND-004's
+# replaceable-consumer contract, WW-OPS-001/002's operator-facing
+# surface): the lane's one proof that the real dcs-ctl binary — not a
+# test harness — reads and commands a deployed pair. The binary comes
+# from the run's image build (the bounded builder's
+# `cargo build -p dcs-monitor --bin dcs-ctl` beside the image
+# binaries), handed to the scenario as ctx['dcs_ctl']; every asserted
+# read and mutation travels through CLI invocations against the
+# published monitor addresses. The leg is read-mostly by construction:
+# its single mutation is the writable-safe declared command the
+# served-interface case's selection logic picks, and the refusal
+# probes are rejected before they can perturb the plant.
+
+DCS_CTL_TIMEOUT = 20   # bound on one dcs-ctl invocation
+CTL_DEADLINE = 30      # bound on the journaled-settlement wait
+CTL_ACTOR = 'qa-lane-dcs-ctl'  # the --actor the invoke declares
+
+
+def _ctl_addr(base):
+    """A monitor base URL as dcs-ctl's `<addr>` argument — host:port."""
+    return base.split('://', 1)[-1]
+
+
+def _run_ctl(binary, addr, args):
+    """One dcs-ctl invocation, captured — the subprocess seam the pool
+    tests fake."""
+    return subprocess.run([binary, addr, *args], capture_output=True,
+                          text=True, timeout=DCS_CTL_TIMEOUT)
+
+
+def _value_literal(value):
+    """A wire `{"bool": true}`-shaped Value as dcs-ctl's `<value>` text."""
+    if 'bool' in value:
+        return 'true' if value['bool'] else 'false'
+    if 'int' in value:
+        return str(value['int'])
+    return repr(value['float'])
+
+
+def _ctl_command_args(command):
+    """The dcs-ctl argv submitting the picked receipted-path command:
+    `invoke`, `set_parameter`, and `write_value` map to the same-named
+    subcommands; any other variant has no CLI spelling and returns
+    None."""
+    if 'invoke' in command:
+        body = command['invoke']
+        return ['invoke', str(body['component']), str(body['command'])] \
+            + [str(name) + '=' + _value_literal(value)
+               for name, value in
+               (body.get('arguments') or {}).items()]
+    if 'set_parameter' in command:
+        body = command['set_parameter']
+        return ['set-parameter', str(body['component']),
+                str(body['name']), _value_literal(body['value'])]
+    if 'write_value' in command:
+        body = command['write_value']
+        return ['write', str(body['point']), _value_literal(body['value'])]
+    return None
+
+
+def scenario_dcs_ctl(ctx):
+    """The shipped dcs-ctl binary against the deployed pair — the
+    replaceable-consumer contract exercised through the operator CLI
+    rather than raw HTTP."""
+    case = Case('dcs-ctl',
+                'dcs-ctl consumes the served contract externally',
+                'the lane-built dcs-ctl binary reports exactly one '
+                'active and one standby across the pair, its schema '
+                'read covers every component kind the rig model '
+                'declares, the command the served-interface selection '
+                'logic picks settles a receipt journaled with the '
+                '--actor the leg passed, the emitted-events read '
+                'attributes a produced event to its component, and an '
+                'undeclared or unavailable invocation is refused by '
+                'name — never silently accepted')
+    transcript = []
+
+    def done(outcome, detail=None):
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-transcript.json', transcript)
+        if not any(entry['ref'] == ref
+                   for entry in case.record['evidence']):
+            case.evidence('file', ref,
+                          'the dcs-ctl invocation transcript')
+        return case.finish(outcome, detail)
+
+    def ctl(base, *args):
+        """Run the binary; append the invocation to the transcript;
+        return (exit, parsed-stdout-or-None, stderr)."""
+        addr = _ctl_addr(base)
+        entry = {'argv': [addr] + [str(arg) for arg in args]}
+        transcript.append(entry)
+        try:
+            result = _run_ctl(binary, addr, entry['argv'][1:])
+        except Exception as exc:
+            entry['error'] = str(exc)[:300]
+            return None, None, str(exc)[:300]
+        entry['exit'] = result.returncode
+        try:
+            body = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            body = None
+            entry['stdout'] = str(result.stdout)[:300]
+        stderr = str(result.stderr or '').strip()
+        if result.returncode or stderr:
+            entry['stderr'] = stderr[:300]
+        return result.returncode, body, stderr
+
+    try:
+        binary = ctx.get('dcs_ctl')
+        if binary is None:
+            return done('inconclusive', 'the run context carries no '
+                        'dcs-ctl binary path')
+        if not Path(binary).is_file() \
+                or not os.access(binary, os.X_OK):
+            return done('inconclusive', 'no executable dcs-ctl at '
+                        + str(binary) + ' — the documented seam '
+                        '(cargo build -p dcs-monitor --bin dcs-ctl '
+                        'inside the lane\'s bounded image build) '
+                        'produced nothing')
+        case.observe('dcs-ctl binary: ' + str(binary) + ' — built by '
+                     'the run\'s image build (cargo build --release '
+                     '--locked -p dcs-monitor --bin dcs-ctl)')
+
+        # The pair must be serving before the tool's answers mean
+        # anything — the same liveness gate the other post-failover
+        # cases apply, so a down monitor stays a rig failure rather
+        # than masquerading as a CLI defect.
+        if wait_for(lambda: _settled_active(ctx),
+                    time.monotonic() + 30) is None:
+            return done('failed', 'no peer reports role=active')
+
+        roles = {}
+        for name in ('active', 'standby'):
+            rc, body, err = ctl(ctx[name], 'role')
+            if rc != 0 or not isinstance(body, dict):
+                return done('failed', 'dcs-ctl role failed on ' + name
+                            + ' against a serving monitor: exit '
+                            + str(rc) + ' ' + str(err)[:200])
+            roles[name] = body.get('role')
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-roles.json',
+                            roles)
+        case.evidence('file', ref, 'dcs-ctl role on both endpoints')
+        if sorted(str(role) for role in roles.values()) \
+                != ['active', 'standby']:
+            return done('failed', 'the post-failover pair is not one '
+                        'active plus one standby: '
+                        + json.dumps(roles, sort_keys=True))
+        active = next(name for name in roles if roles[name] == 'active')
+        base = ctx[active]
+        case.observe('post-failover layout per dcs-ctl: '
+                     + json.dumps(roles, sort_keys=True))
+
+        rc, signals, err = ctl(base, 'signals')
+        if rc != 0 or not isinstance(signals, dict):
+            return done('failed', 'dcs-ctl signals failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        rc, schema, err = ctl(base, 'schema')
+        if rc != 0 or not isinstance(schema, dict):
+            return done('failed', 'dcs-ctl schema failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-schema.json',
+                            {'signals': signals, 'schema': schema})
+        case.evidence('file', ref, 'the CLI-printed signal index and '
+                      'interface registry')
+        declared = signals.get('components') or []
+        if not declared:
+            return done('inconclusive', 'the signal index serves no '
+                        'component records to check coverage against')
+        served = {}
+        for entry in schema.get('interfaces') or []:
+            if isinstance(entry, dict):
+                served[entry.get('name')] = entry.get('interface') or {}
+        missing = [record for record in declared
+                   if (served.get(record.get('name')) or {}).get('kind')
+                   != record.get('kind')]
+        if missing:
+            return done(
+                'failed', 'the schema read misses declared kinds '
+                + ', '.join(sorted({str(r.get('kind'))
+                                    for r in missing}))
+                + ' (instances: '
+                + ', '.join(str(r.get('name')) for r in missing[:8])
+                + ')')
+        kinds = sorted({str(record.get('kind')) for record in declared})
+        case.observe('schema read covers ' + str(len(declared))
+                     + ' declared instances across '
+                     + str(len(kinds)) + ' kinds ('
+                     + ', '.join(kinds) + ')')
+
+        picked = _pick_declared_command(schema.get('interfaces') or [],
+                                        signals)
+        if picked is None:
+            return done('inconclusive', 'no served command translates '
+                        'to the receipted path')
+        component, spec, command = picked
+        argv = _ctl_command_args(command)
+        if argv is None:
+            return done('inconclusive', 'the picked command has no '
+                        'dcs-ctl spelling: ' + json.dumps(command))
+        case.observe('picked command: ' + str(component) + ' '
+                     + str(spec.get('name')) + ' -> dcs-ctl '
+                     + ' '.join(argv) + ' --actor ' + CTL_ACTOR)
+        rc, receipt, err = ctl(base, *argv, '--actor', CTL_ACTOR)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'dcs-ctl-invoke.json',
+            {'argv': argv + ['--actor', CTL_ACTOR], 'exit': rc,
+             'receipt': receipt, 'stderr': err})
+        case.evidence('file', ref, 'the command\'s printed receipt')
+        outcome = receipt.get('outcome') if isinstance(receipt, dict) \
+            else None
+        if not isinstance(receipt, dict) \
+                or receipt.get('command') != command \
+                or not isinstance(outcome, dict) or not outcome:
+            return done('failed', 'the command returned no settled '
+                        'receipt: exit ' + str(rc) + ' '
+                        + json.dumps(receipt)[:300] + ' '
+                        + str(err)[:200])
+        case.observe('receipt outcome: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        # The attributed CommandSettled in the served journal, read
+        # through `dcs-ctl journal` — GET /journal through the shipped
+        # consumer.
+        observed = {}
+
+        def journaled():
+            rc, journal, _err = ctl(base, 'journal', '--since', '0')
+            if rc != 0 or not isinstance(journal, list):
+                return None
+            observed['journal_len'] = len(journal)
+            for entry in journal:
+                settled = ((entry or {}).get('event') or {}) \
+                    .get('command_settled') or {}
+                if (settled.get('receipt') or {}).get('command') \
+                        == command:
+                    observed['entry'] = entry
+                    return True
+            return None
+
+        covered = wait_for(journaled,
+                           time.monotonic() + CTL_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'dcs-ctl-journal.json',
+            {'entry': observed.get('entry'),
+             'journal_len': observed.get('journal_len')})
+        case.evidence('file', ref, 'the CLI-read journal covering the '
+                      'command\'s settlement')
+        if not covered:
+            return done('failed', 'the served journal never recorded '
+                        'the command\'s CommandSettled')
+        settled = (observed['entry'].get('event') or {}) \
+            .get('command_settled', {}).get('receipt') or {}
+        if settled.get('actor') != CTL_ACTOR:
+            return done('failed', 'the journaled receipt is '
+                        'unattributed: actor='
+                        + json.dumps(settled.get('actor')))
+        case.observe('journal carries the settled receipt attributed '
+                     'to ' + CTL_ACTOR)
+
+        # The emitted-events read: the produced event — the command's
+        # settled receipt — attributed to its component.
+        rc, events, err = ctl(base, 'events', component)
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-events.json',
+                            {'component': component, 'exit': rc,
+                             'events': events})
+        case.evidence('file', ref, 'the emitted-events read for '
+                      + str(component))
+        if rc != 0 or not isinstance(events, list):
+            return done('failed', 'dcs-ctl events failed for '
+                        + str(component) + ': exit ' + str(rc) + ' '
+                        + str(err)[:200])
+        match = None
+        for entry in events:
+            event = (entry or {}).get('event') or {}
+            settled_receipt = (event.get('command_settled') or {}) \
+                .get('receipt') or {}
+            if settled_receipt.get('command') == command \
+                    or event.get('event_emitted'):
+                match = entry
+                break
+        if match is None:
+            return done('failed', 'the emitted-events read attributes '
+                        'no produced event to ' + str(component))
+        case.observe('events read attributes '
+                     + next(iter(match.get('event') or {}), '?')
+                     + ' to ' + str(component))
+
+        # The refusal legs: an invoke the served contract does not
+        # declare, and — when the resource view advertises one — a
+        # command whose availability rule currently refuses. Both must
+        # answer the named refusal, never a silent accept.
+        refusals = {}
+        declared_names = {str(item.get('name'))
+                          for item in (served.get(component) or {})
+                          .get('commands') or []}
+        probe = 'dcs-ctl-undeclared'
+        while probe in declared_names:
+            probe += '-x'
+        rc, refused, err = ctl(base, 'invoke', component, probe,
+                               '--actor', CTL_ACTOR)
+        refusals['undeclared'] = {
+            'argv': ['invoke', component, probe, '--actor', CTL_ACTOR],
+            'exit': rc, 'receipt': refused, 'stderr': err}
+
+        unavailable = None
+        try:
+            _, resources = http_json('GET', base + '/resources')
+        except Exception:
+            resources = {}
+        for record in (resources or {}).get('components') or []:
+            interface = served.get(record.get('name')) or {}
+            states = {state.get('name'): state
+                      for state in record.get('commands') or []}
+            for cspec in interface.get('commands') or []:
+                state = states.get(cspec.get('name'))
+                if not state or state.get('available') is not False:
+                    continue
+                submission = _command_for_spec(record.get('name'),
+                                               cspec)
+                un_argv = (_ctl_command_args(submission)
+                           if submission else None)
+                if un_argv:
+                    unavailable = (record.get('name'), cspec.get('name'),
+                                   un_argv, state.get('refusal'))
+                    break
+            if unavailable:
+                break
+        if unavailable:
+            un_component, un_name, un_argv, advertised = unavailable
+            rc, refused, err = ctl(base, *un_argv,
+                                   '--actor', CTL_ACTOR)
+            refusals['unavailable'] = {
+                'argv': un_argv + ['--actor', CTL_ACTOR], 'exit': rc,
+                'receipt': refused, 'stderr': err,
+                'component': un_component, 'command': un_name,
+                'advertised_refusal': advertised}
+        else:
+            case.observe('no unavailable command advertised; the '
+                         'undeclared probe covers the refusal leg')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-refusals.json', refusals)
+        case.evidence('file', ref, 'the named refusals')
+
+        def rejection(leg):
+            """The named rejection a refusal leg answered, or None."""
+            receipt = leg['receipt']
+            reason = ((receipt or {}).get('outcome') or {}) \
+                .get('rejected') if isinstance(receipt, dict) else None
+            reason = (reason or {}).get('reason') \
+                if isinstance(reason, dict) else None
+            return next(iter(reason), None) \
+                if isinstance(reason, dict) and reason else None
+
+        undeclared = refusals['undeclared']
+        if undeclared['exit'] == 0 \
+                or rejection(undeclared) != 'unknown_command':
+            return done('failed', 'the undeclared invoke was not '
+                        'refused by name: exit '
+                        + str(undeclared['exit']) + ' '
+                        + json.dumps(undeclared['receipt'])[:300])
+        case.observe('undeclared invoke refused by name: '
+                     + rejection(undeclared))
+        if 'unavailable' in refusals:
+            if refusals['unavailable']['exit'] == 0 \
+                    or rejection(refusals['unavailable']) is None:
+                return done('failed', 'the contract-named unavailable '
+                            'command was silently accepted: '
+                            + json.dumps(refusals['unavailable'])[:300])
+            case.observe('unavailable command refused by name: '
+                         + rejection(refusals['unavailable']))
+        return done('passed')
+    except Exception as exc:
+        return done('inconclusive', str(exc))
+
+
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
-# watches reconverge.
+# watches reconverge. The parameter-tune case also runs ahead of the
+# failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
+# so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
+# and the promotion it performs is the run's one a->b switch — the
+# failover leg behind it demotes whichever peer reports settled active
+# and promotes the converged one back. The model-revision case runs
+# behind the failover: whichever peer holds the field then is the one
+# its third --revised controller stands by on and supersedes, so every
+# case after it already exercises the revised model document. The
+# plant-link-loss case
+# follows later in the schedule: its plant container cycling cannot
+# contaminate an earlier case, and whichever endpoint owns the field
+# by then keeps it through the outage and recovery the scenario
+# drives. The field-fault case is self-contained on either role
+# layout — including the post-recovery rig — and leaves the rig as it
+# found it. The dcs-ctl case closes the schedule: it observes the
+# post-failover role layout and perturbs nothing earlier cases
+# established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
+<<<<<<< HEAD
              scenario_stale_freshness,
              scenario_failover, scenario_evidence_capture,
              scenario_served_interface, scenario_consumer_schedule,
              scenario_command_admission)
+=======
+             scenario_parameter_tune_carryover, scenario_failover,
+             scenario_model_revision,
+             scenario_evidence_capture, scenario_served_interface,
+             scenario_force_release, scenario_consumer_schedule,
+             scenario_command_admission, scenario_plant_link_loss,
+             scenario_field_fault, scenario_dcs_ctl)
+>>>>>>> origin/main
 
 
 def run_all(ctx, timeline):

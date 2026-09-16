@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import netpolicy, report as qa_report
+from . import netpolicy, report as qa_report, revision
 from . import scenarios, state as qa_state
 
 MANAGED_LABEL = 'dcs-hwtest.managed'
@@ -83,6 +83,9 @@ DEFAULT_CONFIG = {
     'rig_ifname': netpolicy.RIG_IFACE,
     'active_port': 18080,
     'standby_port': 18081,
+    # The rolling model-revision case's third controller publishes its
+    # monitor here; its sim-net side shares the run's labeled bridge.
+    'revised_port': 18082,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -109,6 +112,22 @@ DEFAULT_CONFIG = {
                    'exercised through the dcs-sim-net remote simulation.',
          'blocking': False},
     ],
+    # Charter-based exploratory lane (qax-* run ids): when enabled, idle
+    # cycles dispatch a time-bounded Devin session against the newest
+    # gate-verdicted revision instead of rerunning scenarios. The session
+    # runs on the host as the lane user — its working directory lives
+    # inside the run dir and it reaches the rig through the loopback
+    # monitor ports. `exploration_devin` should be an absolute path: the
+    # oneshot unit's PATH lacks ~/.local/bin.
+    'exploration_enabled': False,
+    'exploration_devin': 'devin',
+    'exploration_model': 'swe-2-high',
+    'exploration_time_budget_seconds': 5400,
+    'exploration_interval_seconds': 7200,
+    'max_explorations_per_day': 8,
+    'exploration_ledger_keep': 20,
+    'exploration_prompt': None,
+    'git_dir': '/srv/dcs-hwtest/repo.git',
 }
 
 
@@ -556,14 +575,18 @@ def reclaim(st, cfg, log=print, docker_ok=True):
 
 
 def _maybe_retry(st, cfg, now, day):
-    """Queue one automatic retry for an inconclusive finished run."""
-    finished = st.runs(('finished',))
+    """Queue one automatic retry for an inconclusive assessment run.
+    Dedicated kinds never trigger sha-retries: an inconclusive qav
+    already bounds its own attempts and an inconclusive exploration is
+    a valid outcome, not a broken gate."""
+    finished = [r for r in st.runs(('finished',))
+                if r['run_id'].startswith('qa-')]
     if not finished:
         return
     last = finished[-1]
     if last['outcome'] != 'inconclusive':
         return
-    if st.next_queued() is not None:
+    if st.next_queued('qa') is not None:
         return
     attempts = st.attempts_for(last['attempted_sha'])
     if attempts >= cfg['max_attempts_per_sha']:
@@ -637,19 +660,25 @@ def cycle(cfg, log=print):
         _maybe_retry(st, cfg, now, day)
         if _set_blocked(st, *(block or (None, None)), log):
             return
-        if st.started_today(day) >= cfg['max_runs_per_day']:
-            log('cycle: daily run budget reached')
-            return
-        # Pending fix verifications dispatch ahead of the newest-SHA
-        # assessment: a merged fix is re-verified on a revision proven to
-        # contain it before the lane spends a run on fresh exploration.
+        # Dispatch order: pending fix verifications first, then the newest
+        # queued assessment, then — when enabled and nothing else is due —
+        # an exploratory session against the newest gate-verdicted
+        # revision. The daily budget bounds assessments only: dedicated
+        # kinds carry their own budgets (max_explorations_per_day) or are
+        # queue-bound (qav-), and must never starve or be starved by the
+        # deterministic gate.
         record = verify.next_run(st, cfg, now, log)
-        queued = record if record is not None else st.next_queued()
-        if queued is None:
+        queued = None
+        if st.started_today(day, 'qa') >= cfg['max_runs_per_day']:
+            log('cycle: daily assessment budget reached')
+        else:
+            queued = st.next_queued('qa')
+        if record is None and queued is None:
+            from . import explorer
+            record = explorer.next_run(st, cfg, now, log)
+        if record is None and queued is None:
             log('cycle: nothing queued')
             return
-        # The egress gate covers both run kinds: a verification run
-        # builds images and starts a rig exactly like an assessment.
         if cfg.get('egress_required'):
             missing = _ensure_egress_policy(log)
             if missing:
@@ -657,10 +686,13 @@ def cycle(cfg, log=print):
                              'host firewall rules absent: '
                              + '; '.join(missing[:5]), log)
                 return
-        if record is not None:
+        if record is not None and record['run_id'].startswith('qav-'):
             verify.run(st, record, cfg, log)
-        else:
+        elif queued is not None:
             run(st, queued, cfg, log)
+        else:
+            from . import explorer
+            explorer.run(st, record, cfg, log)
     finally:
         st.close()
         lock.close()
@@ -725,7 +757,9 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
            'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant',
+           '-p dcs-controller -p dcs-plant '
+           '&& cargo build --release --locked '
+           '-p dcs-monitor --bin dcs-ctl',
            timeout=cfg['builder_timeout'])
     digests = {}
     for crate, binary, tag in (
@@ -753,7 +787,21 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
                           '--format', '{{.Id}}').stdout.strip()
         digests[crate] = image_id
         timeline('image-built', crate + ' ' + image_id[:19])
+    # The operator CLI ships as a host-side binary, not an image: the
+    # same bounded builder compile produces it, and the dcs-ctl
+    # scenario execs it against the pair's published monitor ports.
+    if not _dcs_ctl_path(cfg).is_file():
+        raise RuntimeError('build produced no dcs-ctl')
+    timeline('tool-built', 'dcs-ctl ' + str(_dcs_ctl_path(cfg)))
     return digests
+
+
+def _dcs_ctl_path(cfg):
+    """The host-side dcs-ctl binary the lane's image build produces —
+    the operator-CLI seam the dcs-ctl scenario consumes through
+    ctx['dcs_ctl']."""
+    return Path(cfg['state_dir']) / 'build-cache' / 'target' \
+        / 'release' / 'dcs-ctl'
 
 
 def _docker_run_args(cfg, run_id, name):
@@ -817,6 +865,7 @@ def restart_controller(run_id, name, timeline):
     timeline('controller-restarted', container + ' running')
 
 
+<<<<<<< HEAD
 def stop_controller(run_id, name, timeline):
     """The stop half of the lifecycle action, alone: `docker stop` on
     one of the run's controller containers, held down until the scenario
@@ -843,31 +892,134 @@ def start_controller(run_id, name, timeline):
 
 
 def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
+=======
+def stop_plant(run_id, timeline):
+    """The scenario-callable plant stop: `docker stop` on the run's
+    shared-plant container — the field-loss half of the link-loss
+    scenario, severing both controllers' remote-driver connections at
+    the same boundary. Recorded on the run's action timeline like the
+    controller restart; a docker failure raises so the calling
+    scenario reports the stop never completed."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    timeline('plant-stop', 'docker stop ' + container)
+    docker('stop', '--time', '2', container, timeout=90)
+    timeline('plant-stopped', container + ' stopped')
+
+
+def start_plant(run_id, timeline):
+    """The recovery half: `docker start` relaunches the run's plant
+    container — a fresh plant-server lifetime, so the single-writer
+    claim the old process held is gone and the field owner must
+    re-claim it."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    timeline('plant-start', 'docker start ' + container)
+    docker('start', container, timeout=60)
+    timeline('plant-started', container + ' running')
+
+
+def start_revised_controller(cfg, record, run_dir, model, active,
+                             timeline):
+    """The scenario-callable rolling model-revision action
+    (WW-LCM-001's deployment-update clause, the rolling
+    model-revision decision): derive the revised model document from
+    the run's mounted model through the checked-in recipe
+    (qa_lane/revision.py), then launch the run's third controller
+    container on it as `--standby <active> --revised`.
+
+    `active` is the scenario ctx key of the peer currently writing the
+    field ('active' is ctrl-a, 'standby' ctrl-b) — the revised peer
+    pulls that peer's checkpoints until the carryover rule applies
+    them to the revised model. The container carries the run's managed
+    and run labels so teardown reconciles it with the rest of the rig,
+    mounts the revised document read-only at /model/revised.json, and
+    gets its own runner-owned state/journal directory: the carryover
+    arrives through the standby pull, never through a copied
+    checkpoint that the fingerprint gate would reject. Both halves —
+    the derivation and the launch — are recorded on the run's action
+    timeline; a derivation or docker failure raises so the calling
+    scenario reports the action never completed.
+
+    Returns the derivation summary (revised document path and the
+    recipe's added point/signal ids) plus the container name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_revised expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    revised_doc = Path(run_dir) / 'model-revised.json'
+    info = revision.derive_revised_model(model, revised_doc)
+    directory = _controller_dir(run_dir, 'c')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-c'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    timeline('model-revision-start',
+             'derive ' + revised_doc.name + ' (+points '
+             + str(info['added_points']) + ', +signals '
+             + str(info['added_signals']) + '); launch ' + container
+             + ' --standby ' + standby + ' --revised')
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':8082',
+           '-v', str(revised_doc) + ':/model/revised.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/revised.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--standby', standby,
+           '--revised',
+           '--scan-ms', '100', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
+    timeline('model-revision-up', container
+             + ' running the revised model')
+    return dict(info, container=container)
+
+
+def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
+>>>>>>> origin/main
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
-    per endpoint key, the run's evidence dir and deadline, the
-    runner-owned controller-restart action, and the host-side
-    per-controller state/journal files the restart scenario reads."""
+    per endpoint key (the model-revision case's third controller
+    answers on 'revised' once launched), the published plant-protocol
+    endpoint, the run's evidence dir and deadline, the runner-owned
+    controller-restart, plant stop/start, and model-revision actions,
+    and the host-side per-controller state/journal files the restart
+    and model-revision scenarios read."""
     run_id = record['run_id']
-    names = {'active': 'a', 'standby': 'b'}
+    names = {'active': 'a', 'standby': 'b', 'revised': 'c'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+        'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
+        'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+<<<<<<< HEAD
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline),
         'failover_misses': cfg['failover_misses'],
+=======
+        'stop_plant': lambda: stop_plant(run_id, timeline),
+        'start_plant': lambda: start_plant(run_id, timeline),
+        'start_revised': lambda name: start_revised_controller(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
+>>>>>>> origin/main
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
         'journal_files': {key: str(_controller_dir(run_dir, peer)
                                    / 'journal.jsonl')
                           for key, peer in names.items()},
+        'dcs_ctl': str(_dcs_ctl_path(cfg)),
     }
 
 
@@ -1022,7 +1174,8 @@ def _teardown_rig(run_id, timeline, st=None):
 
 
 def _persist_report(st, record, cfg, outcome, completed_sha, images,
-                    results, infra, events, log=print, verifications=None):
+                    results, infra, events, log=print, verifications=None,
+                    mode=None, exploration=None):
     """Validate, store, stage, and record a report for a run record.
 
     The durable cleanup ledger is merged into infrastructure_failures
@@ -1061,6 +1214,10 @@ def _persist_report(st, record, cfg, outcome, completed_sha, images,
             'first': record['range_first'], 'last': record['attempted_sha']}
     if verifications is not None:
         report_doc['verifications'] = verifications
+    if mode is not None:
+        report_doc['mode'] = mode
+    if exploration is not None:
+        report_doc['exploration'] = exploration
     qa_report.validate_report(json.dumps(report_doc),
                               run_id=record['run_id'],
                               attempted_sha=record['attempted_sha'])
@@ -1188,8 +1345,8 @@ def run(st, record, cfg, log=print):
         try:
             if not _wait_monitor(cfg, timeline):
                 raise RuntimeError('monitors did not come up')
-            ctx = _scenario_ctx(cfg, record, run_dir, evidence_dir,
-                                deadline, timeline)
+            ctx = _scenario_ctx(cfg, record, src, run_dir,
+                                evidence_dir, deadline, timeline)
             results = scenarios.run_all(ctx, timeline)
         finally:
             infra += _teardown_rig(run_id, timeline, st)
@@ -1230,13 +1387,14 @@ def run(st, record, cfg, log=print):
 def status(cfg):
     st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
     try:
-        from . import verify
+        from . import explorer, verify
         runs = st.runs()
         try:
             storage = qa_storage_usage(cfg)
             storage['bound'] = cfg['qa_storage_max_bytes']
         except Exception as exc:
             storage = {'error': str(exc)[:300]}
+        day = _utcnow().strftime('%Y-%m-%d')
         return {
             'last_attempted_sha': st.last_attempted_sha(),
             'queued': [r['attempted_sha'] for r in st.runs(('queued',))],
@@ -1253,6 +1411,12 @@ def status(cfg):
                         'attempt': r['attempt'], 'day': r['day']}
                        for r in runs[-10:]],
             'pending_verifications': len(verify.load_queue(cfg)),
+            'exploration': {
+                'enabled': bool(cfg.get('exploration_enabled')),
+                'devin': explorer.resolve_devin(cfg),
+                'today': st.started_today(day, explorer.RUN_PREFIX),
+                'ledger': len(explorer.ledger(st)),
+            },
         }
     finally:
         st.close()

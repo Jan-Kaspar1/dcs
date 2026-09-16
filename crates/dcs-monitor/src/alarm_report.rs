@@ -1986,6 +1986,7 @@ mod tests {
                 .collect(),
             }],
             command_queue: Default::default(),
+            command_verdicts: Vec::new(),
             publication: None,
         };
         let model =
@@ -2022,6 +2023,7 @@ mod tests {
                     forces: Vec::new(),
                     parameters: Vec::new(),
                     command_queue: Default::default(),
+                    command_verdicts: Vec::new(),
                     publication: None,
                 },
                 &model.signal_index(),

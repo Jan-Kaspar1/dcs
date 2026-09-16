@@ -152,8 +152,19 @@ YAML is equivalent data):
   "dynamics": { "path": "model/dynamics.json" },
   "plant": { "listen": "0.0.0.0:9001" },
   "controllers": [
-    { "name": "ctrl-a", "listen": "0.0.0.0:8080" },
-    { "name": "ctrl-b", "listen": "0.0.0.0:8081", "standby": "ctrl-a:8080" }
+    {
+      "name": "ctrl-a",
+      "listen": "0.0.0.0:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
+    },
+    {
+      "name": "ctrl-b",
+      "listen": "0.0.0.0:8081",
+      "standby": "ctrl-a:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
+    }
   ]
 }
 ```
@@ -163,7 +174,18 @@ Each field maps to the documented run commands in
 documents, `plant.listen` is the plant server's `--listen`,
 `standby` is the tracking peer's `--standby` address, and
 `model.fingerprint` is the identity the checkpoint negotiation
-verifies on the wire. The shape is a recorded contract, not yet a
+verifies on the wire. A controller entry's `state_file` and
+`journal_file` are **optional** per-controller container paths
+carried to the invocation's `--state-file` and `--journal-file`
+flags: `state_file` is decision 35's restart-recovery checkpoint — a
+container restart resumes in place at the last persisted scan — and
+`journal_file` is decision 36's durable journal, the attributed
+operator-action record that survives the process lifetime. Each
+declared path must live on writable deployment storage — a named
+volume in the checked-in rig definition — while the model and
+dynamics mounts stay read-only; a consumer without durable storage
+omits both fields, and the flags are then absent. The shape is a
+recorded contract, not yet a
 schema-enforced document — `reference-plant/deploy/manifest.json`
 instantiates it, `reference-plant/deploy/compose.yaml` instantiates
 the manifest itself as a checked-in rig definition (the consumer-side
@@ -286,9 +308,9 @@ The checks' failures are named diagnostics:
 | `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-failed` | The scripted simulation's declared leg outcomes did not hold against the checked-in model and dynamics. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-nondeterministic` | Two scripted-simulation runs produced different outcome digests. Reported by the reference plant's `ci/check.sh`. |
-| `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
+| `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the `GET /schema` block-interface registry's coverage of the declared kinds, a kind-declared command's structured receipt through `POST /command`, a kind-emitted event's arrival in `GET /journal`/`GET /resources`, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
 | `consumer-interference` | A consumer schedule changed the driven run's outputs or command receipts, or the schedule's own evidence failed — a consumer met a server fault, a held response arrived incomplete, malformed traffic went unrefused, or a restarted UI process found no freshness metadata. Reported by the reference plant's `ci/check.sh`, naming the schedule. |
 | `consumer-nondeterministic` | Two passes of the consumer-schedule stage produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
-| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, or the controller pair's standby wiring disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
+| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |

@@ -10,6 +10,8 @@ anywhere a config or report file is reachable).
                                          pin run:<id> or sha:<sha>
                                          evidence against retention;
                                          no spec lists current pins
+  python3 -m qa_lane ledger              print the exploration ledger
+                                         (charters from qax-* runs)
   python3 -m qa_lane netpolicy <apply|verify>
                                          host egress firewall policy
                                          (needs root; the dedicated
@@ -93,6 +95,13 @@ def main(argv=None):
         st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
         try:
             _preserve(st, rest)
+        finally:
+            st.close()
+    elif command == 'ledger':
+        from . import explorer
+        st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
+        try:
+            print(json.dumps(explorer.ledger(st), indent=1))
         finally:
             st.close()
     elif command == 'netpolicy':

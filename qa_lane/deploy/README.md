@@ -16,7 +16,11 @@ repository; this directory is the contract those copies mirror.
   `reports/<run_id>.json` staged for the WSL relay, `repo.git/` the
   bare mirror the relay pushes (fix-ancestry checks for verification
   runs), and `verifications.json` the pending fix-verification queue
-  the relay delivers from the supervisor.
+  the relay delivers from the supervisor. `build-cache/` also holds
+  the bounded builder's `target/` — beside the image binaries it
+  carries the host-side `dcs-ctl` the dcs-ctl scenario execs against
+  the published monitor ports (`cargo build --release --locked
+  -p dcs-monitor --bin dcs-ctl` in the revision under test).
 
 ## Install
 
@@ -64,6 +68,23 @@ sudo systemctl enable --now dcs-hwtest-netpolicy.service
   ancestry check, and evidence in the report's `verifications`
   channel (schema v2). An unproven or non-containing revision never
   produces a verdict.
+- When `exploration_enabled` is set and nothing else is due, a cycle
+  dispatches a `qax-*` exploration run: same build + rig skeleton, then a
+  time-bounded Devin session (`exploration_devin`, `exploration_model`,
+  `exploration_time_budget_seconds`) gets the rendered
+  `qa_lane/explorer_prompt.md` charter prompt with run context (revision,
+  endpoints, UI URL, rig manifest, recent merges, backlog snapshot,
+  pending verifications, exploration ledger, forbidden actions). The
+  agent writes `runs/<id>/results/agent-result.json` +
+  `exploration-summary.md` + `evidence/` + `scripts/`; the runner
+  validates the document and folds it into a schema-v3 report whose
+  scenario entries may carry explicit finding fields. Spacing is
+  `exploration_interval_seconds` between starts and
+  `max_explorations_per_day`, both outside the assessment's
+  `max_runs_per_day` budget. `python3 -m qa_lane ledger` prints the
+  exploration ledger. Prerequisite: `devin auth login` on the host for
+  the lane user — the CLI runs on the host (loopback rig ports + Devin
+  API egress), not in a container.
 - `python3 -m qa_lane status` reports queue, active run, block reason,
   cleanup-failure ledger, retention pins, pending verifications,
   storage usage, and history.
