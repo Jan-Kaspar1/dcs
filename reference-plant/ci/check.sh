@@ -69,7 +69,7 @@
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the release-line rev
-#                this repository's manifest records — the newest 0.1
+#                this repository's manifest records — the v0.2.0
 #                commit whose tooling serves the interface registry,
 #                declared commands, and emitted events the surface
 #                stage proves).
@@ -90,7 +90,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-b85eaa4355520594eaeb3b5e77561062e9789ace}"
+DCS_REV="${DCS_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 TOOLS=""
