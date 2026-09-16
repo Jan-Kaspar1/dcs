@@ -1,0 +1,687 @@
+{
+  "dt": 1.0,
+  "legs": [
+    {
+      "commands": [],
+      "expect": {
+        "100": {
+          "bool": false
+        },
+        "1003": {
+          "bool": false
+        },
+        "101": {
+          "bool": false
+        },
+        "1013": {
+          "bool": false
+        },
+        "1014": {
+          "bool": false
+        },
+        "204": {
+          "int": 0
+        },
+        "210": {
+          "int": 1
+        },
+        "211": {
+          "int": 0
+        }
+      },
+      "expect_receipts": [],
+      "name": "cold-start-idle",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [],
+      "expect": {
+        "204": {
+          "int": 1
+        },
+        "210": {
+          "int": 1
+        },
+        "211": {
+          "int": 1
+        },
+        "212": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "duty-pump-stages",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [],
+      "expect": {
+        "204": {
+          "int": 2
+        },
+        "211": {
+          "int": 2
+        },
+        "213": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "lag-pump-stages",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1003": {
+          "bool": true
+        },
+        "1004": {
+          "bool": true
+        },
+        "200": {
+          "min": 4.6
+        },
+        "215": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "high-level-annunciates",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1001,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1004": {
+          "bool": true
+        },
+        "1005": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "not_writable"
+      ],
+      "name": "lah-shelve-request-refused",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1000,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1004": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "ack-clears-lah-latch",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1000,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1004": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "lah-ack-released",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1023": {
+          "bool": true
+        },
+        "1024": {
+          "bool": true
+        },
+        "216": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "primary-fault-fails-over",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 10
+        }
+      ],
+      "scans": 2
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1023": {
+          "bool": false
+        },
+        "1024": {
+          "bool": true
+        },
+        "216": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "primary-recovers",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 10
+        }
+      ],
+      "scans": 2
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1020,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1024": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "backup-alarm-acknowledged",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1020,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {},
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "backup-ack-released",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [],
+      "expect": {
+        "100": {
+          "bool": false
+        },
+        "101": {
+          "bool": false
+        },
+        "1013": {
+          "bool": true
+        },
+        "1014": {
+          "bool": true
+        },
+        "204": {
+          "int": 0
+        },
+        "210": {
+          "int": 2
+        },
+        "211": {
+          "int": 0
+        },
+        "214": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "well-drains-all-stop",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1011,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1014": {
+          "bool": true
+        },
+        "1015": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "lal-shelve-request-stands",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1011,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1015": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "lal-unshelved",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1010,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1014": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "lal-acknowledged",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1010,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {},
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "lal-ack-released",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 324,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 325,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "210": {
+          "int": 1
+        },
+        "324": {
+          "bool": true
+        },
+        "345": {
+          "bool": false
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "manual-takeover-hands-duty-over",
+      "plant": [],
+      "scans": 6
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 326,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1097": {
+          "bool": true
+        },
+        "345": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "out-of-service-inhibits",
+      "plant": [],
+      "scans": 4
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1093": {
+          "bool": true
+        },
+        "1094": {
+          "bool": false
+        },
+        "1096": {
+          "bool": true
+        },
+        "1097": {
+          "bool": true
+        },
+        "336": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "fault-suppressed-while-oos",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 41
+        }
+      ],
+      "scans": 3
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 326,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1094": {
+          "bool": true
+        },
+        "1096": {
+          "bool": false
+        },
+        "1097": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "return-to-service-reannunciates",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1093": {
+          "bool": false
+        },
+        "1094": {
+          "bool": true
+        },
+        "336": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "fault-clears",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 41
+        }
+      ],
+      "scans": 4
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1090,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1094": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "fault-alarm-acknowledged",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1090,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 324,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 325,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "210": {
+          "int": 1
+        },
+        "324": {
+          "bool": false
+        },
+        "345": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted",
+        "accepted"
+      ],
+      "name": "restored-to-auto",
+      "plant": [],
+      "scans": 4
+    }
+  ]
+}

@@ -12,8 +12,14 @@ The mechanics are proven workspace-side by
 supported crates from an immutable revision of this repository with no
 `path` dependency, composes and deterministically emits a model, and
 passes it through the released tooling. The independent reference-plant
-repository — the consumer-shaped proof decision 79 requires — is a
-later slice of the same gate and pins this contract's first release.
+repository — the consumer-shaped proof decision 79 requires — is the
+`reference-plant/` tree in this repository, publishable verbatim as the
+customer's own repository: it pins this contract's first release and
+carries its own clean-CI check (`ci/check.sh`), proven from the
+workspace by `crates/dcs-build/tests/reference_plant.rs`, which
+materializes the tree outside the workspace, substitutes only the
+`file://` remote stand-in for the published origin, and runs the
+template's check green.
 
 ## The supported release set
 
@@ -153,7 +159,9 @@ documents, `plant.listen` is the plant server's `--listen`,
 `standby` is the tracking peer's `--standby` address, and
 `model.fingerprint` is the identity the checkpoint negotiation
 verifies on the wire. The shape is a recorded contract, not yet a
-schema-enforced document — the reference-plant slice may formalize it.
+schema-enforced document — `reference-plant/deploy/manifest.json`
+instantiates it, and the template's `ci/check.sh` ties its recorded
+fingerprint to a fresh emit.
 
 ## The release procedure
 
@@ -198,7 +206,21 @@ the model twice and compares bytes, then runs `dcs-model validate`,
 document. A pinned `rev` works against any commit; consumers pin the
 release tag the same way.
 
-Its failures are named diagnostics:
+`crates/dcs-build/tests/reference_plant.rs` extends the proof to the
+full consumer repository: it copies `reference-plant/` to a scratch
+directory outside the workspace, rewrites only the dependency remote
+to the same `file://` stand-in — the recorded `rev` pin untouched —
+and runs the template's own `ci/check.sh` end to end, including its
+git-only lockfile assertion, its released-tooling stage against
+locally built binaries, the manifest fingerprint check, and two runs
+of the scripted simulation. Its negative cases prove the template's
+new stage names surface as the diagnostics below.
+
+```sh
+cargo test -p dcs-build --test reference_plant
+```
+
+The failures are named diagnostics:
 
 | Diagnostic | Meaning |
 |---|---|
@@ -207,3 +229,7 @@ Its failures are named diagnostics:
 | `path-dependency-leak` | The consumer lockfile records a `path` source for a released crate — the no-path-dependency proof itself failed. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
+| `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |
+| `scenario-failed` | The scripted simulation's declared leg outcomes did not hold against the checked-in model and dynamics. Reported by the reference plant's `ci/check.sh`. |
+| `scenario-nondeterministic` | Two scripted-simulation runs produced different outcome digests. Reported by the reference plant's `ci/check.sh`. |

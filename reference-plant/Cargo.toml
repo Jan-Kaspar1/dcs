@@ -1,0 +1,21 @@
+# The reference plant — a standalone consumer repository. This tree is
+# not a workspace member of the platform repository: its own
+# `[workspace]` table makes it a self-contained package whose only DCS
+# dependencies are the pinned release crates. The pin is the release
+# contract's recorded mechanism: `git = "<published origin>"` at the
+# revision `docs/release-contract.md` records for v0.1.0 — a `rev` pin
+# names the identical immutable commit the `v0.1.0` tag names.
+[package]
+name = "pump-station"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Reference duty/standby lift station — a DCS consumer plant"
+
+# An independent consumer repository: no platform workspace member.
+[workspace]
+
+[dependencies]
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13e7b4273b133bc0fff55cb97e16c5d3197" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13e7b4273b133bc0fff55cb97e16c5d3197" }
+serde_json = "1"
