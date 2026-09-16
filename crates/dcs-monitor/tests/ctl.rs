@@ -563,6 +563,94 @@ fn events_print_each_components_recent_emissions() {
 }
 
 #[test]
+fn resources_print_the_served_live_resource_view() {
+    with_monitor(|driver, addr, client| {
+        // One scan so every bound point has a served sample: `run`
+        // held completes the first one-tick step.
+        driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
+        client.advance(1).unwrap();
+
+        // The bare form prints the served ResourceView — the same
+        // document the client's own accessor decodes, one entry per
+        // served instance in scan order.
+        let view: dcs_core::ResourceView =
+            serde_json::from_value(ctl_ok(addr, &["resources"])).unwrap();
+        assert_eq!(view, client.resources().unwrap());
+        assert_eq!(
+            view.components
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["level-pid", "plain", "seq"]
+        );
+
+        // The filtered form prints the named instance's
+        // ComponentResources — the same element of the bare view,
+        // addressed like `events <component>`: measurements and state
+        // joined to the bound points' samples, the current
+        // configuration values, and each command's
+        // `available`/`refusal`.
+        let seq: dcs_core::ComponentResources =
+            serde_json::from_value(ctl_ok(addr, &["resources", "seq"])).unwrap();
+        assert_eq!(
+            seq,
+            *view
+                .components
+                .iter()
+                .find(|entry| entry.name == "seq")
+                .unwrap()
+        );
+        assert_eq!(seq.kind, "sequencer");
+        let run = seq
+            .measurements
+            .iter()
+            .find(|entry| entry.name == "run")
+            .unwrap();
+        assert_eq!(run.point, Some(SEQ_RUN));
+        assert_eq!(run.sample, Some(Sample::good(Value::Bool(true), Tick(1))));
+        let done = seq.state.iter().find(|entry| entry.name == "done").unwrap();
+        assert_eq!(done.point, Some(SEQ_DONE));
+        assert_eq!(done.sample, Some(Sample::good(Value::Bool(false), Tick(1))));
+        assert_eq!(
+            seq.configuration
+                .iter()
+                .find(|entry| entry.name == "step_count")
+                .unwrap()
+                .value,
+            Some(Value::Int(2))
+        );
+        // `advance`/`reset` report admissible; `write_value:run`'s
+        // bound point is not model-declared writable, so its served
+        // refusal is the reason the receipted path would answer.
+        for name in ["advance", "reset"] {
+            let command = seq
+                .commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("{name} missing: {:?}", seq.commands));
+            assert!(command.available, "{name}: {command:?}");
+        }
+        let write_run = seq
+            .commands
+            .iter()
+            .find(|command| command.name == "write_value:run")
+            .unwrap();
+        assert!(!write_run.available);
+        assert_eq!(
+            write_run.refusal.as_deref(),
+            Some("I/O point PointId(50) is not declared writable")
+        );
+
+        // A name the served registry does not carry fails the
+        // invocation naming it — the same lookup `events <component>`
+        // performs, never a rejection.
+        let output = ctl(addr, &["resources", "ghost"]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("ghost"), "{output:?}");
+    });
+}
+
+#[test]
 fn write_parses_per_the_declared_kind_and_reports_receipts() {
     with_monitor(|_driver, addr, client| {
         client.advance(1).unwrap();
@@ -1275,6 +1363,9 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "events", "a", "b"],
         vec![dead, "events", "comp", "--actor", "op"],
         vec![dead, "events", "--bogus"],
+        vec![dead, "resources", "a", "b"],
+        vec![dead, "resources", "comp", "--actor", "op"],
+        vec![dead, "resources", "--bogus"],
         vec![dead, "write"],
         vec![dead, "write", "10"],
         vec![dead, "write", "abc", "1"],

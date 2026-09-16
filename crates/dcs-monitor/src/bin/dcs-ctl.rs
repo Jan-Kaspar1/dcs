@@ -49,16 +49,22 @@
 //! `command_refused` an unavailable declared command settles — arrives
 //! as the ordinary rejected receipt.
 //!
-//! The interface surface's read half is `schema` and `events`:
-//! `schema` prints the served [`SchemaView`](dcs_core::SchemaView) —
-//! the block-interface registry, every served instance's declared
-//! measurements, configuration, state, commands, and events — and
-//! `events [<component>]` prints the [`ResourceView`](dcs_core::ResourceView)'s
-//! per-instance `events`, the retained journal tail attributed to the
-//! named component, or every component's list keyed by name when the
-//! argument is absent. A name the served registry does not carry
-//! fails the invocation naming it — the read is a lookup, never a
-//! submission, so there is no receipt to answer with.
+//! The interface surface's read half is `schema`, `resources`, and
+//! `events`: `schema` prints the served
+//! [`SchemaView`](dcs_core::SchemaView) — the block-interface
+//! registry, every served instance's declared measurements,
+//! configuration, state, commands, and events; `resources
+//! [<component>]` prints the matching live half, the served
+//! [`ResourceView`](dcs_core::ResourceView) verbatim or the named
+//! instance's `ComponentResources` entry — its measurements and
+//! state with quality, current configuration, and each command's
+//! `available`/`refusal` beside the attributed events; and `events
+//! [<component>]` prints that view's per-instance `events`, the
+//! retained journal tail attributed to the named component, or every
+//! component's list keyed by name when the argument is absent. A
+//! name the served registry does not carry fails the invocation
+//! naming it — the read is a lookup, never a submission, so there is
+//! no receipt to answer with.
 //!
 //! Every receipted submission can declare the actor identity the
 //! command-path audit-attribution contract journals — the tool-side
@@ -75,8 +81,8 @@
 //! change unattributed.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, JournalEntry, PointId, RoleReport, SwitchError, Value,
-    ValueKind,
+    Command, CommandOutcome, CommandReceipt, ComponentResources, JournalEntry, PointId,
+    ResourceView, RoleReport, SwitchError, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use serde::Serialize;
@@ -97,6 +103,10 @@ read commands:
   events [<component>]        the recently emitted events attributed to
                               <component>, or every component's keyed
                               by name
+  resources [<component>]     the served ResourceView — every
+                              instance's live resource state — or the
+                              named component's ComponentResources
+                              entry
   role                        the instance's RoleReport
   receipts                    the executor's receipt log
   journal [--since <seq>]     journal entries with a seq above <seq>
@@ -218,6 +228,10 @@ enum Action {
         /// `None` prints every served component's list.
         component: Option<String>,
     },
+    Resources {
+        /// `None` prints the whole served `ResourceView`.
+        component: Option<String>,
+    },
     Role,
     Receipts,
     Journal {
@@ -279,6 +293,13 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ("events", rest) => match rest {
             [] => Action::Events { component: None },
             [component] if !component.starts_with("--") => Action::Events {
+                component: Some((*component).to_string()),
+            },
+            _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+        },
+        ("resources", rest) => match rest {
+            [] => Action::Resources { component: None },
+            [component] if !component.starts_with("--") => Action::Resources {
                 component: Some((*component).to_string()),
             },
             _ => return Err(usage(format!("wrong arguments for {command:?}"))),
@@ -485,19 +506,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             // command, say) appear ahead of the stamped publication.
             let view = client.resources().map_err(|e| transport(addr, e))?;
             match component {
-                Some(name) => print_json(
-                    &view
-                        .components
-                        .iter()
-                        .find(|entry| entry.name == *name)
-                        .ok_or_else(|| {
-                            Failure::message(format!(
-                                "dcs-ctl: {addr}: no served component named {name:?}"
-                            ))
-                        })?
-                        .events,
-                    addr,
-                ),
+                Some(name) => print_json(&resource_entry(&view, name, addr)?.events, addr),
                 None => {
                     let events: BTreeMap<&str, &[JournalEntry]> = view
                         .components
@@ -506,6 +515,16 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                         .collect();
                     print_json(&events, addr)
                 }
+            }
+        }
+        Action::Resources { component } => {
+            // The served view verbatim, or the named instance's
+            // entry — whatever command state the publication carries,
+            // this accessor only surfaces it.
+            let view = client.resources().map_err(|e| transport(addr, e))?;
+            match component {
+                Some(name) => print_json(resource_entry(&view, name, addr)?, addr),
+                None => print_json(&view, addr),
             }
         }
         Action::Role => print_json(&client.role().map_err(|e| transport(addr, e))?, addr),
@@ -601,6 +620,26 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             addr,
         ),
     }
+}
+
+/// One instance's [`ComponentResources`] in the served view — the
+/// name lookup `resources <component>` and `events <component>`
+/// share: a name the served registry does not carry fails the
+/// invocation naming it, the read being a lookup rather than a
+/// submission.
+fn resource_entry<'a>(
+    view: &'a ResourceView,
+    name: &str,
+    addr: SocketAddr,
+) -> Result<&'a ComponentResources, Failure> {
+    view.components
+        .iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| {
+            Failure::message(format!(
+                "dcs-ctl: {addr}: no served component named {name:?}"
+            ))
+        })
 }
 
 /// A transport-level failure, naming the monitor the request went to.
