@@ -238,6 +238,228 @@ class ConsumerScheduleTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class RestartFeed:
+    """A stubbed pair for the controller-restart scenario. ctrl-a owns
+    the field and persists every scan — the --state-file checkpoint is
+    `persisted` — while ctrl-b tracks it and degrades during the
+    restart gap. The journal file is a real append-only record the
+    feed writes itself: a run_boundary marker per process lifetime and
+    one entry per settled command, matching the durable record's
+    format. Fault flags stage each named failure the issue calls
+    out."""
+
+    def __init__(self, journal_path):
+        self.tick = 100      # well past the resume slack
+        self.persisted = 100
+        self.point = False
+        self.up = True           # ctrl-a's monitor answers
+        self.serves = True       # False: the monitor never returns
+        self.returns = True      # False: the restart action fails
+        self.cold = False        # restart resumes nothing
+        self.regress = False     # resume lands far behind
+        self.loses_state = False  # written point value does not persist
+        self.seq_restarts = False  # journal seq numbering restarts
+        self.peer_promoted = False
+        self.restarts = []
+        self.path = Path(journal_path)
+        self.next_seq = 1
+        self.runs = 1
+        self._append({'run_boundary': {'run': 1, 'tick': 0}})
+
+    def _append(self, record):
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+
+    def _journal_entry(self):
+        self._append({'entry': {'seq': self.next_seq,
+                                'tick': self.tick, 'event': {}}})
+        self.next_seq += 1
+
+    def _scan(self):
+        # One completed scan per snapshot read; the state file follows
+        # at the same end-of-cycle boundary.
+        self.tick += 1
+        self.persisted = self.tick
+
+    # The runner-owned lifecycle action — replaces
+    # ctx['restart_controller'].
+    def restart(self, name):
+        self.restarts.append(name)
+        if not self.returns:
+            raise RuntimeError('docker start failed: no such container')
+        self.up = False
+        self.down_left = 2  # refused polls before the monitor returns
+        resumed = self.persisted
+        if self.cold:
+            resumed = 0
+        if self.regress:
+            resumed = max(1, resumed - 100)
+        self.tick = resumed
+        if self.loses_state:
+            self.point = False
+        self.runs += 1
+        self._append({'run_boundary': {'run': self.runs,
+                                       'tick': resumed}})
+        if self.seq_restarts:
+            self.next_seq = 1
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        if host == 'ctrl-b:2':
+            if (method, route) == ('GET', '/role'):
+                if self.peer_promoted:
+                    return 200, {'role': 'active', 'tick': self.tick}
+                sync = {'tracking': {'aligned': self.tick}} if self.up \
+                    else {'degraded': {'detail': 'checkpoint pull '
+                                       'failed'}}
+                return 200, {'role': 'standby', 'tick': self.tick,
+                             'sync': sync}
+            raise AssertionError('unexpected request %s %s'
+                                 % (method, url))
+        if not self.up:
+            self.down_left -= 1
+            if self.down_left <= 0 and self.serves:
+                self.up = True
+            else:
+                raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': 10, 'signal': None, 'name': 'p101-oos',
+                 'direction': 'in', 'value_type': 'bool',
+                 'writable': True},
+                {'point': 20, 'signal': None, 'name': 'level-primary',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False}]}
+        if (method, route) == ('GET', '/snapshot'):
+            self._scan()
+            return 200, {'tick': self.tick, 'points': [
+                {'point': 10, 'sample': {
+                    'value': {'bool': self.point},
+                    'quality': {'quality': 'good'}}}]}
+        if (method, route) == ('POST', '/command'):
+            write = body['command']['write_value']
+            self.point = write['value']['bool']
+            receipt = {'command': body['command'],
+                       'outcome': {'applied': {'tick': self.tick}},
+                       'actor': body.get('actor')}
+            self._journal_entry()
+            return 200, receipt
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class ControllerRestartTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal = Path(self.tmp.name) / 'controllers' / 'a'
+        self.journal.mkdir(parents=True)
+        self.journal = self.journal / 'journal.jsonl'
+        self.feed = RestartFeed(self.journal)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, **patches):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'restart_controller': self.feed.restart,
+               'journal_files': {'active': str(self.journal),
+                                 'standby': str(self.journal)},
+               'state_files': {}}
+        defaults = {'POLL_INTERVAL': 0.001, 'RESTART_POLL': 0.001,
+                    'RESTART_RETURN_DEADLINE': 0.5,
+                    'RESTART_SETTLE_DEADLINE': 0.5,
+                    'RESTART_JOURNAL_DEADLINE': 0.3}
+        defaults.update(patches)
+        with patch.object(scenarios, 'http_json', self.feed.http_json):
+            for key, value in defaults.items():
+                patcher = patch.object(scenarios, key, value)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+            return scenarios.scenario_controller_restart(ctx)
+
+    def test_clean_restart_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.restarts, ['active'])
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+
+    def test_cold_start_resume_fails(self):
+        self.feed.cold = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('regressed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_stale_resume_fails(self):
+        self.feed.regress = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('regressed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_lost_point_state_fails(self):
+        self.feed.loses_state = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('lost its written value',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_seq_restart_fails(self):
+        self.feed.seq_restarts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('seqs', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_boundary_fails(self):
+        # A restarted lifetime that never marks its boundary: the file
+        # holds run 1's records only.
+        feed = self.feed
+
+        def restart(name):
+            feed.restarts.append(name)
+            feed.up, feed.down_left = False, 2
+            feed.tick = feed.persisted
+
+        self.feed.restart = restart
+        ctx_record = self.run_scenario()
+        self.assertEqual(ctx_record['outcome'], 'failed', ctx_record)
+        self.assertIn('run-boundary', ctx_record.get('detail', ''))
+        report.validate_scenario(ctx_record)
+
+    def test_spurious_peer_promotion_fails(self):
+        self.feed.peer_promoted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('reported active', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unfinished_restart_is_inconclusive(self):
+        self.feed.returns = False
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('restart action never completed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unreturned_monitor_is_inconclusive(self):
+        self.feed.serves = False
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never returned', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
 class ServedFeed:
     """A stubbed monitor pair for the served-interface scenario. The rig
     declares two instances whose served interfaces both bind the
