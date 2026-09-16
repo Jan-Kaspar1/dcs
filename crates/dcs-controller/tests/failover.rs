@@ -27,11 +27,13 @@
 
 use dcs_assembly::assemble;
 use dcs_controller::registry;
-use dcs_core::{IoDriver, JournalEvent, PointId, Role, StandbySync, TelemetrySnapshot, Value};
+use dcs_core::{
+    IoDriver, IoError, JournalEvent, PointId, Role, StandbySync, TelemetrySnapshot, Value,
+};
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{Executor, WriteGate};
-use dcs_sim_net::RemoteDriver;
+use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -195,6 +197,12 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
     )
     .0;
 
+    // The field observer the run asserts on — and its setpoint lands
+    // before the controllers spawn: the launched active's startup claim
+    // fences this attachment, so every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed.
     let mut active_process = spawn_controller(&pair_model, &[], DT);
@@ -212,7 +220,8 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
     let standby = MonitorClient::new(standby_process.addr);
 
     // The reference: the same model in-process against its own plant —
-    // its gate starts open, the field owner's posture.
+    // its gate starts open, the field owner's posture. Its plant is
+    // never claimed — the in-process run carries no claim hook.
     let model = PlantModel::load(MODEL_SOURCE).unwrap();
     let reference_driver = RemoteDriver::connect(reference_plant.addr).unwrap();
     let reference_gate = WriteGate::closed(&reference_driver);
@@ -222,11 +231,6 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
         gate: &reference_gate,
         plant: RemoteDriver::connect(reference_plant.addr).unwrap(),
     };
-
-    // Observers on both plants — the field the run asserts on; the
-    // setpoint lands once, before any claim exists.
-    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
-    field.write(SETPOINT, Value::Float(50.0)).unwrap();
     reference.plant.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Phase 1: N converged ticks — the standby tracks the active's
@@ -360,6 +364,10 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
         SimTcp::PerDevice,
     )
     .0;
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences this attachment from boot.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
@@ -375,8 +383,6 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
-    field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Converge first.
     for _ in 0..N {
@@ -499,6 +505,10 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         SimTcp::PerDevice,
     )
     .0;
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences this attachment from boot.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
@@ -513,8 +523,6 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
-    field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     for _ in 0..N {
         standby.advance(1).unwrap();
@@ -579,6 +587,99 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         let error = active.advance(1).unwrap_err();
         assert!(error.to_string().contains("fenced"), "tick {tick}: {error}");
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The issue's acceptance test on the sim-net path: the launched active
+/// takes the plant's single-writer claim at startup — a third
+/// attachment's write and step are refused from boot, before any
+/// promotion — and a rogue claim's preemption is journaled on the
+/// fenced owner, not only reported as its exit cause. The converged
+/// standby's promotion still takes the field back.
+#[test]
+fn the_launched_active_claims_the_field_and_a_rogue_claim_is_journaled() {
+    let dir = std::env::temp_dir().join(format!("dcs-failover-claim-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // A third attachment: the launched active already holds the claim,
+    // so the plant refuses its writes and steps from boot — reads stay
+    // open to every attachment.
+    let rogue = RemoteDriver::connect(pair_plant.addr).unwrap();
+    assert_eq!(
+        rogue.write(SETPOINT, Value::Float(50.0)),
+        Err(IoError::Fenced(SETPOINT)),
+        "a third attachment's write must be fenced once the active owns the field"
+    );
+    assert_eq!(
+        rogue.step(DT_F64),
+        Err(RemoteError::Fenced),
+        "a third attachment's step must be fenced once the active owns the field"
+    );
+    assert_eq!(rogue.read(SETPOINT).unwrap().value, Value::Float(0.0));
+
+    // Converge the standby — the designed takeover path the rogue
+    // claim must leave standing.
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // A rogue claim still preempts unconditionally — the plant cannot
+    // tell it from a promoted peer's takeover — but the loss is no
+    // longer silent: the fenced owner's next scan fails named, and its
+    // journal carries the claim loss.
+    rogue.claim_writer(0xdead_beef).unwrap();
+    let error = active.advance(1).unwrap_err();
+    assert!(
+        error.to_string().contains("fenced"),
+        "the preempted owner's write must fail fenced: {error}"
+    );
+    assert!(
+        active.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost { point } if point == VALVE
+        )),
+        "the fenced owner's journal must record the claim loss"
+    );
+
+    // The designed takeover still stands: the converged standby's
+    // promotion claims the field back from the rogue, and the pair's
+    // writes and steps drive the plant again.
+    standby.promote().unwrap();
+    let owner = standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    assert_eq!(
+        rogue.read(VALVE).unwrap().value,
+        image_value(&owner, VALVE),
+        "the promoted peer's write must reach the field the rogue held"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

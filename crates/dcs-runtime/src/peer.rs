@@ -53,12 +53,19 @@
 //! and presents the returned [`TrackReport`]; the scan itself stays
 //! caller-owned.
 //!
-//! Promotion — manual or automatic — first runs the field-ownership
-//! claim installed by [`with_field_claim`](Peer::with_field_claim):
-//! the fencing arbitration that makes the shared field refuse a
-//! superseded owner's writes. A failed claim refuses the promotion
+//! The field-ownership claim installed by
+//! [`with_field_claim`](Peer::with_field_claim) runs at every transition
+//! into field ownership — a promotion, manual or automatic, and a
+//! launched-active peer's [`activate`](Peer::activate) at startup: the
+//! fencing arbitration that makes the shared field refuse every
+//! attachment not holding it. A failed claim refuses the transition
 //! with [`SwitchError::FieldClaimFailed`] — a peer that cannot take the
-//! field's single-writer arbitration does not take the field.
+//! field's single-writer arbitration does not take the field. And when
+//! a claim the owner held is preempted — the field's arbitration is
+//! unconditional, so a rogue claim can take it — the first fenced field
+//! write queues a [`FencingLoss`] for the journal beside the scan
+//! failure: the loss of the field's single-writer claim is a recorded
+//! run event, not only an exit cause.
 //!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
@@ -77,8 +84,8 @@ use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarryoverReport, Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync,
-    SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandReceipt, IoError, PointId, Role, RoleReport, Sample,
+    StandbySync, SwitchError, TelemetrySnapshot, Tick,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,6 +151,15 @@ pub struct Peer<'d> {
     /// transition into [`StandbySync::Reinitialized`], each carrying the
     /// crossing's [`CarryoverReport`].
     pending_reinits: Vec<CarryoverReport>,
+    /// Whether the field-ownership claim this peer holds was observed
+    /// lost — set when a field-owning scan's write reports
+    /// [`IoError::Fenced`], meaning another attachment now holds the
+    /// claim. Re-armed by each successful claim lift: the queued report
+    /// is once per ownership, not once per fenced scan.
+    fencing_lost: bool,
+    /// Claim losses not yet consumed for journaling — one
+    /// [`FencingLoss`] per observed preemption.
+    pending_fencing: Vec<FencingLoss>,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -170,6 +186,20 @@ pub struct RoleChange {
     pub from: Role,
     /// The newly reported role.
     pub to: Role,
+}
+
+/// The field's single-writer claim was preempted while this peer owned
+/// the field — detected on the scan whose field write the field fenced.
+/// One report is queued per held claim: further fenced writes under the
+/// same lost claim do not queue again, and a fresh claim re-arms the
+/// report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FencingLoss {
+    /// The run's tick when the loss was observed — the fenced scan's
+    /// boundary; the aborted scan itself produced no tick.
+    pub tick: Tick,
+    /// The point whose write the field fenced.
+    pub point: PointId,
 }
 
 /// Why [`Peer::apply`] or [`Peer::transfer`] did not consume a
@@ -276,16 +306,17 @@ pub enum TrackReport {
 }
 
 impl<'d> Peer<'d> {
-    /// An instance owning field writes: role `active`, its gate lifted.
+    /// An instance owning field writes: role `active`.
     ///
     /// `gate` is the [`WriteGate`] the executor's driver is gated behind
     /// for a shared-field pair, or `None` when the field is private to
-    /// this process. Passing the gate — opened here — is what lets a
-    /// later [`demote`](Self::demote) re-quiesce the instance.
+    /// this process. The gate stays closed until
+    /// [`activate`](Self::activate) runs the field-ownership claim and
+    /// lifts it — a launched active takes the field in the same
+    /// claim-then-lift order a promotion does, so a shared field is
+    /// fenced for this owner from the first scan rather than left open
+    /// until the first promotion.
     pub fn active(executor: Executor<'d>, gate: Option<&'d WriteGate<'d>>) -> Self {
-        if let Some(gate) = gate {
-            gate.open();
-        }
         Self {
             executor,
             gate,
@@ -301,12 +332,15 @@ impl<'d> Peer<'d> {
             claim: None,
             revision: false,
             pending_reinits: Vec::new(),
+            fencing_lost: false,
+            pending_fencing: Vec::new(),
         }
     }
 
     /// Arms the peer's fencing hook — the field-side write-ownership
-    /// claim every promotion runs after the convergence checks and
-    /// before the gate lifts. `claim` is the caller's arbitration
+    /// claim run before the gate lifts at every transition into field
+    /// ownership: a promotion's, and a launched active's
+    /// [`activate`](Self::activate). `claim` is the caller's arbitration
     /// against the shared field — e.g. the plant server's single-writer
     /// claim — so a peer built without it relies on the write gate
     /// alone.
@@ -368,7 +402,30 @@ impl<'d> Peer<'d> {
             claim: None,
             revision: false,
             pending_reinits: Vec::new(),
+            fencing_lost: false,
+            pending_fencing: Vec::new(),
         }
+    }
+
+    /// Starts field ownership on a launched-active peer — the startup
+    /// half of the claim contract: takes the field-ownership claim
+    /// [`with_field_claim`](Self::with_field_claim) installed, then
+    /// lifts the gate, in the same order a promotion runs them. The
+    /// caller runs it once at startup, after the claim hook is
+    /// installed and before the first scan; until it runs the gate
+    /// stays closed — a launched active that cannot take the plant's
+    /// single-writer claim does not run unfenced.
+    ///
+    /// Only a launched `active` activates — any other role is refused
+    /// with [`SwitchError::NotActive`] — and a failed claim refuses the
+    /// start as [`SwitchError::FieldClaimFailed`] with the gate still
+    /// closed. On a peer carrying no claim hook — a private field — the
+    /// gate simply lifts.
+    pub fn activate(&mut self) -> Result<(), SwitchError> {
+        if self.role != Role::Active {
+            return Err(SwitchError::NotActive);
+        }
+        self.lift_gate()
     }
 
     /// The currently reported role.
@@ -808,8 +865,30 @@ impl<'d> Peer<'d> {
     /// `Out` image is stashed for the divergence check
     /// [`apply`](Self::apply) runs; a field-owning peer stages nothing —
     /// its writes are the field's truth.
+    ///
+    /// A field-owning scan whose write the shared field fenced —
+    /// [`IoError::Fenced`], meaning the claim this peer held was
+    /// preempted — still fails with its [`ScanError`], and queues one
+    /// [`FencingLoss`] for the journal: the loss of the field's
+    /// single-writer claim is a recorded run event, not only the exit
+    /// cause a caller may print.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
-        let tick = self.executor.scan()?;
+        let tick = match self.executor.scan() {
+            Ok(tick) => tick,
+            Err(error) => {
+                if self.owns_field()
+                    && !self.fencing_lost
+                    && let ScanError::Io(IoError::Fenced(point)) = &error
+                {
+                    self.fencing_lost = true;
+                    self.pending_fencing.push(FencingLoss {
+                        tick: self.executor.tick(),
+                        point: *point,
+                    });
+                }
+                return Err(error);
+            }
+        };
         match self.role {
             Role::Promoting => self.change(tick, Role::Active),
             Role::Demoting => self.change(tick, Role::Standby),
@@ -844,6 +923,14 @@ impl<'d> Peer<'d> {
     /// monitoring layer records them into.
     pub fn take_reinitializations(&mut self) -> Vec<CarryoverReport> {
         std::mem::take(&mut self.pending_reinits)
+    }
+
+    /// Drains field-claim losses queued since the last call — one
+    /// [`FencingLoss`] per observed preemption of the claim this peer
+    /// held — for the transition journal the monitoring layer records
+    /// them into.
+    pub fn take_fencing_losses(&mut self) -> Vec<FencingLoss> {
+        std::mem::take(&mut self.pending_fencing)
     }
 
     /// Queues `command` for application at the next scan boundary —
@@ -911,6 +998,9 @@ impl<'d> Peer<'d> {
         if let Some(gate) = self.gate {
             gate.open();
         }
+        // A fresh claim re-arms the loss report — a fenced write under
+        // this ownership is a new event, not a repeat of a prior one.
+        self.fencing_lost = false;
         Ok(())
     }
 
@@ -1243,6 +1333,7 @@ mod tests {
         let driver = StubDriver::new(point, Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
         let mut peer = Peer::active(executor(&gate), Some(&gate));
+        peer.activate().unwrap();
         peer.scan().unwrap();
         assert!(gate.is_open());
 
@@ -1261,6 +1352,106 @@ mod tests {
 
         // Demoting a non-owner is a named error.
         assert_eq!(peer.demote(), Err(SwitchError::NotActive));
+    }
+
+    /// A launched active takes the same field-ownership claim a
+    /// promotion does — at startup, before the gate lifts — so the
+    /// shared field is fenced for this owner from the first scan.
+    #[test]
+    fn the_launched_active_claims_the_field_then_lifts_the_gate() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate)).with_field_claim(|| {
+            claimed.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+
+        // The gate waits on the claim: construction alone opens nothing.
+        assert!(!claimed.load(Ordering::Relaxed));
+        assert!(!gate.is_open());
+
+        peer.activate().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+    }
+
+    /// A startup claim the field refuses fails the activation named —
+    /// `FieldClaimFailed` — with the gate still closed: a launched
+    /// active that cannot take the single-writer arbitration does not
+    /// run unfenced.
+    #[test]
+    fn a_refused_startup_claim_keeps_the_gate_closed() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_claim(|| Err("claim refused".to_string()));
+
+        assert_eq!(
+            peer.activate(),
+            Err(SwitchError::FieldClaimFailed {
+                detail: "claim refused".to_string()
+            })
+        );
+        assert!(!gate.is_open());
+        // Activation is a launched-active transition only.
+        let mut standby = Peer::standby(executor(&gate), None);
+        assert_eq!(standby.activate(), Err(SwitchError::NotActive));
+    }
+
+    /// A write the shared field fenced — its answer to a preempted
+    /// claim — fails the owning peer's scan as before and queues one
+    /// `FencingLoss` for the journal: the claim loss is a recorded run
+    /// event, not only the caller's exit cause.
+    struct FencingDriver<'d> {
+        inner: &'d (dyn IoDriver + Sync),
+        armed: AtomicBool,
+    }
+
+    impl IoDriver for FencingDriver<'_> {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            self.inner.read(point)
+        }
+
+        fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+            if self.armed.load(Ordering::Relaxed) {
+                return Err(IoError::Fenced(point));
+            }
+            self.inner.write(point, value)
+        }
+    }
+
+    #[test]
+    fn a_preempted_claim_journals_one_loss_per_ownership() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+        peer.scan().unwrap();
+        assert!(peer.take_fencing_losses().is_empty());
+
+        // Another attachment took the claim: the next write is fenced.
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Err(ScanError::Io(IoError::Fenced(OUTPUT))));
+        assert_eq!(
+            peer.take_fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(2),
+                point: OUTPUT
+            }]
+        );
+
+        // The loss is one event per held claim — repeated fenced scans
+        // do not queue again.
+        assert!(peer.scan().is_err());
+        assert!(peer.take_fencing_losses().is_empty());
     }
 
     /// A read-biasing driver wrapper: adds `offset` to `Float` reads of
@@ -1715,6 +1906,7 @@ mod tests {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
         let mut peer = Peer::active(executor(&gate), Some(&gate));
+        peer.activate().unwrap();
 
         let report = peer.track_once(|| panic!("a field owner pulls nothing"));
         assert_eq!(report, TrackReport::OwnsField);

@@ -143,6 +143,12 @@ const MODEL_SOURCE: &str = include_str!("../../dcs-demo/fixtures/ijmuiden.json")
 
 /// Process time advanced per scan — the dynamics declaration's dt.
 const DT: &str = "1.0";
+/// The field-ownership token the launched active pins via
+/// `--owner-token` — the claim the scripted field attachment shares,
+/// so its stimulus writes keep passing the plant's fencing while the
+/// active owns the field (and across the state-file restart, whose
+/// respawned process claims the same token).
+const OWNER_TOKEN: u64 = 499_002;
 /// The declared actor identity every operator command lands under —
 /// the receipted path's attribution the journal keeps.
 const OPERATOR: &str = "ops-lead";
@@ -760,8 +766,16 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         state_active.to_str().unwrap().to_string(),
         "--journal-file".to_string(),
         journal_active.to_str().unwrap().to_string(),
+        "--owner-token".to_string(),
+        OWNER_TOKEN.to_string(),
     ];
     let mut active_process = spawn_controller_logged(&model_path, &active_args, DT).0;
+    // The launched active holds the plant's single-writer claim from
+    // startup: this stimulus attachment joins that claim — the pinned
+    // token's other half — so the scripted field writes keep passing
+    // where any third attachment's would fence. The promotion below
+    // still fences it: the promoted peer's claim carries its own token.
+    field.claim_writer(OWNER_TOKEN).unwrap();
     let relay = PeerRelay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
         &model_path,

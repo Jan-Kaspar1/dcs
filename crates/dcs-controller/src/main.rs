@@ -7,7 +7,7 @@
 //! Usage: `dcs-controller <model-file> [--check] [--ticks N]
 //!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
 //!         [--remote ADDR] [--driven] [--auto-promote N]
-//!         [--state-file PATH] [--journal-file PATH]`
+//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]`
 //!
 //! `--check` is the engineering compile-check: the model is loaded,
 //! validated, and assembled through the standard registries — device
@@ -107,6 +107,19 @@
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
 //!
+//! The field's single-writer claim is taken at every transition into
+//! field ownership — a promotion, and a launched active's startup:
+//! `Peer::active` claims the shared plant's write arbitration before
+//! the gate lifts, so the field is fenced for this owner from the
+//! first scan rather than open to every attachment until the first
+//! promotion. The claim rides under a per-process owner token —
+//! `--owner-token N` pins it when an external attachment must share the
+//! owner's claim (a test harness driving plant stimuli); otherwise a
+//! fresh token is generated per process. A claim the field refuses —
+//! or a launch that cannot reach it — fails startup with the named
+//! `FieldClaimFailed`, and a claim a rogue `claim_writer` preempts
+//! journals `field_claim_lost` beside the fenced scan failure.
+//!
 //! Rolling a revised plant model into production, per the rolling
 //! model-revision decision: start the standby with `--revised` against
 //! the revised model document. Its fingerprint differs by design, so
@@ -200,6 +213,16 @@ impl Driver {
         }
     }
 
+    /// Whether this driver's surface reaches the shared field — a
+    /// remote attachment or a fan-out declaring field-facing devices —
+    /// so its write-ownership claim means something.
+    fn has_shared_field(&self) -> bool {
+        match self {
+            Self::Remote(_) => true,
+            Self::Local(fanout) => fanout.has_field_backend(),
+        }
+    }
+
     /// Takes the shared field's write-ownership under `owner` — the
     /// fencing claim every promotion runs before the gate lifts, so the
     /// field itself refuses a superseded owner's writes. A purely local
@@ -290,13 +313,20 @@ struct Options {
     /// restart. Requires `--listen`: the journal's recorder lives in
     /// the monitor.
     journal_file: Option<PathBuf>,
+    /// Pin this instance's field-ownership token instead of generating
+    /// a fresh per-process one — so an external attachment can claim
+    /// under the same token and share the owner's field access (a test
+    /// harness driving plant stimuli through its own sim-net
+    /// connection).
+    owner_token: Option<u64>,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
                       [--remote ADDR] [--driven] [--auto-promote N]
-                      [--revised] [--state-file PATH] [--journal-file PATH]
+                      [--owner-token N] [--revised] [--state-file PATH]
+                      [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -342,6 +372,12 @@ controller scan.
                   field-facing devices to arbitrate a single writer —
                   sim-tcp does through the plant server's claim, sim-bus
                   through the device server's
+  --owner-token N
+                  pin this instance's field-ownership token to N instead
+                  of generating a fresh per-process one — so an external
+                  attachment claiming under the same token shares the
+                  owner's field access (a test harness driving plant
+                  stimuli through its own sim-net connection)
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle — atomically, by write-then-rename —
@@ -380,6 +416,7 @@ impl Options {
         let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
+        let mut owner_token = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -425,6 +462,13 @@ impl Options {
                 "--journal-file" => {
                     journal_file = Some(PathBuf::from(value("--journal-file")?));
                 }
+                "--owner-token" => {
+                    owner_token = Some(
+                        value("--owner-token")?
+                            .parse::<u64>()
+                            .map_err(|error| format!("invalid --owner-token value: {error}"))?,
+                    );
+                }
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -454,6 +498,7 @@ impl Options {
                 ("--revised", revised),
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
+                ("--owner-token", owner_token.is_some()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -525,6 +570,7 @@ impl Options {
             revised,
             state_file,
             journal_file,
+            owner_token,
         })
     }
 }
@@ -714,11 +760,12 @@ fn main() -> ExitCode {
 
     // The role machine: a --standby instance tracks its active's
     // checkpoints gate-closed until promoted; anything else owns the
-    // field from the start. Every promotion — manual or the
-    // `--auto-promote` failover — first takes the field's
-    // write-ownership claim under this instance's token, so the shared
-    // plant itself refuses a superseded peer's writes.
-    let owner = owner_token();
+    // field from the start. The field's write-ownership claim is taken
+    // under this instance's token at every transition into field
+    // ownership — a launched active's startup activation below, and
+    // every promotion — so the shared plant itself refuses every
+    // attachment not holding the claim.
+    let owner = options.owner_token.unwrap_or_else(owner_token);
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
         None => Peer::active(executor, gate.as_ref()),
@@ -733,10 +780,25 @@ fn main() -> ExitCode {
     // checkpoint through the documented carryover rule rather than
     // degrading on the mismatch the fingerprint gate would otherwise
     // report.
-    let peer = match options.revised {
+    let mut peer = match options.revised {
         true => peer.with_revision(),
         false => peer,
     };
+
+    // A launched active owns the field from startup: activation runs
+    // the same claim-then-lift sequence a promotion does — the plant's
+    // single-writer claim under this instance's token first, the gate
+    // second — so the shared field is fenced for this owner from the
+    // first scan. A claim the field refuses is a named startup failure,
+    // not an unfenced run.
+    if options.standby.is_none() {
+        if let Err(error) = peer.activate() {
+            return fail(format!("{error}"));
+        }
+        if driver.has_shared_field() {
+            eprintln!("field write-ownership claim held under owner token {owner}");
+        }
+    }
 
     // The simulated process time per scan: explicit --dt, else the
     // wall-clock period in seconds, else one unit per unpaced tick.
