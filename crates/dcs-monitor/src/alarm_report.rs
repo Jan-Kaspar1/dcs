@@ -1984,6 +1984,7 @@ mod tests {
                 .collect(),
             }],
             command_queue: Default::default(),
+            publication: None,
         };
         let model =
             dcs_model::PlantModel::load(include_str!("../fixtures/managed_alarms.json")).unwrap();
@@ -2017,6 +2018,7 @@ mod tests {
                     forces: Vec::new(),
                     parameters: Vec::new(),
                     command_queue: Default::default(),
+                    publication: None,
                 },
                 &model.signal_index(),
             )

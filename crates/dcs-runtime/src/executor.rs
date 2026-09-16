@@ -1047,6 +1047,10 @@ impl<'d> Executor<'d> {
                 depth: self.pending_commands.len(),
                 high_water: self.command_admission.high_water,
             },
+            // The executor reports no publication section: only a
+            // monitor's post-scan publication stamps the store's
+            // overload counters — this view is the executor's own.
+            publication: None,
         }
     }
 

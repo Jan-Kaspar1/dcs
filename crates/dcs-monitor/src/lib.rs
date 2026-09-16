@@ -2,14 +2,27 @@
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
 //! small synchronous HTTP server, so no async runtime is involved and every
-//! request is handled one at a time. The executor lives behind a [`Mutex`]:
-//! each request holds the lock for its whole handling, so a snapshot can
-//! never observe a half-run scan and commands always interleave between
-//! scans, where the executor's documented boundary applies them.
+//! request is handled one at a time. The executor lives behind a [`Mutex`]
+//! the control-plane endpoints and the scan loop share — scans, commands,
+//! checkpoints, and role changes hold it for their whole handling, so a
+//! snapshot can never observe a half-run scan and commands always
+//! interleave between scans, where the executor's documented boundary
+//! applies them. The read endpoints do not touch it: after each completed
+//! scan the monitor publishes one immutable, already-materialized
+//! [`Publication`] — the snapshot plus the history and journal deltas
+//! that scan appended — into bounded storage owned outside the executor
+//! lock (the disposable-consumer decision's read side), and the read
+//! endpoints serialize and write those published copies. A stalled,
+//! absent, or slow reader therefore cannot extend the lock's hold
+//! beyond the scan and the publication swap.
 //!
 //! All bodies are JSON and all protocol types are shared serde contracts:
 //!
-//! - `GET /snapshot` → `200` [`TelemetrySnapshot`]
+//! - `GET /snapshot` → `200` [`TelemetrySnapshot`] — the latest
+//!   published read model's snapshot: materialized once per completed
+//!   scan regardless of request rate, serialized from the published
+//!   copy outside the executor lock, and carrying the `publication`
+//!   section's store overload counters
 //! - `GET /signals` → `200` [`SignalIndex`] — the loaded model's
 //!   point-to-signal metadata: every known point's signal name, unit,
 //!   description, display group, direction, and value type, plus the
@@ -18,12 +31,14 @@
 //!   instance, the per-instance model data the descriptors do not
 //!   carry (the decision-70 rationalization block), joined by the
 //!   `kind:id` diagnostic name the descriptor reports
-//! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the executor's
-//!   receipt log, retrievable alongside the snapshot
+//! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the receipt
+//!   log's published mirror, refreshed wherever the control-plane lock
+//!   changes it, so a submission between scans is immediately visible
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
-//!   point's retained samples in tick order; `?point=<id>` (repeatable)
-//!   selects points and `?since=<seq>` returns only samples newer than
-//!   the caller's last seen sequence
+//!   point's retained samples in tick order from the store's bounded
+//!   rings; `?point=<id>` (repeatable) selects points and
+//!   `?since=<seq>` returns only samples newer than the caller's last
+//!   seen sequence — an evicted stretch surfaces as a numbering gap
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise
 //! - `GET /checkpoint` → `200` [`Checkpoint`] — the executor's current
@@ -70,10 +85,24 @@
 //! point: after each completed scan it journals the command receipts the
 //! scan boundary settled, appends each point's fresh image sample to that
 //! point's history ring, and journals quality transitions and step
-//! failures — in the scan's own phase order. Both streams are bounded by
-//! [`MonitorConfig`] with oldest-first eviction, and every entry carries
-//! a monotonically increasing `seq`, so a polling consumer detects an
-//! evicted stretch as a numbering gap instead of silently missing it.
+//! failures — in the scan's own phase order. Every recorded append lands
+//! in the publication store's served rings immediately — including
+//! events the control plane journals between scans, like a refused
+//! command or a role change — and the completed scan then publishes one
+//! immutable [`Publication`] carrying its monotonic sequence, its tick,
+//! and the deltas appended since the previous publication into the
+//! store's bounded retained window. All streams are bounded by
+//! [`MonitorConfig`] with oldest-first eviction, and every entry
+//! carries a monotonically increasing `seq`, so a polling consumer
+//! detects an evicted stretch as a numbering gap — or, on the
+//! seq-cursor publication read ([`Monitor::publications_since`]), the
+//! named [`PublicationGap`] — and coalesces onto retained or latest
+//! state instead of ever backpressuring execution. The store's
+//! overload accounting — publications produced, publications evicted
+//! and coalesced, retained depth, the configured window bound — rides
+//! each served snapshot's `publication` section: the documented
+//! placement of the read-side overload metrics. With zero consumers
+//! the counters still advance and storage stays bounded.
 //!
 //! With `journal_file` set on [`MonitorConfig`], every journaled entry is
 //! also appended to that path as one line-delimited JSON record at the
@@ -257,21 +286,24 @@ pub mod alarm_report;
 mod journal_file;
 mod pair;
 mod recorder;
+mod store;
 
+use crate::store::Store;
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
 pub use pair::{PairClient, PairError, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
+pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    RoleReport, TelemetrySnapshot, Tick,
+    PublicationHealth, RoleReport, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Request body of `POST /scan`: how many scans the executor should run.
@@ -341,10 +373,19 @@ pub struct Driven<'d> {
 
 /// A monitoring server sharing one executor over HTTP+JSON.
 ///
-/// See the crate docs for the endpoint contract and the single-lock
-/// concurrency model.
+/// See the crate docs for the endpoint contract and the two-lock split:
+/// `shared` serializes the control plane — scans, commands,
+/// checkpoints, role changes — while `store` holds the published read
+/// models and served rings every read endpoint copies out without
+/// touching it.
 pub struct Monitor<'d> {
     shared: Mutex<Shared<'d>>,
+    /// The read side: the bounded publication store the read endpoints
+    /// serve, owned outside the executor lock. A fetch clones an `Arc`
+    /// or an owned copy and releases the store's own small lock before
+    /// any serialization or socket I/O; each completed scan swaps a new
+    /// immutable [`Publication`] in.
+    store: Store,
     signals: SignalIndex,
     server: Server,
     /// When set — [`bind_paced`](Self::bind_paced) — the hosting process
@@ -357,7 +398,9 @@ pub struct Monitor<'d> {
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
-/// behind one lock so a request never observes a half-recorded scan.
+/// behind one lock so a scan never runs half-recorded and every
+/// mutation settles at a scan boundary. The publication store is
+/// deliberately outside it: reader work never joins this lock.
 struct Shared<'d> {
     peer: Peer<'d>,
     recorder: recorder::Recorder,
@@ -449,8 +492,15 @@ impl<'d> Monitor<'d> {
         config: MonitorConfig,
     ) -> io::Result<Self> {
         let recorder = recorder::Recorder::new(config, peer.tick())?;
+        let store = recorder.store();
+        // The bind-time read model is the first publication — any
+        // journal tail a configured file replayed rides its event
+        // delta — so the read endpoints serve from the store from the
+        // moment the monitor exists.
+        store.publish(peer.tick(), peer.snapshot(), peer.receipts());
         Ok(Self {
             shared: Mutex::new(Shared { peer, recorder }),
+            store,
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
@@ -490,20 +540,22 @@ impl<'d> Monitor<'d> {
         self.server.unblock();
     }
 
-    /// Runs one executor scan through the shared lock and records it —
-    /// the entry point for a process pacing its own scan loop once the
-    /// monitor owns the executor.
+    /// Runs one executor scan through the shared lock, records it, and
+    /// publishes its immutable read model — the entry point for a
+    /// process pacing its own scan loop once the monitor owns the
+    /// executor.
     ///
-    /// Holding the mutex for the whole scan keeps the documented
-    /// interleaving: a request never observes a half-run scan, and a
-    /// command submitted between scans still applies at the next scan's
-    /// boundary. The scan is recorded exactly like an endpoint-driven
-    /// one, so `/history` and `/journal` advance under pacing. A pending
-    /// role transition settles on the completed scan and its journal
-    /// entry follows the scan's own events.
+    /// Holding the mutex for the scan, recording, and publication swap
+    /// keeps the documented interleaving: a request never observes a
+    /// half-run scan, and a command submitted between scans still
+    /// applies at the next scan's boundary. The scan is recorded and
+    /// published exactly like an endpoint-driven one, so the read
+    /// endpoints track the paced run; their serving work stays off the
+    /// lock. A pending role transition settles on the completed scan
+    /// and its journal entry follows the scan's own events.
     pub fn paced_scan(&self) -> Result<Tick, ScanError> {
         let mut shared = self.shared.lock().unwrap();
-        scan_and_record(&mut shared)
+        scan_and_record(&mut shared, &self.store)
     }
 
     /// Records one scan cycle that overran its wall-clock period — the
@@ -516,8 +568,46 @@ impl<'d> Monitor<'d> {
     }
 
     /// The executor's current telemetry snapshot, taken under the lock.
+    ///
+    /// This is the control-plane view — the executor's own report,
+    /// built on demand — not the published read model: a consumer that
+    /// wants the served copy, built once per completed scan, reads
+    /// [`published`](Self::published).
     pub fn snapshot(&self) -> TelemetrySnapshot {
         self.shared.lock().unwrap().peer.snapshot()
+    }
+
+    /// The latest published read model — the immutable copy `GET
+    /// /snapshot` serializes: materialized once per completed scan and
+    /// carrying its publication sequence, its scan's tick, the history
+    /// and journal deltas appended since the previous publication, and
+    /// the receipt log as of the scan. `None` only before the bind-time
+    /// publication every `bind_*` performs.
+    ///
+    /// Holding the returned `Arc` never blocks a scan: publications are
+    /// immutable, and the store ages its bounded retained window
+    /// forward around them.
+    pub fn published(&self) -> Option<Arc<Publication>> {
+        self.store.latest()
+    }
+
+    /// Reads the retained publication window from a seq cursor — the
+    /// in-process form of a consumer's "everything newer than what I
+    /// last saw" read. Publications newer than `seq` come back oldest
+    /// first; when the cursor's successors already aged out of the
+    /// bounded window the page carries the named [`PublicationGap`],
+    /// and the consumer coalesces onto the retained tail or
+    /// [`published`](Self::published)'s latest state instead of ever
+    /// backpressuring the run.
+    pub fn publications_since(&self, seq: u64) -> PublicationPage {
+        self.store.page_since(seq)
+    }
+
+    /// The publication store's overload counters as they stand now —
+    /// the same [`PublicationHealth`] report the latest publication's
+    /// snapshot `publication` section carries as of its publish.
+    pub fn publication_health(&self) -> PublicationHealth {
+        self.store.health()
     }
 
     /// The executor's current transferable state, taken under the lock —
@@ -563,6 +653,10 @@ impl<'d> Monitor<'d> {
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
         }
+        // An adopted checkpoint carries the active's receipt log —
+        // refresh the store's mirror so `GET /receipts` stays current
+        // before the next scan publishes.
+        self.store.sync_receipts(peer.receipts());
         result
     }
 
@@ -585,6 +679,7 @@ impl<'d> Monitor<'d> {
         for report in peer.take_reinitializations() {
             recorder.note_reinitialized(report);
         }
+        self.store.sync_receipts(peer.receipts());
         result
     }
 
@@ -609,7 +704,7 @@ impl<'d> Monitor<'d> {
     /// the recorder. The returned [`TrackReport`] is the caller's to
     /// present; the journal already holds its transitions.
     pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
-        track_and_record(&mut self.shared.lock().unwrap(), pull)
+        track_and_record(&mut self.shared.lock().unwrap(), &self.store, pull)
     }
 
     /// Whether the heartbeat's consecutive failed pulls have reached the
@@ -643,22 +738,27 @@ impl<'d> Monitor<'d> {
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
-            (Method::Get, "/snapshot") => json(200, &self.shared.lock().unwrap().peer.snapshot()),
-            (Method::Get, "/receipts") => json(200, self.shared.lock().unwrap().peer.receipts()),
+            // The read endpoints fetch the published copy — an `Arc`
+            // clone or an owned stream — releasing the store's lock
+            // inside the call, then serialize and write it: no part of
+            // serving a reader ever holds the executor lock.
+            (Method::Get, "/snapshot") => match self.store.latest() {
+                Some(publication) => json(200, &publication.snapshot),
+                // Bind always publishes the seed read model; a store
+                // without one can only mean the monitor was never bound.
+                None => json(503, "no publication yet"),
+            },
+            (Method::Get, "/receipts") => json(200, &*self.store.receipts()),
             (Method::Get, "/checkpoint") => {
                 json(200, &self.shared.lock().unwrap().peer.checkpoint())
             }
             (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
             (Method::Get, "/history") => match history_query(query) {
-                Ok((points, since)) => {
-                    let shared = self.shared.lock().unwrap();
-                    let Shared { peer, recorder } = &*shared;
-                    json(200, &recorder.history(peer.executor(), &points, since))
-                }
+                Ok((points, since)) => json(200, &self.store.history(&points, since)),
                 Err(message) => json(400, &message),
             },
             (Method::Get, "/journal") => match journal_query(query) {
-                Ok(since) => json(200, &self.shared.lock().unwrap().recorder.journal(since)),
+                Ok(since) => json(200, &self.store.journal(since)),
                 Err(message) => json(400, &message),
             },
             (Method::Post, "/promote") => self.switchover(true),
@@ -678,6 +778,10 @@ impl<'d> Monitor<'d> {
                         let index = peer.receipts().len() - 1;
                         let tick = peer.tick();
                         recorder.note_command(index, receipt.clone(), tick);
+                        // Refresh the store's mirror so `GET /receipts`
+                        // answers the just-submitted receipt before its
+                        // scan boundary settles it.
+                        self.store.sync_receipts(peer.receipts());
                         receipt
                     } else {
                         let receipt = CommandReceipt {
@@ -712,13 +816,13 @@ impl<'d> Monitor<'d> {
                         // sync state, which `GET /role` serves; the scan
                         // still runs on its last-known state.
                         if let Some(active) = self.driven.track {
-                            track_and_record(&mut shared, || {
+                            track_and_record(&mut shared, &self.store, || {
                                 MonitorClient::new(active)
                                     .checkpoint()
                                     .map_err(|error| format!("fetch from {active}: {error}"))
                             });
                         }
-                        if let Err(error) = scan_and_record(&mut shared) {
+                        if let Err(error) = scan_and_record(&mut shared, &self.store) {
                             failure = Some(error.to_string());
                             break;
                         }
@@ -731,7 +835,16 @@ impl<'d> Monitor<'d> {
                     }
                     match failure {
                         Some(error) => json(500, &error),
-                        None => json(200, &shared.peer.snapshot()),
+                        // The last scan already published its read model —
+                        // answer with that immutable copy, released from
+                        // the executor lock before serialization.
+                        None => {
+                            drop(shared);
+                            match self.store.latest() {
+                                Some(publication) => json(200, &publication.snapshot),
+                                None => json(503, "no publication yet"),
+                            }
+                        }
                     }
                 }
                 Err(response) => response,
@@ -775,8 +888,11 @@ impl<'d> Monitor<'d> {
 /// promote-on-budget sequence, then the queues it filled — divergence
 /// detections, reinitialization reports, the role change a
 /// self-promotion reported — drain into the recorder in report order.
+/// An applied checkpoint adopts the peer's receipt log, so the store's
+/// mirror refreshes before the next scan publishes.
 fn track_and_record(
     shared: &mut Shared<'_>,
+    store: &Store,
     pull: impl FnOnce() -> Result<Checkpoint, String>,
 ) -> TrackReport {
     let Shared { peer, recorder } = shared;
@@ -790,20 +906,36 @@ fn track_and_record(
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
     }
+    store.sync_receipts(peer.receipts());
     report
 }
 
-/// One executor scan plus its recording — the body `paced_scan` and
-/// `POST /scan` share: the scan runs under the lock, its history and
-/// journal entries are attributed to the scan's tick, and a role
-/// transition the scan settled is journaled after the scan's own events.
-fn scan_and_record(shared: &mut Shared<'_>) -> Result<Tick, ScanError> {
+/// One executor scan, its recording, and its publication — the body
+/// `paced_scan` and `POST /scan` share: the scan runs under the lock,
+/// its history and journal entries are attributed to the scan's tick, a
+/// role transition the scan settled is journaled after the scan's own
+/// events, and the once-materialized snapshot publishes into the
+/// bounded store the read endpoints serve. The lock's hold ends at the
+/// swap — the consumer side never joins it.
+fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanError> {
     let Shared { peer, recorder } = shared;
-    let tick = peer.scan()?;
-    recorder.record_scan(peer.executor(), tick);
+    let tick = match peer.scan() {
+        Ok(tick) => tick,
+        Err(error) => {
+            // A scan aborted mid-way is not recorded — the run ends at
+            // it — but its boundary already counted the I/O faults
+            // into `io_health`: publish the faulted boundary's state
+            // so the served read model reports the fault rather than
+            // sitting on the last healthy scan.
+            store.publish(peer.tick(), peer.snapshot(), peer.receipts());
+            return Err(error);
+        }
+    };
+    let snapshot = recorder.record_scan(peer.executor(), tick);
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
     }
+    store.publish(tick, snapshot, peer.receipts());
     Ok(tick)
 }
 

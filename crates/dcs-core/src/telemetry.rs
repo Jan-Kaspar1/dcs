@@ -155,6 +155,36 @@ pub struct IoHealth {
     pub driver: Option<DriverDiagnostics>,
 }
 
+/// The monitoring publication store's report — the read-side overload
+/// surface of the decision that the controller owns execution while UI
+/// delivery is a bounded consumer. A monitor materializes one immutable
+/// read model per completed scan into bounded storage outside the
+/// executor lock and stamps this section onto the snapshot it carries:
+/// consumers read the store's own counters here rather than the
+/// executor's.
+///
+/// `None` on a producer's own `Executor::snapshot` view — the section
+/// exists only where a publication store publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationHealth {
+    /// Read models published since the monitor bound — also the latest
+    /// publication's monotonic sequence: assigned in publish order and
+    /// never reused, so a consumer holding a seq cursor knows how far
+    /// behind the window it has fallen.
+    pub published: u64,
+    /// Publications that aged out of the retained window — the seq
+    /// stretch a lagging seq-cursor consumer can no longer read back
+    /// and so observes as the named gap, coalescing onto the retained
+    /// tail or the latest state. This is the overload counter: it
+    /// moves when scans out-publish the window, never by backpressure
+    /// into execution.
+    pub coalesced: u64,
+    /// Publications the retained window currently holds.
+    pub depth: u64,
+    /// The retained window's configured bound.
+    pub window: u64,
+}
+
 /// The snapshot's command-ingress section: admission metrics for the
 /// executor's bounded pending-command queue — the overload visibility
 /// the bounded-ingress decision requires beside the bound itself.
@@ -191,7 +221,7 @@ pub struct CommandQueueDiagnostics {
 /// appears once, carrying its latest observation. Producers order `points`
 /// by ascending [`PointId`] and `components` by execution order so equal
 /// runs serialize identically.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
     /// The producer's tick when the snapshot was taken; [`Tick::ZERO`]
     /// before the first scan.
@@ -236,6 +266,45 @@ pub struct TelemetrySnapshot {
     /// reads back with a zeroed section.
     #[serde(default)]
     pub command_queue: CommandQueueDiagnostics,
+    /// The serving monitor's publication-store report — the overload
+    /// counters of the bounded read-model storage this snapshot was
+    /// published into. `None` — and absent on the wire — on a
+    /// producer's own snapshot; a monitor stamps it as of the publish
+    /// the snapshot rides. Absent from snapshots serialized before the
+    /// section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationHealth>,
+}
+
+impl PartialEq for TelemetrySnapshot {
+    /// The `publication` section is the serving monitor's own
+    /// bookkeeping — its store's counters, whatever instance answered —
+    /// not run state: two peers of a redundant pair legitimately
+    /// publish different counts, and a restarted peer restarts them.
+    /// Equality is therefore the run's state — every field but that
+    /// section; the destructure names each compared field so a future
+    /// field forces the decision here.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            tick,
+            points,
+            components,
+            descriptors,
+            io_health,
+            forces,
+            parameters,
+            command_queue,
+            publication: _,
+        } = self;
+        tick == &other.tick
+            && points == &other.points
+            && components == &other.components
+            && descriptors == &other.descriptors
+            && io_health == &other.io_health
+            && forces == &other.forces
+            && parameters == &other.parameters
+            && command_queue == &other.command_queue
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +433,12 @@ mod tests {
                 depth: 3,
                 high_water: 6,
             },
+            publication: Some(PublicationHealth {
+                published: 7,
+                coalesced: 3,
+                depth: 4,
+                window: 8,
+            }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
@@ -372,13 +447,14 @@ mod tests {
         );
 
         // A snapshot serialized before forces, parameter reporting, the
-        // cyclic exchange counters, and the command-queue section existed
-        // carries none of those fields and reads back with empty
-        // sections.
+        // publication and command-queue sections, and the cyclic exchange
+        // counters existed carries none of those fields and reads back
+        // with empty sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object_mut().unwrap();
         object.remove("forces");
         object.remove("parameters");
+        object.remove("publication");
         object.remove("command_queue");
         object
             .get_mut("io_health")
@@ -389,6 +465,7 @@ mod tests {
         let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
         assert_eq!(legacy.forces, Vec::new());
         assert_eq!(legacy.parameters, Vec::new());
+        assert_eq!(legacy.publication, None);
         assert_eq!(legacy.io_health.failed_exchanges, 0);
         assert_eq!(legacy.command_queue, CommandQueueDiagnostics::default());
     }

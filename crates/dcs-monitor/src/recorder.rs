@@ -2,7 +2,8 @@
 //!
 //! [`Recorder`] observes the executor once per completed scan — the
 //! documented recording point is after the scan's write phase, never
-//! mid-scan — and appends to two bounded streams:
+//! mid-scan — and appends to the bounded streams the monitor's
+//! publication [`Store`](crate::store::Store) owns and serves:
 //!
 //! - a per-point ring of [`HistorySample`]s carrying each point's fresh
 //!   image sample, and
@@ -18,26 +19,37 @@
 //! A scan aborted by a [`ScanError`](dcs_runtime::ScanError) is not
 //! recorded: the run ends at it. Both streams evict oldest-first past the
 //! configured capacity and number entries with never-reused `seq`s, so
-//! consumers detect eviction as a numbering gap.
+//! consumers detect eviction as a numbering gap. `record_scan` also
+//! returns the materialized snapshot — the monitor publishes it into the
+//! store as the completed scan's immutable read model rather than
+//! rebuilding it per request.
 
 use crate::journal_file::JournalFile;
+use crate::store::Store;
 use dcs_core::{
-    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, HistorySample, JournalEntry,
-    JournalEvent, PointHistory, PointId, Quality, Role, Sample, Tick, Value,
+    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, JournalEntry, JournalEvent,
+    PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
 use dcs_runtime::Executor;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
-/// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded
-/// streams, plus the journal's optional durable sink.
+/// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded and
+/// published streams, plus the journal's optional durable sink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorConfig {
     /// Samples retained per point in the history rings; `0` retains none.
     pub history_capacity: usize,
     /// Entries retained in the transition journal; `0` retains none.
     pub journal_capacity: usize,
+    /// Publications retained in the read-model window a seq-cursor
+    /// consumer pages through; `0` retains only the latest. Bounded
+    /// regardless of consumer count — a window that fills evicts
+    /// oldest-first and counts the evictions into the `coalesced`
+    /// overload counter the served snapshot's `publication` section
+    /// reports.
+    pub publication_capacity: usize,
     /// When set, every journaled entry is also appended to this
     /// line-delimited JSON file — the journal-persistence decision's
     /// monitor-local sink. Startup replays the file into the in-memory
@@ -56,34 +68,8 @@ impl Default for MonitorConfig {
         Self {
             history_capacity: 1024,
             journal_capacity: 1024,
+            publication_capacity: 16,
             journal_file: None,
-        }
-    }
-}
-
-/// One point's ring of recent samples.
-struct Ring {
-    /// The `seq` the next appended sample takes.
-    next_seq: u64,
-    samples: VecDeque<HistorySample>,
-}
-
-impl Ring {
-    fn new() -> Self {
-        Self {
-            next_seq: 1,
-            samples: VecDeque::new(),
-        }
-    }
-
-    fn push(&mut self, sample: Sample, capacity: usize) {
-        self.samples.push_back(HistorySample {
-            seq: self.next_seq,
-            sample,
-        });
-        self.next_seq += 1;
-        while self.samples.len() > capacity {
-            self.samples.pop_front();
         }
     }
 }
@@ -91,12 +77,10 @@ impl Ring {
 /// Records bounded per-point history and the transition journal, one scan
 /// at a time. See the module docs for the recording point and ordering.
 pub(super) struct Recorder {
-    config: MonitorConfig,
-    /// Rings keyed by point id; the `BTreeMap` keeps `/history` output in
-    /// ascending point order.
-    rings: BTreeMap<PointId, Ring>,
-    /// Retained journal entries, oldest first.
-    journal: VecDeque<JournalEntry>,
+    /// The publication store the recorded streams live in — shared with
+    /// the monitor, which publishes each completed scan's read model
+    /// there and serves every read from it.
+    store: Store,
     /// The `seq` the next journaled entry takes.
     next_seq: u64,
     /// The last quality observed per point — what transitions diff
@@ -136,10 +120,16 @@ impl Recorder {
             }
             None => (None, crate::journal_file::Replay::default()),
         };
+        let store = Store::new(
+            config.history_capacity,
+            config.journal_capacity,
+            config.publication_capacity,
+        );
+        for entry in replay.entries {
+            store.push_journal(entry);
+        }
         Ok(Self {
-            config,
-            rings: BTreeMap::new(),
-            journal: replay.entries,
+            store,
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
             values: HashMap::new(),
@@ -147,6 +137,13 @@ impl Recorder {
             step_counts: Vec::new(),
             sink,
         })
+    }
+
+    /// The publication store the recorded streams live in — the monitor
+    /// shares it, publishing each completed scan's read model there and
+    /// serving every read from it.
+    pub(super) fn store(&self) -> Store {
+        self.store.clone()
     }
 
     /// Notes the receipt a `submit_command` just produced, at
@@ -215,8 +212,14 @@ impl Recorder {
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the
-    /// module docs for the event ordering.
-    pub(super) fn record_scan(&mut self, executor: &Executor<'_>, scan_tick: Tick) {
+    /// module docs for the event ordering. Returns the materialized
+    /// snapshot — built exactly once here — for the monitor to publish
+    /// as the scan's read model.
+    pub(super) fn record_scan(
+        &mut self,
+        executor: &Executor<'_>,
+        scan_tick: Tick,
+    ) -> TelemetrySnapshot {
         // Commands settle at the scan head, before the input read. A
         // receipt journals on the outcome transition this record
         // observes — whether the command was submitted here or arrived
@@ -256,10 +259,7 @@ impl Recorder {
             let Some(sample) = telemetry.sample else {
                 continue;
             };
-            self.rings
-                .entry(telemetry.point)
-                .or_insert_with(Ring::new)
-                .push(sample, self.config.history_capacity);
+            self.store.push_sample(telemetry.point, sample);
             let from = self.qualities.insert(telemetry.point, sample.quality);
             if from != Some(sample.quality) {
                 self.push(
@@ -325,62 +325,23 @@ impl Recorder {
         for event in failures {
             self.push(scan_tick, event);
         }
+        snapshot
     }
 
-    /// The retained history of `points` — every mapped point when empty —
-    /// keeping only samples with a `seq` above `since`. Points are
-    /// returned in ascending id order regardless of request order, so
-    /// equal runs answer identically.
-    pub(super) fn history(
-        &self,
-        executor: &Executor<'_>,
-        points: &[PointId],
-        since: u64,
-    ) -> Vec<PointHistory> {
-        let selected: BTreeSet<PointId> = if points.is_empty() {
-            executor
-                .snapshot()
-                .points
-                .iter()
-                .map(|telemetry| telemetry.point)
-                .collect()
-        } else {
-            points.iter().copied().collect()
-        };
-        selected
-            .into_iter()
-            .map(|point| PointHistory {
-                point,
-                samples: self
-                    .rings
-                    .get(&point)
-                    .map(|ring| {
-                        ring.samples
-                            .iter()
-                            .filter(|sample| sample.seq > since)
-                            .copied()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
-            .collect()
-    }
-
-    /// Retained journal entries with a `seq` above `since`, oldest first.
+    /// Retained journal entries with a `seq` above `since`, oldest first
+    /// — the store's served ring. Test-only: the served `GET /journal`
+    /// answer reads the store directly.
+    #[cfg(test)]
     pub(super) fn journal(&self, since: u64) -> Vec<JournalEntry> {
-        self.journal
-            .iter()
-            .filter(|entry| entry.seq > since)
-            .cloned()
-            .collect()
+        self.store.journal(since)
     }
 
     /// Appends one journal entry — to the configured file sink first,
-    /// then the ring — evicting the oldest past capacity. An append the
-    /// file cannot take is fatal: the run dies naming the file rather
-    /// than running on while its audit trail silently stops, and the
-    /// partial record a crash can leave is what the next startup's
-    /// replay rejects by name.
+    /// then the store's served ring and pending publication delta. An
+    /// append the file cannot take is fatal: the run dies naming the
+    /// file rather than running on while its audit trail silently
+    /// stops, and the partial record a crash can leave is what the next
+    /// startup's replay rejects by name.
     pub(super) fn push(&mut self, tick: Tick, event: JournalEvent) {
         let entry = JournalEntry {
             seq: self.next_seq,
@@ -391,10 +352,7 @@ impl Recorder {
             sink.append(&entry)
                 .unwrap_or_else(|error| panic!("{error}"));
         }
-        self.journal.push_back(entry);
         self.next_seq += 1;
-        while self.journal.len() > self.config.journal_capacity {
-            self.journal.pop_front();
-        }
+        self.store.push_journal(entry);
     }
 }
