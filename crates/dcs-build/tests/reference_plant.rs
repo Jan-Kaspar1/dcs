@@ -8,7 +8,9 @@
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance, the manifest fingerprint check, the
-//! deterministic scripted simulation, the served operator surface —
+//! rig-definition consistency check asserting `deploy/compose.yaml`
+//! instantiates `deploy/manifest.json`, the deterministic scripted
+//! simulation, the served operator surface —
 //! the signal index, page, snapshot descriptors, and journal asserted
 //! against the emitted model's declaration — the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
@@ -27,8 +29,8 @@
 //! Every failure the template's check can land is a named diagnostic
 //! from `docs/release-contract.md` — this test surfaces them verbatim —
 //! and the negative cases prove the new stage names the template
-//! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`, and
-//! `scenario-failed`.
+//! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
+//! `scenario-failed`, and `rig-mismatch`.
 
 mod common;
 
@@ -351,6 +353,41 @@ fn a_wrong_manifest_fingerprint_reports_the_named_diagnostic() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
         "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A rig definition diverging from the deployment manifest is the
+/// `rig-mismatch` diagnostic — exercised against a doctored copy at
+/// script level, so neither the remote stand-in nor the tooling builds
+/// are needed.
+#[test]
+fn a_divergent_rig_definition_reports_rig_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-rig-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let compose = dir.join("deploy/compose.yaml");
+    let source = std::fs::read_to_string(&compose).unwrap();
+    std::fs::write(&compose, source.replacen("ctrl-a:8080", "ctrl-a:9090", 1)).unwrap();
+    let output = Command::new("python3")
+        .arg("ci/deploy_rig.py")
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the rig-definition check");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a divergent rig definition passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("rig-mismatch"),
+        "expected the rig-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
