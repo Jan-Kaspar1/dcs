@@ -7,8 +7,10 @@
 //! exactly that commit — and runs the tree's own `ci/check.sh`
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
-//! released-tooling acceptance, the manifest fingerprint check, and the
-//! deterministic scripted simulation.
+//! released-tooling acceptance, the manifest fingerprint check, the
+//! deterministic scripted simulation, and the served operator surface —
+//! the signal index, page, snapshot descriptors, and journal asserted
+//! against the emitted model's declaration.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -301,6 +303,73 @@ fn a_changed_trajectory_reports_scenario_failed() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("scenario-failed"),
         "expected the scenario-failed diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The `surface` stage's tamper case, at script level. Every edit to
+/// the materialized tree that would desynchronize the served surface
+/// from the declared one is already caught by an earlier stage — emit
+/// proves the checked-in artifacts byte-equal a fresh emit, and the
+/// controller serves the same document the stage derives its
+/// expectations from — so this exercises the stage's comparison
+/// directly: a served index missing a declared writable command point,
+/// a writable point served read-only, or the never-shelvable alarm's
+/// read-only `shelve` surface served writable each report the named
+/// mismatches `ci/check.sh` turns into `surface-mismatch`.
+#[test]
+fn a_tampered_served_index_reports_named_mismatches() {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("simulate", "ci/simulate.py")
+simulate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(simulate)
+
+model = json.load(open("model/plant.json"))
+declared = simulate.declared_signal_index(model)
+
+# The untampered index reports no mismatches.
+served = json.loads(json.dumps(declared))
+assert simulate.index_mismatches(declared, served) == []
+
+# A declared writable command point dropped from the served index is
+# named as not served.
+served = json.loads(json.dumps(declared))
+writable = next(e["point"] for e in served["points"] if e["writable"])
+served["points"] = [e for e in served["points"] if e["point"] != writable]
+failures = simulate.index_mismatches(declared, served)
+assert any(str(writable) in f and "not served" in f for f in failures), failures
+
+# A writable command point served read-only is flagged.
+served = json.loads(json.dumps(declared))
+entry = next(e for e in served["points"] if e["point"] == writable)
+entry["writable"] = False
+failures = simulate.index_mismatches(declared, served)
+assert any(str(writable) in f and "writable" in f for f in failures), failures
+
+# The never-shelvable high-level alarm's read-only shelve point served
+# writable is flagged — the refused shelve surface.
+served = json.loads(json.dumps(declared))
+entry = next(e for e in served["points"] if e["name"] == "lah-shelve")
+entry["writable"] = True
+failures = simulate.index_mismatches(declared, served)
+assert any("lah-shelve" in f and "writable" in f for f in failures), failures
+
+print("tamper cases report named mismatches")
+"#,
+        )
+        .current_dir(root().join("reference-plant"))
+        .output()
+        .expect("python3 runs the surface comparison");
+    assert!(
+        output.status.success(),
+        "the surface comparison did not flag the tampered index:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
