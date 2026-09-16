@@ -24,6 +24,20 @@ declaration instead of the scenario legs — the check's `surface` stage:
   writable while the never-shelvable alarm's read-only `shelve` point
   does not — plus one component record per declared instance;
 - `GET /` must serve the monitoring page;
+- `GET /schema` must serve the block-interface registry — one versioned
+  interface per declared `<kind>:<id>` covering every declared port as
+  a measurement or state resource with its bound point, every declared
+  parameter as a configuration entry with its `set_parameter` command,
+  the point-command verbs on every `In` port, and the block-level
+  `command_settled`/`step_failed` events;
+- every kind-declared command a served interface carries answers a
+  structured receipt through `POST /command`'s `invoke` variant and
+  settles `applied` through the journaled `command_settled` record;
+- every kind-declared event a served interface carries must reach the
+  consumer-visible record — the `GET /journal` `event_emitted` entries
+  and the instance-attributed `events` of `GET /resources` — once the
+  run drives its declaring component to emission (the exercise
+  program's `run` input held across its declared step table);
 - the snapshot's `descriptors` must cover every composed component as
   its declared `<kind>:<id>`;
 - `GET /journal` must answer the run's recorded transitions.
@@ -59,6 +73,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -284,6 +299,360 @@ def descriptor_mismatches(model, snapshot):
     return failures
 
 
+def bound_points(model):
+    """The `(component id, port name) -> point id` map the model's
+    wiring resolves — the binding the served registry's `point`
+    annotation carries. A point-to-port connection binds the declared
+    point; a port-to-port wire binds the synthesized internal carrier
+    pair the assembly allocates above every declared point id — the
+    `from` port the `Out` carrier, the `to` port the linked `In` — in
+    connection order, the same resolution `dcs-assembly` performs."""
+    bound = {}
+    next_internal = (
+        max((point["id"] for point in model["io_points"]), default=0) + 1
+    )
+    for connection in model["connections"]:
+        ports = [
+            end["port"] for end in (connection["from"], connection["to"]) if "port" in end
+        ]
+        point = next(
+            (
+                end["point"]
+                for end in (connection["from"], connection["to"])
+                if "point" in end
+            ),
+            None,
+        )
+        if len(ports) == 1 and point is not None:
+            bound[(ports[0]["component"], ports[0]["name"])] = point
+        elif len(ports) == 2:
+            bound[(ports[0]["component"], ports[0]["name"])] = next_internal
+            bound[(ports[1]["component"], ports[1]["name"])] = next_internal + 1
+            next_internal += 2
+    return bound
+
+
+def registry_expectations(model):
+    """The content each declared component's served interface must
+    carry — derived from the emitted model document, so
+    `schema_mismatches` proves the served registry against the
+    artifact and the test seam can build a tamperable served-shaped
+    document from the same expectation.
+
+    Returns `{name: {"kind", "ports", "configuration", "commands",
+    "events"}}` where `ports` maps a port name to the resource fields
+    asserted (`direction`, `kind`, `point`), `configuration` maps a
+    parameter name to its declared value kind, `commands` maps an
+    adapted command's name to its asserted fields (`adapted`,
+    `availability`, `point`), and `events` is the name set the
+    interface must carry."""
+    bound = bound_points(model)
+    expected = {}
+    for component in model["components"]:
+        name = f"{component['kind']}:{component['id']}"
+        ports = {}
+        commands = {}
+        events = {"command_settled", "step_failed"}
+        for port_name, port in component["ports"].items():
+            point = bound.get((component["id"], port_name))
+            ports[port_name] = {
+                "direction": port["direction"],
+                "kind": port["value_type"],
+                "point": point,
+            }
+            events.add(f"quality_changed:{port_name}")
+            if port["value_type"] in ("bool", "int"):
+                events.add(f"point_changed:{port_name}")
+            if port["direction"] == "in":
+                for verb in ("write_value", "force_point", "unforce_point"):
+                    commands[f"{verb}:{port_name}"] = {
+                        "adapted": verb,
+                        "availability": "bound_point_writable",
+                        "point": point,
+                    }
+        configuration = {}
+        for parameter_name, parameter in component.get("parameters", {}).items():
+            configuration[parameter_name] = next(iter(parameter))
+            commands[f"set_parameter:{parameter_name}"] = {
+                "adapted": "set_parameter",
+                "availability": "always",
+            }
+        expected[name] = {
+            "kind": component["kind"],
+            "ports": ports,
+            "configuration": configuration,
+            "commands": commands,
+            "events": events,
+        }
+    return expected
+
+
+def schema_mismatches(model, schema):
+    """Named differences between the emitted model's declared
+    components and the block-interface registry `GET /schema` serves —
+    every declared `<kind>:<id>` must serve a versioned interface
+    carrying its declared ports as measurement/state resources, its
+    declared parameters as configuration, the adapted command verbs on
+    every `In` port, and the adapted event vocabulary."""
+    failures = []
+    served = {}
+    for entry in schema.get("interfaces", []):
+        served[entry.get("name")] = entry.get("interface", {})
+    for name, want in registry_expectations(model).items():
+        interface = served.get(name)
+        if interface is None:
+            failures.append(
+                f"component {name} is declared but the registry serves no interface"
+            )
+            continue
+        if interface.get("kind") != want["kind"]:
+            failures.append(
+                f"component {name}: served kind={interface.get('kind')!r}, "
+                f"declared {want['kind']!r}"
+            )
+        if interface.get("version") != 1:
+            failures.append(
+                f"component {name}: served interface version "
+                f"{interface.get('version')!r}, expected 1"
+            )
+        resources = {}
+        for collection in ("measurements", "state"):
+            for entry in interface.get(collection, []):
+                resources[entry.get("name")] = entry
+        configuration = {
+            entry.get("name"): entry
+            for entry in interface.get("configuration", [])
+        }
+        commands = {
+            entry.get("name"): entry for entry in interface.get("commands", [])
+        }
+        events = {entry.get("name") for entry in interface.get("events", [])}
+        for port_name, port in want["ports"].items():
+            resource = resources.get(port_name)
+            if resource is None:
+                failures.append(
+                    f"component {name}: port {port_name} is declared but "
+                    f"serves no measurement or state resource"
+                )
+            else:
+                for field in ("direction", "kind", "point"):
+                    if resource.get(field) != port[field]:
+                        failures.append(
+                            f"component {name}: port {port_name} serves "
+                            f"{field}={resource.get(field)!r}, "
+                            f"declared {port[field]!r}"
+                        )
+        for command_name, command in want["commands"].items():
+            spec = commands.get(command_name)
+            if spec is None:
+                failures.append(
+                    f"component {name}: serves no {command_name} command"
+                )
+                continue
+            for field, expected in command.items():
+                if spec.get(field) != expected:
+                    failures.append(
+                        f"component {name}: {command_name} serves "
+                        f"{field}={spec.get(field)!r}, declared {expected!r}"
+                    )
+        for parameter_name, kind in want["configuration"].items():
+            property_ = configuration.get(parameter_name)
+            if property_ is None:
+                failures.append(
+                    f"component {name}: parameter {parameter_name} is "
+                    f"declared but serves no configuration entry"
+                )
+            elif property_.get("kind") != kind:
+                failures.append(
+                    f"component {name}: parameter {parameter_name} serves "
+                    f"kind={property_.get('kind')!r}, declared {kind!r}"
+                )
+        for event_name in sorted(want["events"]):
+            if event_name not in events:
+                failures.append(
+                    f"component {name}: serves no {event_name} event"
+                )
+    for name in sorted(set(served) - set(registry_expectations(model))):
+        failures.append(f"component {name} serves an interface but is not declared")
+    return failures
+
+
+def declared_commands(schema):
+    """The `(component, spec)` pairs a served registry declares
+    natively — `adapted == "declared"` `commands` entries, the
+    `invoke`-addressed surface."""
+    return [
+        (entry["name"], spec)
+        for entry in schema.get("interfaces", [])
+        for spec in entry["interface"].get("commands", [])
+        if spec.get("adapted") == "declared"
+    ]
+
+
+def declared_events(schema):
+    """The `(component, spec)` pairs a served registry declares
+    natively — `adapted == "declared"` `events` entries, the
+    kind-emitted surface."""
+    return [
+        (entry["name"], spec)
+        for entry in schema.get("interfaces", [])
+        for spec in entry["interface"].get("events", [])
+        if spec.get("adapted") == "declared"
+    ]
+
+
+def command_arguments(spec):
+    """A minimal submission honoring a declared command's request
+    schema — one typed argument per declared `request` entry."""
+    minimal = {"bool": {"bool": False}, "int": {"int": 1}, "float": {"float": 1.0}}
+    return {
+        argument["name"]: minimal[argument["kind"]]
+        for argument in spec.get("request", [])
+    }
+
+
+def receipt_mismatches(component, command, receipt):
+    """Named differences between the structured receipt a declared
+    command's `invoke` submission must answer and what `POST /command`
+    returned — the receipt must echo the submission and carry the
+    `accepted` outcome the admissible-at-rest invocation earns."""
+    name = f"{command['name']} on {component}"
+    if not isinstance(receipt, dict):
+        return [f"the declared command {name} produced no receipt"]
+    failures = []
+    invoke = receipt.get("command", {}).get("invoke", {})
+    if invoke.get("component") != component or invoke.get("command") != command["name"]:
+        failures.append(
+            f"the declared command {name}'s receipt echoes "
+            f"{receipt.get('command')!r}"
+        )
+    outcome = receipt.get("outcome")
+    if not isinstance(outcome, dict) or not (
+        {"accepted", "applied", "rejected"} & set(outcome)
+    ):
+        failures.append(f"the declared command {name} produced no structured receipt")
+    else:
+        outcome_name = receipt_outcome(receipt)
+        if outcome_name != "accepted":
+            failures.append(
+                f"the declared command {name} answered {outcome_name}, "
+                f"expected accepted"
+            )
+    return failures
+
+
+def settlement_misses(invoked, journal):
+    """Each `(component, command)` submitted through `invoke` must
+    reach a journaled `command_settled` receipt with the `applied`
+    outcome — the structured answer completing at the scan boundary."""
+    settled = [
+        entry["event"]["command_settled"]["receipt"]
+        for entry in journal
+        if "command_settled" in entry.get("event", {})
+    ]
+    failures = []
+    for component, command in invoked:
+        matches = [
+            receipt
+            for receipt in settled
+            if receipt.get("command", {}).get("invoke", {}).get("component")
+            == component
+            and receipt["command"]["invoke"].get("command") == command
+        ]
+        if not matches:
+            failures.append(
+                f"the declared command {command} on {component} produced "
+                f"no settled receipt"
+            )
+        elif all(receipt_outcome(receipt) != "applied" for receipt in matches):
+            failures.append(
+                f"the declared command {command} on {component} settled "
+                f"{receipt_outcome(matches[-1])}, not applied"
+            )
+    return failures
+
+
+def emitted_event_misses(wanted, journal):
+    """Each `(component, spec)` in `wanted` must have a journaled
+    `event_emitted` record carrying its declared payload fields — the
+    kind-emitted event reaching the consumer-visible record."""
+    emitted = [
+        entry["event"]["event_emitted"]["event"]
+        for entry in journal
+        if "event_emitted" in entry.get("event", {})
+    ]
+    failures = []
+    for component, spec in wanted:
+        matches = [
+            event
+            for event in emitted
+            if event.get("component") == component
+            and event.get("event") == spec["name"]
+        ]
+        if not matches:
+            failures.append(
+                f"no emitted {spec['name']} event from {component} "
+                f"reached the journal"
+            )
+            continue
+        fields = matches[-1].get("fields", {})
+        for field in spec.get("payload", []):
+            if field["name"] not in fields:
+                failures.append(
+                    f"the emitted {spec['name']} event from {component} "
+                    f"lacks declared field {field['name']}"
+                )
+    return failures
+
+
+def resource_event_misses(wanted, resources):
+    """Each `(component, spec)` in `wanted` must appear in the
+    component's `GET /resources` `events` — the per-instance view of
+    the same consumer-visible record."""
+    components = {
+        entry.get("name"): entry for entry in resources.get("components", [])
+    }
+    failures = []
+    for component, spec in wanted:
+        entry = components.get(component)
+        if entry is None:
+            failures.append(f"{component} serves no resource view")
+            continue
+        if not any(
+            "event_emitted" in event.get("event", {})
+            and event["event"]["event_emitted"]["event"].get("event")
+            == spec["name"]
+            for event in entry.get("events", [])
+        ):
+            failures.append(
+                f"no emitted {spec['name']} event is attributed to "
+                f"{component} in the resource view"
+            )
+    return failures
+
+
+def emission_scans(model, component):
+    """The running scans a declared-event component needs to emit — the
+    exercise program's `sequencer` emits `step_completed` once `run`
+    has held across a step's declared ticks, so the declared step
+    table's total length covers emission."""
+    declared = next(
+        (
+            entry
+            for entry in model["components"]
+            if f"{entry['kind']}:{entry['id']}" == component
+        ),
+        None,
+    )
+    if declared is None:
+        return 0
+    ticks = 0
+    for name, value in declared.get("parameters", {}).items():
+        if re.fullmatch(r"step_\d+_ticks", name) and "int" in value:
+            ticks += value["int"]
+    return ticks
+
+
 def run_surface(monitor, model):
     """The `--surface` mode's check: asserts the monitor's served
     operator surface against the emitted model's declaration, over the
@@ -304,32 +673,166 @@ def run_surface(monitor, model):
     else:
         if "<html" not in page:
             failures.append("GET / did not serve the monitoring page")
+
+    # The served block-interface registry: `GET /schema` must cover
+    # every component the emitted model declares — the schema-driven
+    # contract a generic consumer renders from.
     try:
-        snapshot = http(f"{monitor}/scan", {"scans": 2})
+        schema = http(f"{monitor}/schema")
+    except urllib.error.URLError as error:
+        failures.append(f"GET /schema answered {error}")
+        schema = None
+    if schema is not None:
+        failures += schema_mismatches(model, schema)
+
+    # The declared command surface: every kind-declared command a
+    # served interface carries submits through `POST /command`'s
+    # `invoke` variant and must answer a structured receipt. The
+    # submissions queue now and apply at the first scan boundary the
+    # `POST /scan` below crosses.
+    invoked = []
+    if schema is not None:
+        commands = declared_commands(schema)
+        if not commands:
+            failures.append(
+                "the registry carries no kind-declared command — the "
+                "declared command surface is unproven"
+            )
+        for component, command in commands:
+            body = {
+                "command": {
+                    "invoke": {
+                        "component": component,
+                        "command": command["name"],
+                        "arguments": command_arguments(command),
+                    }
+                },
+                "actor": "ci-surface",
+            }
+            try:
+                receipt = http(f"{monitor}/command", body)
+            except urllib.error.URLError as error:
+                failures.append(
+                    f"the declared command {command['name']} on {component} "
+                    f"produced no receipt: {error}"
+                )
+                continue
+            failures += receipt_mismatches(component, command, receipt)
+            invoked.append((component, command["name"]))
+
+    # The kind-emitted event surface: each component declaring a
+    # kind-emitted event is driven far enough to emit it. Driving is
+    # composition knowledge — the exercise program's `sequencer` emits
+    # `step_completed` once its writable `run` input has held across
+    # the declared step table's ticks.
+    wanted = []
+    scans_needed = 2
+    if schema is not None:
+        writable = {entry["point"] for entry in declared["points"] if entry["writable"]}
+        interfaces = {
+            entry["name"]: entry["interface"] for entry in schema["interfaces"]
+        }
+        events = declared_events(schema)
+        if not events:
+            failures.append(
+                "the registry carries no kind-declared event — the "
+                "emitted event surface is unproven"
+            )
+        for component, event in events:
+            wanted.append((component, event))
+            interface = interfaces.get(component, {})
+            write = next(
+                (
+                    entry
+                    for entry in interface.get("commands", [])
+                    if entry.get("name") == "write_value:run"
+                ),
+                None,
+            )
+            point = write.get("point") if write is not None else None
+            request = {a["name"]: a["kind"] for a in write.get("request", [])} if write else {}
+            if point is None or request.get("value") != "bool" or point not in writable:
+                failures.append(
+                    f"{component}: no writable boolean `run` input drives it to "
+                    f"emit {event['name']}"
+                )
+                continue
+            try:
+                receipt = http(
+                    f"{monitor}/command",
+                    {
+                        "command": {
+                            "write_value": {
+                                "kind": "bool",
+                                "point": point,
+                                "value": {"bool": True},
+                            }
+                        },
+                        "actor": "ci-surface",
+                    },
+                )
+                outcome = receipt_outcome(receipt)
+            except (urllib.error.URLError, KeyError, TypeError) as error:
+                failures.append(
+                    f"{component}: the `run` write produced no receipt: {error}"
+                )
+                continue
+            if outcome != "accepted":
+                failures.append(
+                    f"{component}: the `run` write answered {outcome}, "
+                    f"expected accepted"
+                )
+                continue
+            scans_needed = max(scans_needed, emission_scans(model, component) + 1)
+
+    try:
+        snapshot = http(f"{monitor}/scan", {"scans": scans_needed})
     except urllib.error.URLError as error:
         failures.append(f"POST /scan answered {error}")
         snapshot = None
     if snapshot is not None:
         failures += descriptor_mismatches(model, snapshot)
+
+    # The consumer-visible record: `GET /journal` answers the run's
+    # transitions — which must include each submitted declared
+    # command's settled receipt and each declared event's emitted
+    # record — and `GET /resources` attributes the emitted events to
+    # their producing instances.
+    journal = None
     try:
         journal = http(f"{monitor}/journal")
     except urllib.error.URLError as error:
         failures.append(f"GET /journal answered {error}")
-        journal = None
     if journal is not None and not isinstance(journal, list):
         failures.append("GET /journal did not answer a list of entries")
         journal = None
-    if isinstance(journal, list) and not journal:
-        failures.append("GET /journal answered no entries across the run's scans")
+    if isinstance(journal, list):
+        if not journal:
+            failures.append("GET /journal answered no entries across the run's scans")
+        else:
+            failures += emitted_event_misses(wanted, journal)
+            failures += settlement_misses(invoked, journal)
+    try:
+        resources = http(f"{monitor}/resources")
+    except urllib.error.URLError as error:
+        failures.append(f"GET /resources answered {error}")
+        resources = None
+    if resources is not None:
+        failures += resource_event_misses(wanted, resources)
+
     if failures:
         for failure in failures:
             eprint(f"surface: {failure}")
         return 1
+    emitted = sum(
+        1 for entry in journal if "event_emitted" in entry.get("event", {})
+    )
     digest = hashlib.sha256(
         json.dumps(
             {
                 "signals": served,
                 "descriptors": snapshot["descriptors"],
+                "schema": schema,
                 "journal": journal,
             },
             sort_keys=True,
@@ -339,6 +842,8 @@ def run_surface(monitor, model):
     print(
         f"surface-digest {digest} — {len(declared['points'])} points "
         f"({writable} writable), {len(declared['components'])} components, "
+        f"{len(schema['interfaces'])} interfaces, {len(invoked)} declared "
+        f"commands receipted, {emitted} emitted events, "
         f"{len(journal)} journal entries"
     )
     return 0

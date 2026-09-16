@@ -67,7 +67,7 @@ services:
     volumes:
       - ../model/plant.json:/model/plant.json:ro
     environment:
-      DCS_MODEL_FINGERPRINT: "68b94d7a876ecc3d"
+      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
     command:
       - /model/plant.json
       - --remote
@@ -92,7 +92,7 @@ services:
     volumes:
       - ../model/plant.json:/model/plant.json:ro
     environment:
-      DCS_MODEL_FINGERPRINT: "68b94d7a876ecc3d"
+      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
     command:
       - /model/plant.json
       - --remote
