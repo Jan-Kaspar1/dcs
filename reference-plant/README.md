@@ -123,13 +123,17 @@ point-command verbs on every `In` port; every kind-declared command a
 served interface carries — the exercise `sequencer`'s `advance` and
 `reset` — must answer a structured receipt through `POST /command`'s
 `invoke` variant and settle `applied` through the journaled
-`command_settled` record; every kind-emitted event — the sequencer's
-`step_completed` — must reach the consumer-visible record once the run
-drives its declaring component to emission, appearing in `GET
-/journal`'s `event_emitted` entries and the instance-attributed
-`events` of `GET /resources`; the snapshot's `descriptors` must cover
-every composed component; and `GET /journal` must answer the run's
-recorded transitions. A divergence fails `surface-mismatch`.
+`command_settled` record; `GET /resources` must join each
+`kind_declared` command's published availability verdict — `advance`
+reporting `available` mid-table, then `available: false` carrying the
+kind's named refusal once the run completes the table; every
+kind-emitted event — the sequencer's `step_completed` — must reach the
+consumer-visible record once the run drives its declaring component to
+emission, appearing in `GET /journal`'s `event_emitted` entries and
+the instance-attributed `events` of `GET /resources`; the snapshot's
+`descriptors` must cover every composed component; and `GET /journal`
+must answer the run's recorded transitions. A divergence fails
+`surface-mismatch`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the

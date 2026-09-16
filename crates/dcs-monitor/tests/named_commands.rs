@@ -7,9 +7,9 @@
 
 use dcs_blocks::{Sequencer, SequencerStep};
 use dcs_core::{
-    Command, CommandError, CommandOutcome, ComponentDescriptor, Direction, EmittedEvent, EventDecl,
-    EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEntry,
-    JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandState, ComponentDescriptor, Direction,
+    EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue, IoDriver,
+    IoError, JournalEntry, JournalEvent, PointId, ResourceView, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
@@ -232,6 +232,16 @@ fn settled(client: &MonitorClient, since: u64) -> Vec<JournalEntry> {
         .collect()
 }
 
+/// The `seq` component's served command state for `name` — the
+/// `GET /resources` view's `commands` entry.
+fn command_state<'a>(view: &'a ResourceView, name: &str) -> &'a CommandState {
+    view.components
+        .iter()
+        .find(|entry| entry.name == "seq")
+        .and_then(|seq| seq.commands.iter().find(|command| command.name == name))
+        .unwrap_or_else(|| panic!("{name} missing from seq's commands"))
+}
+
 #[test]
 fn invoke_submission_rejections_journal_at_the_run_tick() {
     with_sequencer(MonitorConfig::default(), |_driver, client| {
@@ -390,6 +400,44 @@ fn sequencer_invokes_apply_at_the_boundary_and_journal() {
                 .value,
             Value::Int(1)
         );
+    });
+}
+
+#[test]
+fn resources_serve_the_published_command_verdicts() {
+    with_sequencer(MonitorConfig::default(), |driver, client| {
+        // The seed publication predates the first scan's probe: with
+        // no `command_verdicts` section to join, a `KindDeclared`
+        // command keeps the unconditional `available` the read model
+        // reported before the section existed.
+        let view = client.resources().unwrap();
+        assert!(command_state(&view, "advance").available);
+        assert_eq!(command_state(&view, "advance").refusal, None);
+
+        // One scan in, the probe's verdicts join the view: `advance`
+        // mid-table reports invocable — and `reset`, `Always`-
+        // available, is untouched by the section.
+        client.advance(1).unwrap();
+        let view = client.resources().unwrap();
+        let advance = command_state(&view, "advance");
+        assert!(advance.available);
+        assert_eq!(advance.refusal, None);
+        assert!(command_state(&view, "reset").available);
+
+        // `run` paced to the table's end publishes the kind's standing
+        // refusal: the served state reports `advance` unavailable
+        // carrying the probe's reason — the same text a refused
+        // submission's receipt settles.
+        driver.write(RUN, Value::Bool(true)).unwrap();
+        client.advance(2).unwrap();
+        let view = client.resources().unwrap();
+        let advance = command_state(&view, "advance");
+        assert!(!advance.available);
+        assert_eq!(
+            advance.refusal.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert!(command_state(&view, "reset").available);
     });
 }
 

@@ -33,6 +33,12 @@ declaration instead of the scenario legs — the check's `surface` stage:
 - every kind-declared command a served interface carries answers a
   structured receipt through `POST /command`'s `invoke` variant and
   settles `applied` through the journaled `command_settled` record;
+- `GET /resources` joins the published per-command availability: a
+  `kind_declared` command reports `available` while the kind's
+  standing predicate permits — the exercise program's `advance`
+  mid-table — and `available: false` carrying the kind's named
+  refusal reason once it refuses — the same `advance` on the table
+  the run drove to its end;
 - every kind-declared event a served interface carries must reach the
   consumer-visible record — the `GET /journal` `event_emitted` entries
   and the instance-attributed `events` of `GET /resources` — once the
@@ -605,6 +611,50 @@ def emitted_event_misses(wanted, journal):
     return failures
 
 
+def availability_misses(commands, resources, expect):
+    """Named differences between the `kind_declared` commands'
+    published standing verdicts and the command states
+    `GET /resources` serves: each `(component, spec)` in `commands`
+    declaring `kind_declared` availability on a component `expect`
+    keys must report `expect`'s `available` — a refused command also
+    carrying the kind's named refusal reason. `expect` is composition
+    knowledge the calling leg supplies: the exercise program's
+    `advance` is invocable mid-table and refuses once the table has
+    run to its end."""
+    components = {
+        entry.get("name"): entry for entry in resources.get("components", [])
+    }
+    failures = []
+    for component, spec in commands:
+        if spec.get("availability") != "kind_declared" or component not in expect:
+            continue
+        entry = components.get(component)
+        state = next(
+            (
+                command
+                for command in (entry or {}).get("commands", [])
+                if command.get("name") == spec["name"]
+            ),
+            None,
+        )
+        name = f"{spec['name']} on {component}"
+        if state is None:
+            failures.append(f"the declared command {name} serves no command state")
+            continue
+        wanted = expect[component]
+        if state.get("available") is not wanted:
+            failures.append(
+                f"the declared command {name} serves "
+                f"available={state.get('available')!r}, expected {wanted}"
+            )
+        elif wanted is False and not state.get("refusal"):
+            failures.append(
+                f"the declared command {name} serves unavailable "
+                f"without the kind's named refusal"
+            )
+    return failures
+
+
 def resource_event_misses(wanted, resources):
     """Each `(component, spec)` in `wanted` must appear in the
     component's `GET /resources` `events` — the per-instance view of
@@ -785,11 +835,41 @@ def run_surface(monitor, model):
                 continue
             scans_needed = max(scans_needed, emission_scans(model, component) + 1)
 
+    # The run scans in two legs so the served per-command availability
+    # is provable in both directions: mid-table the exercise program's
+    # kind-declared commands report the published invocable verdict,
+    # the completed table's the standing refusal. A read never reaches
+    # the scan, so splitting the pacing changes no outcome.
     try:
-        snapshot = http(f"{monitor}/scan", {"scans": scans_needed})
+        snapshot = http(f"{monitor}/scan", {"scans": 1})
     except urllib.error.URLError as error:
         failures.append(f"POST /scan answered {error}")
         snapshot = None
+    if snapshot is not None and schema is not None:
+        try:
+            mid_run = http(f"{monitor}/resources")
+        except urllib.error.URLError as error:
+            failures.append(f"GET /resources answered {error}")
+            mid_run = None
+        if mid_run is not None:
+            # One running scan cannot have completed a table whose
+            # declared steps total more than a tick, so the program's
+            # kind-declared commands are still invocable.
+            failures += availability_misses(
+                commands,
+                mid_run,
+                {
+                    component: True
+                    for component, _event in wanted
+                    if emission_scans(model, component) > 1
+                },
+            )
+    if snapshot is not None and scans_needed > 1:
+        try:
+            snapshot = http(f"{monitor}/scan", {"scans": scans_needed - 1})
+        except urllib.error.URLError as error:
+            failures.append(f"POST /scan answered {error}")
+            snapshot = None
     if snapshot is not None:
         failures += descriptor_mismatches(model, snapshot)
 
@@ -819,6 +899,15 @@ def run_surface(monitor, model):
         resources = None
     if resources is not None:
         failures += resource_event_misses(wanted, resources)
+        if schema is not None:
+            # Each driven component's table has run to its end: its
+            # kind-declared commands now serve the kind's standing
+            # refusal — `available: false` with the named reason.
+            failures += availability_misses(
+                commands,
+                resources,
+                {component: False for component, _event in wanted},
+            )
 
     if failures:
         for failure in failures:

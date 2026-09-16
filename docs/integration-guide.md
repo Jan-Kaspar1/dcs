@@ -444,8 +444,8 @@ published verdict and the refusal must be the same expression. The
 verdict is advisory only: submissions still validate, queue, and settle
 through the receipted path, and a verdict dispatch disagrees with
 settles honestly rather than failing the scan. The default reports
-every declared command invocable, matching the read model's earlier
-unconditional `available`.
+every declared command invocable — the unconditional `available` a
+publication carrying no verdict still serves.
 
 ### Declaring an emitted event
 
@@ -496,10 +496,14 @@ A generic consumer needs no kind-specific code:
 - `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a
   declared command through the same receipted path without a browser.
 
-A `KindDeclared` command reports `available` in the resource view even
-when the kind's predicate would refuse this submission — the served
-refusal is the settled `command_refused` receipt's, so consumers should
-surface that named reason rather than pre-judging availability.
+A `KindDeclared` command's served `available` joins the published
+verdict: while the kind's predicate refuses, the resource view reports
+`available: false` carrying the kind's named refusal reason. The served
+answer is advisory — it is the last completed scan's standing verdict,
+so a submission still validates, queues, and settles through the
+receipted path, and a refusal the verdict predates (an argument-domain
+check, an `invoke_command` invariant) still lands on the settled
+`command_refused` receipt for consumers to surface.
 
 ## Adding a device kind
 
