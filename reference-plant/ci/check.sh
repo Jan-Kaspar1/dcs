@@ -33,10 +33,15 @@
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
 #   surface      the served operator surface — the signal index, the
-#                monitoring page, the snapshot's descriptors, and the
-#                journal — matches the emitted model's declaration, in
-#                the same deterministic --driven run the simulate stage
-#                performs (surface-mismatch)
+#                monitoring page, the snapshot's descriptors, the
+#                block-interface registry covering every declared
+#                component, the kind-declared commands answering
+#                structured receipts through POST /command, and the
+#                kind-emitted events reaching the journal and the
+#                per-instance resource view — matches the emitted
+#                model's declaration, in the same deterministic
+#                --driven run the simulate stage performs
+#                (surface-mismatch)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -59,8 +64,11 @@
 #                from (default: the published origin below). The
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
-#   DCS_REV      the pinned revision (default: the v0.1.0 rev this
-#                repository's manifest records).
+#   DCS_REV      the pinned revision (default: the release-line rev
+#                this repository's manifest records — the newest 0.1
+#                commit whose tooling serves the interface registry,
+#                declared commands, and emitted events the surface
+#                stage proves).
 #   DCS_UPGRADE_REV
 #                the later compatible revision the upgrade stage repins
 #                to (default: $DCS_REV — a same-revision repin, still
@@ -78,7 +86,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-a2b1b13e7b4273b133bc0fff55cb97e16c5d3197}"
+DCS_REV="${DCS_REV:-b85eaa4355520594eaeb3b5e77561062e9789ace}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 TOOLS=""
@@ -235,14 +243,14 @@ python3 ci/simulate.py \
     --model model/plant.json \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
-    || fail "surface-mismatch: the served operator surface does not match the emitted model's declared surface"
+    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, emitted events — does not match the emitted model's declared surface"
 
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py README.md; do
+for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

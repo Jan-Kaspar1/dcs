@@ -42,6 +42,11 @@
 //!   `oos` to the pump's own maintenance-inhibit point and its
 //!   `suppress` to the delivered copy, so a deliberately offline
 //!   machine's fault stays named without annunciating.
+//! - **Program:** the exercise program — the station's `sequencer`
+//!   instance — steps its declared table while its `run` input holds,
+//!   reporting `step`/`done` and emitting `step_completed` per
+//!   finished step; the kind's declared `advance`/`reset` commands
+//!   pace or restart it through the receipted command path.
 //!
 //! ## The declared point-id scheme
 //!
@@ -51,7 +56,8 @@
 //! the dynamics document's `threshold` element drives, and per pump
 //! `i` (0-based, `pumps <= 20`): `20+i` draw, `40+i` run, `60+i`
 //! thermal, `80+i` moisture, `100+i` command. Internal carriers start
-//! at `200`, per-pump internal blocks at `300 + 24·i`, and every alarm
+//! at `200`, the exercise program's block sits at `240`, per-pump
+//! internal blocks at `300 + 24·i`, and every alarm
 //! owns a ten-point block at `1000 + 10·a`: `ack`/`shelve`/`oos` at
 //! offsets 0–2 where the instance declares the input, `alarm`,
 //! `unacknowledged`, `shelved`, `suppressed`, `out_of_service` at 3–7.
@@ -63,7 +69,7 @@
 use dcs_build::specs::{
     BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, ManagedAlarmHandles,
     ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, MotorSpec,
-    PumpGroupInstance, PumpGroupSpec, ThresholdChainSpec,
+    PumpGroupInstance, PumpGroupSpec, SequencerSpec, ThresholdChainSpec,
 };
 use dcs_build::{
     parameters, BuildError, Direction, InPoint, PlantBuilder, PointId, Rationalization, SignalId,
@@ -132,6 +138,19 @@ mod carriers {
     pub const BACKUP_ACTIVE_IN: u64 = 219;
     pub const NONE_AVAILABLE_IN: u64 = 220;
     pub const ALL_FAULTED_IN: u64 = 221;
+    /// The exercise program's held `run` request — the writable point
+    /// an operator writes to start the table.
+    pub const EXERCISE_RUN: u64 = 240;
+    /// The exercise program's held `reset` condition — bound read-only
+    /// because the kind's declared `reset` command is the one-shot
+    /// operator path.
+    pub const EXERCISE_RESET: u64 = 241;
+    /// The active exercise step's declared demand.
+    pub const EXERCISE_OUT: u64 = 242;
+    /// The active exercise step, 1-based.
+    pub const EXERCISE_STEP: u64 = 243;
+    /// The exercise program's run-to-end flag.
+    pub const EXERCISE_DONE: u64 = 244;
 }
 
 /// The first per-pump internal block: pump `i` owns
@@ -866,6 +885,70 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             power_ok,
             &group,
         ));
+    }
+
+    // The exercise program — the station's `sequencer` and the kind
+    // carrying the declared command/event vocabulary (`advance`,
+    // `reset`, and the kind-emitted `step_completed` event) the
+    // consumer surface proof exercises. `run` is the writable held
+    // request that starts the table; `reset` binds read-only — the
+    // declared command is the one-shot path. Each step's declared
+    // demand lands on `out`; `step`/`done` report progress, and
+    // `done` is journaled so the finished program leaves a durable
+    // record beside its emitted events.
+    let exercise = plant.add(SequencerSpec::new(parameters([
+        ("step_count", Value::Int(2)),
+        ("step_1_ticks", Value::Int(2)),
+        ("step_1_out", Value::Float(1.0)),
+        ("step_2_ticks", Value::Int(2)),
+        ("step_2_out", Value::Float(0.5)),
+    ])));
+    let exercise_run =
+        plant.internal_input::<bool>(PointId(carriers::EXERCISE_RUN), false, true);
+    let exercise_reset =
+        plant.internal_input::<bool>(PointId(carriers::EXERCISE_RESET), false, false);
+    let exercise_out = plant.internal_output::<f64>(PointId(carriers::EXERCISE_OUT), 0.0);
+    let exercise_step = plant.internal_output::<i64>(PointId(carriers::EXERCISE_STEP), 0);
+    let exercise_done = plant.internal_output::<bool>(PointId(carriers::EXERCISE_DONE), false);
+    plant.journaled(exercise_done);
+    plant.connect(exercise_run, &exercise.run);
+    plant.connect(exercise_reset, &exercise.reset);
+    plant.connect(&exercise.out, exercise_out);
+    plant.connect(&exercise.step, exercise_step);
+    plant.connect(&exercise.done, exercise_done);
+    for (point, name, unit, description) in [
+        (
+            carriers::EXERCISE_RUN,
+            "exercise-run",
+            "",
+            "Exercise program run request",
+        ),
+        (
+            carriers::EXERCISE_RESET,
+            "exercise-reset",
+            "",
+            "Exercise program held reset condition",
+        ),
+        (
+            carriers::EXERCISE_OUT,
+            "exercise-out",
+            "",
+            "Active exercise step's declared demand",
+        ),
+        (
+            carriers::EXERCISE_STEP,
+            "exercise-step",
+            "",
+            "Active exercise step, 1-based",
+        ),
+        (
+            carriers::EXERCISE_DONE,
+            "exercise-done",
+            "",
+            "Exercise program run to completion",
+        ),
+    ] {
+        signal(&mut plant, PointId(point), name, unit, description, "program");
     }
 
     let model = plant.build()?;

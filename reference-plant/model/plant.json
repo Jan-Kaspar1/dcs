@@ -1441,6 +1441,48 @@
         "bool": false
       },
       "journaled": true
+    },
+    {
+      "id": 240,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 241,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 242,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 243,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 244,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
     }
   ],
   "signals": [
@@ -2683,6 +2725,46 @@
       "unit": "",
       "description": "Out of service with the pump's maintenance state",
       "group": "pump-p102"
+    },
+    {
+      "id": 10240,
+      "name": "exercise-run",
+      "source": 240,
+      "unit": "",
+      "description": "Exercise program run request",
+      "group": "program"
+    },
+    {
+      "id": 10241,
+      "name": "exercise-reset",
+      "source": 241,
+      "unit": "",
+      "description": "Exercise program held reset condition",
+      "group": "program"
+    },
+    {
+      "id": 10242,
+      "name": "exercise-out",
+      "source": 242,
+      "unit": "",
+      "description": "Active exercise step's declared demand",
+      "group": "program"
+    },
+    {
+      "id": 10243,
+      "name": "exercise-step",
+      "source": 243,
+      "unit": "",
+      "description": "Active exercise step, 1-based",
+      "group": "program"
+    },
+    {
+      "id": 10244,
+      "name": "exercise-done",
+      "source": 244,
+      "unit": "",
+      "description": "Exercise program run to completion",
+      "group": "program"
     }
   ],
   "components": [
@@ -4023,6 +4105,49 @@
         "out": {
           "direction": "out",
           "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "kind": "sequencer",
+      "parameters": {
+        "step_1_out": {
+          "float": 1.0
+        },
+        "step_1_ticks": {
+          "int": 2
+        },
+        "step_2_out": {
+          "float": 0.5
+        },
+        "step_2_ticks": {
+          "int": 2
+        },
+        "step_count": {
+          "int": 2
+        }
+      },
+      "ports": {
+        "done": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "reset": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "step": {
+          "direction": "out",
+          "value_type": "int"
         }
       }
     }
@@ -6195,6 +6320,61 @@
           "component": 37,
           "name": "in"
         }
+      }
+    },
+    {
+      "from": {
+        "point": 240
+      },
+      "to": {
+        "port": {
+          "component": 39,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 241
+      },
+      "to": {
+        "port": {
+          "component": 39,
+          "name": "reset"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 39,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 242
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 39,
+          "name": "step"
+        }
+      },
+      "to": {
+        "point": 243
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 39,
+          "name": "done"
+        }
+      },
+      "to": {
+        "point": 244
       }
     }
   ]
