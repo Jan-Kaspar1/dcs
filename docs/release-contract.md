@@ -11,15 +11,17 @@ The mechanics are proven workspace-side by
 `crates/dcs-build/tests/consumer_release.rs`, which resolves the
 supported crates from an immutable revision of this repository with no
 `path` dependency, composes and deterministically emits a model, and
-passes it through the released tooling. The independent reference-plant
-repository — the consumer-shaped proof decision 79 requires — is the
-`reference-plant/` tree in this repository, publishable verbatim as the
-customer's own repository: it pins this contract's first release and
-carries its own clean-CI check (`ci/check.sh`), proven from the
-workspace by `crates/dcs-build/tests/reference_plant.rs`, which
-materializes the tree outside the workspace, substitutes only the
-`file://` remote stand-in for the published origin, and runs the
-template's check green.
+passes it through the released tooling, by
+`crates/dcs-build/tests/consumer_upgrade.rs`, which proves the
+same-minor repin is a drop-in upgrade and that the incompatible
+crossings refuse with named diagnostics, and by
+`crates/dcs-build/tests/reference_plant.rs`, which materializes the
+independent reference-plant repository — the `reference-plant/` tree
+in this repository, publishable verbatim as the customer's own
+repository — outside the workspace, substitutes only the `file://`
+remote stand-in for the published origin, and runs the template's own
+clean-CI check (`ci/check.sh`) green. The reference plant pins this
+contract's first release.
 
 ## The supported release set
 
@@ -182,10 +184,14 @@ it follows:
 ### The first release
 
 `v0.1.0`, tagged on the `main` commit landing this contract (issue
-#348). Its record lives at `docs/releases/v0.1.0/`; the reference
-plant pins `tag = "v0.1.0"` (or the recorded rev) for the crates and
-the recorded digests for the images. The tag itself and the record's
-sha/digest fields are filled when the release is cut.
+#348). Its record is landed at `docs/releases/v0.1.0/` — `record.md`
+with the fillable fields populated and `plant-model.schema.json`
+emitted at the recorded commit, pinned byte-for-byte to `dcs-model
+schema`'s output by the drift test in
+`crates/dcs-model/tests/schema.rs`. The reference plant pins
+`tag = "v0.1.0"` (or the recorded rev) for the crates and the recorded
+digests for the images. The tag itself and the record's image-digest
+fields are filled when the release is cut.
 
 ## The consumer-resolution check
 
@@ -220,7 +226,29 @@ new stage names surface as the diagnostics below.
 cargo test -p dcs-build --test reference_plant
 ```
 
-The failures are named diagnostics:
+The upgrade half of the compatibility policy is proven by
+`crates/dcs-build/tests/consumer_upgrade.rs`:
+
+```sh
+cargo test -p dcs-build --test consumer_upgrade
+```
+
+It materializes the same scratch consumer pinned at the revision this
+document records for `v0.1.0` — the release tag once it exists in the
+checkout, until then the commit that landed this contract — and runs
+the identical resolve/build/deterministic-emit/released-tooling
+pipeline green. It then repins the unchanged consumer source to the
+checkout's `HEAD` — a later commit in the same minor series — and
+reruns the pipeline, asserting the two pins emit byte-identical model
+documents: a divergence is itself the signal this policy asks a
+release record to name, and fails named rather than passing silently.
+The same target records the incompatible crossings: a document
+doctored one version past `MODEL_VERSION` is refused by the released
+`dcs-model validate` with `LoadError::UnsupportedVersion` naming the
+found and supported versions, and an unresolvable tag name fails
+`pin-unresolvable` beside the version-requirement exclusion.
+
+The checks' failures are named diagnostics:
 
 | Diagnostic | Meaning |
 |---|---|
@@ -228,7 +256,9 @@ The failures are named diagnostics:
 | `surface-incompatible` | The release crates resolved but the consumer's use of the supported API fails to compile — an incompatible pin reaching compile time. |
 | `path-dependency-leak` | The consumer lockfile records a `path` source for a released crate — the no-path-dependency proof itself failed. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
+| `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
 | `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
 | `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-failed` | The scripted simulation's declared leg outcomes did not hold against the checked-in model and dynamics. Reported by the reference plant's `ci/check.sh`. |

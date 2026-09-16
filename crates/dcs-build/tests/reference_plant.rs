@@ -21,29 +21,16 @@
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`, and
 //! `scenario-failed`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const CARGO: &str = env!("CARGO");
+use common::{CARGO, repo_url, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
 const PUBLISHED_REMOTE: &str = "https://github.com/Jan-Kaspar1/dcs.git";
-
-/// The workspace root — two levels up from `crates/dcs-build`.
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .unwrap()
-        .to_path_buf()
-}
-
-/// The repository's own URL as a `file://` remote — the stand-in for
-/// the published origin the template's `Cargo.toml` records.
-fn repo_url() -> String {
-    format!("file://{}", root().display())
-}
 
 /// The workspace's build target directory, resolved through cargo so a
 /// `CARGO_TARGET_DIR` override is honored.
