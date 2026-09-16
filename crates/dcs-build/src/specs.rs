@@ -20,9 +20,13 @@ use crate::spec::{
     BINARY_CODE_RANGE, CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
     POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
-use dcs_core::{Direction, PointType, ValueKind};
+use dcs_core::{
+    CommandArgument, CommandAvailability, CommandDecl, Direction, EventDecl, EventField,
+    EventFieldKind, EventRetention, PointType, ValueKind,
+};
 use dcs_model::{ComponentId, Rationalization};
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
 mod sealed {
     /// Seals [`RawKind`](super::RawKind): the analog kinds' raw channel
@@ -1825,12 +1829,50 @@ impl Spec for TotalizerSpec {
     }
 }
 
+/// The `sequencer` kind's declared native commands — the spec mirror of
+/// the descriptor's `commands`: `advance` paces the table by command and
+/// `reset` restarts it, neither aliased to a writable point.
+static SEQUENCER_COMMANDS: LazyLock<Vec<CommandDecl>> = LazyLock::new(|| {
+    vec![
+        CommandDecl {
+            name: "advance".to_string(),
+            request: vec![CommandArgument {
+                name: "count".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        },
+        CommandDecl {
+            name: "reset".to_string(),
+            request: Vec::new(),
+            availability: CommandAvailability::Always,
+        },
+    ]
+});
+
+/// The `sequencer` kind's declared emitted events — the spec mirror of
+/// the descriptor's `events`: `step_completed` journals the 1-based
+/// index of each step that ran its `ticks` out.
+static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
+    vec![EventDecl {
+        name: "step_completed".to_string(),
+        payload: vec![EventField {
+            name: "step".to_string(),
+            kind: EventFieldKind::Value(ValueKind::Int),
+            optional: false,
+        }],
+        retention: EventRetention::Journal,
+    }]
+});
+
 /// Spec for the `sequencer` kind: stepping through a declared ordered
 /// table of steps, each driving `out` for a configured tick count.
 ///
 /// Ports mirror the descriptor: `run` (`In`, `Bool`), `reset` (`In`,
 /// `Bool`), `out` (`Out`, `Float`), `step` (`Out`, `Int`), `done`
-/// (`Out`, `Bool`).
+/// (`Out`, `Bool`). The kind also declares the native commands
+/// `advance`/`reset` and the emitted `step_completed` event — mirrored
+/// by [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
 ///
 /// The parameter set is *not statically enumerable*: `step_count`
 /// declares the table length `N` and each step `n` in `1..=N` adds
@@ -1902,6 +1944,14 @@ impl Spec for SequencerSpec {
         // `step_count`: no static set exists, so the map goes
         // unchecked at `build` (the recorded treatment for this kind).
         None
+    }
+
+    fn declared_commands(&self) -> Option<&[CommandDecl]> {
+        Some(&SEQUENCER_COMMANDS)
+    }
+
+    fn declared_events(&self) -> Option<&[EventDecl]> {
+        Some(&SEQUENCER_EVENTS)
     }
 
     fn parameter_values(&self) -> &Parameters {

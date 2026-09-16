@@ -7,9 +7,10 @@
 //! exactly the declared set.
 
 use dcs_core::{
-    CommandError, ComponentDescriptor, Direction, IoDriver, IoError, PointId, PointType,
-    PortDescriptor, Sample, StateError, StateMap, Tick, TypedSample, Value, ValueKind,
+    CommandError, ComponentDescriptor, Direction, EmittedEvent, IoDriver, IoError, PointId,
+    PointType, PortDescriptor, Sample, StateError, StateMap, Tick, TypedSample, Value, ValueKind,
 };
+use std::collections::BTreeMap;
 
 /// The error type a component's [`step`](Component::step) reports.
 ///
@@ -225,6 +226,69 @@ pub trait Component: Send {
             component: self.name().to_string(),
             parameter: parameter.to_string(),
         })
+    }
+
+    /// Executes a kind-declared named command — the component half of
+    /// [`Command::Invoke`](dcs_core::Command::Invoke).
+    ///
+    /// The executor calls this at the scan boundary, in deterministic
+    /// submission order, after validating the invocation against
+    /// [`describe`](Component::describe)'s declared
+    /// [`CommandDecl`](dcs_core::CommandDecl)s: `command` is a declared
+    /// command's `name` and every supplied argument is a declared
+    /// [`CommandArgument`](dcs_core::CommandArgument) name whose
+    /// [`Value`] variant matches its declared kind. What the schema does
+    /// not constrain — a missing optional argument, a value outside the
+    /// command's domain, the declared
+    /// [`CommandAvailability::KindDeclared`](dcs_core::CommandAvailability)
+    /// availability predicate, and every other kind invariant — is the
+    /// implementation's to check.
+    ///
+    /// `Ok` reports the command applied; `Err` refuses it with the
+    /// declared refusal reason, which the settled receipt's
+    /// [`CommandError::CommandRefused`] carries verbatim — a refused
+    /// invocation changes nothing.
+    ///
+    /// **Checkpoint obligation:** like a tuned parameter, a command's
+    /// effect is run state. An implementation that accepts commands must
+    /// fold every state the command mutates into its
+    /// [`capture_state`](Component::capture_state) vocabulary, so a
+    /// tracking standby inherits the effect through the ordinary
+    /// checkpoint.
+    ///
+    /// The default refuses every declared command: kinds opt into the
+    /// invoke surface by overriding the hook, and a kind whose
+    /// descriptor declares commands it does not serve still settles
+    /// every invocation `command_refused` rather than silently
+    /// succeeding.
+    fn invoke_command(
+        &mut self,
+        command: &str,
+        _arguments: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        Err(format!(
+            "the kind does not serve the declared command {command:?}"
+        ))
+    }
+
+    /// Drains the events the component emitted — the component half of
+    /// the [`EventDecl`](dcs_core::EventDecl) vocabulary
+    /// [`describe`](Component::describe) declares.
+    ///
+    /// The executor calls this after every [`step`](Component::step),
+    /// success or failure, so events a failing step produced are not
+    /// lost, and forwards the drained set — in the component's own
+    /// emission order — to the scan's emitted-event record, stamping
+    /// each [`EmittedEvent`]'s `component` with the registered name.
+    /// Emissions journal at the producing scan's tick where the
+    /// declaration's [`EventRetention`](dcs_core::EventRetention) keeps
+    /// them durable.
+    ///
+    /// The default emits nothing: kinds opt into the declared-event
+    /// surface by overriding the hook, and a kind declaring no events
+    /// needs no drain.
+    fn drain_events(&mut self) -> Vec<EmittedEvent> {
+        Vec::new()
     }
 
     /// Reports the current values of the component's declared parameters
