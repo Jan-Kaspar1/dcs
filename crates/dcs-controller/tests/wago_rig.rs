@@ -279,10 +279,11 @@ fn ethercat_driver(model: &PlantModel, published: Arc<Mutex<Vec<Vec<u8>>>>) -> F
 /// physical loopback: every published `do1` write lands on `di1`'s
 /// register inside the same exchange, so the answered census latches
 /// the transition — the register-bank analogue of `WireTransport`'s
-/// byte-level wire. Returns the server, the checked-in document with
-/// its `__BUS_ADDR__` placeholder substituted for the bound address,
-/// and the observer attachment the exchange scripter goes through.
-fn cyclic_field() -> (BusServer, PlantModel, BusDriver) {
+/// byte-level wire. Returns the shared server, the checked-in document
+/// with its `__BUS_ADDR__` placeholder substituted for the bound
+/// address, and the observer attachment the exchange scripter goes
+/// through.
+fn cyclic_field() -> (Arc<BusServer>, PlantModel, BusDriver) {
     let bank = RegisterBank::new([
         RegisterDecl {
             register: registers::DO1,
@@ -304,20 +305,22 @@ fn cyclic_field() -> (BusServer, PlantModel, BusDriver) {
     .unwrap()
     .with_wires([(registers::DO1, registers::DI1)])
     .unwrap();
-    let server = BusServer::bind_stationed(
-        "127.0.0.1:0",
-        bank,
-        BTreeMap::from([(
-            COUPLER_STATION.to_string(),
-            BTreeSet::from([
-                registers::DO1,
-                registers::DO2,
-                registers::DI1,
-                registers::DI2,
-            ]),
-        )]),
-    )
-    .unwrap();
+    let server = Arc::new(
+        BusServer::bind_stationed(
+            "127.0.0.1:0",
+            bank,
+            BTreeMap::from([(
+                COUPLER_STATION.to_string(),
+                BTreeSet::from([
+                    registers::DO1,
+                    registers::DO2,
+                    registers::DI1,
+                    registers::DI2,
+                ]),
+            )]),
+        )
+        .unwrap(),
+    );
     let mut model = fixture(CYCLIC_JSON);
     let declared = model.devices[0].parameters.get_mut("address").unwrap();
     assert_eq!(
@@ -366,25 +369,27 @@ fn cyclic_driver(model: &PlantModel) -> FanoutDriver {
 }
 
 /// The monitor-backed scripted run — the receipted operator path the
-/// commissioning sequence names. `driver` builds the driver side
-/// inside the served scope: a cyclic backend's connect-time census
-/// needs its device server already answering, so `field`'s serve loop
-/// starts first. The driver's `step` paces the simulated plant after
-/// each scan (a no-op on the ethercat binding: the field advances
-/// itself inside the scan's exchange).
+/// commissioning sequence names. `field`'s serve loop starts on its
+/// own thread before `driver` builds the driver side: a cyclic
+/// backend's connect-time census needs its device server already
+/// answering. The driver's `step` paces the simulated plant after each
+/// scan (a no-op on the ethercat binding: the field advances itself
+/// inside the scan's exchange).
 fn scripted_run(
     model: &PlantModel,
     driver: impl FnOnce() -> FanoutDriver,
-    field: Option<&BusServer>,
+    field: Option<Arc<BusServer>>,
 ) -> Run {
+    // The field answers before the driver side connects.
+    let serving = field.map(|server| {
+        let accepting = Arc::clone(&server);
+        (server, thread::spawn(move || accepting.serve()))
+    });
+    let driver = driver();
+    let executor = assemble(model, &dcs_controller::registry(), &driver).unwrap();
+    let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
     let result = thread::scope(|scope| {
-        if let Some(server) = field {
-            scope.spawn(move || server.serve());
-        }
-        let driver = driver();
-        let executor = assemble(model, &dcs_controller::registry(), &driver).unwrap();
-        let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
-        let client = MonitorClient::new(monitor.local_addr());
         scope.spawn(|| monitor.serve());
         // A failing assertion must not deadlock the scope join: catch
         // the panic so the servers are always shut down first.
@@ -420,11 +425,12 @@ fn scripted_run(
             }
         }));
         monitor.shutdown();
-        if let Some(server) = field {
-            server.shutdown();
-        }
         result
     });
+    if let Some((server, accepting)) = serving {
+        server.shutdown();
+        accepting.join().unwrap();
+    }
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
@@ -449,7 +455,7 @@ fn the_rig_control_path_runs_identically_on_every_binding() {
         || ethercat_driver(&ethercat_model, Arc::clone(&published)),
         None,
     );
-    let cyclic_run = scripted_run(&cyclic_model, || cyclic_driver(&cyclic_model), Some(&server));
+    let cyclic_run = scripted_run(&cyclic_model, || cyclic_driver(&cyclic_model), Some(server));
 
     // The WW-FND-002 proof: identical telemetry transition sequences
     // and identical receipted-command outcomes on all three bindings —
@@ -544,7 +550,7 @@ fn the_rig_control_path_runs_identically_on_every_binding() {
     let rerun = scripted_run(
         &rerun_model,
         || cyclic_driver(&rerun_model),
-        Some(&rerun_server),
+        Some(rerun_server),
     );
     assert_eq!(rerun.scans, cyclic_run.scans);
     assert_eq!(rerun.receipts, cyclic_run.receipts);
@@ -560,12 +566,17 @@ fn the_rig_control_path_runs_identically_on_every_binding() {
 #[test]
 fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
     let (server, model, observer) = cyclic_field();
+    // The field answers before the cyclic backend's connect-time
+    // census — the same ordering `scripted_run` establishes.
+    let accepting = thread::spawn({
+        let accepting = Arc::clone(&server);
+        move || accepting.serve()
+    });
+    let driver = cyclic_driver(&model);
+    let executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
+    let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
     let result = thread::scope(|scope| {
-        scope.spawn(|| server.serve());
-        let driver = cyclic_driver(&model);
-        let executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
-        let monitor = Monitor::bind("127.0.0.1:0", executor, model.signal_index()).unwrap();
-        let client = MonitorClient::new(monitor.local_addr());
         scope.spawn(|| monitor.serve());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Baseline: assert DO1 through the receipted path and
@@ -609,10 +620,7 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
                     Quality::Good,
                     "miss {misses}: the held image must keep serving"
                 );
-                assert!(
-                    bool_(di1),
-                    "miss {misses}: DI1 lost its held value"
-                );
+                assert!(bool_(di1), "miss {misses}: DI1 lost its held value");
             }
 
             // The retained staged image: the release command submitted
@@ -665,9 +673,10 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
             );
         }));
         monitor.shutdown();
-        server.shutdown();
         result
     });
+    server.shutdown();
+    accepting.join().unwrap();
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 

@@ -20,9 +20,9 @@
 
 use dcs_assembly::{AssemblyError, DriverRegistry, resolve_drivers};
 use dcs_build::wago::{
-    COUPLER_STATION, CYCLIC_ADDRESS_PLACEHOLDER, CYCLIC_KIND, ECAT_BUS,
-    EXCHANGE_MISS_THRESHOLD, RigBinding, WAGO_PRODUCT, WAGO_REVISION, WAGO_VENDOR, channels, points,
-    registers, station_identity, wago_rig,
+    COUPLER_STATION, CYCLIC_ADDRESS_PLACEHOLDER, CYCLIC_KIND, ECAT_BUS, EXCHANGE_MISS_THRESHOLD,
+    RigBinding, WAGO_PRODUCT, WAGO_REVISION, WAGO_VENDOR, channels, points, registers,
+    station_identity, wago_rig,
 };
 use dcs_build::{Direction, PlantBuilder, PointId, ValueKind};
 use dcs_core::Value;
@@ -270,9 +270,14 @@ fn the_cyclic_declaration_parses_under_the_real_contract() {
         parsed.station_registers(),
         BTreeMap::from([(
             COUPLER_STATION.to_string(),
-            [registers::DO1, registers::DO2, registers::DI1, registers::DI2]
-                .into_iter()
-                .collect()
+            [
+                registers::DO1,
+                registers::DO2,
+                registers::DI1,
+                registers::DI2
+            ]
+            .into_iter()
+            .collect()
         )])
     );
 }
@@ -490,10 +495,7 @@ fn the_hardware_marker_is_enforced_on_every_binding() {
     // A simulated device carrying `"hardware": true` is the
     // mirror-image dishonesty: a simulated factory cannot serve a
     // hardware-bound declaration.
-    for (binding, kind) in [
-        (RigBinding::Sim, "sim"),
-        (RigBinding::Cyclic, CYCLIC_KIND),
-    ] {
+    for (binding, kind) in [(RigBinding::Sim, "sim"), (RigBinding::Cyclic, CYCLIC_KIND)] {
         let mut model = emit(binding);
         model.devices[0].hardware = true;
         match resolve_drivers(&model, &DriverRegistry::standard()) {
