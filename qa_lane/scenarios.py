@@ -116,26 +116,6 @@ def _point_value(snapshot, point):
     return None
 
 
-def _quality_key(quality):
-    """A wire `Quality` as one comparable token: 'good',
-    'uncertain:stale', 'bad:communication_fault', and so on."""
-    if isinstance(quality, str):
-        return quality
-    if isinstance(quality, dict) and quality:
-        severity, reason = next(iter(quality.items()))
-        return str(severity) + ':' + str(reason)
-    return 'unknown'
-
-
-def _point_quality(snapshot, point):
-    """The point's served sample quality out of a snapshot, as a
-    `_quality_key` token — or None while the point carries no sample."""
-    for entry in snapshot.get('points', []):
-        if entry.get('point') == point and entry.get('sample'):
-            return _quality_key(entry['sample'].get('quality'))
-    return None
-
-
 def _history_qualities(payload, point):
     """One point's served history as (seq, quality-key, tick) triples out
     of a `/history` answer — the record the stale interval must survive
@@ -1687,7 +1667,6 @@ def scenario_controller_restart(ctx):
 
 
 # --------------------------------------------------------------------
-<<<<<<< HEAD
 # The declared freshness budget (WW-OPS-003's stale-data surface,
 # WW-ALM-003's rule that stale data never presents as a healthy
 # last-known value): the rig model's `net-flow` field input carries a
@@ -1745,127 +1724,12 @@ def scenario_stale_freshness(ctx):
                                'no controller stop/start action — the '
                                'writer-loss induction has no documented '
                                'seam')
-=======
-# The plant-link boundary (WW-OPS-003's communication confidence and
-# WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss
-# checks): the runner-owned plant stop/start action severs both
-# controllers' remote-driver connections mid-run — the non-cyclic
-# remote form of decision 78's exchange-loss shape, and unlike a
-# per-point fault a dead plant fails every field point at once at the
-# link boundary. The active's telemetry must degrade honestly — held
-# values re-marked past the read boundary, the driver link reporting
-# disconnected with counted per-direction failures and a last_error —
-# while scans keep running and the pair's roles hold: the standby's
-# checkpoint-pull heartbeat is peer-to-peer, not field traffic, so it
-# never promotes on field loss. A restarted plant is a new server
-# lifetime — its single-writer claim died with the old process — so
-# recovery means the field owner re-attaches and re-claims: reads Good
-# again, a third attachment's mutation fenced, and the outage's
-# failures still counted in io_health rather than silently reset.
-
-LINK_POLL = 1.0                # cadence watching the pair mid-outage
-LINK_DEGRADE_DEADLINE = 45     # bound on the telemetry degrading
-LINK_SETTLE = 6.0              # extra role watch once degradation shows
-LINK_RECOVERY_DEADLINE = 90    # bound on the plant's return + re-claim
-
-
-def _try_role(ctx, base):
-    """`/role` or None — for the outage watch a dropped read is one
-    lost poll, not the leg's verdict."""
-    try:
-        return _role(ctx, base)
-    except Exception:
-        return None
-
-
-def _plant_probe(ctx, request, timeout=5):
-    """One request/response against the run's plant server on a fresh
-    connection — the `dcs-sim-net` wire protocol on the published
-    endpoint ctx['plant'] carries. The link-loss scenario uses it for
-    the field's own evidence: `list_points` is the census of points the
-    boundary fails at once, and a `step` mutation is the fencing probe
-    — answered `fenced` while any attachment holds the plant's
-    single-writer claim, `stepped` while nobody does. Each probe takes
-    a new connection because the outage it watches is exactly a dead
-    listener; the probe never sends `claim_writer` — claiming from
-    here would preempt the field owner it is checking for."""
-    stream = _plant_connect(ctx, timeout=timeout)
-    try:
-        stream.settimeout(timeout)
-        return _plant_request(stream, request)
-    finally:
-        stream.close()
-
-
-def _try_plant(ctx, request):
-    """`_plant_probe` or None — a refused probe is one lost poll, not
-    the leg's verdict."""
-    try:
-        return _plant_probe(ctx, request)
-    except Exception:
-        return None
-
-
-def _fenced(response):
-    """Whether a fencing probe's answer says a writer claim stands —
-    the shared field refused a third attachment's mutation."""
-    return (response or {}).get('error', {}).get('kind') == 'fenced'
-
-
-def _sample_quality(snapshot, point):
-    """The point's latest served quality flattened for comparison —
-    'good', 'uncertain:stale', 'bad:communication_fault' — or None when
-    no sample exists."""
-    for entry in snapshot.get('points', []):
-        if entry.get('point') == point and entry.get('sample'):
-            quality = entry['sample'].get('quality')
-            if isinstance(quality, dict):
-                kind, reason = next(iter(quality.items()))
-                return kind + ':' + str(reason)
-            return quality
-    return None
-
-
-def scenario_plant_link_loss(ctx):
-    """Stop the run's plant container mid-run, prove the link-loss
-    degradation through the monitor surface, then restart it and prove
-    the field owner's re-claim and recovery."""
-    case = Case('plant-link-loss',
-                'Plant-link loss degrades honestly and recovers',
-                'stopping the run\'s plant container leaves the active '
-                'scanning with its field reads marked down at the link '
-                'boundary — io_health counting the per-direction '
-                'failures, the driver link reporting disconnected, a '
-                'last_error recorded — the standby never promoting, '
-                'and restarting the plant recovering Good reads under '
-                'a re-claimed writer claim with the outage\'s failures '
-                'still counted')
-
-    def role_violation(name, report, expected_roles, seen):
-        ref = save_evidence(ctx['evidence_dir'],
-                            'plant-link-loss-roles.json',
-                            {'expected': expected_roles,
-                             'offender': report, 'seen': seen})
-        case.evidence('file', ref)
-        return case.finish('failed', 'field loss moved ' + name
-                           + ' to role ' + str(report.get('role'))
-                           + ': ' + json.dumps(report)[:300])
-
-    try:
-        stop = ctx.get('stop_plant')
-        start = ctx.get('start_plant')
-        if stop is None or start is None or not ctx.get('plant'):
-            return case.finish('inconclusive', 'the run context '
-                               'carries no plant stop/start action or '
-                               'plant address')
->>>>>>> origin/main
         active = wait_for(lambda: _settled_active(ctx),
                           time.monotonic() + 30)
         if active is None:
             return case.finish('failed', 'no peer reports role=active')
         peer = 'standby' if active == 'active' else 'active'
         base, peer_base = ctx[active], ctx[peer]
-<<<<<<< HEAD
         budget = ctx.get('failover_misses')
         case.observe('seam=writer-stop: stop ' + active + ' (' + base
                      + '), observe ' + peer + ' (' + peer_base + ')'
@@ -1912,7 +1776,7 @@ def scenario_plant_link_loss(ctx):
                                'not a tracking standby — the writer-loss '
                                'induction has no observation point')
         baseline = _snapshot(ctx, peer_base)
-        baseline_q = {p: _point_quality(baseline, p)
+        baseline_q = {p: _sample_quality(baseline, p)
                       for p in (b_point, c_point)}
         case.observe('baseline qualities: ' + STALE_BUDGETED_NAME + '='
                      + str(baseline_q[b_point]) + ' '
@@ -1966,8 +1830,8 @@ def scenario_plant_link_loss(ctx):
                 degraded = True
             if report.get('role') in ('promoting', 'active'):
                 promoted = True
-            qb = _point_quality(snap, b_point)
-            qc = _point_quality(snap, c_point)
+            qb = _sample_quality(snap, b_point)
+            qc = _sample_quality(snap, c_point)
             freeze_obs.append({'tick': tick, 'budgeted': qb,
                                'comparison': qc,
                                'role': report.get('role'),
@@ -2020,7 +1884,7 @@ def scenario_plant_link_loss(ctx):
                 snap = _snapshot(ctx, peer_base)
             except Exception:
                 return None
-            if _point_quality(snap, b_point) != 'good':
+            if _sample_quality(snap, b_point) != 'good':
                 return None
             return {'role': report.get('role'), 'tick': snap.get('tick')}
 
@@ -2157,7 +2021,129 @@ def scenario_plant_link_loss(ctx):
                                    'writer never returned')
             case.observe('the restarted writer is serving as active '
                          'at tick ' + str(back.get('tick')))
-=======
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+# --------------------------------------------------------------------
+# The plant-link boundary (WW-OPS-003's communication confidence and
+# WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss
+# checks): the runner-owned plant stop/start action severs both
+# controllers' remote-driver connections mid-run — the non-cyclic
+# remote form of decision 78's exchange-loss shape, and unlike a
+# per-point fault a dead plant fails every field point at once at the
+# link boundary. The active's telemetry must degrade honestly — held
+# values re-marked past the read boundary, the driver link reporting
+# disconnected with counted per-direction failures and a last_error —
+# while scans keep running and the pair's roles hold: the standby's
+# checkpoint-pull heartbeat is peer-to-peer, not field traffic, so it
+# never promotes on field loss. A restarted plant is a new server
+# lifetime — its single-writer claim died with the old process — so
+# recovery means the field owner re-attaches and re-claims: reads Good
+# again, a third attachment's mutation fenced, and the outage's
+# failures still counted in io_health rather than silently reset.
+
+LINK_POLL = 1.0                # cadence watching the pair mid-outage
+LINK_DEGRADE_DEADLINE = 45     # bound on the telemetry degrading
+LINK_SETTLE = 6.0              # extra role watch once degradation shows
+LINK_RECOVERY_DEADLINE = 90    # bound on the plant's return + re-claim
+
+
+def _try_role(ctx, base):
+    """`/role` or None — for the outage watch a dropped read is one
+    lost poll, not the leg's verdict."""
+    try:
+        return _role(ctx, base)
+    except Exception:
+        return None
+
+
+def _plant_probe(ctx, request, timeout=5):
+    """One request/response against the run's plant server on a fresh
+    connection — the `dcs-sim-net` wire protocol on the published
+    endpoint ctx['plant'] carries. The link-loss scenario uses it for
+    the field's own evidence: `list_points` is the census of points the
+    boundary fails at once, and a `step` mutation is the fencing probe
+    — answered `fenced` while any attachment holds the plant's
+    single-writer claim, `stepped` while nobody does. Each probe takes
+    a new connection because the outage it watches is exactly a dead
+    listener; the probe never sends `claim_writer` — claiming from
+    here would preempt the field owner it is checking for."""
+    stream = _plant_connect(ctx, timeout=timeout)
+    try:
+        stream.settimeout(timeout)
+        return _plant_request(stream, request)
+    finally:
+        stream.close()
+
+
+def _try_plant(ctx, request):
+    """`_plant_probe` or None — a refused probe is one lost poll, not
+    the leg's verdict."""
+    try:
+        return _plant_probe(ctx, request)
+    except Exception:
+        return None
+
+
+def _fenced(response):
+    """Whether a fencing probe's answer says a writer claim stands —
+    the shared field refused a third attachment's mutation."""
+    return (response or {}).get('error', {}).get('kind') == 'fenced'
+
+
+def _sample_quality(snapshot, point):
+    """The point's latest served quality flattened for comparison —
+    'good', 'uncertain:stale', 'bad:communication_fault' — or None when
+    no sample exists."""
+    for entry in snapshot.get('points', []):
+        if entry.get('point') == point and entry.get('sample'):
+            quality = entry['sample'].get('quality')
+            if isinstance(quality, dict):
+                kind, reason = next(iter(quality.items()))
+                return kind + ':' + str(reason)
+            return quality
+    return None
+
+
+def scenario_plant_link_loss(ctx):
+    """Stop the run's plant container mid-run, prove the link-loss
+    degradation through the monitor surface, then restart it and prove
+    the field owner's re-claim and recovery."""
+    case = Case('plant-link-loss',
+                'Plant-link loss degrades honestly and recovers',
+                'stopping the run\'s plant container leaves the active '
+                'scanning with its field reads marked down at the link '
+                'boundary — io_health counting the per-direction '
+                'failures, the driver link reporting disconnected, a '
+                'last_error recorded — the standby never promoting, '
+                'and restarting the plant recovering Good reads under '
+                'a re-claimed writer claim with the outage\'s failures '
+                'still counted')
+
+    def role_violation(name, report, expected_roles, seen):
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-roles.json',
+                            {'expected': expected_roles,
+                             'offender': report, 'seen': seen})
+        case.evidence('file', ref)
+        return case.finish('failed', 'field loss moved ' + name
+                           + ' to role ' + str(report.get('role'))
+                           + ': ' + json.dumps(report)[:300])
+
+    try:
+        stop = ctx.get('stop_plant')
+        start = ctx.get('start_plant')
+        if stop is None or start is None or not ctx.get('plant'):
+            return case.finish('inconclusive', 'the run context '
+                               'carries no plant stop/start action or '
+                               'plant address')
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
         expected = {active: 'active', peer: 'standby'}
         case.observe('field owner: ' + active + ' (' + base + ')')
 
@@ -2388,7 +2374,6 @@ def scenario_plant_link_loss(ctx):
                      + str(health.get('failed_reads')) + ' failed '
                      'reads and ' + str(health.get('failed_writes'))
                      + ' failed writes')
->>>>>>> origin/main
         return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
@@ -4742,19 +4727,13 @@ def scenario_dcs_ctl(ctx):
 # established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
-<<<<<<< HEAD
              scenario_stale_freshness,
-             scenario_failover, scenario_evidence_capture,
-             scenario_served_interface, scenario_consumer_schedule,
-             scenario_command_admission)
-=======
              scenario_parameter_tune_carryover, scenario_failover,
              scenario_model_revision,
              scenario_evidence_capture, scenario_served_interface,
              scenario_force_release, scenario_consumer_schedule,
              scenario_command_admission, scenario_plant_link_loss,
              scenario_field_fault, scenario_dcs_ctl)
->>>>>>> origin/main
 
 
 def run_all(ctx, timeline):

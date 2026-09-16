@@ -195,7 +195,6 @@ class RestartActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-restart'])
 
 
-<<<<<<< HEAD
 class LifecycleActionTests(unittest.TestCase):
     """The scenario-callable stop/start pair: each action records its
     own attempt and completion on the run's action timeline, so a
@@ -203,21 +202,12 @@ class LifecycleActionTests(unittest.TestCase):
     instead of taking the whole restart as one step."""
 
     def test_stop_and_start_record_their_own_events(self):
-=======
-class PlantActionTests(unittest.TestCase):
-    """The scenario-callable plant stop/start: the run's shared-plant
-    container cycled mid-run, each half recorded on the run's action
-    timeline."""
-
-    def test_stop_and_start_recorded_on_timeline(self):
->>>>>>> origin/main
         calls, events = [], []
 
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             return Result('')
 
-<<<<<<< HEAD
         timeline = lambda event, detail=None: events.append(event)
         with patch.object(runner, 'docker', fake_docker):
             runner.stop_controller('qa-1', 'active', timeline)
@@ -228,7 +218,35 @@ class PlantActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-stop', 'controller-stopped',
                                   'controller-start',
                                   'controller-started'])
-=======
+
+    def test_failed_start_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'start' and check:
+                raise RuntimeError('docker start failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_controller(
+                    'qa-1', 'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['controller-start'])
+
+
+class PlantActionTests(unittest.TestCase):
+    """The scenario-callable plant stop/start: the run's shared-plant
+    container cycled mid-run, each half recorded on the run's action
+    timeline."""
+
+    def test_stop_and_start_recorded_on_timeline(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
         with patch.object(runner, 'docker', fake_docker):
             timeline = lambda event, detail=None: events.append(
                 (event, detail))
@@ -256,7 +274,6 @@ class PlantActionTests(unittest.TestCase):
                     'qa-1',
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['plant-stop'])
->>>>>>> origin/main
 
     def test_failed_start_raises_after_recording_the_attempt(self):
         events = []
@@ -268,12 +285,6 @@ class PlantActionTests(unittest.TestCase):
 
         with patch.object(runner, 'docker', raising):
             with self.assertRaises(RuntimeError):
-<<<<<<< HEAD
-                runner.start_controller(
-                    'qa-1', 'active',
-                    lambda event, detail=None: events.append(event))
-        self.assertEqual(events, ['controller-start'])
-=======
                 runner.start_plant(
                     'qa-1',
                     lambda event, detail=None: events.append(event))
@@ -300,7 +311,6 @@ class PlantActionTests(unittest.TestCase):
                     ('start', 'dcs-hw-qa-1-plant')])
         self.assertEqual(events, ['plant-stop', 'plant-stopped',
                                   'plant-start', 'plant-started'])
->>>>>>> origin/main
 
 
 class RigStateFileTests(unittest.TestCase):

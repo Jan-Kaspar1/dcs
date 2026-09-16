@@ -865,7 +865,6 @@ def restart_controller(run_id, name, timeline):
     timeline('controller-restarted', container + ' running')
 
 
-<<<<<<< HEAD
 def stop_controller(run_id, name, timeline):
     """The stop half of the lifecycle action, alone: `docker stop` on
     one of the run's controller containers, held down until the scenario
@@ -891,8 +890,6 @@ def start_controller(run_id, name, timeline):
     timeline('controller-started', container + ' running')
 
 
-def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
-=======
 def stop_plant(run_id, timeline):
     """The scenario-callable plant stop: `docker stop` on the run's
     shared-plant container — the field-loss half of the link-loss
@@ -980,7 +977,6 @@ def start_revised_controller(cfg, record, run_dir, model, active,
 
 
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
->>>>>>> origin/main
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key (the model-revision case's third controller
@@ -1000,19 +996,16 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
-<<<<<<< HEAD
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline),
         'failover_misses': cfg['failover_misses'],
-=======
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
         'start_revised': lambda name: start_revised_controller(
             cfg, record, run_dir, src / cfg['model_fixture'], name,
             timeline),
->>>>>>> origin/main
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
