@@ -1304,7 +1304,6 @@ class CommandAdmissionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
-<<<<<<< HEAD
 class FreshnessFeed:
     """A stubbed pair for the stale-freshness scenario. ctrl-a is the
     field writer: while it is up the shared plant steps and the
@@ -1463,7 +1462,134 @@ class StaleFreshnessTests(unittest.TestCase):
     the undeclared comparison keeps Good; the writer's restart realigns
     the peer inside the failover bound and /history preserves the
     interval."""
-=======
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = FreshnessFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, ctx=None, feed=None, evidence=None):
+        feed = feed if feed is not None else self.feed
+        evidence = evidence if evidence is not None else self.evidence
+        base = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+                'evidence_dir': str(evidence),
+                'stop_controller': feed.stop,
+                'start_controller': feed.start,
+                'failover_misses': 120}
+        if ctx is not None:
+            base.update(ctx)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'STALE_FRESHNESS_POLL', 0.001), \
+                patch.object(scenarios, 'STALE_WALL_DEADLINE', 5.0), \
+                patch.object(scenarios, 'STALE_RECOVER_DEADLINE', 1.0), \
+                patch.object(scenarios, 'STALE_RETURN_DEADLINE', 1.0):
+            return scenarios.scenario_stale_freshness(base)
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_stale_freshness,
+                      scenarios.SCENARIOS)
+
+    def test_freeze_stale_recovery_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.stops, ['active'])
+        self.assertEqual(self.feed.starts, ['active'])
+        self.assertTrue(self.feed.stale_seen)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        interval = json.loads(
+            (self.evidence / 'stale-freshness-history.json').read_text())
+        self.assertIsNotNone(interval['budgeted']['interval'])
+        self.assertFalse(interval['budgeted']['interval']['good_inside'])
+
+    def test_stale_never_presenting_fails(self):
+        self.feed.never_stale = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never presented Uncertain(Stale)',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_comparison_presenting_stale_fails(self):
+        self.feed.leak = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('leaked past its declaration',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_stale_reverting_to_healthy_fails(self):
+        self.feed.relapse = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('healthy last-known', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_recovery_after_restart_fails(self):
+        self.feed.no_recover = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not return Good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promoted_peer_never_recovering_fails(self):
+        # The armed failover bound firing mid-freeze: the promoted peer
+        # reclaims the writer and resumes stepping, but its scan ticks
+        # lead the frozen stamps by the outage — the lag never closes.
+        self.feed.promote = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('self-promotion', record.get('detail', ''))
+        self.assertTrue(self.feed.promoted)
+        report.validate_scenario(record)
+
+    def test_unfrozen_induction_is_inconclusive(self):
+        # The writer-stop never took: the plant's stamps keep advancing
+        # and the peer keeps tracking, so a missing stale presentation
+        # cannot be attributed to the induction.
+        self.feed.freeze_takes = False
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never took effect', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_restart_action_is_inconclusive(self):
+        self.feed.start_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('restart never completed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_lifecycle_actions_are_inconclusive(self):
+        record = self.run_scenario(ctx={'stop_controller': None,
+                                        'start_controller': None})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('no documented', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs of the scenario
+        # against the same rig state record the same report and the
+        # same evidence files.
+        runs = []
+        for index in range(2):
+            evidence = Path(self.tmp.name) / ('evidence-' + str(index))
+            evidence.mkdir()
+            record = self.run_scenario(feed=FreshnessFeed(),
+                                       evidence=evidence)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
 class RevisionFeed:
     """A stubbed rig for the model-revision scenario. ctrl-b owns the
     field — the post-failover layout the suite reaches this case in —
@@ -1713,56 +1839,21 @@ class ModelRevisionTests(unittest.TestCase):
     receipts or journal seqs lost across the boundary, a field
     regression, a demoted peer still serving writes, and a run that
     ends off the revised fingerprint."""
->>>>>>> origin/main
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.evidence = Path(self.tmp.name) / 'evidence'
         self.evidence.mkdir()
-<<<<<<< HEAD
-        self.feed = FreshnessFeed()
-=======
         root = Path(self.tmp.name) / 'controllers'
         self.document = Path(self.tmp.name) / 'model-revised.json'
         self.document.write_text(json.dumps({'revised': True}))
         self.journals = {name: root / name / 'journal.jsonl'
                          for name in ('a', 'b', 'c')}
         self.feed = RevisionFeed(self.journals, self.document)
->>>>>>> origin/main
 
     def tearDown(self):
         self.tmp.cleanup()
 
-<<<<<<< HEAD
-    def run_scenario(self, ctx=None, feed=None, evidence=None):
-        feed = feed if feed is not None else self.feed
-        evidence = evidence if evidence is not None else self.evidence
-        base = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
-                'evidence_dir': str(evidence),
-                'stop_controller': feed.stop,
-                'start_controller': feed.start,
-                'failover_misses': 120}
-        if ctx is not None:
-            base.update(ctx)
-        with patch.object(scenarios, 'http_json', feed.http_json), \
-                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
-                patch.object(scenarios, 'STALE_FRESHNESS_POLL', 0.001), \
-                patch.object(scenarios, 'STALE_WALL_DEADLINE', 5.0), \
-                patch.object(scenarios, 'STALE_RECOVER_DEADLINE', 1.0), \
-                patch.object(scenarios, 'STALE_RETURN_DEADLINE', 1.0):
-            return scenarios.scenario_stale_freshness(base)
-
-    def test_registered_in_scenarios(self):
-        self.assertIn(scenarios.scenario_stale_freshness,
-                      scenarios.SCENARIOS)
-
-    def test_freeze_stale_recovery_passes_and_validates(self):
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'passed', record)
-        self.assertEqual(self.feed.stops, ['active'])
-        self.assertEqual(self.feed.starts, ['active'])
-        self.assertTrue(self.feed.stale_seen)
-=======
     def _ctx(self):
         return {'active': 'http://ctrl-a:1',
                 'standby': 'http://ctrl-b:2',
@@ -1797,97 +1888,10 @@ class ModelRevisionTests(unittest.TestCase):
     def test_clean_roll_passes_validates_and_orders_the_roll(self):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
->>>>>>> origin/main
         report.validate_scenario(record)
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
-<<<<<<< HEAD
-        interval = json.loads(
-            (self.evidence / 'stale-freshness-history.json').read_text())
-        self.assertIsNotNone(interval['budgeted']['interval'])
-        self.assertFalse(interval['budgeted']['interval']['good_inside'])
-
-    def test_stale_never_presenting_fails(self):
-        self.feed.never_stale = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('never presented Uncertain(Stale)',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_comparison_presenting_stale_fails(self):
-        self.feed.leak = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('leaked past its declaration',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_stale_reverting_to_healthy_fails(self):
-        self.feed.relapse = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('healthy last-known', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_no_recovery_after_restart_fails(self):
-        self.feed.no_recover = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('did not return Good', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_promoted_peer_never_recovering_fails(self):
-        # The armed failover bound firing mid-freeze: the promoted peer
-        # reclaims the writer and resumes stepping, but its scan ticks
-        # lead the frozen stamps by the outage — the lag never closes.
-        self.feed.promote = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('self-promotion', record.get('detail', ''))
-        self.assertTrue(self.feed.promoted)
-        report.validate_scenario(record)
-
-    def test_unfrozen_induction_is_inconclusive(self):
-        # The writer-stop never took: the plant's stamps keep advancing
-        # and the peer keeps tracking, so a missing stale presentation
-        # cannot be attributed to the induction.
-        self.feed.freeze_takes = False
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('never took effect', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_failed_restart_action_is_inconclusive(self):
-        self.feed.start_fails = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('restart never completed',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_missing_lifecycle_actions_are_inconclusive(self):
-        record = self.run_scenario(ctx={'stop_controller': None,
-                                        'start_controller': None})
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('no documented', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_two_runs_produce_identical_evidence(self):
-        # The deterministic-rerun contract: two runs of the scenario
-        # against the same rig state record the same report and the
-        # same evidence files.
-        runs = []
-        for index in range(2):
-            evidence = Path(self.tmp.name) / ('evidence-' + str(index))
-            evidence.mkdir()
-            record = self.run_scenario(feed=FreshnessFeed(),
-                                       evidence=evidence)
-            runs.append((record, {p.name: p.read_text()
-                                  for p in evidence.iterdir()}))
-        self.assertEqual(runs[0], runs[1])
-=======
         # The documented order: the third controller launches first,
         # the old active demotes, and only then the revised peer
         # promotes.
@@ -3036,7 +3040,6 @@ class DcsCtlTests(unittest.TestCase):
             self.assertEqual(record['outcome'], 'inconclusive',
                              (value, record))
             report.validate_scenario(record)
->>>>>>> origin/main
 
 
 if __name__ == '__main__':
