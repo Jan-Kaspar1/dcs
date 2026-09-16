@@ -687,7 +687,11 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// reaches the driver — the force overrides the image, not the field —
 /// so the release observes whatever the field then carries. Release is
 /// the same boundary in reverse: the applying scan's input phase reads
-/// the driver again. Forces are run state — listed in
+/// the driver again for a field point, while a held internal point's
+/// image — left with the force's last `Substituted` stamp — is
+/// re-stamped `Good`, resuming the held-value rule as the same
+/// observable state a `WriteValue` of that value produces. Forces are
+/// run state — listed in
 /// [`snapshot`](Executor::snapshot)'s `forces` section and carried in
 /// [`checkpoint`](Executor::checkpoint) so a standby preserves them.
 ///
@@ -1965,7 +1969,10 @@ impl<'d> Executor<'d> {
     /// A `ForcePoint` records the force — this scan's input phase already
     /// substitutes the value at `Substituted` quality — and an
     /// `UnforcePoint` lifts it, so the same scan reads the driver again
-    /// for a field point. The pair never touches the driver, so both
+    /// for a field point, while a held internal point's image — left with
+    /// the force's last `Substituted` stamp — is re-stamped `Good` here:
+    /// the held-value rule resuming as the observable state a same-value
+    /// `WriteValue` produces. The pair never touches the driver, so both
     /// settle `Applied` here.
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
@@ -2012,7 +2019,26 @@ impl<'d> Executor<'d> {
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Unforce { point }) => {
-                    self.forces.remove(&point);
+                    if self.forces.remove(&point).is_some()
+                        && self
+                            .map
+                            .get(point)
+                            .is_some_and(|spec| spec.internal.is_some())
+                    {
+                        // No channel rewrites a held internal point, so
+                        // the lifted force's last `Substituted` stamp
+                        // would stand forever — re-stamp the held value
+                        // `Good`: the observable state a same-value
+                        // `WriteValue` produces. A field point needs
+                        // nothing here; this scan's input phase reads
+                        // the driver again.
+                        let held = self.image.borrow().get(&point).copied();
+                        if let Some(sample) = held {
+                            self.image
+                                .borrow_mut()
+                                .insert(point, Sample::good(sample.value, tick));
+                        }
+                    }
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Invoke {
@@ -4025,12 +4051,65 @@ mod tests {
         executor.submit_command(Command::UnforcePoint { point: PointId(10) });
         executor.scan().unwrap();
         // Release resumes the held-value rule: the image keeps the last
-        // sample — the forced value as last stamped while forced.
+        // sample's value — the forced value as last stamped while
+        // forced — re-stamped `Good` at the release boundary rather than
+        // left claiming substituted data.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn unforce_restamps_an_internal_held_value_good() {
+        // The release of a forced internal writable point leaves the
+        // held value stamped `Good` at the release boundary — not the
+        // force's `Substituted` mark, which claims a substitution no
+        // longer standing — and a same-value `WriteValue` produces the
+        // identical observable state.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        executor.run(2).unwrap();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(8.0), 2))
         );
+
+        executor.submit_command(unforce_point(10));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
         assert!(executor.snapshot().forces.is_empty());
+        // The release boundary's image — the held point and the
+        // downstream internal `Out` the component derived from it.
+        let released = [PointId(10), PointId(20)].map(|point| executor.sample(point));
+
+        // The restamp is the held value now: later scans leave it
+        // untouched rather than re-substituting.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
+
+        // A parallel run writing the same value at the same boundary
+        // lands on the identical image.
+        let written_driver = StubDriver::new(&[], &[]);
+        let mut written = internal_rig(&written_driver);
+        written.run(2).unwrap();
+        written.submit_command(write_value(10, ValueKind::Float, Value::Float(8.0)));
+        written.scan().unwrap();
+        for (sample, point) in released.into_iter().zip([PointId(10), PointId(20)]) {
+            assert_eq!(written.sample(point), sample, "point {point:?}");
+        }
     }
 
     #[test]
