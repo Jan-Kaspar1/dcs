@@ -36,6 +36,19 @@
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
+#   restart      the restart-recovery leg (WW-LCM-001's
+#                lone-controller clause): the field-owning controller
+#                runs the deterministic scenario on the
+#                manifest-declared --state-file/--journal-file flags
+#                pointed at runner-owned scratch paths, is stopped at
+#                a leg boundary, and relaunches onto the same files —
+#                the resumed run must continue at the persisted tick
+#                with leg outcomes, receipts, and the field image
+#                equal to an uninterrupted reference pass, the
+#                journal's seq order continuing across the file's
+#                run-boundary marker; a missing or unparseable state
+#                file never passes silently
+#                (restart-resume-failed, restart-resume-nondeterministic)
 #   surface      the served operator surface — the signal index, the
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
@@ -337,6 +350,52 @@ SECOND="$(run_simulation)" || fail "scenario-failed: the scripted simulation's d
     || fail "scenario-nondeterministic: two simulation runs produced different digests"
 echo "  $FIRST"
 
+echo "== restart =="
+# The lone-controller half of WW-LCM-001's restart-recovery evidence:
+# the field-owning controller launches with the manifest-declared
+# --state-file/--journal-file flags at runner-owned scratch paths,
+# runs the deterministic scenario to a leg boundary — far enough to
+# leave applied receipts and journaled transitions — is stopped, and
+# relaunches onto the same files. The resumed run must continue at the
+# persisted tick, its leg outcomes, receipts, and served field image
+# equal to an uninterrupted reference pass, the journal's seq order
+# continuing across the file's run-boundary marker. Two passes must
+# produce identical digests.
+run_restart() {
+    python3 ci/restart.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_restart)" \
+    || fail "restart-resume-failed: the restart leg did not hold — its evidence lines are above"
+SECOND="$(run_restart)" \
+    || fail "restart-resume-failed: the restart leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "restart-resume-nondeterministic: two restart-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: each tamper at the restart point must surface
+# the named diagnostic — never a silently accepted tick-zero restart.
+# A corrupt state file is refused by the relaunch's startup naming the
+# file; a missing one cold-starts the resumed run at tick zero, which
+# the leg's own checks catch and report.
+for tamper in missing-state-file corrupt-state-file; do
+    if out="$(run_restart --tamper "$tamper" 2>&1)"; then
+        fail "restart-resume-unchecked: a $tamper passed the restart leg"
+    fi
+    case "$tamper" in
+        missing-state-file) evidence="never reported a resume" ;;
+        corrupt-state-file) evidence="does not hold a checkpoint" ;;
+    esac
+    printf '%s\n' "$out" | grep -q "$evidence" \
+        || fail "restart-resume-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, restart-resume-failed"
+done
+
 echo "== surface =="
 python3 ci/simulate.py \
     --surface \
@@ -352,7 +411,7 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py README.md; do
+for file in ci/consumers.py ci/deploy_rig.py ci/restart.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
