@@ -826,6 +826,14 @@ impl<'d> Peer<'d> {
     /// the cycle queued — divergences, reinitializations, role changes —
     /// still drain through the `take_*` queues for the journal.
     ///
+    /// The caller's scan cycle waits on `pull`, so a pull that can
+    /// block on the network must be bounded or run on a fetch worker —
+    /// `dcs_monitor::CheckpointPuller` consumes a dedicated thread's
+    /// completed fetch per cycle and answers a cycle whose pull is
+    /// still in flight with the same `Err` a refused fetch produces,
+    /// keeping the failover window at budget × scan period whatever
+    /// the fetch latency.
+    ///
     /// A field-owning peer performs no pull and no failover check:
     /// [`TrackReport::OwnsField`], and `pull` is never invoked. The scan
     /// itself stays caller-owned — this is the pre-scan tracking half.
