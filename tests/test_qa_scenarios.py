@@ -1,8 +1,9 @@
 """The deterministic scenarios' unit coverage: stubbed monitor feeds
 drive scenario_consumer_schedule, scenario_served_interface,
 scenario_force_release, scenario_command_admission,
-scenario_controller_restart, scenario_plant_link_loss, and
-scenario_field_fault through their pass outcomes and the named
+scenario_controller_restart, scenario_plant_link_loss,
+scenario_field_fault, and scenario_model_revision through their
+pass outcomes and the named
 failures their issues call out — a stalled reader whose leg's scan
 outputs stopped advancing, a lagging seq-cursor read answered with
 silently stale data, a served registry missing a declared kind or
@@ -18,7 +19,10 @@ fresh, whose standby promotes, whose writer claim never re-arms, or
 whose io_health forgets the failures it counted, an injected quality
 fault the served snapshot keeps reporting Good, an error fault that
 never surfaces on io_health, a role that moves under a field fault,
-and a clear that never restores the field value."""
+a clear that never restores the field value, and a model revision
+whose revised peer never converges, converges to the wrong sync
+state, loses receipts across the boundary, regresses the field, or
+ends on the wrong fingerprint."""
 import json
 import socket
 import tempfile
@@ -1297,6 +1301,734 @@ class CommandAdmissionTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never settled applied', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class FreshnessFeed:
+    """A stubbed pair for the stale-freshness scenario. ctrl-a is the
+    field writer: while it is up the shared plant steps and the
+    dynamics-driven stamp advances with it. ctrl-b is the tracking
+    standby — its own scan tick advances per snapshot read, its sync
+    reports `degraded` while the writer's checkpoint pulls miss, and the
+    budgeted point's served quality follows the declared five-tick lag
+    rule over the frozen stamp while the undeclared comparison keeps
+    Good. The writer's restart realigns the standby's tick — the resumed
+    checkpoint stream's rewind — and /history keeps the recorded
+    interval. Fault flags stage each named outcome the issue calls
+    out."""
+
+    BUDGET = 5
+    B_POINT = 13   # net-flow — the model's declared stale_after_ticks
+    C_POINT = 10   # level-primary — the undeclared comparison
+    PROMOTE_MISSES = 12  # the armed failover budget, past first stale
+
+    def __init__(self):
+        self.plant = 100     # the dynamics-driven driver stamp
+        self.b_tick = 100    # the standby's own scan tick
+        self.writer_up = True
+        self.misses = 0
+        self.promoted = False
+        self.stale_seen = False
+        self.relapsed = False
+        self.hist = {self.B_POINT: [], self.C_POINT: []}
+        self.seq = 1
+        self.stops = []
+        self.starts = []
+        # Fault flags for the named outcomes.
+        self.never_stale = False   # the budgeted point never presents
+        self.leak = False          # the undeclared point presents stale
+        self.relapse = False       # stale flips back to good mid-freeze
+        self.no_recover = False    # the restart never realigns the peer
+        self.freeze_takes = True   # False: the stop never freezes stamps
+        self.promote = False       # the armed failover budget fires
+        self.start_fails = False   # the restart action never completes
+
+    # The runner-owned lifecycle actions — replace ctx's
+    # stop_controller/start_controller.
+    def stop(self, name):
+        self.stops.append(name)
+        self.writer_up = False
+
+    def start(self, name):
+        self.starts.append(name)
+        if self.start_fails:
+            raise RuntimeError('docker start failed: no such container')
+        self.writer_up = True
+        if not self.promoted and not self.no_recover:
+            # The resumed checkpoint stream rewinds the tracking peer's
+            # tick domain to the plant's — the documented realign.
+            self.b_tick = self.plant
+
+    def _frozen(self):
+        # Stamps freeze while no peer steps the plant. A promoted
+        # standby steps it itself; a stop that never took leaves the
+        # writer effectively running.
+        return not self.writer_up and not self.promoted \
+            and self.freeze_takes
+
+    def _b_scan(self):
+        """One standby scan: its own tick advances, the plant's stamp
+        advances only while a writer steps it, and a downed writer's
+        pulls miss — the armed budget promoting at the configured
+        count."""
+        self.b_tick += 1
+        if not self._frozen():
+            self.plant += 1
+        if self.writer_up or not self.freeze_takes:
+            self.misses = 0
+        else:
+            self.misses += 1
+            if self.promote and self.misses >= self.PROMOTE_MISSES:
+                self.promoted = True
+
+    def _b_quality(self):
+        lag = max(0, self.b_tick - self.plant)
+        if lag > self.BUDGET and not self.never_stale:
+            if self.relapse and self.stale_seen and not self.relapsed:
+                self.relapsed = True
+                return 'good'
+            self.stale_seen = True
+            return {'uncertain': 'stale'}
+        return 'good'
+
+    def _c_quality(self):
+        lag = max(0, self.b_tick - self.plant)
+        if self.leak and lag > self.BUDGET:
+            return {'uncertain': 'stale'}
+        return 'good'
+
+    def _record(self, point, quality):
+        self.hist[point].append({'seq': self.seq, 'sample': {
+            'value': {'float': 1.0}, 'quality': quality,
+            'tick': self.plant}})
+        self.seq += 1
+
+    def _standby(self, method, route, query):
+        if (method, route) == ('GET', '/role'):
+            if self.promoted:
+                return 200, {'role': 'active', 'tick': self.b_tick}
+            sync = {'degraded': {'misses': self.misses}} if self.misses \
+                else {'tracking': {'aligned': self.plant}}
+            return 200, {'role': 'standby', 'tick': self.b_tick,
+                         'sync': sync}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': self.B_POINT, 'signal': None,
+                 'name': 'net-flow', 'direction': 'in',
+                 'value_type': 'float', 'writable': False},
+                {'point': self.C_POINT, 'signal': None,
+                 'name': 'level-primary', 'direction': 'in',
+                 'value_type': 'float', 'writable': False}]}
+        if (method, route) == ('GET', '/snapshot'):
+            self._b_scan()
+            qb, qc = self._b_quality(), self._c_quality()
+            self._record(self.B_POINT, qb)
+            self._record(self.C_POINT, qc)
+            return 200, {'tick': self.b_tick, 'points': [
+                {'point': self.B_POINT, 'sample': {
+                    'value': {'float': 1.0}, 'quality': qb,
+                    'tick': self.plant}},
+                {'point': self.C_POINT, 'sample': {
+                    'value': {'float': 1.0}, 'quality': qc,
+                    'tick': self.plant}}]}
+        if (method, route) == ('GET', '/history'):
+            params = [part.split('=', 1) for part in query.split('&')]
+            wanted = [int(v) for k, v in params if k == 'point']
+            since = next((int(v) for k, v in params if k == 'since'), 0)
+            return 200, [{'point': point,
+                          'samples': [s for s in self.hist[point]
+                                      if s['seq'] > since]}
+                         for point in wanted]
+        raise AssertionError('unexpected request %s ctrl-b%s'
+                             % (method, route))
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        if host == 'ctrl-b:2':
+            return self._standby(method, route, query)
+        if not self.writer_up:
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.plant}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class StaleFreshnessTests(unittest.TestCase):
+    """scenario_stale_freshness against the stubbed pair: stopping the
+    writer freezes the plant's stamps, the tracking standby's scans
+    outrun them, and the declared budget presents stale per-point while
+    the undeclared comparison keeps Good; the writer's restart realigns
+    the peer inside the failover bound and /history preserves the
+    interval."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = FreshnessFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, ctx=None, feed=None, evidence=None):
+        feed = feed if feed is not None else self.feed
+        evidence = evidence if evidence is not None else self.evidence
+        base = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+                'evidence_dir': str(evidence),
+                'stop_controller': feed.stop,
+                'start_controller': feed.start,
+                'failover_misses': 120}
+        if ctx is not None:
+            base.update(ctx)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'STALE_FRESHNESS_POLL', 0.001), \
+                patch.object(scenarios, 'STALE_WALL_DEADLINE', 5.0), \
+                patch.object(scenarios, 'STALE_RECOVER_DEADLINE', 1.0), \
+                patch.object(scenarios, 'STALE_RETURN_DEADLINE', 1.0):
+            return scenarios.scenario_stale_freshness(base)
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_stale_freshness,
+                      scenarios.SCENARIOS)
+
+    def test_freeze_stale_recovery_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.stops, ['active'])
+        self.assertEqual(self.feed.starts, ['active'])
+        self.assertTrue(self.feed.stale_seen)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        interval = json.loads(
+            (self.evidence / 'stale-freshness-history.json').read_text())
+        self.assertIsNotNone(interval['budgeted']['interval'])
+        self.assertFalse(interval['budgeted']['interval']['good_inside'])
+
+    def test_stale_never_presenting_fails(self):
+        self.feed.never_stale = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never presented Uncertain(Stale)',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_comparison_presenting_stale_fails(self):
+        self.feed.leak = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('leaked past its declaration',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_stale_reverting_to_healthy_fails(self):
+        self.feed.relapse = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('healthy last-known', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_recovery_after_restart_fails(self):
+        self.feed.no_recover = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not return Good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promoted_peer_never_recovering_fails(self):
+        # The armed failover bound firing mid-freeze: the promoted peer
+        # reclaims the writer and resumes stepping, but its scan ticks
+        # lead the frozen stamps by the outage — the lag never closes.
+        self.feed.promote = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('self-promotion', record.get('detail', ''))
+        self.assertTrue(self.feed.promoted)
+        report.validate_scenario(record)
+
+    def test_unfrozen_induction_is_inconclusive(self):
+        # The writer-stop never took: the plant's stamps keep advancing
+        # and the peer keeps tracking, so a missing stale presentation
+        # cannot be attributed to the induction.
+        self.feed.freeze_takes = False
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never took effect', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_restart_action_is_inconclusive(self):
+        self.feed.start_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('restart never completed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_lifecycle_actions_are_inconclusive(self):
+        record = self.run_scenario(ctx={'stop_controller': None,
+                                        'start_controller': None})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('no documented', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs of the scenario
+        # against the same rig state record the same report and the
+        # same evidence files.
+        runs = []
+        for index in range(2):
+            evidence = Path(self.tmp.name) / ('evidence-' + str(index))
+            evidence.mkdir()
+            record = self.run_scenario(feed=FreshnessFeed(),
+                                       evidence=evidence)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class RevisionFeed:
+    """A stubbed rig for the model-revision scenario. ctrl-b owns the
+    field — the post-failover layout the suite reaches this case in —
+    ctrl-a is its demoted partner, and ctrl-c is the third controller
+    the runner action launches on the revised document. Every monitor
+    read on a peer is one completed scan: an active peer's scan lands
+    its staged field write on the faked sim-net plant. Each peer's
+    --journal-file is a real append-only record the feed writes itself.
+    Every transition is call-count keyed — never wall-clock — so two
+    scenario runs emit identical evidence. Fault flags stage each named
+    failure the issue calls out."""
+
+    V1, V2 = 111, 222  # the mounted and revised model fingerprints
+    POINT = 302        # the writable bool the carryover must name
+    WATCH = 100        # the field `out` point the roll watches
+
+    def __init__(self, journals, document):
+        self.journals = {name: Path(p) for name, p in journals.items()}
+        self.document = document
+        self.ticks = {'a': 0, 'b': 40, 'c': 0}
+        self.roles = {'a': 'standby', 'b': 'active', 'c': 'standby'}
+        self.launched = False
+        self.c_role_polls = 0
+        self.converge_after = 3
+        self.reinit_journaled = False
+        self.point = False
+        self.receipts = {'a': [], 'b': [], 'c': []}
+        self.staged = {'a': True, 'b': True, 'c': True}
+        self.field = {'value': {'bool': True}, 'quality': 'good',
+                      'tick': 7}
+        self.health = {'b': {'failed_writes': 0,
+                             'consecutive_failures': 0,
+                             'last_error': None}}
+        self.seqs = {'a': 1, 'b': 1, 'c': 1}
+        self.calls = []
+        self.gap_open = False
+        self.gap_reads = 0
+        # Fault injection for the named-failure cases.
+        self.action_fails = False      # the runner action raises
+        self.never_converge = False    # c stays unsynchronized
+        self.bad_convergence = None    # 'degraded'|'diverged'|'tracking'
+        self.lose_receipts = False     # the adopted log drops the tail
+        self.empty_carry = False       # the report names no carried point
+        self.regress_field = False     # the field moves in the gap
+        self.field_lag = False         # post-roll writes never land
+        self.demoted_writes = False    # b keeps attempting writes
+        self.wrong_fp = False          # c's checkpoint keeps v1's fp
+        self.no_reinit_entry = False   # c's journal lacks the crossing
+        self.demoted_restart = False   # b's journal gains a lifetime
+        for name in ('a', 'b'):
+            self.journals[name].parent.mkdir(parents=True,
+                                             exist_ok=True)
+            self.journals[name].write_text(
+                json.dumps({'run_boundary': {'run': 1, 'tick': 0}})
+                + '\n')
+
+    def _journal(self, peer, record):
+        with self.journals[peer].open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+
+    def _entry(self, peer, event):
+        self._journal(peer, {'entry': {'seq': self.seqs[peer],
+                                       'tick': self.ticks[peer],
+                                       'event': event}})
+        self.seqs[peer] += 1
+
+    def _report(self):
+        carried = [] if self.empty_carry else [
+            {'point': self.POINT, 'value': {'bool': self.point}}]
+        return {'from': self.V1, 'to': self.V2,
+                'resumed_at': self.ticks['b'],
+                'carried': carried,
+                'carried_outputs': [{'point': self.WATCH,
+                                     'value': {'bool': True}}],
+                'carried_forces': [], 'dropped': [],
+                'reinitialized': ['motor:20', 'digital-input:12'],
+                'initialized': [900]}
+
+    # The runner-owned action — replaces ctx['start_revised'].
+    def start(self, name):
+        self.calls.append(('start_revised', name))
+        if self.action_fails:
+            raise RuntimeError('docker run failed: name in use')
+        self.launched = True
+        self.journals['c'].parent.mkdir(parents=True, exist_ok=True)
+        self._journal('c', {'run_boundary': {'run': 1, 'tick': 0}})
+        return {'container': 'dcs-hw-qa-1-c',
+                'document': str(self.document),
+                'added_points': [900], 'added_signals': [10900]}
+
+    def _role(self, peer):
+        if peer != 'c':
+            return {'role': self.roles[peer], 'tick': self.ticks[peer],
+                    'sync': 'unsynchronized'
+                    if self.roles[peer] == 'standby' else None}
+        self.c_role_polls += 1
+        if self.never_converge:
+            sync = 'unsynchronized'
+        elif self.bad_convergence:
+            sync = {self.bad_convergence: {'detail': 'staged'}}
+        elif self.c_role_polls >= self.converge_after:
+            sync = {'reinitialized': {'report': self._report()}}
+            if not self.reinit_journaled:
+                self.reinit_journaled = True
+                # The crossing journals its carryover report and the
+                # adopted receipt log arrives with the checkpoint.
+                if not self.no_reinit_entry:
+                    self._entry('c', {'reinitialized':
+                                      {'report': self._report()}})
+                receipts = list(self.receipts['b'])
+                if self.lose_receipts:
+                    receipts = receipts[:-1]
+                self.receipts['c'] = receipts
+        else:
+            sync = 'unsynchronized'
+        return {'role': self.roles['c'], 'tick': self.ticks['c'],
+                'sync': sync}
+
+    def _snapshot(self, peer):
+        self.ticks[peer] += 1
+        if self.roles[peer] == 'active' and not (
+                peer == 'c' and self.field_lag):
+            self.field = {'value': {'bool': self.staged[peer]},
+                          'quality': 'good',
+                          'tick': self.ticks[peer]}
+        if peer == 'b' and self.demoted_writes \
+                and self.roles['b'] == 'standby':
+            # A demoted peer still attempting writes meets the plant's
+            # fence, which counts each rejection in its io_health.
+            self.health['b']['failed_writes'] += 1
+            self.health['b']['consecutive_failures'] += 1
+            self.health['b']['last_error'] = {
+                'tick': self.ticks['b'], 'point': self.WATCH,
+                'direction': 'out', 'error': {'fenced': None}}
+        health = dict(self.health.get(
+            peer, {'failed_writes': 0, 'consecutive_failures': 0,
+                   'last_error': None}))
+        return {'tick': self.ticks[peer],
+                'points': [
+                    {'point': self.WATCH,
+                     'sample': {'value': {'bool': self.staged[peer]},
+                                'quality': 'good'}},
+                    {'point': self.POINT,
+                     'sample': {'value': {'bool': self.point},
+                                'quality': 'good'}}],
+                'io_health': health}
+
+    def _command(self, peer, body):
+        write = body['command']['write_value']
+        if write['point'] == self.POINT:
+            self.point = write['value']['bool']
+        receipt = {'command': body['command'],
+                   'outcome': {'applied': {'tick': self.ticks[peer]}},
+                   'actor': body.get('actor')}
+        self.receipts[peer].append(receipt)
+        self._entry(peer, {'command_settled': {'receipt': receipt}})
+        return 200, receipt
+
+    def _demote(self, peer):
+        self.calls.append(('demote', peer))
+        self.gap_open = True
+        self.roles[peer] = 'standby'
+        self._entry(peer, {'role_changed': {'from': 'active',
+                                            'to': 'demoting'}})
+        self._entry(peer, {'role_changed': {'from': 'demoting',
+                                            'to': 'standby'}})
+        if self.demoted_restart:
+            self._journal(peer, {'run_boundary': {'run': 2,
+                                                  'tick': 0}})
+        return 200, {'role': 'standby', 'tick': self.ticks[peer]}
+
+    def _promote(self, peer):
+        self.calls.append(('promote', peer))
+        self.gap_open = False
+        self.roles[peer] = 'active'
+        self._entry(peer, {'role_changed': {'from': 'standby',
+                                            'to': 'promoting'}})
+        self._entry(peer, {'role_changed': {'from': 'promoting',
+                                            'to': 'active'}})
+        return 200, {'role': 'active', 'tick': self.ticks[peer]}
+
+    # The monitor channel — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        peer = {'ctrl-a:1': 'a', 'ctrl-b:2': 'b',
+                'ctrl-c:3': 'c'}[host]
+        if peer == 'c' and not self.launched:
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, self._role(peer)
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': 302, 'signal': 10302, 'name': 'p101-oos',
+                 'direction': 'in', 'value_type': 'bool',
+                 'writable': True},
+                {'point': 10, 'signal': 10010, 'name': 'level-primary',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False}]}
+        if (method, route) == ('GET', '/checkpoint'):
+            fp = self.V1 if peer != 'c' or self.wrong_fp else self.V2
+            return 200, {'model_fingerprint': fp,
+                         'tick': self.ticks[peer]}
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, self._snapshot(peer)
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts[peer])
+        if (method, route) == ('POST', '/command'):
+            return self._command(peer, body)
+        if (method, route) == ('POST', '/demote'):
+            return self._demote(peer)
+        if (method, route) == ('POST', '/promote'):
+            return self._promote(peer)
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+    # The plant's sim-net service — replaces scenarios._field_request.
+    def field_request(self, ctx, request):
+        if request['op'] == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': self.WATCH, 'direction': 'out',
+                 'sample': self.field, 'fault': None},
+                {'point': 10, 'direction': 'in',
+                 'sample': {'value': {'float': 1.5},
+                            'quality': 'good', 'tick': 7},
+                 'fault': None}]}
+        if request['op'] == 'read':
+            if self.gap_open:
+                self.gap_reads += 1
+            if self.regress_field and self.gap_open \
+                    and self.gap_reads > 1:
+                # The named failure: the field moves inside the
+                # writer-less window — after the scenario's held read.
+                self.regress_field = False
+                self.field = {'value': {'bool': not self.field
+                                        ['value']['bool']},
+                              'quality': 'good', 'tick': 9}
+            return {'result': 'sample', 'sample': self.field}
+        raise AssertionError('unexpected plant request %s' % request)
+
+
+class ModelRevisionTests(unittest.TestCase):
+    """scenario_model_revision against the stubbed rig: the feed's
+    transitions are call-count keyed so each run emits identical
+    evidence, and every fault flag stages a named acceptance failure —
+    the revised peer that never converges, the wrong terminal sync,
+    receipts or journal seqs lost across the boundary, a field
+    regression, a demoted peer still serving writes, and a run that
+    ends off the revised fingerprint."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        root = Path(self.tmp.name) / 'controllers'
+        self.document = Path(self.tmp.name) / 'model-revised.json'
+        self.document.write_text(json.dumps({'revised': True}))
+        self.journals = {name: root / name / 'journal.jsonl'
+                         for name in ('a', 'b', 'c')}
+        self.feed = RevisionFeed(self.journals, self.document)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _ctx(self):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'revised': 'http://ctrl-c:3',
+                'plant': 'plant:9',
+                'evidence_dir': str(self.evidence),
+                'start_revised': self.feed.start,
+                'journal_files': {
+                    'active': str(self.journals['a']),
+                    'standby': str(self.journals['b']),
+                    'revised': str(self.journals['c'])}}
+
+    def run_scenario(self):
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, '_field_request',
+                             self.feed.field_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'REVISION_POLL', 0.001), \
+                patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
+                             2.0), \
+                patch.object(scenarios, 'REVISION_SETTLE_DEADLINE',
+                             0.5), \
+                patch.object(scenarios, 'REVISION_FIELD_ROUNDS', 4), \
+                patch.object(scenarios, 'RESTART_JOURNAL_DEADLINE',
+                             0.5):
+            return scenarios.scenario_model_revision(self._ctx())
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_model_revision,
+                      scenarios.SCENARIOS)
+
+    def test_clean_roll_passes_validates_and_orders_the_roll(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The documented order: the third controller launches first,
+        # the old active demotes, and only then the revised peer
+        # promotes.
+        kinds = [kind for kind, _ in self.feed.calls]
+        self.assertEqual(kinds,
+                         ['start_revised', 'demote', 'promote'])
+        self.assertEqual(dict(self.feed.calls)['demote'], 'b')
+        self.assertEqual(dict(self.feed.calls)['promote'], 'c')
+        self.assertEqual(self.feed.roles['b'], 'standby')
+        self.assertEqual(self.feed.roles['c'], 'active')
+
+    def test_two_runs_produce_identical_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        first = {p.name: p.read_bytes()
+                 for p in self.evidence.iterdir()}
+        second_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(second_tmp.cleanup)
+        evidence2 = Path(second_tmp.name) / 'evidence'
+        evidence2.mkdir()
+        journals2 = {name: Path(second_tmp.name) / 'controllers'
+                     / name / 'journal.jsonl'
+                     for name in ('a', 'b', 'c')}
+        feed2 = RevisionFeed(journals2, self.document)
+        ctx2 = self._ctx()
+        ctx2['evidence_dir'] = str(evidence2)
+        ctx2['start_revised'] = feed2.start
+        ctx2['journal_files'] = {
+            'active': str(journals2['a']),
+            'standby': str(journals2['b']),
+            'revised': str(journals2['c'])}
+        with patch.object(scenarios, 'http_json', feed2.http_json), \
+                patch.object(scenarios, '_field_request',
+                             feed2.field_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'REVISION_POLL', 0.001), \
+                patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
+                             2.0), \
+                patch.object(scenarios, 'REVISION_SETTLE_DEADLINE',
+                             0.5), \
+                patch.object(scenarios, 'REVISION_FIELD_ROUNDS', 4), \
+                patch.object(scenarios, 'RESTART_JOURNAL_DEADLINE',
+                             0.5):
+            record2 = scenarios.scenario_model_revision(ctx2)
+        self.assertEqual(record2['outcome'], 'passed', record2)
+        second = {p.name: p.read_bytes() for p in evidence2.iterdir()}
+        self.assertEqual(set(first), set(second))
+        for name, data in first.items():
+            self.assertEqual(data, second[name], name)
+
+    def test_never_converging_revised_peer_is_inconclusive(self):
+        self.feed.never_converge = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never converged', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_wrong_convergence_state_fails(self):
+        self.feed.bad_convergence = 'tracking'
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('reinitialized', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_persistent_degraded_pulls_fail(self):
+        # A degraded pull that never clears is the revised peer's
+        # rejected crossing — terminal at the convergence deadline.
+        self.feed.bad_convergence = 'degraded'
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('degraded', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_carryover_missing_the_operator_write_fails(self):
+        self.feed.empty_carry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('carryover report', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_receipt_loss_across_the_roll_fails(self):
+        self.feed.lose_receipts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('receipt', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_field_regression_in_the_gap_fails(self):
+        self.feed.regress_field = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('writer-less window', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_field_regression_after_promotion_fails(self):
+        self.feed.staged['c'] = False
+        self.feed.field_lag = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('regressed across the roll',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_demoted_peer_serving_writes_fails(self):
+        self.feed.demoted_writes = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('serving writes', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_run_ending_off_the_revised_fingerprint_fails(self):
+        self.feed.wrong_fp = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('fingerprint', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_reinitialized_journal_entry_fails(self):
+        self.feed.no_reinit_entry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('journal', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_demoted_journal_lifetime_restart_fails(self):
+        self.feed.demoted_restart = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('lifetimes', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_action_is_inconclusive(self):
+        self.feed.action_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('model-revision action never completed',
+                      record.get('detail', ''))
         report.validate_scenario(record)
 
 

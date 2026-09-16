@@ -1,8 +1,8 @@
 {
-  "dcs_release": "v0.1.0",
+  "dcs_release": "v0.2.0",
   "images": {
-    "controller": "dcs-controller:v0.1.0",
-    "plant_server": "dcs-plant-server:v0.1.0"
+    "controller": "dcs-controller:v0.2.0",
+    "plant_server": "dcs-plant-server:v0.2.0"
   },
   "model": {
     "path": "model/plant.json",
@@ -17,12 +17,16 @@
   "controllers": [
     {
       "name": "ctrl-a",
-      "listen": "0.0.0.0:8080"
+      "listen": "0.0.0.0:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     },
     {
       "name": "ctrl-b",
       "listen": "0.0.0.0:8081",
-      "standby": "ctrl-a:8080"
+      "standby": "ctrl-a:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     }
   ]
 }

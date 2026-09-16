@@ -55,11 +55,11 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by immutable revision:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
 ```
 
-`tag = "v0.1.0"` names the identical commit once the release tag
+`tag = "v0.2.0"` names the identical commit once the release tag
 exists; a `rev` pin is always supported. `Cargo.lock` is committed so
 every build resolves the same sources.
 
@@ -91,7 +91,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev b85eaa4… \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
     dcs-model dcs-controller dcs-plant
 ```
 
@@ -187,6 +187,15 @@ and the redundant controller pair:
 - `plant.listen` — the plant server's listen address.
 - `controllers` — the duty controller and its tracking standby
   (`standby` names the peer it follows).
+- `controllers[].state_file` / `controllers[].journal_file` —
+  **optional** per-controller container paths for the runtime's two
+  durability files: `state_file` is the restart-recovery checkpoint —
+  a restarted container resumes in place at the last persisted scan —
+  and `journal_file` is the durable attributed operator-action record
+  surviving the process lifetime. Each declared path must land on
+  writable deployment storage and rides the invocation's
+  `--state-file`/`--journal-file` flags; a deployment without durable
+  storage omits both fields and the flags stay absent.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -199,14 +208,18 @@ records as run commands: one `dcs-plant-server` container serving the
 mounted model and dynamics documents read-only, and the `ctrl-a` /
 `ctrl-b` pair attaching to its listener through `--remote`, the standby
 following the duty's monitor through `--standby`, both monitor ports
-published. Each controller invocation carries the manifest's
-fingerprint in its `DCS_MODEL_FINGERPRINT` environment — the identity
-checkpoint negotiation verifies on the wire. The check's `deploy`
-stage parses the file through `docker compose config` (or an
-equivalent YAML parser) and asserts it agrees with the manifest on
-every field — release, images, mounts, fingerprint, listen addresses,
-and pair wiring; a divergence fails `rig-mismatch`, an unparsable file
-`rig-invalid`, a host with neither parser `rig-unverifiable`.
+published. Each peer's declared `state_file`/`journal_file` lands on
+its writable named volume — `ctrl-a-data`/`ctrl-b-data` — and rides
+the invocation's `--state-file`/`--journal-file` flags, while the
+model and dynamics mounts stay read-only. Each controller invocation
+carries the manifest's fingerprint in its `DCS_MODEL_FINGERPRINT`
+environment — the identity checkpoint negotiation verifies on the
+wire. The check's `deploy` stage parses the file through `docker
+compose config` (or an equivalent YAML parser) and asserts it agrees
+with the manifest on every field — release, images, mounts,
+fingerprint, listen addresses, and pair wiring; a divergence fails
+`rig-mismatch`, an unparsable file `rig-invalid`, a host with
+neither parser `rig-unverifiable`.
 
 Running the rig is the customer action: with the release's images
 available — pulled by their recorded digests or built at the release
