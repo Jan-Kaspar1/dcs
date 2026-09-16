@@ -172,6 +172,8 @@ impl Component for Regulator {
                     range: None,
                 },
             ],
+            commands: Vec::new(),
+            events: Vec::new(),
         }
     }
 }

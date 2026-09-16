@@ -1961,6 +1961,8 @@ mod tests {
                 },
             ],
             parameters: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
         };
         let snapshot = TelemetrySnapshot {
             tick: Tick(5),
@@ -2013,6 +2015,8 @@ mod tests {
                         label: "gain".to_string(),
                         ports: Vec::new(),
                         parameters: Vec::new(),
+                        commands: Vec::new(),
+                        events: Vec::new(),
                     }],
                     io_health: IoHealth::default(),
                     forces: Vec::new(),

@@ -1699,6 +1699,15 @@ impl<'d> Executor<'d> {
     /// [`CommandError::ParameterTypeMismatch`], and a value outside a
     /// declared [`ParameterRange`](dcs_core::ParameterRange) is
     /// [`CommandError::OutOfRange`].
+    ///
+    /// An `Invoke` resolves its component the same way, then validates
+    /// against the component's declared commands: an undeclared command
+    /// is [`CommandError::UnknownCommand`] and a supplied argument whose
+    /// kind differs from its declaration is
+    /// [`CommandError::ArgumentTypeMismatch`]. Dispatch itself is the
+    /// `named-command-event-runtime` tranche — a well-formed invocation
+    /// is refused [`CommandError::CommandRefused`] naming the gap rather
+    /// than accepted and left unsettled.
     fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
         match command {
             Command::WriteValue { point, kind, value }
@@ -1783,6 +1792,45 @@ impl<'d> Executor<'d> {
                     component: index,
                     name: name.clone(),
                     value: *value,
+                })
+            }
+            Command::Invoke {
+                component,
+                command: name,
+                arguments,
+            } => {
+                let index = self
+                    .components
+                    .iter()
+                    .position(|entry| entry.component.name() == component)
+                    .ok_or_else(|| CommandError::UnknownComponent {
+                        component: component.clone(),
+                    })?;
+                let declared = self.components[index].component.describe().commands;
+                let Some(spec) = declared.iter().find(|entry| entry.name == *name) else {
+                    return Err(CommandError::UnknownCommand {
+                        component: component.clone(),
+                        command: name.clone(),
+                    });
+                };
+                for (argument, value) in arguments {
+                    if let Some(declared) =
+                        spec.request.iter().find(|entry| entry.name == *argument)
+                        && declared.kind != value.kind()
+                    {
+                        return Err(CommandError::ArgumentTypeMismatch {
+                            component: component.clone(),
+                            command: name.clone(),
+                            argument: argument.clone(),
+                            expected: declared.kind,
+                            found: value.kind(),
+                        });
+                    }
+                }
+                Err(CommandError::CommandRefused {
+                    component: component.clone(),
+                    command: name.clone(),
+                    reason: "the runtime does not dispatch declared commands".to_string(),
                 })
             }
         }
@@ -4504,6 +4552,8 @@ mod tests {
                         range: Some(range),
                     })
                     .collect(),
+                commands: Vec::new(),
+                events: Vec::new(),
             }
         }
 
@@ -4935,6 +4985,8 @@ mod tests {
                     kind: ValueKind::Float,
                     range: None,
                 }],
+                commands: Vec::new(),
+                events: Vec::new(),
             }
         }
 
@@ -5372,6 +5424,8 @@ mod tests {
                     },
                 ],
                 parameters: Vec::new(),
+                commands: Vec::new(),
+                events: Vec::new(),
             }
         );
     }
@@ -5426,6 +5480,8 @@ mod tests {
                             max: Value::Float(10.0),
                         }),
                     }],
+                    commands: Vec::new(),
+                    events: Vec::new(),
                 }
             }
         }

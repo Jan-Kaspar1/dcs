@@ -48,7 +48,8 @@ mod telemetry;
 pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement};
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
-    ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
+    CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,
+    PortDescriptor, PortRole,
 };
 pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
@@ -62,7 +63,7 @@ pub use io::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
     LinkState, Output, PointType, TypedSample,
 };
-pub use journal::{JournalEntry, JournalEvent};
+pub use journal::{EmittedEvent, EventValue, JournalEntry, JournalEvent};
 pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,

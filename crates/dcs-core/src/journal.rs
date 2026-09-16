@@ -17,6 +17,46 @@ use crate::command::CommandReceipt;
 use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// One typed value in an [`EmittedEvent`]'s payload — the value half
+/// of a declared [`EventField`](crate::EventField): the variant
+/// matches the field's declared
+/// [`EventFieldKind`](crate::EventFieldKind).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventValue {
+    /// A [`Value`] — the payload of a field declared
+    /// `EventFieldKind::Value`.
+    Value(Value),
+    /// A [`Quality`] flag — `EventFieldKind::Quality`.
+    Quality(Quality),
+    /// A [`CommandReceipt`] — `EventFieldKind::Receipt`.
+    Receipt(Box<CommandReceipt>),
+    /// Free text — `EventFieldKind::Text`.
+    Text(String),
+}
+
+/// A kind-declared event a component emitted during the producing scan
+/// — the record [`JournalEvent::EventEmitted`] carries.
+///
+/// `event` is the stable event-kind identity: the declaring
+/// [`EventSpec`](crate::EventSpec)'s `name`. `component` is the
+/// producing instance's name — the identity its descriptor and
+/// diagnostics report. `fields` is the typed payload keyed by the
+/// `EventSpec`'s declared [`EventField`](crate::EventField) names; a
+/// field the schema marks `optional` is absent when it carried no
+/// value, matching the contract's omit-when-none convention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmittedEvent {
+    /// The event's stable kind identity — the declaring `EventSpec`'s
+    /// `name`.
+    pub event: String,
+    /// The producing component instance's name.
+    pub component: String,
+    /// The typed payload, keyed by declared field name.
+    pub fields: BTreeMap<String, EventValue>,
+}
 
 /// One kind of event the journal records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +140,18 @@ pub enum JournalEvent {
     Reinitialized {
         /// The crossing's carryover record.
         report: CarryoverReport,
+    },
+    /// A component emitted a kind-declared event — the durable record
+    /// of a [`Declared`](crate::AdaptedEvent::Declared)-provenance
+    /// [`EventSpec`](crate::EventSpec). The entry's `tick` is the
+    /// producing scan's tick; `event` carries the stable event-kind
+    /// identity, the producing component, and the typed payload over
+    /// the spec's declared [`EventField`](crate::EventField) schema.
+    /// Durable-retention emissions flow through this journal rather
+    /// than a parallel channel.
+    EventEmitted {
+        /// The emitted event record.
+        event: EmittedEvent,
     },
 }
 
@@ -231,6 +283,22 @@ mod tests {
                     },
                 },
             },
+            JournalEntry {
+                seq: 10,
+                tick: Tick(14),
+                event: JournalEvent::EventEmitted {
+                    event: EmittedEvent {
+                        event: "stroke_complete".to_string(),
+                        component: "vlv:1".to_string(),
+                        fields: [
+                            ("ticks".to_string(), EventValue::Value(Value::Int(30))),
+                            ("detail".to_string(), EventValue::Text("seated".to_string())),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -245,5 +313,72 @@ mod tests {
         assert!(json.contains("\"role_changed\""), "{json}");
         assert!(json.contains("\"divergence_detected\""), "{json}");
         assert!(json.contains("\"reinitialized\""), "{json}");
+        assert!(json.contains("\"event_emitted\""), "{json}");
+    }
+
+    #[test]
+    fn event_emitted_uses_the_documented_wire_shape() {
+        // The emitted-event journal entry: the stable event-kind
+        // identity, the producing component, and the typed payload
+        // keyed by declared field name — each field value tagged by
+        // its `EventFieldKind` counterpart. The entry's `tick` is the
+        // producing scan's tick.
+        let receipt = CommandReceipt {
+            command: Command::Invoke {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+                arguments: BTreeMap::new(),
+            },
+            outcome: CommandOutcome::Applied { tick: Tick(14) },
+            actor: Some("operator-3".to_string()),
+        };
+        let entry = JournalEntry {
+            seq: 10,
+            tick: Tick(14),
+            event: JournalEvent::EventEmitted {
+                event: EmittedEvent {
+                    event: "stroke_complete".to_string(),
+                    component: "vlv:1".to_string(),
+                    fields: [
+                        ("ticks".to_string(), EventValue::Value(Value::Int(30))),
+                        ("quality".to_string(), EventValue::Quality(Quality::Good)),
+                        (
+                            "receipt".to_string(),
+                            EventValue::Receipt(Box::new(receipt)),
+                        ),
+                        ("detail".to_string(), EventValue::Text("seated".to_string())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            json,
+            r#"{"seq":10,"tick":14,"event":{"event_emitted":{"event":{"event":"stroke_complete","component":"vlv:1","fields":{"detail":{"text":"seated"},"quality":{"quality":"good"},"receipt":{"receipt":{"command":{"invoke":{"component":"vlv:1","command":"stroke_test","arguments":{}}},"outcome":{"applied":{"tick":14}},"actor":"operator-3"}},"ticks":{"value":{"int":30}}}}}}}"#
+        );
+        assert_eq!(serde_json::from_str::<JournalEntry>(&json).unwrap(), entry);
+    }
+
+    #[test]
+    fn journal_entries_predating_event_emitted_deserialize() {
+        // A journal file recorded before the variant exists carries
+        // none of it; each entry deserializes unchanged.
+        let entries: Vec<JournalEntry> = serde_json::from_str(
+            r#"[{"seq":1,"tick":4,"event":{"step_failed":{"component":"pid","error":"computation failed"}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            [JournalEntry {
+                seq: 1,
+                tick: Tick(4),
+                event: JournalEvent::StepFailed {
+                    component: "pid".to_string(),
+                    error: "computation failed".to_string(),
+                },
+            }]
+        );
     }
 }

@@ -377,6 +377,8 @@ mod tests {
                             max: Value::Float(10.0),
                         }),
                     }],
+                    commands: Vec::new(),
+                    events: Vec::new(),
                 },
                 ComponentDescriptor {
                     name: "fragile".to_string(),
@@ -384,6 +386,8 @@ mod tests {
                     label: "fragile".to_string(),
                     ports: Vec::new(),
                     parameters: Vec::new(),
+                    commands: Vec::new(),
+                    events: Vec::new(),
                 },
             ],
             io_health: IoHealth {

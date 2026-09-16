@@ -127,6 +127,11 @@ pub fn component<S: AsRef<str>>(
             })
             .collect(),
         parameters,
+        // Native commands and events are declared on the returned
+        // descriptor's `commands`/`events` — the helper covers the
+        // port/parameter vocabulary every kind shares.
+        commands: Vec::new(),
+        events: Vec::new(),
     }
 }
 
