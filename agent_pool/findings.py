@@ -51,6 +51,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qa_lane import report as qa_report
+from qa_lane import verify as qa_verify
 
 from . import planning
 
@@ -280,15 +281,33 @@ def _scenario_finding(scenario, data):
                 'summary': ('%s: %s' % (outcome, scenario.get('detail')
                                         or scenario['expected']))[:4000],
                 'evidence': evidence}
-    return {'key': key, 'kind': 'defect',
-            'module': 'qa-lane/' + key,
-            'severity': 'medium', 'confidence': 'high',
-            'title': scenario['title'],
-            'summary': scenario.get('detail') or scenario['expected'],
-            'reproduction': 'Automated scenario %s of QA run %s on the '
-                            'Lenovo simulated rig.' % (key, data['run_id']),
-            'expected': scenario['expected'],
-            'evidence': evidence}
+    # Schema v3 scenarios may carry the finding fields an exploratory
+    # session declared — the real module, its own reproduction, and its
+    # severity/confidence judgments — instead of the generic lane
+    # defaults. Fields absent stay conservatively derived.
+    finding = {'key': key, 'kind': 'defect',
+               'module': scenario.get('module') or 'qa-lane/' + key,
+               'severity': scenario.get('severity') or 'medium',
+               'confidence': scenario.get('confidence') or 'high',
+               'title': scenario['title'],
+               'summary': scenario.get('detail') or scenario['expected'],
+               'expected': scenario['expected'],
+               'evidence': evidence}
+    if scenario.get('reproduction'):
+        finding['reproduction'] = scenario['reproduction']
+    elif scenario.get('mode'):
+        finding['reproduction'] = (
+            'Exploratory probe %s of QA run %s on the Lenovo host '
+            '(mode %s).' % (key, data['run_id'], scenario['mode']))
+    else:
+        finding['reproduction'] = (
+            'Automated scenario %s of QA run %s on the Lenovo simulated '
+            'rig.' % (key, data['run_id']))
+    if scenario.get('test_requirements'):
+        finding['test_requirements'] = scenario['test_requirements']
+    if type(scenario.get('product_cause')) is bool:
+        finding['product_cause'] = scenario['product_cause']
+    return finding
 
 
 def _keyed_finding(item, data, kind):
@@ -827,8 +846,14 @@ def verification_queue(state):
         if not row.get('fix_sha'):
             continue  # an unknown fix can never be verified
         payload = json.loads(row['payload'])
+        # Deterministic replay exists only for findings whose case
+        # identity maps onto qa_lane.scenarios; exploratory cases are
+        # re-run by the exploration lane instead.
+        replay = ('auto' if qa_verify.case_function(row['key'])
+                  else 'agent')
         items.append({'finding_key': row['key'], 'case': row['key'],
                       'fix_sha': row['fix_sha'], 'issue': row['issue'],
+                      'replay': replay,
                       'reproduction': payload.get('reproduction'),
                       'expected': payload.get('expected')})
     return {'schema': 'qa-verifications/1', 'generated_at': int(time.time()),

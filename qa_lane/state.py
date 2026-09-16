@@ -89,21 +89,27 @@ class State:
     def enqueue(self, run_id, sha, now, day, attempt=1):
         """Queue a revision for testing. Returns the queued record.
 
-        Only the newest queued revision runs: every still-queued record is
-        superseded, and the new record's range_first carries the oldest
-        untested revision so the report preserves the intervening range.
-        Re-enqueueing the same SHA is a no-op.
+        Only the newest queued revision runs: every still-queued assessment
+        record is superseded, and the new record's range_first carries the
+        oldest untested revision so the report preserves the intervening
+        range. Re-enqueueing the same SHA is a no-op. Dedicated run kinds
+        (qav- verifications, qax- explorations) never participate: a
+        running exploration must not suppress a real assessment, and a
+        queued verification survives a newer dispatch.
         """
         for row in self.runs(('queued', 'running')):
-            if row['attempted_sha'] == sha:
+            if row['run_id'].startswith('qa-') \
+                    and row['attempted_sha'] == sha:
                 return row
-        queued = self.runs(('queued',))
+        queued = [r for r in self.runs(('queued',))
+                  if r['run_id'].startswith('qa-')]
         range_first = None
         for row in queued:
             if range_first is None:
                 range_first = row['range_first'] or row['attempted_sha']
         if range_first is None:
-            last = self.runs(('finished', 'interrupted'))
+            last = [r for r in self.runs(('finished', 'interrupted'))
+                    if r['run_id'].startswith('qa-')]
             if last:
                 prev = last[-1]['completed_sha'] or last[-1]['attempted_sha']
                 if prev != sha:
@@ -119,12 +125,11 @@ class State:
                 (run_id, sha, 'queued', attempt, day, now, range_first))
         return self.run(run_id)
 
-    def queue_verification(self, run_id, sha, now, day):
-        """Queue a dedicated fix-verification run (run ids 'qav-*').
-
-        Unlike enqueue() this never supersedes queued assessment runs:
-        verification work is additive and is dispatched ahead of the
-        newest-SHA assessment by the cycle.
+    def queue_dedicated(self, run_id, sha, now, day):
+        """Queue one dedicated run record (qav- verifications, qax-
+        explorations). Unlike enqueue() this never supersedes queued
+        assessment runs and carries no range_first — dedicated kinds are
+        additive work dispatched by their own lanes.
         """
         with self.db:
             self.db.execute(
@@ -133,8 +138,20 @@ class State:
                 (run_id, sha, day, now))
         return self.run(run_id)
 
-    def next_queued(self):
+    def queue_verification(self, run_id, sha, now, day):
+        """Queue a dedicated fix-verification run (run ids 'qav-*').
+
+        Unlike enqueue() this never supersedes queued assessment runs:
+        verification work is additive and is dispatched ahead of the
+        newest-SHA assessment by the cycle.
+        """
+        return self.queue_dedicated(run_id, sha, now, day)
+
+    def next_queued(self, prefix=None):
         queued = self.runs(('queued',))
+        if prefix is not None:
+            queued = [r for r in queued
+                      if r['run_id'].startswith(prefix + '-')]
         return queued[-1] if queued else None
 
     def attempts_for(self, sha):
@@ -144,10 +161,23 @@ class State:
             (sha,)).fetchone()
         return row[0]
 
-    def started_today(self, day):
+    def started_today(self, day, prefix=None):
+        """Runs that began on UTC `day`. `prefix` scopes the count to one
+        run kind ('qa', 'qav', 'qax') so dedicated budgets never eat the
+        assessment allowance or vice versa."""
+        query = "SELECT COUNT(*) FROM runs WHERE day=? AND status IN " \
+                "('running','finished','interrupted')"
+        args = [day]
+        if prefix is not None:
+            query += " AND run_id LIKE ?"
+            args.append(prefix + '-%')
+        return self.db.execute(query, args).fetchone()[0]
+
+    def last_started(self, prefix):
+        """Newest start timestamp among runs of one kind, or None."""
         row = self.db.execute(
-            "SELECT COUNT(*) FROM runs WHERE day=? AND status IN "
-            "('running','finished','interrupted')", (day,)).fetchone()
+            "SELECT MAX(started) FROM runs WHERE run_id LIKE ?",
+            (prefix + '-%',)).fetchone()
         return row[0]
 
     def begin(self, run_id, pid, now):
@@ -185,13 +215,27 @@ class State:
                 (path, now, run_id))
 
     def last_attempted_sha(self):
-        """The newest revision the lane was asked to test. 'blocked'
+        """The newest revision the lane was asked to assess. 'blocked'
         runs never attempted the revision, so they do not suppress
-        redispatch of the same SHA."""
+        redispatch of the same SHA. Dedicated run kinds (qav-, qax-)
+        do not move this pointer — the WSL relay keys new-SHA dispatch
+        off it and an exploration of an older revision must never
+        regress it into a redundant re-queue."""
         rows = [r for r in
                 self.runs(('queued', 'running', 'finished', 'interrupted'))
-                if r['outcome'] != 'blocked']
+                if r['run_id'].startswith('qa-') and r['outcome'] != 'blocked']
         return rows[-1]['attempted_sha'] if rows else None
+
+    def latest_verdicted_sha(self):
+        """The newest revision whose deterministic assessment produced a
+        verdict (passed/failed with completed_sha) — the exploration
+        lane's target. Runs are ordered by creation, so the last
+        verdicted assessment names the latest gate-covered revision."""
+        rows = [r for r in self.runs(('finished',))
+                if r['run_id'].startswith('qa-')
+                and r['outcome'] in ('passed', 'failed')
+                and r['completed_sha']]
+        return rows[-1]['completed_sha'] if rows else None
 
     # -- cleanup-failure ledger -------------------------------------------
     # Failures are keyed so a later success clears exactly the failure it

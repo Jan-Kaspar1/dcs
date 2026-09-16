@@ -243,7 +243,7 @@ class ValidationTests(LaneFixture):
 
     def test_field_errors(self):
         mutations = {
-            'schema_version': lambda d: d.update(schema_version=3),
+            'schema_version': lambda d: d.update(schema_version=4),
             'run_id': lambda d: d.update(run_id='Bad Key'),
             'attempted_sha': lambda d: d.update(attempted_sha='abc'),
             'outcome': lambda d: d.update(outcome='ok'),
@@ -918,6 +918,83 @@ class EndToEndTests(LaneFixture):
             self.github.issues(), self.log)
         self.assertEqual(state.qa_finding('scan-restamp')['status'], 'verified')
         self.assertEqual(self.github.created, 1)
+
+
+class ExploratoryFindingsTests(LaneFixture):
+    """Schema-v3 reports from qax-* runs carry the finding fields the
+    exploratory session declared; absent fields keep the conservative
+    coordinator defaults."""
+
+    def exploratory(self, **scenario_kw):
+        doc = report(run_id='qax-20990101-001',
+                     scenarios=[scenario('receipts-lost-on-standby-window',
+                                         **scenario_kw)])
+        doc['schema_version'] = 3
+        doc['mode'] = 'simulation'
+        doc['exploration'] = {'charter': 'command-boundary-behavior'}
+        return doc
+
+    def merge(self, issue=101):
+        self.state.reserve(issue, 'worker-01', 'dcs-monitor')
+        self.state.complete(issue)
+        self.state.update_job(issue, pr=42)
+        self.github.pull_requests[42] = dict(merge_commit_sha=FIX_SHA)
+        self.poll()
+
+    def test_explicit_fields_flow_into_finding_and_issue(self):
+        drop(self.root, self.exploratory(
+            module='dcs-monitor', mode='simulation',
+            reproduction='demote active, promote standby, GET /receipts',
+            severity='high', confidence='medium',
+            test_requirements='regression test driving the transition',
+            product_cause=True))
+        self.poll()
+        row = self.state.qa_finding('receipts-lost-on-standby-window')
+        self.assertEqual(row['module'], 'dcs-monitor')
+        self.assertEqual(row['severity'], 'high')
+        self.assertEqual(row['confidence'], 'medium')
+        self.assertEqual(row['status'], 'issue-open')
+        issue = self.github.items[row['issue']]
+        self.assertIn('demote active, promote standby, GET /receipts',
+                      issue['body'])
+        self.assertIn('regression test driving the transition',
+                      issue['body'])
+        meta = planning.metadata(issue['body'])
+        self.assertEqual(meta['group'], 'dcs-monitor')
+        self.assertEqual(meta['priority'], 1)
+
+    def test_absent_fields_keep_defaults(self):
+        drop(self.root, self.exploratory())
+        self.poll()
+        row = self.state.qa_finding('receipts-lost-on-standby-window')
+        self.assertEqual(row['module'],
+                         'qa-lane/receipts-lost-on-standby-window')
+        self.assertEqual(row['severity'], 'medium')
+        payload = json.loads(row['payload'])
+        self.assertIn('Automated scenario', payload['reproduction'])
+
+    def test_mode_marks_probe_reproduction(self):
+        drop(self.root, self.exploratory(mode='simulation'))
+        self.poll()
+        payload = json.loads(
+            self.state.qa_finding('receipts-lost-on-standby-window')
+            ['payload'])
+        self.assertIn('Exploratory probe', payload['reproduction'])
+        self.assertIn('mode simulation', payload['reproduction'])
+
+    def test_exploratory_case_marked_agent_replay(self):
+        drop(self.root, self.exploratory())
+        self.poll()
+        self.merge()
+        doc = findings.verification_queue(self.state)
+        self.assertEqual(doc['items'][0]['replay'], 'agent')
+
+    def test_deterministic_case_marked_auto_replay(self):
+        drop(self.root, report(scenarios=[scenario('evidence-capture')]))
+        self.poll()
+        self.merge()
+        doc = findings.verification_queue(self.state)
+        self.assertEqual(doc['items'][0]['replay'], 'auto')
 
 
 class MigrationTests(unittest.TestCase):
