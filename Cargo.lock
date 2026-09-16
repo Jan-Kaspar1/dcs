@@ -345,6 +345,7 @@ dependencies = [
  "dcs-model",
  "dcs-runtime",
  "dcs-sim",
+ "jsonschema",
  "serde_json",
 ]
 

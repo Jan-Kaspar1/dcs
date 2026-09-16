@@ -41,6 +41,30 @@
 //!   seen sequence — an evicted stretch surfaces as a numbering gap
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise
+//! - `GET /schema` → `200` [`SchemaView`] — the served block-interface
+//!   registry of the schema-driven-interface decision: one instance-level
+//!   [`BlockInterface`](dcs_core::BlockInterface) per component instance,
+//!   in scan order, derived
+//!   from the latest publication's bound-point-annotated descriptors
+//!   with each measurement's `unit` resolved through the signal index —
+//!   so every kind the run instantiated serves its five-category schema
+//!   (measurements, configuration, state, commands, events) without the
+//!   consumer reconstructing it from scattered surfaces. The view
+//!   stamps the publication `seq`/`tick` it was derived from; the
+//!   document's JSON Schema is `dcs-model interface-schema`'s emitted
+//!   artifact
+//! - `GET /resources` → `200` [`ResourceView`] — the same publication's
+//!   live half: per instance, each measurement's and state resource's
+//!   latest value and quality from the bound point's sample, each
+//!   configuration resource's current value from the snapshot's
+//!   `parameters` section, each command's `available` flag or the named
+//!   refusal a submission would meet, and the retained journal tail's
+//!   entries attributed to the instance (its bound points' transitions,
+//!   its settled command receipts, its step failures, its emitted
+//!   events). Collections are parallel to the interface's, so a
+//!   consumer zips the schema and resource views by index or joins by
+//!   `name`. Both reads serve published copies — never the executor
+//!   lock — exactly like `/snapshot`
 //! - `GET /checkpoint` → `200` [`Checkpoint`] — the executor's current
 //!   transferable state. This is the peer-sync endpoint a standby
 //!   controller pulls from (the peer-transport decision): like every
@@ -286,6 +310,7 @@ pub mod alarm_report;
 mod journal_file;
 mod pair;
 mod recorder;
+mod serve;
 mod store;
 
 use crate::store::Store;
@@ -296,7 +321,7 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    PublicationHealth, RoleReport, TelemetrySnapshot, Tick,
+    PublicationHealth, ResourceView, RoleReport, SchemaView, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
@@ -761,6 +786,21 @@ impl<'d> Monitor<'d> {
                 Ok(since) => json(200, &self.store.journal(since)),
                 Err(message) => json(400, &message),
             },
+            // The schema and resource views derive from the published
+            // read model exactly like `/snapshot` — one `Arc` fetch, the
+            // store's small lock released before the join or any socket
+            // I/O, the journal tail read from the same served ring.
+            (Method::Get, "/schema") => match self.store.latest() {
+                Some(publication) => json(200, &serve::schema_view(&publication, &self.signals)),
+                None => json(503, "no publication yet"),
+            },
+            (Method::Get, "/resources") => match self.store.latest() {
+                Some(publication) => json(
+                    200,
+                    &serve::resource_view(&publication, &self.signals, &self.store.journal(0)),
+                ),
+                None => json(503, "no publication yet"),
+            },
             (Method::Post, "/promote") => self.switchover(true),
             (Method::Post, "/demote") => self.switchover(false),
             (Method::Post, "/command") => match read_command_submission(&mut request) {
@@ -1145,6 +1185,21 @@ impl MonitorClient {
     /// `seq` above `since` (`0` fetches everything retained).
     pub fn journal(&self, since: u64) -> io::Result<Vec<JournalEntry>> {
         self.get_json(&format!("/journal?since={since}"))
+    }
+
+    /// `GET /schema`: the served block-interface registry — every
+    /// component instance's `BlockInterface`, stamped with the
+    /// publication it was derived from.
+    pub fn schema(&self) -> io::Result<SchemaView> {
+        self.get_json("/schema")
+    }
+
+    /// `GET /resources`: per-instance live resource state — measurement
+    /// and state values with quality, current configuration, per-command
+    /// availability or refusal, and the retained events attributed to
+    /// each instance.
+    pub fn resources(&self) -> io::Result<ResourceView> {
+        self.get_json("/resources")
     }
 
     /// `POST /command`: submits `command`, returning its receipt —

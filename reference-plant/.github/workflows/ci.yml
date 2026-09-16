@@ -1,8 +1,9 @@
 # The consumer repository's own CI: a fresh checkout runs the tree's
 # clean-CI script — resolve, build, deterministic emit, released-tooling
-# acceptance, manifest fingerprint, and the scripted simulation — with
-# no platform checkout present. `ci/check.sh` installs the released
-# tooling from the pinned git remote itself.
+# acceptance, manifest fingerprint, rig-definition consistency, and the
+# scripted simulation — with no platform checkout present.
+# `ci/check.sh` installs the released tooling from the pinned git remote
+# itself.
 name: ci
 
 on:

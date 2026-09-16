@@ -24,7 +24,8 @@ Its `README.md` walks the full customer path:
    observable behavior leg by leg.
 6. **Deploy** — `deploy/manifest.json` binds the approved model and its
    fingerprint to the release's images and the redundant controller
-   pair.
+   pair, and `deploy/compose.yaml` instantiates the manifest as a
+   checked-in rig definition the check holds in lockstep.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,
