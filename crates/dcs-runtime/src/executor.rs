@@ -7466,6 +7466,18 @@ mod tests {
             }
             vec![Self::event("fired", self.n), Self::event("beat", self.n)]
         }
+
+        fn capture_state(&self) -> StateMap {
+            let mut state = StateMap::new();
+            state.insert("n", Value::Int(self.n));
+            state
+        }
+
+        fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+            state.ensure_known_fields(self.name, &["n"])?;
+            self.n = state.require_i64(self.name, "n")?;
+            Ok(())
+        }
     }
 
     fn invoke(component: &str, command: &str, arguments: &[(&str, Value)]) -> Command {
@@ -7946,5 +7958,108 @@ mod tests {
         let checkpoint = executor.checkpoint();
         executor.apply(&checkpoint).unwrap();
         assert!(executor.emitted_events().is_empty());
+    }
+
+    /// Emission rig: one `Emitter` ("em") and no I/O surface — the
+    /// redundancy pair's proving kind for the pinned standby-emission
+    /// semantics.
+    fn emitter_rig(driver: &StubDriver) -> Executor<'_> {
+        Executor::new(
+            driver,
+            PointMap::new(),
+            vec![Box::new(Emitter {
+                name: "em",
+                n: 0,
+                fail: false,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_tracking_standby_emits_the_same_declared_events() {
+        // The pinned standby-emission semantics: the tracking peer
+        // steps the same components on the adopted run state, so every
+        // scan's emitted record is identical to the active's — the
+        // per-peer event streams are indistinguishable, which is what
+        // makes a promoted peer's journal an uninterrupted run's
+        // journal.
+        let active_driver = StubDriver::new(&[], &[]);
+        let mut active = emitter_rig(&active_driver);
+        let standby_driver = StubDriver::new(&[], &[]);
+        let mut standby = emitter_rig(&standby_driver);
+
+        // A standby joining mid-run: the checkpointed component state
+        // aligns the emission sequence, so its first tracked scan
+        // already emits what the active's does.
+        active.run(3).unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+
+        // The driven pair's cycle: adopt the active's post-scan state,
+        // then scan — the peers' emitted records are equal scan by
+        // scan, whether or not the pull lands between them.
+        for _ in 0..4 {
+            standby.scan().unwrap();
+            active.scan().unwrap();
+            assert_eq!(standby.emitted_events(), active.emitted_events());
+            standby.apply(&active.checkpoint()).unwrap();
+        }
+    }
+
+    #[test]
+    fn post_promotion_emissions_continue_the_adopted_sequence() {
+        // Once the tracking pull stops — the peer owns the field — the
+        // stream is the adopted run's own continuation: no reset, no
+        // replay of the abandoned line's record, indistinguishable from
+        // an uninterrupted reference for every scan asserted.
+        let reference_driver = StubDriver::new(&[], &[]);
+        let mut reference = emitter_rig(&reference_driver);
+        let standby_driver = StubDriver::new(&[], &[]);
+        let mut standby = emitter_rig(&standby_driver);
+
+        for _ in 0..3 {
+            standby.apply(&reference.checkpoint()).unwrap();
+            standby.scan().unwrap();
+            reference.scan().unwrap();
+        }
+        // Promotion: the peer stops applying and runs on.
+        for _ in 0..4 {
+            standby.scan().unwrap();
+            reference.scan().unwrap();
+            assert_eq!(standby.emitted_events(), reference.emitted_events());
+        }
+    }
+
+    #[test]
+    fn an_adopted_pending_invoke_settles_once_and_stays_settled() {
+        // Exactly-once across adoption: the checkpoint's `Accepted`
+        // entry re-queues once on the applying peer and settles at its
+        // next boundary; a later checkpoint carrying the settled
+        // outcome never re-queues it — the receipt log is the pair's
+        // one audit, not a replay channel.
+        let active_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut active = commanded_rig(&active_driver);
+        active.submit_command(invoke("ctr", "bump", &[("by", Value::Int(7))]));
+        let pending = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut standby = commanded_rig(&standby_driver);
+        standby.apply(&pending).unwrap();
+        standby.scan().unwrap();
+
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
+
+        // The settled outcome rides the next checkpoint forward — the
+        // re-application lands nothing: still one receipt, still 7.
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
     }
 }

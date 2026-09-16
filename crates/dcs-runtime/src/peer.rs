@@ -526,6 +526,63 @@ impl<'d> Peer<'d> {
         Ok(())
     }
 
+    /// One best-effort synchronization at the promotion boundary — a
+    /// final checkpoint pull against the tracking source before the
+    /// gate lifts, so a command the active admitted up to the promote
+    /// request — still `Accepted` in its checkpointed receipt log —
+    /// carries into the promoted run and settles at the new active's
+    /// next scan boundary rather than being lost to the sub-scan gap
+    /// between the last tracking pull and the promote.
+    ///
+    /// The pull is opportunistic, not a heartbeat cycle: it never counts
+    /// a miss and never decides the transition by itself. A field-owning
+    /// peer has no source to sync from; a produced-nothing pull changes
+    /// nothing; and a checkpoint older than the run's tick is stale —
+    /// applying it would rewind scans the peer already ran, re-applying
+    /// their commands and re-emitting their events — so it is skipped.
+    /// A landed checkpoint is an ordinary [`transfer`](Self::transfer)
+    /// on the executor side — the reinitialization report a
+    /// model-boundary crossing owes the journal queues as it would on
+    /// any pull — but the standing the promotion check reads is
+    /// restored regardless of the outcome, as below.
+    ///
+    /// The staged `Out` image is discarded first rather than carried
+    /// into the transfer's divergence comparison: the staged evidence
+    /// describes the tracking line the applied checkpoint abandons —
+    /// what the quiesced scan *would* have written — and at the
+    /// promotion boundary a same-tick comparison would flag the
+    /// one-tick lag a field-carried command write inherently leaves on
+    /// a peer that cannot issue it: the standby's own scan ran on the
+    /// field's pre-command value, the checkpoint carries the post-write
+    /// state, and the promoted run continues from the checkpoint, not
+    /// from the staged what-if.
+    ///
+    /// The reported standing is the cadence's, whatever the pull does:
+    /// the executor side of a landed transfer — state, receipt log,
+    /// pending queue, alignment, the miss reset — stays, so the carried
+    /// commands settle under the promotion, while the `sync`/
+    /// `converged` verdict [`promote`](Self::promote) and
+    /// [`self_promote`](Self::self_promote) read restores to what the
+    /// tracking cadence last established — a boundary pull neither
+    /// manufactures promotability on a peer that never tracked nor
+    /// revokes it on one that did.
+    pub fn final_sync(&mut self, pull: impl FnOnce() -> Result<Checkpoint, String>) {
+        if self.owns_field() {
+            return;
+        }
+        let Ok(checkpoint) = pull() else {
+            return;
+        };
+        if checkpoint.tick < self.executor.tick() {
+            return;
+        }
+        self.staged = None;
+        let (sync, converged) = (self.sync.clone(), self.converged);
+        let _ = self.transfer(&checkpoint);
+        self.sync = sync;
+        self.converged = converged;
+    }
+
     /// Applies a checkpoint received from the active, aligning the run
     /// at the checkpointed tick — the tracking half of the redundancy
     /// contract, in place on the running executor.
@@ -869,7 +926,11 @@ impl<'d> Peer<'d> {
 mod tests {
     use super::*;
     use crate::{Component, ComponentIo, ComponentIoExt, IoRequirement, PointMap, StepError};
-    use dcs_core::{Direction, Divergence, IoDriver, IoError, PointId, Sample, Value, ValueKind};
+    use dcs_core::{
+        CommandArgument, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor,
+        Direction, Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention,
+        EventValue, IoDriver, IoError, PointId, Sample, StateMap, Value, ValueKind,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1659,5 +1720,312 @@ mod tests {
         assert_eq!(report, TrackReport::OwnsField);
         assert_eq!(peer.missed_transfers(), 0);
         assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+    }
+
+    /// The declared-command emitter the command/event redundancy tests
+    /// prove on: `bump {by}` adds to the checkpointed `count` — a
+    /// repeated application would show in the total — and each scan
+    /// emits `beat` carrying the checkpointed `scans` counter, the
+    /// emitted sequence the continuity assertions read.
+    struct Clocked {
+        name: &'static str,
+        scans: i64,
+        count: i64,
+    }
+
+    impl Clocked {
+        /// The rig's executor — no I/O surface, just the declared
+        /// command and the per-scan event.
+        fn executor<'d>(driver: &'d (dyn IoDriver + Sync)) -> Executor<'d> {
+            Executor::new(
+                driver,
+                PointMap::new(),
+                vec![Box::new(Self {
+                    name: "clk",
+                    scans: 0,
+                    count: 0,
+                })],
+            )
+            .unwrap()
+        }
+
+        /// The `bump` invocation `by` steps.
+        fn bump(by: i64) -> Command {
+            Command::Invoke {
+                component: "clk".to_string(),
+                command: "bump".to_string(),
+                arguments: [("by".to_string(), Value::Int(by))].into_iter().collect(),
+            }
+        }
+
+        /// `count` as the checkpoint reports it — the application's
+        /// once-witness.
+        fn count(checkpoint: &Checkpoint) -> Value {
+            checkpoint.components["clk"].get("count").unwrap()
+        }
+    }
+
+    impl Component for Clocked {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            Vec::new()
+        }
+
+        fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            self.scans += 1;
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "clocked".to_string(),
+                label: self.name.to_string(),
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                commands: vec![CommandDecl {
+                    name: "bump".to_string(),
+                    request: vec![CommandArgument {
+                        name: "by".to_string(),
+                        kind: ValueKind::Int,
+                    }],
+                    availability: CommandAvailability::Always,
+                }],
+                events: vec![EventDecl {
+                    name: "beat".to_string(),
+                    payload: vec![EventField {
+                        name: "n".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    }],
+                    retention: EventRetention::Journal,
+                }],
+            }
+        }
+
+        fn invoke_command(
+            &mut self,
+            command: &str,
+            arguments: &BTreeMap<String, Value>,
+        ) -> Result<(), String> {
+            match (command, arguments.get("by")) {
+                ("bump", Some(Value::Int(by))) => {
+                    self.count += by;
+                    Ok(())
+                }
+                _ => unreachable!("submission validates the declared surface"),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<EmittedEvent> {
+            vec![EmittedEvent {
+                event: "beat".to_string(),
+                component: String::new(),
+                fields: [("n".to_string(), EventValue::Value(Value::Int(self.scans)))]
+                    .into_iter()
+                    .collect(),
+            }]
+        }
+
+        fn capture_state(&self) -> StateMap {
+            let mut state = StateMap::new();
+            state.insert("scans", Value::Int(self.scans));
+            state.insert("count", Value::Int(self.count));
+            state
+        }
+
+        fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+            state.ensure_known_fields(self.name, &["scans", "count"])?;
+            self.scans = state.require_i64(self.name, "scans")?;
+            self.count = state.require_i64(self.name, "count")?;
+            Ok(())
+        }
+    }
+
+    /// The emitted `beat`'s payload counter — the sequence the
+    /// continuity assertions compare.
+    fn beat_n(executor: &Executor<'_>) -> i64 {
+        match executor.emitted_events() {
+            [event] => match event.fields["n"] {
+                EventValue::Value(Value::Int(n)) => n,
+                ref other => panic!("the beat's n is an Int, got {other:?}"),
+            },
+            other => panic!("one beat per scan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pending_invoke_carried_at_promotion_settles_exactly_once() {
+        // The strict takeover case: the invoke is admitted on the
+        // active and still `Accepted` in the receipt log the promotion
+        // boundary's final pull carries — unsettled when the peer
+        // promotes, settling once at the new active's first scan, never
+        // lost, never applied again. Its `bump` lands 7 exactly once.
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Clocked::executor(&source_driver);
+        source.run(2).unwrap();
+        standby.apply(&source.checkpoint()).unwrap();
+
+        // The admission lands after the last tracking pull — the
+        // promotion boundary's `final_sync` is its carrier.
+        source.submit_command(Clocked::bump(7));
+        standby.final_sync(|| Ok(source.checkpoint()));
+        assert_eq!(standby.receipts().len(), 1);
+        assert!(matches!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        standby.promote().unwrap();
+        assert_eq!(standby.role(), Role::Promoting);
+        standby.scan().unwrap();
+        assert_eq!(standby.role(), Role::Active);
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+
+        // Never again: the settled outcome stays the log's one entry.
+        standby.scan().unwrap();
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+    }
+
+    #[test]
+    fn a_promoted_peers_emitted_events_continue_the_sequence() {
+        // Identical per-peer streams, then the promoted run's own
+        // continuation: the emitted `beat` count matches an
+        // uninterrupted reference scan for scan across the promotion —
+        // no reset, no replay.
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+        let reference_driver = StubDriver::field(&[]);
+        let mut reference = Clocked::executor(&reference_driver);
+
+        for _ in 0..3 {
+            standby.apply(&reference.checkpoint()).unwrap();
+            standby.scan().unwrap();
+            reference.scan().unwrap();
+            assert_eq!(
+                standby.executor().emitted_events(),
+                reference.emitted_events()
+            );
+        }
+
+        standby.promote().unwrap();
+        for tick in 4..7 {
+            standby.scan().unwrap();
+            reference.scan().unwrap();
+            assert_eq!(
+                standby.executor().emitted_events(),
+                reference.emitted_events()
+            );
+            // The sequence continues — the promoted scan's `beat` counts
+            // the adopted run's scans, not a restarted line's.
+            assert_eq!(beat_n(standby.executor()), tick);
+        }
+        assert_eq!(standby.role(), Role::Active);
+    }
+
+    #[test]
+    fn final_sync_is_a_no_op_for_a_failed_or_stale_pull() {
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Clocked::executor(&source_driver);
+        source.run(2).unwrap();
+        standby.apply(&source.checkpoint()).unwrap();
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(2) }
+        );
+
+        // A produced-nothing pull is no miss and no state change — the
+        // standing convergence decides the promotion that follows.
+        standby.final_sync(|| Err("fetch from active: refused".to_string()));
+        assert_eq!(standby.missed_transfers(), 0);
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(2) }
+        );
+
+        // A refused transfer — here a checkpoint whose component set
+        // the run cannot restore — restores the standing report too.
+        let mut corrupt = source.checkpoint();
+        corrupt
+            .components
+            .insert("ghost".to_string(), Default::default());
+        standby.final_sync(|| Ok(corrupt));
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(2) }
+        );
+        assert!(standby.receipts().is_empty());
+
+        // And a checkpoint older than the run's position is skipped:
+        // the standby has scanned past tick 2, so re-applying it would
+        // replay that scan's commands and events.
+        standby.scan().unwrap();
+        source.submit_command(Clocked::bump(7));
+        standby.final_sync(|| Ok(source.checkpoint()));
+        assert!(
+            standby.receipts().is_empty(),
+            "the stale checkpoint's pending invoke is not adopted"
+        );
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(0));
+
+        // The standing proof still promotes.
+        standby.promote().unwrap();
+        assert_eq!(standby.role(), Role::Promoting);
+    }
+
+    #[test]
+    fn final_sync_carries_state_without_manufacturing_convergence() {
+        // The boundary pull lands the checkpoint's state — the pending
+        // invoke included — but the promotability proof stays the
+        // tracking cadence's: a peer that never tracked reports
+        // `Unsynchronized` still and is refused promotion even aligned
+        // to the freshest state.
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Clocked::executor(&source_driver);
+        source.run(5).unwrap();
+        source.submit_command(Clocked::bump(7));
+
+        standby.final_sync(|| Ok(source.checkpoint()));
+        assert_eq!(standby.executor().tick(), Tick(5));
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(standby.sync_state(), &StandbySync::Unsynchronized);
+        assert_eq!(
+            standby.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Unsynchronized
+            })
+        );
+
+        // The cadence's own proof still earns it: one applied tracking
+        // pull on the same state, and the carried invoke promotes and
+        // settles with the run.
+        standby.apply(&source.checkpoint()).unwrap();
+        standby.promote().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(standby.role(), Role::Active);
+        assert_eq!(beat_n(standby.executor()), 6);
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(6) }
+        );
     }
 }
