@@ -55,11 +55,11 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by immutable revision:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
 ```
 
-`tag = "v0.1.0"` names the identical commit once the release tag
+`tag = "v0.2.0"` names the identical commit once the release tag
 exists; a `rev` pin is always supported. `Cargo.lock` is committed so
 every build resolves the same sources.
 
@@ -91,7 +91,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev b85eaa4… \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
     dcs-model dcs-controller dcs-plant
 ```
 
