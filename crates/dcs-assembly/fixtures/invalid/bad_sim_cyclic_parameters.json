@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-cyclic",
+      "parameters": {
+        "address": "127.0.0.1:5599",
+        "exchange_miss_threshold": 0,
+        "stations": {
+          "inlet": { "level-raw": 4 }
+        }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "level-raw" }
+    }
+  ],
+  "signals": [],
+  "components": [],
+  "connections": []
+}

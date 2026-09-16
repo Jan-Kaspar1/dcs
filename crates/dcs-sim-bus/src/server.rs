@@ -4,9 +4,10 @@
 
 use crate::bank::RegisterBank;
 use crate::protocol::{
-    BusError, BusRequest, BusResponse, MAX_FRAME, decode_request, encode_response, read_frame,
+    BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, decode_request, encode_response,
+    read_frame,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,6 +37,20 @@ struct Shared {
     /// the device, so a dead owner's silence cannot fence the field
     /// against a promoted peer's claim.
     writer: Mutex<Option<WriterClaim>>,
+    /// The station layout a `sim-cyclic` device declares: station name
+    /// → the register addresses its channels occupy. A
+    /// [`ExchangeOutcome::ShortStation`] withholds exactly one
+    /// station's registers from the exchange answer, so the attribution
+    /// the driver applies is the device's own declaration — an empty
+    /// map serves a `sim-bus` device, whose `Exchange` requests a
+    /// station shortfall can never be scripted against.
+    stations: BTreeMap<String, BTreeSet<u16>>,
+    /// The scripted exchange queue [`BusRequest::ScriptExchange`]
+    /// appends to and every [`BusRequest::Exchange`] consumes one entry
+    /// from — the development harness deciding which outcomes the
+    /// device's exchanges present. An empty queue means steady state:
+    /// every exchange completes.
+    script: Mutex<VecDeque<ExchangeOutcome>>,
 }
 
 /// A held write-ownership claim: the owner token the last preempting
@@ -104,7 +119,13 @@ fn serve_connection(shared: &Shared, stream: TcpStream, connection: u64) {
             Ok(None) | Err(_) => return,
         };
         let response = match decode_request(&body) {
-            Ok(request) => dispatch(shared, connection, request),
+            Ok(request) => match dispatch(shared, connection, request) {
+                Some(response) => response,
+                // A scripted missed exchange: the device answers
+                // nothing — the dropped connection is the link
+                // failure the driver's exchange observes.
+                None => return,
+            },
             Err(detail) => BusResponse::Error {
                 error: BusError::InvalidRequest { detail },
             },
@@ -144,12 +165,130 @@ fn fenced_out() -> BusResponse {
 /// mutate the bank too but are deliberately unfenced: fault injection
 /// is development tooling, so a test or operator tool not holding the
 /// claim can fault a point while a controller pair owns the field.
-fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusResponse {
-    match request {
+///
+/// The answer is `Some` for every request but a scripted
+/// [`ExchangeOutcome::Miss`]: the miss is the connection dropping
+/// unanswered, so `None` tells the connection loop to hang up without
+/// a frame.
+fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<BusResponse> {
+    Some(match request {
         BusRequest::ReadRegister { register } => match shared.bank.read(register) {
             Ok(sample) => BusResponse::Sample { sample },
             Err(error) => BusResponse::Error { error },
         },
+        BusRequest::Exchange { outputs } => {
+            // Publishing staged outputs is field mutation: a fenced
+            // attachment's image never reaches the bank. A census-only
+            // exchange — a tracking standby's, which stages nothing —
+            // is a read and always completes.
+            let writer = shared.writer.lock().unwrap();
+            if !outputs.is_empty()
+                && writer
+                    .as_ref()
+                    .is_some_and(|claim| !claim.holders.contains(&connection))
+            {
+                return Some(fenced_out());
+            }
+            drop(writer);
+            // The exchange applies all of its outputs or none: every
+            // staged write is validated against the bank before the
+            // scripted outcome is consumed, so a refused exchange
+            // completes nothing.
+            for output in &outputs {
+                match shared.bank.read(output.register) {
+                    Ok(sample) if sample.value.kind() != output.value.kind() => {
+                        return Some(BusResponse::Error {
+                            error: BusError::KindMismatch {
+                                register: output.register,
+                                expected: sample.value.kind(),
+                                found: output.value,
+                            },
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Some(BusResponse::Error { error }),
+                }
+            }
+            let outcome = shared
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(ExchangeOutcome::Complete);
+            let withhold: BTreeSet<u16> = match &outcome {
+                // The miss answers with nothing at all.
+                ExchangeOutcome::Miss => return None,
+                ExchangeOutcome::ShortStation { station } => {
+                    match shared.stations.get(station.as_str()) {
+                        Some(registers) => registers.clone(),
+                        None => {
+                            return Some(BusResponse::Error {
+                                error: BusError::InvalidRequest {
+                                    detail: format!(
+                                        "scripted short exchange names station {station:?} the device does not declare"
+                                    ),
+                                },
+                            });
+                        }
+                    }
+                }
+                ExchangeOutcome::ShortRegisters { registers } => {
+                    registers.iter().copied().collect()
+                }
+                ExchangeOutcome::Complete | ExchangeOutcome::Late => BTreeSet::new(),
+            };
+            // Publish before the census: the outputs a short exchange
+            // withholds stay unpublished — the exchange completed
+            // nothing for them.
+            for output in &outputs {
+                if !withhold.contains(&output.register) {
+                    shared
+                        .bank
+                        .write(output.register, output.value)
+                        .expect("every staged output was validated above");
+                }
+            }
+            let registers = shared
+                .bank
+                .registers()
+                .into_iter()
+                .filter(|info| !withhold.contains(&info.register))
+                .collect();
+            BusResponse::Exchanged {
+                registers,
+                late: matches!(outcome, ExchangeOutcome::Late),
+            }
+        }
+        BusRequest::ScriptExchange { outcomes } => {
+            // Scripting is development tooling — unfenced like quality
+            // injection. The whole queue validates before any of it
+            // lands, so a malformed script changes nothing.
+            for outcome in &outcomes {
+                match outcome {
+                    ExchangeOutcome::ShortStation { station } => {
+                        if !shared.stations.contains_key(station.as_str()) {
+                            return Some(BusResponse::Error {
+                                error: BusError::InvalidRequest {
+                                    detail: format!(
+                                        "scripted short exchange names station {station:?} the device does not declare"
+                                    ),
+                                },
+                            });
+                        }
+                    }
+                    ExchangeOutcome::ShortRegisters { registers } => {
+                        for &register in registers {
+                            if let Err(error) = shared.bank.read(register) {
+                                return Some(BusResponse::Error { error });
+                            }
+                        }
+                    }
+                    ExchangeOutcome::Complete | ExchangeOutcome::Miss | ExchangeOutcome::Late => {}
+                }
+            }
+            shared.script.lock().unwrap().extend(outcomes);
+            BusResponse::Done
+        }
         BusRequest::WriteRegister { register, value } => {
             // The claim stays locked across the write itself, keeping a
             // claim strictly ordered against a write already in flight
@@ -159,7 +298,7 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
                 .as_ref()
                 .is_some_and(|claim| !claim.holders.contains(&connection))
             {
-                return fenced_out();
+                return Some(fenced_out());
             }
             match shared.bank.write(register, value) {
                 Ok(tick) => BusResponse::Written { tick },
@@ -172,18 +311,18 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
             // named refusal — the same rule the plant protocol's step
             // applies.
             if !dt.is_finite() || dt < 0.0 {
-                return BusResponse::Error {
+                return Some(BusResponse::Error {
                     error: BusError::InvalidRequest {
                         detail: format!("step dt must be finite and non-negative, got {dt}"),
                     },
-                };
+                });
             }
             let writer = shared.writer.lock().unwrap();
             if writer
                 .as_ref()
                 .is_some_and(|claim| !claim.holders.contains(&connection))
             {
-                return fenced_out();
+                return Some(fenced_out());
             }
             BusResponse::Stepped {
                 tick: shared.bank.step(dt),
@@ -230,7 +369,7 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> BusRespons
             Ok(()) => BusResponse::Done,
             Err(error) => BusResponse::Error { error },
         },
-    }
+    })
 }
 
 /// A TCP server sharing one [`RegisterBank`] with every connected
@@ -273,7 +412,26 @@ impl BusServer {
     /// Taking the constructed bank — rather than its declarations —
     /// lets the caller serve a device whose registers were already
     /// written or stepped.
+    ///
+    /// The device declares no stations: `exchange` requests are served
+    /// (a full census every time) but no station-attributed short
+    /// outcome can be scripted against them — [`bind_stationed`] is the
+    /// `sim-cyclic` half.
     pub fn bind<A: ToSocketAddrs>(addr: A, bank: RegisterBank) -> io::Result<Self> {
+        Self::bind_stationed(addr, bank, BTreeMap::new())
+    }
+
+    /// As [`bind`](Self::bind) for a `sim-cyclic` device: `stations`
+    /// declares the station layout the exchange protocol attributes
+    /// short exchanges to — station name → the register addresses its
+    /// channels occupy, the map
+    /// [`CyclicDeviceParameters::station_registers`](crate::CyclicDeviceParameters::station_registers)
+    /// produces.
+    pub fn bind_stationed<A: ToSocketAddrs>(
+        addr: A,
+        bank: RegisterBank,
+        stations: BTreeMap<String, BTreeSet<u16>>,
+    ) -> io::Result<Self> {
         Ok(Self {
             shared: Arc::new(Shared {
                 bank,
@@ -281,6 +439,8 @@ impl BusServer {
                 clients: Mutex::new(HashMap::new()),
                 next_client: AtomicU64::new(0),
                 writer: Mutex::new(None),
+                stations,
+                script: Mutex::new(VecDeque::new()),
             }),
             listener: TcpListener::bind(addr)?,
         })

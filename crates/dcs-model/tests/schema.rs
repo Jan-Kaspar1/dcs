@@ -99,6 +99,10 @@ fn invalid_expectations() -> std::collections::BTreeMap<&'static str, (bool, boo
             (false, true),
         ),
         (
+            "crates/dcs-assembly/fixtures/invalid/bad_sim_cyclic_parameters.json",
+            (false, true),
+        ),
+        (
             "crates/dcs-assembly/fixtures/invalid/direction_mismatch.json",
             (true, true),
         ),
