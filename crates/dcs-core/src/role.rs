@@ -167,6 +167,30 @@ pub struct RoleReport {
     pub sync: Option<StandbySync>,
 }
 
+/// What initiated a role switch — the journaled distinction between a
+/// switch the monitoring surface was asked for and the peer's own
+/// automatic failover promotion.
+///
+/// Both paths queue the same role transitions (`standby` → `promoting`
+/// → `active`); without an origin a failover's journaled entries would
+/// read identically to an unattributed operator request. The marker
+/// travels beside `actor`, not inside it: `origin` says what initiated
+/// the switch — a fact the peer assigns and a requester cannot
+/// declare — while `actor` says *who* asked, on a request that chose
+/// to declare one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOrigin {
+    /// A switch requested through the monitoring surface —
+    /// `POST /promote` or `POST /demote` — whether or not the request
+    /// declared an actor.
+    Request,
+    /// The peer's own automatic failover promotion — the heartbeat-miss
+    /// budget met while the convergence proof stood — never an
+    /// operator request, and never carrying an actor.
+    Failover,
+}
+
 /// Why a switchover request was refused — the named errors of the
 /// promotion contract, carried on the wire so a monitoring consumer can
 /// tell "try again after convergence" from "wrong peer".

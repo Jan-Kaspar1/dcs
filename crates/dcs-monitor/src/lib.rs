@@ -79,7 +79,12 @@
 //!   lifts the standby's write gate at the request's scan boundary,
 //!   demotion re-closes the active's; a refusal — a standby that has not
 //!   converged, or a repeated promotion — answers `409` with the named
-//!   [`SwitchError`]
+//!   [`SwitchError`]. Either accepts the attributed body
+//!   [`SwitchRequest`] — `{"actor":…}`, the same declared-identity
+//!   convention the command envelope records — beside the still-accepted
+//!   bare request; the journaled `RoleChanged` entries the switch
+//!   produces carry the actor it declared, and `origin` marks a
+//!   requested switch apart from the peer's failover self-promotion
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
 //!   (`accepted` / `rejected` outcome); an unparseable body → `400`.
 //!   The attributed envelope `{"command":…,"actor":…}` is also accepted
@@ -393,6 +398,28 @@ struct CommandEnvelope {
     /// unattributed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     actor: Option<String>,
+}
+
+/// Request body of `POST /promote` and `POST /demote`: the attributed
+/// switch shape — `{"actor": "<identity>"}` — the command-path
+/// audit-identity convention extended to the switch endpoints, submitted
+/// beside the still-accepted bare request (an empty body, the
+/// pre-attribution shape). `actor` is the requester's *declared*
+/// identity — attestation, not authentication, exactly as on
+/// [`CommandReceipt`]'s field — carried onto the journaled
+/// `RoleChanged` entries the switch produces; an absent actor journals
+/// unattributed, never a rejection. The `origin` those entries carry is
+/// the peer's own marking — `request` here, `failover` for its
+/// self-promotion — not a field a requester can declare. Strict fields:
+/// an envelope key the shape does not declare is a `400` rather than a
+/// silently dropped attribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchRequest {
+    /// The requester's declared actor identity; absent switches journal
+    /// unattributed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -806,7 +833,7 @@ impl<'d> Monitor<'d> {
         let Shared { peer, recorder } = &mut *shared;
         peer.self_promote()?;
         for change in peer.take_role_changes() {
-            recorder.note_role_change(change.tick, change.from, change.to);
+            recorder.note_role_change(&change);
         }
         Ok(peer.report())
     }
@@ -856,8 +883,14 @@ impl<'d> Monitor<'d> {
                 ),
                 None => json(503, "no publication yet"),
             },
-            (Method::Post, "/promote") => self.switchover(true),
-            (Method::Post, "/demote") => self.switchover(false),
+            (Method::Post, "/promote") => match read_switch_submission(&mut request) {
+                Ok(actor) => self.switchover(true, actor),
+                Err(response) => response,
+            },
+            (Method::Post, "/demote") => match read_switch_submission(&mut request) {
+                Ok(actor) => self.switchover(false, actor),
+                Err(response) => response,
+            },
             (Method::Post, "/command") => match read_command_submission(&mut request) {
                 Ok(CommandEnvelope { command, actor }) => {
                     let mut shared = self.shared.lock().unwrap();
@@ -954,9 +987,12 @@ impl<'d> Monitor<'d> {
     /// `POST /promote` (`promote` true) or `POST /demote` (`false`):
     /// applies the role change at the request's scan boundary and
     /// answers the post-change [`RoleReport`], or `409` with the named
-    /// [`SwitchError`](dcs_core::SwitchError) on refusal. The reported
-    /// transition — the request is itself a boundary event — is
-    /// journaled at the tick the peer attributes it to.
+    /// [`SwitchError`](dcs_core::SwitchError) on refusal. `actor` is the
+    /// declared identity the request body carried — `None` for the bare
+    /// request — stamped onto the journaled `RoleChanged` entries the
+    /// switch queues: the request transition at the tick the peer
+    /// attributes it to, and the settle transition when the first scan
+    /// under the new mode completes. A refusal journals nothing.
     ///
     /// Promotion runs one best-effort final synchronization against the
     /// tracking source first ([`Peer::final_sync`]): a command the
@@ -965,7 +1001,7 @@ impl<'d> Monitor<'d> {
     /// the promoted run and settles at its next boundary. A failed or
     /// stale pull leaves the standing convergence to decide, exactly as
     /// an unpulled promote would.
-    fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
+    fn switchover(&self, promote: bool, actor: Option<String>) -> Response<Cursor<Vec<u8>>> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;
         let result = if promote {
@@ -983,14 +1019,14 @@ impl<'d> Monitor<'d> {
                 }
                 self.store.sync_receipts(peer.receipts());
             }
-            peer.promote()
+            peer.promote_as(actor)
         } else {
-            peer.demote()
+            peer.demote_as(actor)
         };
         match result {
             Ok(()) => {
                 for change in peer.take_role_changes() {
-                    recorder.note_role_change(change.tick, change.from, change.to);
+                    recorder.note_role_change(&change);
                 }
                 json(200, &peer.report())
             }
@@ -1021,7 +1057,7 @@ fn track_and_record(
         recorder.note_reinitialized(report);
     }
     for change in peer.take_role_changes() {
-        recorder.note_role_change(change.tick, change.from, change.to);
+        recorder.note_role_change(&change);
     }
     store.sync_receipts(peer.receipts());
     report
@@ -1050,7 +1086,7 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
     };
     let snapshot = recorder.record_scan(peer.executor(), tick);
     for change in peer.take_role_changes() {
-        recorder.note_role_change(change.tick, change.from, change.to);
+        recorder.note_role_change(&change);
     }
     store.publish(tick, snapshot, peer.receipts());
     Ok(tick)
@@ -1100,6 +1136,27 @@ fn journal_query(query: &str) -> Result<u64, String> {
         }
     }
     Ok(since)
+}
+
+/// Reads a `POST /promote`/`POST /demote` body into its declared actor.
+/// The bare request — an empty or whitespace body, the pre-attribution
+/// shape — submits unattributed (`Ok(None)`); a present body parses as
+/// the attributed [`SwitchRequest`], with a parse failure the `400`
+/// response directly: an attribution the body meant to carry never
+/// silently drops.
+fn read_switch_submission(
+    request: &mut Request,
+) -> Result<Option<String>, Response<Cursor<Vec<u8>>>> {
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        return Err(json(400, "unreadable request body"));
+    }
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<SwitchRequest>(&body)
+        .map(|body| body.actor)
+        .map_err(|error| json(400, &error.to_string()))
 }
 
 /// Reads and parses a JSON request body; parse failures produce the `400`
@@ -1232,10 +1289,27 @@ impl MonitorClient {
     /// scan boundary, returning the post-change [`RoleReport`]. A
     /// refusal — `not_converged`, `already_active` — surfaces as an
     /// error whose message carries the `409` body: the named
-    /// `SwitchError` JSON.
+    /// `SwitchError` JSON. The bare request journals unattributed;
+    /// [`promote_as`](Self::promote_as) carries a declared actor.
     pub fn promote(&self) -> io::Result<RoleReport> {
         let (status, body) = self.request("POST", "/promote", None)?;
         decode(status, &body)
+    }
+
+    /// `POST /promote` with `actor` as the requester's declared identity
+    /// — the attributed body `{"actor":…}` the journaled `RoleChanged`
+    /// entries carry; `None` sends the same bare request
+    /// [`promote`](Self::promote) sends, journaling unattributed.
+    pub fn promote_as(&self, actor: Option<&str>) -> io::Result<RoleReport> {
+        match actor {
+            Some(actor) => self.post_json(
+                "/promote",
+                &SwitchRequest {
+                    actor: Some(actor.to_string()),
+                },
+            ),
+            None => self.promote(),
+        }
     }
 
     /// `POST /demote`: re-closes the field owner's write gate at the
@@ -1245,6 +1319,21 @@ impl MonitorClient {
     pub fn demote(&self) -> io::Result<RoleReport> {
         let (status, body) = self.request("POST", "/demote", None)?;
         decode(status, &body)
+    }
+
+    /// `POST /demote` with `actor` as the requester's declared identity
+    /// — the attributed-body variant [`promote_as`](Self::promote_as)
+    /// documents.
+    pub fn demote_as(&self, actor: Option<&str>) -> io::Result<RoleReport> {
+        match actor {
+            Some(actor) => self.post_json(
+                "/demote",
+                &SwitchRequest {
+                    actor: Some(actor.to_string()),
+                },
+            ),
+            None => self.demote(),
+        }
     }
 
     /// `GET /history`: the retained samples of `points` — or of every

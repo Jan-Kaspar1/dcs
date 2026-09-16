@@ -45,7 +45,9 @@
 //! only while the convergence proof still stands: the last applied
 //! verdict was `Tracking` and the misses have not exceeded the budget.
 //! An unconverged or over-budget peer reports its named sync state
-//! instead of promoting.
+//! instead of promoting. A self-promotion's queued [`RoleChange`]s
+//! carry the `failover` origin rather than a request's — the journaled
+//! distinction between an automatic takeover and a requested switch.
 //!
 //! A tracking caller runs the whole cycle once per scan through
 //! [`track_once`](Peer::track_once) — the owns-field gate, the pull,
@@ -78,7 +80,7 @@ use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
     CarryoverReport, Command, CommandReceipt, PointId, Role, RoleReport, Sample, StandbySync,
-    SwitchError, TelemetrySnapshot, Tick,
+    SwitchError, SwitchOrigin, TelemetrySnapshot, Tick,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,6 +146,10 @@ pub struct Peer<'d> {
     /// transition into [`StandbySync::Reinitialized`], each carrying the
     /// crossing's [`CarryoverReport`].
     pending_reinits: Vec<CarryoverReport>,
+    /// The attribution [`change`](Self::change) stamps onto every queued
+    /// [`RoleChange`] — set by the initiating switch request so the
+    /// request and settle transitions of one switchover journal alike.
+    attribution: SwitchAttribution,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -160,8 +166,12 @@ impl fmt::Debug for Claim<'_> {
 }
 
 /// One reported-role transition, queued for the transition journal: the
-/// tick it is attributed to and the reported roles before and after.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// tick it is attributed to, the reported roles before and after, and
+/// the switch's attribution — `origin` distinguishing a requested
+/// switch from the peer's own failover promotion, `actor` the declared
+/// identity a request carried (`None` for an unattributed request and
+/// always for a failover origin).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleChange {
     /// The run tick the transition is attributed to: the serving scan's
     /// tick for a settle, the run's current tick for a request.
@@ -170,6 +180,23 @@ pub struct RoleChange {
     pub from: Role,
     /// The newly reported role.
     pub to: Role,
+    /// What initiated the switch this transition belongs to.
+    pub origin: SwitchOrigin,
+    /// The declared actor a requested switch carried.
+    pub actor: Option<String>,
+}
+
+/// The attribution stamped onto every [`RoleChange`] a switch queues:
+/// set by the initiating `promote_as`/`demote_as`/`self_promote` and
+/// carried onto both the request and the settle transitions, so a
+/// failover's settle entry reads `failover` too rather than as an
+/// unattributed request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwitchAttribution {
+    /// What initiated the switch.
+    origin: SwitchOrigin,
+    /// The declared actor a requested switch carried.
+    actor: Option<String>,
 }
 
 /// Why [`Peer::apply`] or [`Peer::transfer`] did not consume a
@@ -301,6 +328,10 @@ impl<'d> Peer<'d> {
             claim: None,
             revision: false,
             pending_reinits: Vec::new(),
+            attribution: SwitchAttribution {
+                origin: SwitchOrigin::Request,
+                actor: None,
+            },
         }
     }
 
@@ -368,6 +399,10 @@ impl<'d> Peer<'d> {
             claim: None,
             revision: false,
             pending_reinits: Vec::new(),
+            attribution: SwitchAttribution {
+                origin: SwitchOrigin::Request,
+                actor: None,
+            },
         }
     }
 
@@ -434,7 +469,22 @@ impl<'d> Peer<'d> {
     /// field-owning instance — including a still-settling promotion —
     /// with [`SwitchError::AlreadyActive`]. A refused promotion touches
     /// nothing: the gate stays as it was.
+    ///
+    /// The unattributed request — [`promote_as`](Self::promote_as) with
+    /// no declared actor.
     pub fn promote(&mut self) -> Result<(), SwitchError> {
+        self.promote_as(None)
+    }
+
+    /// The attributed variant of [`promote`](Self::promote): `actor` is
+    /// the requester's *declared* identity — attestation, not
+    /// authentication, the same convention
+    /// [`submit_command_as`](Self::submit_command_as) follows — carried
+    /// onto every [`RoleChange`] the promotion queues, request and
+    /// settle alike, so the journaled `RoleChanged` entries name the
+    /// submitter. `None` submits the request unattributed; either way
+    /// the transitions journal `origin: request`.
+    pub fn promote_as(&mut self, actor: Option<String>) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
@@ -448,6 +498,10 @@ impl<'d> Peer<'d> {
             });
         }
         self.lift_gate()?;
+        self.attribution = SwitchAttribution {
+            origin: SwitchOrigin::Request,
+            actor,
+        };
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -469,6 +523,11 @@ impl<'d> Peer<'d> {
     /// [`failover_due`](Self::failover_due) once per scan cycle and
     /// invoke this only then — the boundary at which a self-promotion
     /// lands is the budget-th miss's scan.
+    ///
+    /// A self-promotion's queued [`RoleChange`]s carry
+    /// `origin: failover` and no actor — the journaled distinction from
+    /// a requested switch: an automatic failover never reads as an
+    /// unattributed operator request.
     pub fn self_promote(&mut self) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
@@ -480,6 +539,10 @@ impl<'d> Peer<'d> {
             });
         }
         self.lift_gate()?;
+        self.attribution = SwitchAttribution {
+            origin: SwitchOrigin::Failover,
+            actor: None,
+        };
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -509,7 +572,20 @@ impl<'d> Peer<'d> {
     /// with [`SwitchError::NotActive`]. The demoted peer's reported
     /// convergence resets to [`StandbySync::Unsynchronized`]: it
     /// reconverges through fresh checkpoints from the new active.
+    ///
+    /// The unattributed request — [`demote_as`](Self::demote_as) with
+    /// no declared actor.
     pub fn demote(&mut self) -> Result<(), SwitchError> {
+        self.demote_as(None)
+    }
+
+    /// The attributed variant of [`demote`](Self::demote): `actor` is
+    /// the requester's declared identity — attestation, not
+    /// authentication, as on [`promote_as`](Self::promote_as) — carried
+    /// onto every [`RoleChange`] the demotion queues. `None` submits
+    /// the request unattributed; either way the transitions journal
+    /// `origin: request`.
+    pub fn demote_as(&mut self, actor: Option<String>) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => {}
             Role::Standby | Role::Demoting => return Err(SwitchError::NotActive),
@@ -522,6 +598,10 @@ impl<'d> Peer<'d> {
         self.staged = None;
         self.misses = 0;
         self.converged = false;
+        self.attribution = SwitchAttribution {
+            origin: SwitchOrigin::Request,
+            actor,
+        };
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
     }
@@ -916,9 +996,18 @@ impl<'d> Peer<'d> {
 
     /// The reported-role change bookkeeping: `from` is the previously
     /// reported role, recorded at `tick`, and the journal entry follows.
+    /// The queued transition carries the stored [`SwitchAttribution`] —
+    /// set by the switch's initiating request — so the request and the
+    /// settle journal the same origin and actor.
     fn change(&mut self, tick: Tick, to: Role) {
         let from = std::mem::replace(&mut self.role, to);
-        self.pending_changes.push(RoleChange { tick, from, to });
+        self.pending_changes.push(RoleChange {
+            tick,
+            from,
+            to,
+            origin: self.attribution.origin,
+            actor: self.attribution.actor.clone(),
+        });
     }
 }
 
@@ -1041,7 +1130,8 @@ mod tests {
         assert_eq!(peer.report().sync, None);
         assert!(peer.accepts_commands());
 
-        // The queued transitions journal both halves of the switch.
+        // The queued transitions journal both halves of the switch —
+        // an unattributed request here.
         assert_eq!(
             peer.take_role_changes(),
             vec![
@@ -1049,11 +1139,86 @@ mod tests {
                     tick: Tick(7),
                     from: Role::Standby,
                     to: Role::Promoting,
+                    origin: SwitchOrigin::Request,
+                    actor: None,
                 },
                 RoleChange {
                     tick: Tick(8),
                     from: Role::Promoting,
                     to: Role::Active,
+                    origin: SwitchOrigin::Request,
+                    actor: None,
+                },
+            ]
+        );
+    }
+
+    /// Converges a fresh standby against an equivalent source run, the
+    /// prerequisite the attributed-switch tests below share.
+    fn converged_standby<'d>(gate: &'d WriteGate<'d>) -> Peer<'d> {
+        let mut peer = Peer::standby(executor(gate), Some(gate));
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(7).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        peer
+    }
+
+    #[test]
+    fn an_attributed_promotion_carries_the_declared_actor_through_both_transitions() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = converged_standby(&gate);
+
+        peer.promote_as(Some("operator-7".to_string())).unwrap();
+        peer.scan().unwrap();
+
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("operator-7".to_string()),
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("operator-7".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_attributed_demotion_carries_the_declared_actor_through_both_transitions() {
+        let driver = StubDriver::new(PointId(1), Value::Float(10.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+
+        peer.demote_as(Some("supervisor-2".to_string())).unwrap();
+        peer.scan().unwrap();
+
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(0),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("supervisor-2".to_string()),
+                },
+                RoleChange {
+                    tick: Tick(1),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Request,
+                    actor: Some("supervisor-2".to_string()),
                 },
             ]
         );
@@ -1671,6 +1836,8 @@ mod tests {
                 tick: Tick(3),
                 from: Role::Standby,
                 to: Role::Promoting,
+                origin: SwitchOrigin::Failover,
+                actor: None,
             }]
         );
 
@@ -1678,6 +1845,58 @@ mod tests {
         // check — a pull that would fail never runs.
         let report = peer.track_once(|| panic!("a field owner pulls nothing"));
         assert_eq!(report, TrackReport::OwnsField);
+    }
+
+    /// The failover marker: a self-promotion's queued transitions carry
+    /// `origin: failover` with no actor on both the request and the
+    /// settle — never reading as an unattributed operator request,
+    /// whose transitions carry `origin: request` instead.
+    #[test]
+    fn a_self_promotions_transitions_journal_the_failover_origin() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3).unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        peer.self_promote().unwrap();
+        peer.scan().unwrap();
+
+        let changes = peer.take_role_changes();
+        assert_eq!(changes.len(), 2);
+        for change in &changes {
+            assert_eq!(change.origin, SwitchOrigin::Failover);
+            assert_eq!(change.actor, None);
+        }
+        assert_eq!(
+            changes.iter().map(|change| (change.from, change.to)).collect::<Vec<_>>(),
+            vec![
+                (Role::Standby, Role::Promoting),
+                (Role::Promoting, Role::Active),
+            ]
+        );
+    }
+
+    /// The distinction holds the other way too: a requested switch
+    /// journals `origin: request` — attributed or not — and only the
+    /// declared actor a request carried.
+    #[test]
+    fn a_requested_switchs_transitions_journal_the_request_origin() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = converged_standby(&gate);
+
+        peer.promote_as(Some("operator-7".to_string())).unwrap();
+        peer.scan().unwrap();
+
+        for change in peer.take_role_changes() {
+            assert_eq!(change.origin, SwitchOrigin::Request);
+            assert_eq!(change.actor.as_deref(), Some("operator-7"));
+        }
     }
 
     /// The budget-th miss on a peer whose convergence proof does not

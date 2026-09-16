@@ -450,7 +450,7 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
         .unwrap()
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect();

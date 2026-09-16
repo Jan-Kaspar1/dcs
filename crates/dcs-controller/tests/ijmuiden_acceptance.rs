@@ -775,7 +775,7 @@ fn role_changes_in(journal: &[JournalEntry]) -> Vec<(Role, Role)> {
     journal
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect()

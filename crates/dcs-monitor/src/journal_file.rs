@@ -454,6 +454,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file written before `role_changed` carried its attribution
+    /// fields — the previous schema's `{"from":…,"to":…}` shape —
+    /// replays under the journal-persistence decision's contract: the
+    /// entries deserialize with both fields absent, and new attributed
+    /// entries append beside them with continuing seqs.
+    #[test]
+    fn role_changed_records_predating_the_attribution_fields_replay() {
+        let dir = scratch("role-changed-pre-attribution");
+        let path = dir.join("journal.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"run_boundary\":{\"run\":1,\"tick\":0}}\n",
+                "{\"entry\":{\"seq\":1,\"tick\":8,\"event\":{\"role_changed\":{\"from\":\"standby\",\"to\":\"promoting\"}}}}\n",
+                "{\"entry\":{\"seq\":2,\"tick\":9,\"event\":{\"role_changed\":{\"from\":\"promoting\",\"to\":\"active\"}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        // The replayed entries carry no attribution — `None`, never a
+        // request origin the record cannot prove.
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let entries = recorder.journal(0);
+        assert_eq!(
+            entries,
+            vec![
+                JournalEntry {
+                    seq: 1,
+                    tick: Tick(8),
+                    event: dcs_core::JournalEvent::RoleChanged {
+                        from: dcs_core::Role::Standby,
+                        to: dcs_core::Role::Promoting,
+                        origin: None,
+                        actor: None,
+                    },
+                },
+                JournalEntry {
+                    seq: 2,
+                    tick: Tick(9),
+                    event: dcs_core::JournalEvent::RoleChanged {
+                        from: dcs_core::Role::Promoting,
+                        to: dcs_core::Role::Active,
+                        origin: None,
+                        actor: None,
+                    },
+                },
+            ]
+        );
+
+        // A new attributed transition appends at seq 3 and replays with
+        // its fields on the next open.
+        recorder.push(
+            Tick(20),
+            dcs_core::JournalEvent::RoleChanged {
+                from: dcs_core::Role::Active,
+                to: dcs_core::Role::Demoting,
+                origin: Some(dcs_core::SwitchOrigin::Request),
+                actor: Some("operator-7".to_string()),
+            },
+        );
+        drop(recorder);
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        assert_eq!(
+            recorder.journal(0).last().unwrap().event,
+            dcs_core::JournalEvent::RoleChanged {
+                from: dcs_core::Role::Active,
+                to: dcs_core::Role::Demoting,
+                origin: Some(dcs_core::SwitchOrigin::Request),
+                actor: Some("operator-7".to_string()),
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn replay_keeps_the_retained_tail_and_a_resumed_tick_lands_in_the_marker() {
         let dir = scratch("tail");

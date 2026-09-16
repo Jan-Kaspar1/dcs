@@ -29,9 +29,9 @@ use crate::journal_file::JournalFile;
 use crate::store::Store;
 use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
-    JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
+    JournalEvent, PointId, Quality, TelemetrySnapshot, Tick, Value,
 };
-use dcs_runtime::Executor;
+use dcs_runtime::{Executor, RoleChange};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -190,11 +190,22 @@ impl Recorder {
         self.receipt_outcomes[index] = Some(outcome);
     }
 
-    /// Journals a reported-role transition at `tick` — a promotion or
-    /// demotion applied at its boundary, or a transition settling on the
-    /// first scan under the new mode.
-    pub(super) fn note_role_change(&mut self, tick: Tick, from: Role, to: Role) {
-        self.push(tick, JournalEvent::RoleChanged { from, to });
+    /// Journals one reported-role transition — a promotion or demotion
+    /// applied at its boundary, or a transition settling on the first
+    /// scan under the new mode — carrying the switch's attribution:
+    /// `origin` distinguishing a requested switch from the peer's
+    /// failover self-promotion, `actor` the declared identity a
+    /// request carried.
+    pub(super) fn note_role_change(&mut self, change: &RoleChange) {
+        self.push(
+            change.tick,
+            JournalEvent::RoleChanged {
+                from: change.from,
+                to: change.to,
+                origin: Some(change.origin),
+                actor: change.actor.clone(),
+            },
+        );
     }
 
     /// Journals a standby-divergence transition at `tick` — the tick the

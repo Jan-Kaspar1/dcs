@@ -409,6 +409,7 @@ fn role_flip_moves_the_command_target_and_the_tick_domain_continues() {
             JournalEvent::RoleChanged {
                 from: Role::Promoting,
                 to: Role::Active,
+                ..
             }
         )),
         "the promoted peer's settle is journaled"
@@ -462,6 +463,10 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
         "function selectSource()",
         "function switchSource(next)",
         "function submitCommand(command)",
+        "async function postSwitch(peer, verb)",
+        "class=\\\"switch\\\"",
+        "data-verb=\\\"promote\\\"",
+        "data-verb=\\\"demote\\\"",
         "not_active",
         "role_changed",
     ] {

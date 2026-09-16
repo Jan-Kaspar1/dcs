@@ -466,7 +466,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
             .unwrap()
             .iter()
             .filter_map(|entry| match entry.event {
-                JournalEvent::RoleChanged { from, to } => Some((from, to)),
+                JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
                 _ => None,
             })
             .collect()

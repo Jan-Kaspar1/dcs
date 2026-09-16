@@ -14,7 +14,7 @@
 
 use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
-use crate::role::{Divergence, Role};
+use crate::role::{Divergence, Role, SwitchOrigin};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -119,6 +119,23 @@ pub enum JournalEvent {
         from: Role,
         /// The newly reported role.
         to: Role,
+        /// What initiated the switch this transition belongs to —
+        /// [`SwitchOrigin::Request`] for a switch the monitoring surface
+        /// was asked for, [`SwitchOrigin::Failover`] for the peer's own
+        /// automatic promotion. A failover's entries therefore never
+        /// read as an unattributed operator request. Serde-optional:
+        /// entries journaled before the field existed deserialize with
+        /// `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<SwitchOrigin>,
+        /// The declared actor a requested switch carried — the
+        /// command-path audit-identity convention extended to the
+        /// switch endpoints: attestation, not authentication, exactly
+        /// like [`CommandReceipt`]'s `actor`. Absent on an unattributed
+        /// request, always on a failover transition, and on entries
+        /// journaled before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
     },
     /// A tracking peer's staged field outputs were found to mismatch the
     /// field's actual values at the tick this entry is attributed to —
@@ -247,6 +264,8 @@ mod tests {
                 event: JournalEvent::RoleChanged {
                     from: Role::Standby,
                     to: Role::Promoting,
+                    origin: Some(SwitchOrigin::Request),
+                    actor: Some("operator-7".to_string()),
                 },
             },
             JournalEntry {
@@ -379,6 +398,70 @@ mod tests {
                     error: "computation failed".to_string(),
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn role_changed_attribution_uses_the_documented_wire_shape() {
+        // The attributed switch record: `origin` — `request` for a
+        // switch the monitoring surface was asked for, `failover` for
+        // the peer's own automatic promotion — beside `actor`, the
+        // declared identity a request carried. Both fields are
+        // serde-optional and omitted on the wire when absent.
+        let attributed = JournalEvent::RoleChanged {
+            from: Role::Standby,
+            to: Role::Promoting,
+            origin: Some(SwitchOrigin::Request),
+            actor: Some("operator-7".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&attributed).unwrap(),
+            r#"{"role_changed":{"from":"standby","to":"promoting","origin":"request","actor":"operator-7"}}"#
+        );
+        let failover = JournalEvent::RoleChanged {
+            from: Role::Promoting,
+            to: Role::Active,
+            origin: Some(SwitchOrigin::Failover),
+            actor: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&failover).unwrap(),
+            r#"{"role_changed":{"from":"promoting","to":"active","origin":"failover"}}"#
+        );
+        let bare = JournalEvent::RoleChanged {
+            from: Role::Active,
+            to: Role::Demoting,
+            origin: Some(SwitchOrigin::Request),
+            actor: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"role_changed":{"from":"active","to":"demoting","origin":"request"}}"#
+        );
+        for event in [attributed, failover, bare] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<JournalEvent>(&json).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn role_changed_predating_attribution_deserializes_unattributed() {
+        // A journal file written before the fields existed carries only
+        // `from`/`to`: both attribution fields deserialize absent —
+        // `None`, not a request origin the record cannot prove — under
+        // the replay contract.
+        let entry: JournalEntry = serde_json::from_str(
+            r#"{"seq":7,"tick":8,"event":{"role_changed":{"from":"standby","to":"promoting"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.event,
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                origin: None,
+                actor: None,
+            }
         );
     }
 }
