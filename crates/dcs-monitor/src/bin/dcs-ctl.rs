@@ -394,9 +394,7 @@ fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> 
 fn parse_invoke_arguments(args: &[&str]) -> Result<Vec<(String, String)>, String> {
     args.iter()
         .map(|arg| match arg.split_once('=') {
-            Some((name, value)) if !name.is_empty() => {
-                Ok((name.to_string(), value.to_string()))
-            }
+            Some((name, value)) if !name.is_empty() => Ok((name.to_string(), value.to_string())),
             _ => Err(format!(
                 "invalid invoke argument {arg:?}: expected <name>=<value>"
             )),
@@ -623,7 +621,10 @@ fn invoke_arguments(
                 .find(|argument| argument.name == *name)
                 .map(|argument| argument.kind)
         });
-        parsed.insert(name.clone(), parse_operand(kind, text).map_err(Failure::usage)?);
+        parsed.insert(
+            name.clone(),
+            parse_operand(kind, text).map_err(Failure::usage)?,
+        );
     }
     Ok(parsed)
 }

@@ -6,11 +6,11 @@
 //! `SwitchError`s, and the usage/transport failure surface — never a
 //! panic.
 
-use dcs_blocks::{Pid, PidConfig};
+use dcs_blocks::{Pid, PidConfig, Sequencer, SequencerStep};
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver, IoError,
-    JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId, StandbySync,
-    Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver,
+    IoError, JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId,
+    StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient};
@@ -30,7 +30,9 @@ const CTL: &str = env!("CARGO_BIN_EXE_dcs-ctl");
 // point — the write/force target; `SP`, `COUNT`, and `FLAG` are
 // writable internal `In` points covering each declared value kind;
 // `OUT`/`PLAIN_OUT` are `Out` points — never legal command targets;
-// `PLAIN_IN` is a field `In` point left unmarked.
+// `PLAIN_IN` is a field `In` point left unmarked. The `SEQ_*` points
+// wire the sequencer — the rig's declared-command kind `invoke`
+// exercises.
 const PV: PointId = PointId(10);
 const SP: PointId = PointId(11);
 const COUNT: PointId = PointId(12);
@@ -38,6 +40,11 @@ const FLAG: PointId = PointId(13);
 const OUT: PointId = PointId(20);
 const PLAIN_OUT: PointId = PointId(31);
 const PLAIN_IN: PointId = PointId(40);
+const SEQ_RUN: PointId = PointId(50);
+const SEQ_RESET: PointId = PointId(51);
+const SEQ_OUT: PointId = PointId(60);
+const SEQ_STEP: PointId = PointId(61);
+const SEQ_DONE: PointId = PointId(62);
 
 /// In-memory driver stub; the same minimal stand-in the other monitor
 /// tests use — `dcs-monitor` sees only the `IoDriver` contract.
@@ -135,6 +142,11 @@ fn signal_index() -> SignalIndex {
             entry(OUT, Direction::Out, ValueKind::Float, false),
             entry(PLAIN_OUT, Direction::Out, ValueKind::Float, false),
             entry(PLAIN_IN, Direction::In, ValueKind::Float, false),
+            entry(SEQ_RUN, Direction::In, ValueKind::Bool, false),
+            entry(SEQ_RESET, Direction::In, ValueKind::Bool, false),
+            entry(SEQ_OUT, Direction::Out, ValueKind::Float, false),
+            entry(SEQ_STEP, Direction::Out, ValueKind::Int, false),
+            entry(SEQ_DONE, Direction::Out, ValueKind::Bool, false),
         ],
         components: vec![],
     }
@@ -149,6 +161,11 @@ fn point_map() -> PointMap {
         .with_point(OUT, Direction::Out, ValueKind::Float)
         .with_point(PLAIN_OUT, Direction::Out, ValueKind::Float)
         .with_point(PLAIN_IN, Direction::In, ValueKind::Float)
+        .with_point(SEQ_RUN, Direction::In, ValueKind::Bool)
+        .with_point(SEQ_RESET, Direction::In, ValueKind::Bool)
+        .with_point(SEQ_OUT, Direction::Out, ValueKind::Float)
+        .with_point(SEQ_STEP, Direction::Out, ValueKind::Int)
+        .with_point(SEQ_DONE, Direction::Out, ValueKind::Bool)
 }
 
 fn components() -> Vec<Box<dyn Component>> {
@@ -167,7 +184,30 @@ fn components() -> Vec<Box<dyn Component>> {
         },
     )
     .unwrap();
-    vec![Box::new(pid), Box::new(Plain)]
+    // A two-step table: `advance count=2` runs it to completion, where
+    // the `KindDeclared` availability predicate starts refusing
+    // `advance` until `reset` — the invoke test's applied-and-refused
+    // pair.
+    let sequencer = Sequencer::new(
+        "seq",
+        SEQ_RUN,
+        SEQ_RESET,
+        SEQ_OUT,
+        SEQ_STEP,
+        SEQ_DONE,
+        vec![
+            SequencerStep {
+                ticks: 1,
+                value: 10.0,
+            },
+            SequencerStep {
+                ticks: 1,
+                value: 20.0,
+            },
+        ],
+    )
+    .unwrap();
+    vec![Box::new(pid), Box::new(Plain), Box::new(sequencer)]
 }
 
 /// Builds the rig and runs `body` against a serving monitor, handing it
@@ -180,6 +220,11 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, SocketAddr, &MonitorClient) ->
         (OUT, Value::Float(0.0)),
         (PLAIN_OUT, Value::Float(0.0)),
         (PLAIN_IN, Value::Float(0.0)),
+        (SEQ_RUN, Value::Bool(false)),
+        (SEQ_RESET, Value::Bool(false)),
+        (SEQ_OUT, Value::Float(0.0)),
+        (SEQ_STEP, Value::Int(0)),
+        (SEQ_DONE, Value::Bool(false)),
     ]);
     let executor = Executor::new(&driver, point_map(), components()).unwrap();
     let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
@@ -218,6 +263,11 @@ impl PeerRig {
             (OUT, Value::Float(0.0)),
             (PLAIN_OUT, Value::Float(0.0)),
             (PLAIN_IN, Value::Float(0.0)),
+            (SEQ_RUN, Value::Bool(false)),
+            (SEQ_RESET, Value::Bool(false)),
+            (SEQ_OUT, Value::Float(0.0)),
+            (SEQ_STEP, Value::Int(0)),
+            (SEQ_DONE, Value::Bool(false)),
         ])));
         let executor = Executor::new(driver, point_map(), components()).unwrap();
         let peer = match role {
@@ -562,6 +612,101 @@ fn set_parameter_parses_per_the_descriptor_and_names_rejections() {
 }
 
 #[test]
+fn invoke_runs_declared_commands_and_names_refusals() {
+    with_monitor(|_driver, addr, client| {
+        client.advance(1).unwrap();
+
+        // `invoke <component> <command> [<name>=<value>]` parses each
+        // argument per the served schema's declared request kind —
+        // `count` is `advance`'s declared Int — and submits the Invoke
+        // variant through the receipted path: the printed receipt is
+        // the accepted answer.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "advance", "count=2"])).unwrap();
+        assert_eq!(
+            receipt.command,
+            Command::Invoke {
+                component: "seq".to_string(),
+                command: "advance".to_string(),
+                arguments: [("count".to_string(), Value::Int(2))].into_iter().collect(),
+            }
+        );
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+
+        // The invocation applies at the next scan boundary: count 2
+        // walks the two-step table to its end — `done` asserts — and
+        // the settled receipt lands applied in the log.
+        let snapshot: dcs_core::TelemetrySnapshot =
+            serde_json::from_value(ctl_ok(addr, &["scan", "1"])).unwrap();
+        assert_eq!(
+            telemetry(&snapshot, SEQ_DONE).sample.unwrap().value,
+            Value::Bool(true)
+        );
+        let receipts: Vec<CommandReceipt> =
+            serde_json::from_value(ctl_ok(addr, &["receipts"])).unwrap();
+        assert_eq!(
+            receipts.last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+
+        // The same command is now declared-unavailable — the completed
+        // table's KindDeclared predicate. Admission still accepts it
+        // (the kind's own predicate decides), and the boundary settles
+        // the named refusal: `command_refused` carrying the kind's
+        // declared reason verbatim.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "advance"])).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        ctl_ok(addr, &["scan", "1"]);
+        let receipts: Vec<CommandReceipt> =
+            serde_json::from_value(ctl_ok(addr, &["receipts"])).unwrap();
+        assert_eq!(
+            receipts.last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::CommandRefused {
+                    component: "seq".to_string(),
+                    command: "advance".to_string(),
+                    reason: "the sequence has run to its end; reset restarts it".to_string(),
+                }
+            }
+        );
+
+        // `reset` — the Always-available declared command — applies and
+        // the next step reports the restarted table.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "reset"])).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        let snapshot: dcs_core::TelemetrySnapshot =
+            serde_json::from_value(ctl_ok(addr, &["scan", "1"])).unwrap();
+        assert_eq!(
+            telemetry(&snapshot, SEQ_DONE).sample.unwrap().value,
+            Value::Bool(false)
+        );
+
+        // Admission rejections still print the rejected receipt, exit
+        // nonzero, and name the CommandError: an undeclared command on
+        // a known component, and an unknown component.
+        for (args, name) in [
+            (["invoke", "seq", "bogus"].as_slice(), "unknown_command"),
+            (
+                ["invoke", "ghost", "advance"].as_slice(),
+                "unknown_component",
+            ),
+        ] {
+            let output = ctl(addr, args);
+            assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+            let receipt: CommandReceipt = serde_json::from_str(&stdout(&output)).unwrap();
+            assert!(matches!(receipt.outcome, CommandOutcome::Rejected { .. }));
+            assert!(
+                stderr(&output).contains(name),
+                "{args:?}: {}",
+                stderr(&output)
+            );
+        }
+    });
+}
+
+#[test]
 fn force_and_unforce_roundtrip_through_the_receipted_path() {
     with_monitor(|driver, addr, client| {
         driver.write(PV, Value::Float(1.0)).unwrap();
@@ -804,6 +949,11 @@ fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
         (OUT, Value::Float(0.0)),
         (PLAIN_OUT, Value::Float(0.0)),
         (PLAIN_IN, Value::Float(0.0)),
+        (SEQ_RUN, Value::Bool(false)),
+        (SEQ_RESET, Value::Bool(false)),
+        (SEQ_OUT, Value::Float(0.0)),
+        (SEQ_STEP, Value::Int(0)),
+        (SEQ_DONE, Value::Bool(false)),
     ]);
     let executor = Executor::new(&driver, point_map(), components()).unwrap();
     let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
@@ -873,6 +1023,14 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "unforce"],
         vec![dead, "unforce", "abc"],
         vec![dead, "unforce", "10", "--actor"],
+        // invoke: a bare pair without `=` is not an argument, and the
+        // actor flag's malformed shapes apply here too.
+        vec![dead, "invoke"],
+        vec![dead, "invoke", "comp"],
+        vec![dead, "invoke", "comp", "cmd", "noequals"],
+        vec![dead, "invoke", "comp", "cmd", "=1"],
+        vec![dead, "invoke", "comp", "cmd", "x=1", "--actor"],
+        vec![dead, "invoke", "comp", "cmd", "--bogus"],
         // promote/demote take no actor: the switch-request contract has
         // no field for one, so the flag is malformed usage there.
         vec![dead, "promote", "extra"],
@@ -907,6 +1065,9 @@ fn value_parse_errors_print_usage_against_a_live_monitor() {
             ["write", "10", "nan"].as_slice(),
             ["force", "10", "inf"].as_slice(),
             ["set-parameter", "level-pid", "kp", "abc"].as_slice(),
+            // A declared Int argument takes no "abc" — the served
+            // schema's request kinds rule the invoke parse.
+            ["invoke", "seq", "advance", "count=abc"].as_slice(),
         ] {
             let output = ctl(addr, args);
             assert!(!output.status.success(), "{args:?} unexpectedly succeeded");

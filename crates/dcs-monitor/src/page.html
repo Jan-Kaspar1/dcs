@@ -1853,13 +1853,26 @@ function specCommand(component, spec, args) {
   }
 }
 
+// Parses a typed command-argument entry into a Value of the declared
+// kind, strictly: an entry that is not such a value returns null so
+// the row can refuse it client-side rather than ship a body the
+// receipted path could only answer with a parse failure.
+function argumentValue(kind, text) {
+  if (kind === "int") {
+    return /^[-+]?\d+$/.test(text) ? { int: parseInt(text, 10) } : null;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? { float: number } : null;
+}
+
 // A named command's submission from its interface row: reads the
 // request schema's typed controls, builds the CommandSpec's wire
 // command, and submits through the same receipted, active-peer-routed
 // path every operator command takes. An adapted command's required
-// `value` entry warns client-side when empty — the parameter edit's
-// rule — while a declared command's omitted argument simply means the
-// kind's default applies. The answer lands on the row's status cell.
+// `value` entry warns client-side when empty or unparsable — the
+// parameter edit's advisory wording, here a guard — while a declared
+// command's omitted argument simply means the kind's default applies.
+// The answer lands on the row's status cell.
 async function submitInterfaceCommand(button) {
   const component = button.dataset.component;
   const name = button.dataset.command;
@@ -1872,7 +1885,13 @@ async function submitInterfaceCommand(button) {
     if (input.dataset.kind === "bool") {
       args[input.dataset.arg] = { bool: text === "true" };
     } else if (text !== "") {
-      args[input.dataset.arg] = commandValue(input.dataset.kind, text);
+      const value = argumentValue(input.dataset.kind, text);
+      if (value === null) {
+        setCommandStatus(component, name,
+          { text: "not a " + input.dataset.kind + " value", warn: true, bad: false });
+        return;
+      }
+      args[input.dataset.arg] = value;
     }
   }
   if (spec.adapted !== "declared" && spec.request.length > 0 && args.value == null) {
