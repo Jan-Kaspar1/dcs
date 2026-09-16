@@ -1,13 +1,18 @@
 """The deterministic scenarios' unit coverage: stubbed monitor feeds
-drive scenario_consumer_schedule and scenario_served_interface through
-their pass outcomes and the named failures their issues call out — a
-stalled reader whose leg's scan outputs stopped advancing, a lagging
-seq-cursor read answered with silently stale data, a served registry
-missing a declared kind or collection, a declared command returning no
-receipt, and an emitted-events view that never reflects the produced
-event."""
+drive scenario_consumer_schedule, scenario_served_interface, and
+scenario_field_fault through their pass outcomes and the named failures
+their issues call out — a stalled reader whose leg's scan outputs
+stopped advancing, a lagging seq-cursor read answered with silently
+stale data, a served registry missing a declared kind or collection, a
+declared command returning no receipt, an emitted-events view that
+never reflects the produced event, an injected quality fault the served
+snapshot keeps reporting Good, an error fault that never surfaces on
+io_health, a role that moves under a field fault, and a clear that
+never restores the field value."""
 import json
+import socket
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -411,6 +416,241 @@ class ServedInterfaceTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never reflected a produced event',
                       record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class FakePlantPeer:
+    """A plant-protocol peer on 127.0.0.1: a real listener speaking the
+    documented newline-JSON request/response surface — list_points,
+    read, inject_fault, clear_fault — over a fixed table of stable
+    in-points with per-point fault state, mirroring the plant server's
+    semantics: a quality fault substitutes the served sample's quality,
+    an error fault answers the point's IoError."""
+
+    def __init__(self):
+        self.samples = {
+            20: {'value': {'float': 1.5}, 'quality': 'good', 'tick': 0},
+            40: {'value': {'bool': False}, 'quality': 'good',
+                 'tick': 0},
+        }
+        self.faults = {}
+        self.requests = []
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,
+                                 1)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen(4)
+        self.listener.settimeout(30)
+        self.address = '127.0.0.1:' \
+            + str(self.listener.getsockname()[1])
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        try:
+            while True:
+                try:
+                    conn, _ = self.listener.accept()
+                except OSError:
+                    return
+                threading.Thread(target=self._handle, args=(conn,),
+                                 daemon=True).start()
+        finally:
+            self.listener.close()
+
+    def _handle(self, conn):
+        try:
+            buffer = b''
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buffer += chunk
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    if line:
+                        response = self.dispatch(json.loads(line))
+                        conn.sendall(json.dumps(response).encode()
+                                     + b'\n')
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def served(self, point):
+        """The sample a reader observes: stored value, injected
+        quality applied — error faults live at the read boundary."""
+        sample = dict(self.samples[point])
+        fault = self.faults.get(point)
+        if isinstance(fault, dict) and 'quality' in fault:
+            sample['quality'] = fault['quality']
+        return sample
+
+    def dispatch(self, request):
+        self.requests.append(request)
+        op, point = request.get('op'), request.get('point')
+        if op == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': p, 'direction': 'in', 'sample': self.served(p),
+                 'fault': self.faults.get(p)}
+                for p in sorted(self.samples)]}
+        if op == 'read':
+            fault = self.faults.get(point)
+            if fault in ('disconnected', 'timeout'):
+                return {'result': 'error',
+                        'error': {'kind': 'io', 'error': {fault: point}}}
+            return {'result': 'sample', 'sample': self.served(point)}
+        if op == 'inject_fault':
+            self.faults[point] = request.get('fault')
+            return {'result': 'done'}
+        if op == 'clear_fault':
+            self.faults.pop(point, None)
+            return {'result': 'done'}
+        return {'result': 'error',
+                'error': {'kind': 'invalid_request',
+                          'detail': 'unknown op'}}
+
+    def close(self):
+        self.listener.close()
+        self.thread.join(timeout=5)
+
+
+class FieldFaultFeed:
+    """A stubbed monitor pair for the field-fault scenario. Each
+    `http_json` call is one completed scan: the snapshot serves every
+    plant point with the quality its fault state implies — substituted
+    quality under a quality fault, bad:communication_fault plus the
+    io_health counters under an error fault — and the role stays
+    active. Fault flags stage each named failure the issue calls out."""
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.failed_reads = 0
+        self.last_error = None
+        self.ever_faulted = set()
+        # Fault injection for the named-failure cases.
+        self.ignore_quality_fault = False  # snapshot keeps serving Good
+        self.hide_io_fault = False         # io_health never counts
+        self.demote_on_fault = False       # a field fault moves the role
+        self.stuck_recovery = False        # a cleared point stays bad
+
+    def http_json(self, method, url, body=None, timeout=10):
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        self.tick += 1
+        if (method, route) == ('GET', '/role'):
+            role = 'active'
+            if self.demote_on_fault and self.plant.faults:
+                role = 'standby'
+            return 200, {'role': role, 'tick': self.tick}
+        if (method, route) == ('GET', '/snapshot'):
+            points = []
+            for point in sorted(self.plant.samples):
+                fault = self.plant.faults.get(point)
+                if isinstance(fault, dict) and 'quality' in fault:
+                    self.ever_faulted.add(point)
+                quality = 'good'
+                if isinstance(fault, dict) and 'quality' in fault \
+                        and not self.ignore_quality_fault:
+                    quality = fault['quality']
+                elif fault in ('disconnected', 'timeout'):
+                    quality = {'bad': 'communication_fault'}
+                    if not self.hide_io_fault:
+                        self.failed_reads += 1
+                        self.last_error = {
+                            'tick': self.tick, 'point': point,
+                            'direction': 'in',
+                            'error': {fault: point}}
+                if self.stuck_recovery and point in self.ever_faulted:
+                    quality = {'bad': 'device_fault'}
+                points.append({'point': point, 'direction': 'in',
+                               'sample': dict(
+                                   self.plant.samples[point],
+                                   quality=quality,
+                                   tick=self.tick)})
+            return 200, {
+                'tick': self.tick, 'points': points,
+                'io_health': {
+                    'failed_reads': self.failed_reads,
+                    'failed_writes': 0,
+                    'consecutive_failures': 0,
+                    'last_error': self.last_error,
+                    'scan_overruns': 0,
+                    'driver': {'link': 'connected',
+                               'last_error': None,
+                               'exchange': None}}}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class FieldFaultTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = FakePlantPeer()
+        self.feed = FieldFaultFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': self.plant.address,
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'FAULT_PROBE', 0.01), \
+                patch.object(scenarios, 'FAULT_DEADLINE', 2.0):
+            return scenarios.scenario_field_fault(ctx)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The conversation stayed on the documented request surface and
+        # the run left no fault behind.
+        ops = [request.get('op') for request in self.plant.requests]
+        self.assertEqual(ops.count('inject_fault'), 2)
+        self.assertGreaterEqual(ops.count('clear_fault'), 2)
+        self.assertIn('list_points', ops)
+        self.assertEqual(self.plant.faults, {})
+
+    def test_quality_fault_kept_good_fails(self):
+        # The named bad-data clause: the injected quality never reaches
+        # the served sample — the point keeps reading Good.
+        self.feed.ignore_quality_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never surfaced', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_error_fault_hidden_from_io_health_fails(self):
+        self.feed.hide_io_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never surfaced on io_health',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_role_change_under_field_fault_fails(self):
+        # A field fault that reads as peer loss — the scenario's
+        # role-stability check must catch it.
+        self.feed.demote_on_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('moved the active role', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_clear_without_recovery_fails(self):
+        self.feed.stuck_recovery = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never restored', record.get('detail', ''))
         report.validate_scenario(record)
 
 

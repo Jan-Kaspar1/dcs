@@ -382,6 +382,7 @@ def run(st, record, cfg, log=print):
                 raise RuntimeError('monitors did not come up')
             ctx = {'active': 'http://127.0.0.1:' + str(cfg['active_port']),
                    'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+                   'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
                    'evidence_dir': evidence_dir,
                    'deadline': deadline}
             fn = case_function(case_key)
