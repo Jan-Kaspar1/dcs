@@ -79,7 +79,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_rejects_wrong_schema_version(self):
         data = valid_report()
-        data['schema_version'] = 3
+        data['schema_version'] = 4
         with self.assertRaises(ValueError):
             check(data)
 

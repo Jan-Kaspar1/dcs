@@ -27,7 +27,7 @@ runner emits scenarios and limitation/failure records, not findings:
 
 | Report channel | Finding kind | Route |
 | --- | --- | --- |
-| scenario `outcome: failed` | `defect` (severity medium, confidence high — a deterministic case reproduced on the exact tested revision) | managed issue |
+| scenario `outcome: failed` | `defect` (severity medium, confidence high — a deterministic case reproduced on the exact tested revision; schema-v3 scenario fields override the defaults) | managed issue |
 | `capability_limitations[]` | `capability` (severity medium when `blocking`, else low) | planner candidate |
 | `infrastructure_failures[]` | `infrastructure` | operational record |
 | scenario `outcome: blocked`/`inconclusive` | `infrastructure` (rig-side cause, not a product defect) | operational record |
@@ -39,6 +39,18 @@ dedicated verification runs (run ids `qav-*`) on the Lenovo lane; each entry
 names the finding key, the original case identity, the merged fix SHA, the
 revision actually tested, the runner's ancestry check, the verdict, and the
 evidence.
+
+Schema v3 adds the exploratory lane (run ids `qax-*`): a time-bounded Devin
+session explores the running rig under a self-chosen charter and reports
+through `results/agent-result.json`. Its scenario entries may carry explicit
+`module`, `mode`, `reproduction`, `severity`, `confidence`,
+`test_requirements`, and `product_cause` fields — when present they replace
+the derived defaults, so an exploratory defect publishes a real ticket (true
+module, true reproduction, the agent's own severity/confidence judgments,
+and a worker regression contract) instead of a generic `qa-lane/<key>` stub.
+Queue items whose case identity maps to no deterministic scenario are marked
+`replay: agent`: `qav-*` dispatch skips them and the exploration lane re-runs
+the reproduction itself, reporting through the same `verifications` channel.
 
 Only `completed` reports route findings; inconclusive/blocked/interrupted
 runs are recorded as evidence, matching the review lane's rule that partial
