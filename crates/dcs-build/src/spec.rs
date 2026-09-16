@@ -19,7 +19,7 @@
 //! both are updated together.
 
 use crate::endpoint::{Dynamic, Sink, Source};
-use dcs_core::{Direction, ParameterRange, Value, ValueKind};
+use dcs_core::{CommandDecl, Direction, EventDecl, ParameterRange, Value, ValueKind};
 use dcs_model::{ComponentId, Rationalization};
 use std::collections::BTreeMap;
 
@@ -202,6 +202,23 @@ pub trait Spec {
     /// statically known — the instance's parameters then go unchecked.
     fn declared_parameters(&self) -> Option<&[ParamDecl]>;
 
+    /// The kind's declared native commands — the mirror of the
+    /// descriptor's `commands` — or `None` when the set is not
+    /// statically known and the drift guard leaves it unchecked. The
+    /// default declares none: a kind whose descriptor grows a
+    /// [`CommandDecl`] without a spec mirror fails the drift test.
+    fn declared_commands(&self) -> Option<&[CommandDecl]> {
+        Some(&[])
+    }
+
+    /// The kind's declared emitted events — the mirror of the
+    /// descriptor's `events` — or `None` when the set is not statically
+    /// known and the drift guard leaves it unchecked. The default
+    /// declares none.
+    fn declared_events(&self) -> Option<&[EventDecl]> {
+        Some(&[])
+    }
+
     /// The instance's supplied parameter map.
     fn parameter_values(&self) -> &Parameters;
 
@@ -234,6 +251,10 @@ pub struct DynamicSpec {
     pub ports: Vec<PortDecl>,
     /// The declared parameter set; `None` skips parameter checks.
     pub declared_parameters: Option<Vec<ParamDecl>>,
+    /// The declared native command set; `None` skips command checks.
+    pub declared_commands: Option<Vec<CommandDecl>>,
+    /// The declared emitted-event set; `None` skips event checks.
+    pub declared_events: Option<Vec<EventDecl>>,
     /// The instance's parameter map.
     pub parameters: Parameters,
 }
@@ -246,6 +267,8 @@ impl DynamicSpec {
             kind: kind.into(),
             ports,
             declared_parameters: None,
+            declared_commands: None,
+            declared_events: None,
             parameters: Parameters::new(),
         }
     }
@@ -296,6 +319,14 @@ impl Spec for DynamicSpec {
 
     fn declared_parameters(&self) -> Option<&[ParamDecl]> {
         self.declared_parameters.as_deref()
+    }
+
+    fn declared_commands(&self) -> Option<&[CommandDecl]> {
+        self.declared_commands.as_deref()
+    }
+
+    fn declared_events(&self) -> Option<&[EventDecl]> {
+        self.declared_events.as_deref()
     }
 
     fn parameter_values(&self) -> &Parameters {

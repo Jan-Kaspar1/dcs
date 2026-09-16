@@ -188,6 +188,8 @@ pub trait Component: Send {
                 })
                 .collect(),
             parameters: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
         }
     }
 
