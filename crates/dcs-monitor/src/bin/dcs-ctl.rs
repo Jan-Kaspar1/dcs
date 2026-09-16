@@ -31,7 +31,10 @@
 //! — a point absent from the index, a component or parameter absent
 //! from the descriptors — the literal's own kind is sent instead, so
 //! the server's receipt still answers with the contract's named
-//! rejection.
+//! rejection. `invoke`'s `<name>=<value>` arguments follow the same
+//! rule — parsed per the declared request kind when the served schema
+//! declares it, as literals when it does not — the settled
+//! [`CommandReceipt`] staying the authority over every submission.
 //!
 //! `invoke <component> <command> [<name>=<value>]...` exercises the
 //! declared-command surface: the served `SchemaView`'s per-instance
@@ -389,17 +392,24 @@ fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> 
 
 /// The `invoke` subcommand's trailing `<name>=<value>` pairs — split
 /// into key and unparsed text here, parsed per the declared argument
-/// kinds once the served schema answers. A pair with no `=` or an
-/// empty name is malformed usage, never a submission.
+/// kinds once the served schema answers. A pair with no `=`, an empty
+/// name, or a repeated name is malformed usage, never a submission.
 fn parse_invoke_arguments(args: &[&str]) -> Result<Vec<(String, String)>, String> {
-    args.iter()
-        .map(|arg| match arg.split_once('=') {
-            Some((name, value)) if !name.is_empty() => Ok((name.to_string(), value.to_string())),
-            _ => Err(format!(
-                "invalid invoke argument {arg:?}: expected <name>=<value>"
-            )),
-        })
-        .collect()
+    let mut parsed = Vec::new();
+    for arg in args {
+        let (name, value) = arg
+            .split_once('=')
+            .filter(|(name, _)| !name.is_empty())
+            .ok_or_else(|| format!("invalid invoke argument {arg:?}: expected <name>=<value>"))?;
+        if parsed
+            .iter()
+            .any(|(seen, _): &(String, String)| seen == name)
+        {
+            return Err(format!("repeated invoke argument {name:?}"));
+        }
+        parsed.push((name.to_string(), value.to_string()));
+    }
+    Ok(parsed)
 }
 
 /// The environment's configured default actor — a non-empty

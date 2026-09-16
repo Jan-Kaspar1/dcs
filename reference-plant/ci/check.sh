@@ -21,6 +21,14 @@
 #   fingerprint  the emitted model's fingerprint equals the manifest's
 #                recorded `model.fingerprint`
 #                (manifest-fingerprint-mismatch)
+#   deploy       the checked-in rig definition deploy/compose.yaml
+#                instantiates every field of deploy/manifest.json —
+#                release, images, mounted model and dynamics paths,
+#                the fingerprint propagated into the controller
+#                invocations, listen addresses, and the pair's standby
+#                wiring — parsed and validated through
+#                `docker compose config` or the fallback parser
+#                (rig-invalid, rig-unverifiable, rig-mismatch)
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
@@ -199,6 +207,11 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
 
+echo "== deploy =="
+# The rig-definition consistency check reports its own named
+# diagnostics (rig-invalid, rig-unverifiable, rig-mismatch) on stderr.
+python3 ci/deploy_rig.py
+
 echo "== simulate =="
 run_simulation() {
     python3 ci/simulate.py \
@@ -229,7 +242,7 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py README.md; do
+for file in ci/consumers.py ci/deploy_rig.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

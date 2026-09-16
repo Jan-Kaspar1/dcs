@@ -3,8 +3,9 @@
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
-    DriverDiagnostics, ExchangeDiagnostics, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
-    JournalEvent, LinkState, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint, IoDriver,
+    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Sample,
+    Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
@@ -785,6 +786,39 @@ fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
                 point: PointId(0),
                 expected: ValueKind::Bool,
                 found: Value::Bool(false),
+            }),
+            // The declared-command/emitted-event vocabulary the journal
+            // pane renders.
+            emitted_spelling(&Command::Invoke {
+                component: String::new(),
+                command: String::new(),
+                arguments: Default::default(),
+            }),
+            emitted_spelling(&JournalEvent::EventEmitted {
+                event: EmittedEvent {
+                    event: String::new(),
+                    component: String::new(),
+                    fields: Default::default(),
+                },
+            }),
+            emitted_spelling(&EventValue::Value(Value::Int(0))),
+            emitted_spelling(&EventValue::Quality(Quality::Good)),
+            emitted_spelling(&EventValue::Text(String::new())),
+            emitted_spelling(&CommandError::UnknownCommand {
+                component: String::new(),
+                command: String::new(),
+            }),
+            emitted_spelling(&CommandError::ArgumentTypeMismatch {
+                component: String::new(),
+                command: String::new(),
+                argument: String::new(),
+                expected: ValueKind::Int,
+                found: ValueKind::Bool,
+            }),
+            emitted_spelling(&CommandError::CommandRefused {
+                component: String::new(),
+                command: String::new(),
+                reason: String::new(),
             }),
         ] {
             assert!(
