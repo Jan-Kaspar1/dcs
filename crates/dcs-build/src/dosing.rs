@@ -75,8 +75,9 @@
 //!
 //! Field points occupy fixed blocks the checked-in dynamics document is
 //! written against: `10` flow, `11` flow source, `12` tank level, `13`
-//! discharge rate, `14` net draw, `15` tank refill, `20`/`21`/`22` the
-//! skid digital inputs, `30+i`/`34+i` the per-pump draw and metered
+//! discharge rate, `14` net draw, `15` tank refill, `16` injection
+//! rate, `20`/`21`/`22` the skid digital inputs, `30+i`/`34+i` the
+//! per-pump draw and metered
 //! rate, `40+i` run, `50+i` local, `60+i` pump fault, `70+i` stroke,
 //! `100+i` command, `110+i` speed (`i` the 0-based pump index,
 //! `pumps <= 10`). Internal carriers start at `200`, per-pump internal
@@ -115,14 +116,19 @@ pub mod points {
     /// Chemical tank level (`Float`, `In`) — the integrator's output.
     pub const TANK_LEVEL: PointId = PointId(12);
     /// Measured chemical discharge rate (`Float`, `In`) — the
-    /// `flow_sum` over the per-pump metered rates; the
-    /// measured-consumption signal.
+    /// `dead_time` element's delayed view of the injected rate, the
+    /// downstream measurement the transport delay separates from the
+    /// injection point; the measured-consumption signal.
     pub const DISCHARGE_RATE: PointId = PointId(13);
     /// Net tank drawdown rate (`Float`, `In`) — the `flow_sum` of the
     /// pump draws plus the refill line; the integrator's input.
     pub const NET_DRAW: PointId = PointId(14);
     /// Tank refill inflow (`Float`, `In`) — a declared field input.
     pub const TANK_REFILL: PointId = PointId(15);
+    /// Injected chemical rate at the injection point (`Float`, `In`) —
+    /// the `flow_sum` over the per-pump metered rates, upstream of the
+    /// transport delay to the discharge measurement.
+    pub const INJECTION_RATE: PointId = PointId(16);
     /// Flow-proven contact (`Bool`, `In`) — the process running and
     /// flow confirmed.
     pub const FLOW_PROVEN: PointId = PointId(20);
@@ -525,6 +531,10 @@ pub struct DosingSkidLayout {
     pub net_draw: PointId,
     /// The tank refill inflow field point.
     pub tank_refill: PointId,
+    /// The injected chemical rate field point — the summed metered
+    /// rates at the injection point, upstream of the transport delay
+    /// the `dead_time` element imposes on the discharge measurement.
+    pub injection_rate: PointId,
     /// The flow-proven contact field point.
     pub flow_proven: PointId,
     /// The bund flood contact field point.
@@ -647,6 +657,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
     let discharge_rate_ch = plant.channel::<f64>(ai, "discharge-rate", Direction::In);
     let net_draw_ch = plant.channel::<f64>(ai, "net-draw", Direction::In);
     let tank_refill_ch = plant.channel::<f64>(ai, "tank-refill", Direction::In);
+    let injection_rate_ch = plant.channel::<f64>(ai, "injection-rate", Direction::In);
     let flow_proven_ch = plant.channel::<bool>(di, "flow-proven", Direction::In);
     let bund_flood_ch = plant.channel::<bool>(di, "bund-flood", Direction::In);
     let external_inhibit_ch = plant.channel::<bool>(di, "external-inhibit", Direction::In);
@@ -666,15 +677,16 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         })
         .collect();
 
-    // Field points — `flow`, `discharge-rate`, `net-draw`, the draws,
-    // and the rates are produced by the dynamics document's elements,
-    // so some handles go unused here.
+    // Field points — `flow`, `discharge-rate`, `injection-rate`,
+    // `net-draw`, the draws, and the rates are produced by the dynamics
+    // document's elements, so some handles go unused here.
     let flow = plant.field_input::<f64>(points::FLOW, flow_ch, false);
     plant.field_input::<f64>(points::FLOW_SOURCE, flow_source_ch, false);
     let tank_level = plant.field_input::<f64>(points::TANK_LEVEL, tank_level_ch, false);
     let discharge_rate = plant.field_input::<f64>(points::DISCHARGE_RATE, discharge_rate_ch, false);
     plant.field_input::<f64>(points::NET_DRAW, net_draw_ch, false);
     plant.field_input::<f64>(points::TANK_REFILL, tank_refill_ch, false);
+    plant.field_input::<f64>(points::INJECTION_RATE, injection_rate_ch, false);
     let flow_proven = plant.field_input::<bool>(points::FLOW_PROVEN, flow_proven_ch, false);
     let bund_flood = plant.field_input::<bool>(points::BUND_FLOOD, bund_flood_ch, false);
     let external_inhibit =
@@ -733,6 +745,14 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
         "tank-refill",
         "L/scan",
         "Tank refill inflow — the delivery line",
+        "dosing-skid",
+    );
+    signal(
+        &mut plant,
+        points::INJECTION_RATE,
+        "injection-rate",
+        "g/h",
+        "Injected chemical rate at the injection point — upstream of the transport delay to the discharge measurement",
         "dosing-skid",
     );
     signal(
@@ -1425,6 +1445,7 @@ pub fn dosing_skid(config: &DosingSkidConfig) -> Result<DosingSkid, BuildError> 
             discharge_rate: points::DISCHARGE_RATE,
             net_draw: points::NET_DRAW,
             tank_refill: points::TANK_REFILL,
+            injection_rate: points::INJECTION_RATE,
             flow_proven: points::FLOW_PROVEN,
             bund_flood: points::BUND_FLOOD,
             external_inhibit: points::EXTERNAL_INHIBIT,

@@ -5,12 +5,14 @@
 //! `dosing_skid.json` is the emitted PlantModel,
 //! `dosing_skid_dynamics.json` the decision-44 dynamics declaration —
 //! a declared process-flow source summed into `flow`, a `scaled_flow`
-//! per pump turning its speed demand into a metered discharge rate
-//! summed into `discharge-rate`, a `bool_flow` per pump drawing the
-//! chemical tank down while its run command stands, the refill line
-//! and draws summed into `net-draw`, and an integrator carrying the
-//! tank level. These tests assert the helper re-emits the checked-in
-//! document exactly, that the document validates and lints clean,
+//! per pump turning its speed demand into a metered rate summed into
+//! `injection-rate`, a `dead_time` carrying the transport delay from
+//! the injection point to the downstream `discharge-rate` measurement,
+//! a `bool_flow` per pump drawing the chemical tank down while its run
+//! command stands, the refill line and draws summed into `net-draw`,
+//! and an integrator carrying the tank level. These tests assert the
+//! helper re-emits the checked-in document exactly, that the document
+//! validates and lints clean,
 //! assembles through the standard registries, serde-roundtrips, and
 //! that a scripted run over the merged dynamics shows the closed
 //! dosing loop — and that every run is bit-for-bit deterministic.
@@ -129,6 +131,9 @@ struct Scan {
     tank_level: f64,
     /// The measured discharge rate — the measured-consumption signal.
     discharge: f64,
+    /// The injected rate at the injection point — upstream of the
+    /// transport delay to the discharge measurement.
+    injection: f64,
     /// The ratio kind's raw paced demand.
     ratio_demand: f64,
     /// Whether the paced demand sample reads `Good`.
@@ -258,6 +263,7 @@ fn run() -> Run {
             flow_good: sample(layout.flow).quality.is_good(),
             tank_level: float(sample(layout.tank_level)),
             discharge: float(sample(layout.discharge_rate)),
+            injection: float(sample(layout.injection_rate)),
             ratio_demand: float(sample(layout.ratio_demand)),
             ratio_good: sample(layout.ratio_demand).quality.is_good(),
             gated: float(sample(layout.gated_demand)),
@@ -683,6 +689,26 @@ fn scripted_run_shows_the_closed_dosing_loop() {
         at(14)
     );
     assert!(at(14).speed[0] > 0.0 && at(14).speed[1] == 0.0);
+
+    // The transport delay: the downstream measurement replays the
+    // injected rate exactly `delay` scans later — every injected step
+    // lands on `discharge` three scans after `injection` reads it.
+    for needle in [40.0, 80.0] {
+        let injected = scans
+            .iter()
+            .position(|scan| scan.injection == needle)
+            .unwrap_or_else(|| panic!("injection never read {needle}"));
+        let measured = scans
+            .iter()
+            .position(|scan| scan.discharge == needle)
+            .unwrap_or_else(|| panic!("discharge never read {needle}"));
+        assert_eq!(
+            measured - injected,
+            3,
+            "the injected rate must reach the measurement `delay` scans later: \
+             injection@{injected} discharge@{measured}"
+        );
+    }
 
     // The flow sweep: demand follows dose × flow through the declared
     // bounds — 15 m3/h paces 30 g/h, 60 m3/h saturates at `max_rate`
