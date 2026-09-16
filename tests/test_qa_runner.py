@@ -367,5 +367,69 @@ class RigStateFileTests(unittest.TestCase):
         self.assertFalse(self.run_dir.exists())
 
 
+class DcsCtlBuildTests(unittest.TestCase):
+    """The dcs-ctl host-binary seam: the bounded image build compiles
+    the operator CLI beside the image binaries, _scenario_ctx hands its
+    path to the dcs-ctl case, and a build that produces no binary fails
+    loudly rather than leaving the case to run against a phantom
+    tool."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-ctl')):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                target = Path(self.cfg['state_dir']) / 'build-cache' \
+                    / 'target' / 'release'
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in binaries:
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def test_build_compiles_dcs_ctl_beside_the_images(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event), 'qa-1')
+        build = next(args for args in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('-p dcs-monitor --bin dcs-ctl', build[-1])
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        self.assertIn('tool-built', events)
+
+    def test_build_fails_loudly_without_the_binary(self):
+        with patch.object(runner, 'docker',
+                          self._fake_docker(
+                              [], binaries=('dcs-controller',
+                                            'dcs-plant-server'))):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+
+    def test_scenario_ctx_hands_the_binary_to_the_case(self):
+        ctx = runner._scenario_ctx(self.cfg, {'run_id': 'qa-1'},
+                                   self.run_dir,
+                                   self.run_dir / 'evidence', 0,
+                                   lambda e, d=None: None)
+        self.assertEqual(ctx['dcs_ctl'],
+                         str(Path(self.cfg['state_dir']) / 'build-cache'
+                             / 'target' / 'release' / 'dcs-ctl'))
+
+
 if __name__ == '__main__':
     unittest.main()
