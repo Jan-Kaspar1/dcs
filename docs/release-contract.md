@@ -253,11 +253,21 @@ directory outside the workspace, rewrites only the dependency remote
 to the same `file://` stand-in — the recorded `rev` pin untouched —
 and runs the template's own `ci/check.sh` end to end, including its
 git-only lockfile assertion, its released-tooling stage against
-locally built binaries, the manifest fingerprint check, two runs
+locally built binaries — `validate`/`lint`/`--check` acceptance, the
+`dcs-model schema` and `interface-schema` emissions pinned
+byte-identical to the release record's schema artifacts fetched from
+the pinned revision through the same git remote, `dcs-model diff`
+legs over a doctored compatible revision and the identical document,
+and `summary`/`signal-index` outputs recorded as run evidence — the
+manifest fingerprint check, two runs
 of the scripted simulation, the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
-declaration — the `consumers` stage, which replays that driven run
+declaration, and the `GET /schema` document's structural conformance
+to the fetched block-interfaces artifact (a required-keys/field-shape
+check in stdlib-only python — full draft-2020-12 validation of the
+served document stays workspace-side, where the `jsonschema`
+dependency exists) — the `consumers` stage, which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -309,6 +319,9 @@ The checks' failures are named diagnostics:
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `schema-drift` | `dcs-model schema` or `dcs-model interface-schema` at the pinned rev did not emit the release record's recorded artifact bytes (`plant-model.schema.json` / `block-interfaces.schema.json`) — the emitted schema drifted from what the release record pins. Reported by the reference plant's `ci/check.sh`. |
+| `schema-mismatch` | The driven run's `GET /schema` document failed the recorded artifact's structural conformance — a required field absent or mistyped, a vocabulary outside its `enum`/`const`, or an undeclared field under `additionalProperties: false`. Reported by the reference plant's `ci/check.sh`. |
+| `diff-mismatch` | A `dcs-model diff` leg's expectation failed — a revised document's actual differences went unnamed, the identical document reported differences, or a document outside `MODEL_VERSION` was diffed instead of refused. Reported by the reference plant's `ci/check.sh`. |
 | `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
 | `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
 | `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |
@@ -317,6 +330,8 @@ The checks' failures are named diagnostics:
 | `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the `GET /schema` block-interface registry's coverage of the declared kinds, a kind-declared command's structured receipt through `POST /command`, a kind-emitted event's arrival in `GET /journal`/`GET /resources`, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
 | `consumer-interference` | A consumer schedule changed the driven run's outputs or command receipts, or the schedule's own evidence failed — a consumer met a server fault, a held response arrived incomplete, malformed traffic went unrefused, or a restarted UI process found no freshness metadata. Reported by the reference plant's `ci/check.sh`, naming the schedule. |
 | `consumer-nondeterministic` | Two passes of the consumer-schedule stage produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `restart-resume-failed` | The restart-recovery leg did not hold: the relaunched controller did not resume at the persisted tick (a missing state file's cold start included), its leg outcomes, receipts, or field image diverged from the uninterrupted reference pass, the journal's `seq` order did not continue across the run-boundary marker, or an unparseable state file failed startup without the named refusal. Reported by the reference plant's `ci/check.sh`. |
+| `restart-resume-nondeterministic` | Two passes of the restart-recovery leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `ctl-failed` | The released `dcs-ctl` leg did not hold against the driven run: an `invoke` did not settle its applied receipt through `receipts` and the journal, `resources` did not report a command's availability or its named refusal, a refusal mode exited zero or unnamed, or a read subcommand did not answer the served contract. Reported by the reference plant's `ci/check.sh`, with the leg's evidence lines on stderr. |
 | `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
