@@ -10,14 +10,16 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Driven, Monitor, MonitorClient};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// The same minimal in-memory driver the other monitor tests use.
 struct StubDriver {
@@ -344,4 +346,140 @@ fn driven_track_cycle_journals_the_divergence_transition() {
         )),
         "the driven cycle journaled the divergence at the compared tick: {journal:?}"
     );
+}
+
+/// The paced-standby reproduction of the QA finding
+/// `monitor-requests-blocked-by-dead-peer-pull`: while the tracking
+/// pull stalls on a dead active, `GET /role` and `GET /snapshot` must
+/// stay far below the fetch's own wait — the fetch runs on the pull
+/// worker's thread, and the per-scan `track_cycle` consumes it
+/// non-blockingly outside the request-serving lock — and the paced
+/// scan cadence the failover miss budget counts in must not inflate
+/// toward the fetch's stall.
+fn assert_dead_peer_pull_stays_off_the_request_path(dead: SocketAddr) {
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_paced_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+
+    // The paced loop, shaped like dcs-controller's: one tracking cycle
+    // consuming the fetch worker's latest pull, then one paced scan.
+    let mut puller = CheckpointPuller::new(dead);
+    let pacing = Arc::clone(&standby.monitor);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let pacer = thread::spawn(move || {
+        while !stopping.load(Ordering::Relaxed) {
+            pacing.track_cycle(|| puller.poll());
+            let _ = pacing.paced_scan();
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    // Every monitor read stays far under the pull's own stall, and the
+    // degraded heartbeat reports — the dead peer is exactly when the
+    // operator needs the endpoints.
+    for _ in 0..20 {
+        let started = Instant::now();
+        standby.client.role().unwrap();
+        let role_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby.client.snapshot().unwrap();
+        let snapshot_elapsed = started.elapsed();
+        assert!(
+            role_elapsed < Duration::from_millis(500)
+                && snapshot_elapsed < Duration::from_millis(500),
+            "monitor requests serialized behind the dead peer's pull: \
+             /role took {role_elapsed:?}, /snapshot took {snapshot_elapsed:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let report = standby.client.role().unwrap();
+    assert!(
+        matches!(&report.sync, Some(StandbySync::Degraded { .. })),
+        "the failed pulls report the degraded heartbeat: {report:?}"
+    );
+    let first = report.tick;
+    thread::sleep(Duration::from_millis(400));
+    let later = standby.client.role().unwrap().tick;
+    assert!(
+        later.0 - first.0 >= 10,
+        "the paced scan cadence held while the pull stalled: {first:?} -> {later:?}"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    pacer.join().unwrap();
+}
+
+/// The reproduction's literal case: the active's address is unroutable
+/// (TEST-NET-1, RFC 5737), so each pull stalls on the connect until
+/// the dedicated pull bound.
+#[test]
+fn unroutable_active_pull_keeps_the_monitor_responsive() {
+    assert_dead_peer_pull_stays_off_the_request_path("192.0.2.1:8080".parse().unwrap());
+}
+
+/// The guaranteed-stalled case: a listener that accepts connections
+/// but never answers, so every pull sits in flight until the pull
+/// bound — requests must not wait on it.
+#[test]
+fn silent_active_pull_keeps_the_monitor_responsive() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert_dead_peer_pull_stays_off_the_request_path(silent.local_addr().unwrap());
+}
+
+/// The lock property behind the reproduction's fix, without any
+/// network timing: `track_cycle` invokes its `pull` outside the
+/// request-serving lock, so even a deliberately slow pull cannot make
+/// a request wait on it.
+#[test]
+fn track_cycles_pull_does_not_hold_the_request_serving_lock() {
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_paced_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+
+    let pacing = Arc::clone(&standby.monitor);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let pacer = thread::spawn(move || {
+        while !stopping.load(Ordering::Relaxed) {
+            // A pull that stalls well past the asserted request bound.
+            pacing.track_cycle(|| {
+                thread::sleep(Duration::from_millis(400));
+                Err("fetch from 192.0.2.1:8080: stalled".to_string())
+            });
+            let _ = pacing.paced_scan();
+        }
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let started = Instant::now();
+    standby.client.role().unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "GET /role waited on the in-flight pull: {elapsed:?}"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    pacer.join().unwrap();
 }
