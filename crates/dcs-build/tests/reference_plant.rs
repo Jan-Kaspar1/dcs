@@ -8,9 +8,12 @@
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance, the manifest fingerprint check, the
-//! deterministic scripted simulation, and the served operator surface —
+//! deterministic scripted simulation, the served operator surface —
 //! the signal index, page, snapshot descriptors, and journal asserted
-//! against the emitted model's declaration.
+//! against the emitted model's declaration — and the `upgrade` stage,
+//! which repins the materialized tree to the checkout's `HEAD` (seeded
+//! into the stand-in beside the recorded rev) and re-runs the full
+//! pipeline under the repin.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -30,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
-use common::{CARGO, PIN_UNRESOLVABLE, root};
+use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
@@ -139,7 +142,9 @@ fn ensure_commit(rev: &str) {
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
 /// so the stand-in is seeded with that commit, the same object the
-/// published origin serves for the recorded rev.
+/// published origin serves for the recorded rev. The `upgrade` stage's
+/// repin target — the checkout's `HEAD`, a later commit in the same
+/// minor series — is seeded beside it so the repin resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
     let rev = pinned_rev(scratch);
     ensure_commit(&rev);
@@ -156,6 +161,18 @@ fn serve_pinned_rev(scratch: &Path) -> String {
         git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
     }
     git(&remote, &["update-ref", "refs/heads/main", &rev]);
+    let head = head_rev();
+    git(
+        &remote,
+        &[
+            "fetch",
+            "--depth",
+            "1",
+            &root().display().to_string(),
+            &head,
+        ],
+    );
+    git(&remote, &["update-ref", "refs/heads/upgrade", &head]);
     format!("file://{}", remote.display())
 }
 
@@ -206,13 +223,16 @@ impl Materialized {
 
     /// Runs the template's own clean-CI path against the `file://`
     /// stand-in remote and the locally built tooling — the same
-    /// substitutions `consumer_release.rs` makes.
+    /// substitutions `consumer_release.rs` makes, plus the upgrade
+    /// stage's repin target: the checkout's `HEAD`, a later commit in
+    /// the same minor series the stand-in remote also serves.
     fn check(&self, tools: &Path) -> Output {
         Command::new("bash")
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
+            .env("DCS_UPGRADE_REV", head_rev())
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()
             .expect("ci/check.sh runs")
@@ -240,6 +260,44 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "the template's ci/check.sh failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The `upgrade` stage is the executable assertion of the documented
+/// repin upgrade (README §7): under the same `file://`-remote and
+/// binary substitutions as the other stages, the stage repins the
+/// unchanged tree to the checkout's `HEAD`, proves the emitted
+/// `model/plant.json` is byte-identical across the repin
+/// (`emit-divergent` stands guard), re-runs the full pipeline under the
+/// repin, and refuses the named incompatible crossings — the
+/// nonexistent tag (`pin-unresolvable`) and the pin outside the
+/// supported `MODEL_VERSION`/`version` window (`crossing-unrefused`).
+#[test]
+fn the_upgrade_stage_proves_the_repin_and_the_named_crossings() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+    let output = copy.check(&tools);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the template's ci/check.sh failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("== upgrade =="),
+        "the upgrade stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("byte-identical emit across the repin"),
+        "the repin did not emit byte-identically:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("the full pipeline passes under the repin"),
+        "the repinned pipeline did not pass:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("pin-unresolvable") && stdout.contains("outside MODEL_VERSION"),
+        "the named incompatible crossings were not exercised:\n{stdout}"
     );
 }
 

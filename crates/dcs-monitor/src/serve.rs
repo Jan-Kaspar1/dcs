@@ -19,19 +19,17 @@
 //! point's latest [`Sample`], each configuration resource the
 //! `parameters` section's current value, each command the availability
 //! its [`CommandAvailability`](dcs_core::CommandAvailability) rule
-//! reads live — the `writable` mark through the signal index, the
-//! declared-command dispatch gap the receipted path itself answers —
+//! reads live — the `writable` mark through the signal index —
 //! and each instance the retained journal tail's entries attributed to
 //! it.
 
 use crate::store::Publication;
 use dcs_core::{
-    AdaptedCommand, CommandAvailability, CommandError, CommandSpec, CommandState,
-    ComponentInterface, ComponentResources, ConfigValue, Direction, JournalEntry, JournalEvent,
-    PointId, ResourceSample, ResourceView, Sample, SchemaView, Value,
+    CommandAvailability, CommandError, CommandSpec, CommandState, ComponentInterface,
+    ComponentResources, ConfigValue, Direction, JournalEntry, JournalEvent, PointId,
+    ResourceSample, ResourceView, Sample, SchemaView, Value,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::DECLARED_COMMAND_GAP;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `GET /schema`'s view over `publication`: every served component
@@ -126,7 +124,7 @@ pub(crate) fn resource_view(
                 commands: interface
                     .commands
                     .iter()
-                    .map(|command| command_state(&descriptor.name, command, signals))
+                    .map(|command| command_state(command, signals))
                     .collect(),
                 events: journal
                     .iter()
@@ -152,38 +150,29 @@ pub(crate) fn resource_view(
 /// so the reported refusal is the named reason the receipted path would
 /// answer: `not_writable` on a served but unmarked point,
 /// `unknown_point` on a bound point the model never declared, an
-/// unbound port refused by name. A `Declared`-provenance command meets
-/// the runtime's dispatch gap — the same
-/// [`CommandRefused`](dcs_core::CommandError::CommandRefused) an
-/// `invoke` submission is answered with today.
-fn command_state(component: &str, spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
+/// unbound port refused by name. `Always`- and
+/// `KindDeclared`-available commands are admissible: a submission
+/// validates and dispatches at the scan boundary, where a
+/// kind-declared predicate or an `apply_parameter`/`invoke_command`
+/// invariant may still refuse — that refusal settles through the
+/// journaled `command_settled` receipt the view's `events` carry, so
+/// the read model never has to evaluate the kind's predicate.
+fn command_state(spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
     let refused = |reason: CommandError| (false, Some(reason.to_string()));
-    let (available, refusal) = match spec.adapted {
-        AdaptedCommand::Declared => refused(CommandError::CommandRefused {
-            component: component.to_string(),
-            command: spec.name.clone(),
-            reason: DECLARED_COMMAND_GAP.to_string(),
-        }),
-        _ => match spec.availability {
-            CommandAvailability::Always => (true, None),
-            CommandAvailability::BoundPointWritable => match spec.point {
-                None => (
-                    false,
-                    Some(format!("command {:?} targets an unbound port", spec.name)),
-                ),
-                Some(point) => match signals.get(point) {
-                    Some(signal) if signal.direction == Direction::In && signal.writable => {
-                        (true, None)
-                    }
-                    Some(_) => refused(CommandError::NotWritable { point }),
-                    None => refused(CommandError::UnknownPoint { point }),
-                },
+    let (available, refusal) = match spec.availability {
+        CommandAvailability::Always | CommandAvailability::KindDeclared => (true, None),
+        CommandAvailability::BoundPointWritable => match spec.point {
+            None => (
+                false,
+                Some(format!("command {:?} targets an unbound port", spec.name)),
+            ),
+            Some(point) => match signals.get(point) {
+                Some(signal) if signal.direction == Direction::In && signal.writable => {
+                    (true, None)
+                }
+                Some(_) => refused(CommandError::NotWritable { point }),
+                None => refused(CommandError::UnknownPoint { point }),
             },
-            CommandAvailability::KindDeclared => refused(CommandError::CommandRefused {
-                component: component.to_string(),
-                command: spec.name.clone(),
-                reason: DECLARED_COMMAND_GAP.to_string(),
-            }),
         },
     };
     CommandState {

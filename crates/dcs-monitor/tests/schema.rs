@@ -18,8 +18,7 @@ use dcs_core::{
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, DECLARED_COMMAND_GAP, Executor, IoRequirement,
-    PointMap, StepError,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -487,9 +486,10 @@ fn resources_join_the_same_publication_the_snapshot_serves() {
 
         // Command availability reads the availability rule live. The
         // writable setpoint admits writes; the field-served `pv` and
-        // `run` refuse `not_writable`; the declared command reports the
-        // runtime's dispatch gap; the unwired `remote` port's commands
-        // refuse as unbound.
+        // `run` refuse `not_writable`; the unwired `remote` port's
+        // commands refuse as unbound. `stroke_test` is
+        // `KindDeclared`-available — admissible, with the kind's own
+        // predicate deciding at the scan boundary.
         let pid = component(&view, "level-pid");
         assert!(command_state(pid, "write_value:sp").available);
         assert!(command_state(pid, "set_parameter:kp").available);
@@ -521,14 +521,39 @@ fn resources_join_the_same_publication_the_snapshot_serves() {
             "{remote:?}"
         );
         let declared = command_state(drive, "stroke_test");
-        assert!(!declared.available);
-        let dispatch_gap = CommandError::CommandRefused {
+        assert!(declared.available);
+        assert_eq!(declared.refusal, None);
+
+        // The kind's own refusal surfaces through the receipted path
+        // the events collection mirrors: `drive` declares `stroke_test`
+        // but never overrides `invoke_command`, so the dispatched
+        // invocation settles `command_refused` with the default hook's
+        // reason — journaled and attributed to the instance.
+        let invoke = Command::Invoke {
             component: "drive".to_string(),
             command: "stroke_test".to_string(),
-            reason: DECLARED_COMMAND_GAP.to_string(),
-        }
-        .to_string();
-        assert_eq!(declared.refusal.as_deref(), Some(dispatch_gap.as_str()));
+            arguments: [("ticks".to_string(), Value::Int(3))].into_iter().collect(),
+        };
+        let receipt = client.command(&invoke).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        client.advance(1).unwrap();
+        let view = client.resources().unwrap();
+        let drive = component(&view, "drive");
+        assert!(drive.events.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::CommandSettled { receipt }
+                if receipt.command == invoke
+                    && receipt.outcome
+                        == (CommandOutcome::Rejected {
+                            reason: CommandError::CommandRefused {
+                                component: "drive".to_string(),
+                                command: "stroke_test".to_string(),
+                                reason:
+                                    "the kind does not serve the declared command \"stroke_test\""
+                                        .to_string(),
+                            }
+                        })
+        )));
 
         // The live readings: the applied setpoint write shows in `sp`'s
         // sample; `tripped`'s status reads the scan's `Bool` write with

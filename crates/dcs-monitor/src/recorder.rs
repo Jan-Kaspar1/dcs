@@ -13,8 +13,9 @@
 //!   order (the input read and step phases produced them), then value
 //!   transitions over the declared-`journaled` points in the same
 //!   ascending point order — the durable transition record the
-//!   lifecycle-audit decision adds — then component step failures in
-//!   scan order.
+//!   lifecycle-audit decision adds — then the kind-declared events the
+//!   step phase emitted, in emission order — then component step
+//!   failures in scan order.
 //!
 //! A scan aborted by a [`ScanError`](dcs_runtime::ScanError) is not
 //! recorded: the run ends at it. Both streams evict oldest-first past the
@@ -27,8 +28,8 @@
 use crate::journal_file::JournalFile;
 use crate::store::Store;
 use dcs_core::{
-    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, JournalEntry, JournalEvent,
-    PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
+    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
+    JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
 use dcs_runtime::Executor;
 use std::collections::HashMap;
@@ -299,6 +300,36 @@ impl Recorder {
                         point: telemetry.point,
                         from,
                         to: sample.value,
+                    },
+                );
+            }
+        }
+
+        // The kind-declared events the scan's components emitted — the
+        // executor drained each after its `step` — journal here in
+        // emission order at the producing scan's tick. Retention is the
+        // serving-side read of the declared `EventRetention`: `Journal`
+        // events — and an emission the descriptor never declares, which
+        // the audit record still carries — land as `event_emitted`;
+        // `History`/`Latest` emissions follow their declared channel and
+        // are not duplicated into the durable journal.
+        for event in executor.emitted_events() {
+            let retention = snapshot
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.name == event.component)
+                .and_then(|descriptor| {
+                    descriptor
+                        .events
+                        .iter()
+                        .find(|decl| decl.name == event.event)
+                })
+                .map(|decl| decl.retention);
+            if matches!(retention, None | Some(EventRetention::Journal)) {
+                self.push(
+                    scan_tick,
+                    JournalEvent::EventEmitted {
+                        event: event.clone(),
                     },
                 );
             }
