@@ -27,7 +27,9 @@
 
 use dcs_assembly::assemble;
 use dcs_controller::registry;
-use dcs_core::{IoDriver, JournalEvent, PointId, Role, StandbySync, TelemetrySnapshot, Value};
+use dcs_core::{
+    IoDriver, IoError, JournalEvent, PointId, Role, StandbySync, TelemetrySnapshot, Value,
+};
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{Executor, WriteGate};
@@ -534,9 +536,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
 
     // The budget-th miss promotes the standby: its claim preempts, its
     // scan writes, its step drives. From this boundary the old peer is
-    // fenced — its next requested scan's field write is refused with the
-    // named `fenced` error, and the field carries only the new owner's
-    // output.
+    // fenced — its next requested scan's field write is refused and
+    // counted as the `fenced` fault while the scan itself completes
+    // degraded, and the field carries only the new owner's output.
     let promoted = standby.advance(1).unwrap();
     assert_eq!(
         standby.role().unwrap().role,
@@ -547,10 +549,16 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let carried = field.read(VALVE).unwrap().value;
     assert_eq!(carried, image_value(&promoted, VALVE));
 
-    let error = active.advance(1).unwrap_err();
-    assert!(
-        error.to_string().contains("fenced"),
-        "the returning peer's write must fail fenced: {error}"
+    let fenced = active.advance(1).unwrap();
+    assert_eq!(
+        fenced
+            .io_health
+            .last_error
+            .as_ref()
+            .map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the returning peer's write must be refused fenced: {:?}",
+        fenced.io_health
     );
     // Nothing the fenced scan staged reached the field.
     assert_eq!(field.read(VALVE).unwrap().value, carried);
@@ -561,10 +569,16 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // writes the field after failover.
     relay.partition(false);
     assert_eq!(active.role().unwrap().role, Role::Active);
-    let error = active.advance(1).unwrap_err();
-    assert!(
-        error.to_string().contains("fenced"),
-        "a healed but superseded peer stays fenced: {error}"
+    let fenced = active.advance(1).unwrap();
+    assert_eq!(
+        fenced
+            .io_health
+            .last_error
+            .as_ref()
+            .map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "a healed but superseded peer stays fenced: {:?}",
+        fenced.io_health
     );
 
     for tick in 1..=M {
@@ -576,8 +590,17 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
         // And every fresh write attempt by the old peer is refused.
-        let error = active.advance(1).unwrap_err();
-        assert!(error.to_string().contains("fenced"), "tick {tick}: {error}");
+        let fenced = active.advance(1).unwrap();
+        assert_eq!(
+            fenced
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| fault.error),
+            Some(IoError::Fenced(VALVE)),
+            "tick {tick}: {:?}",
+            fenced.io_health
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);

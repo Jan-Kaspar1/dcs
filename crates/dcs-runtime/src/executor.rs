@@ -370,14 +370,19 @@ impl fmt::Display for WiringError {
 
 impl std::error::Error for WiringError {}
 
-/// Why a scan failed after the step phase.
+/// Why a scan failed.
 ///
-/// Component `step` errors never fail a scan — they are counted per
-/// component in [`Executor::component_statuses`]. `ScanError` covers the
-/// driver boundary: the output image could not be delivered to the field.
+/// No scan phase currently produces one: component `step` errors are
+/// counted per component in [`Executor::component_statuses`], and
+/// driver-boundary failures — reads, writes, the cyclic exchange —
+/// degrade into [`IoHealth`](dcs_core::IoHealth) counters and held
+/// samples rather than aborting the scan. The variant set is retained
+/// for the [`Executor::scan`]/[`Peer`](crate::Peer)/monitor `Result`
+/// contract the callers write against.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanError {
-    /// Writing the output image to the driver failed.
+    /// A driver-boundary failure ended the scan — kept for contract
+    /// compatibility; the executor's field faults now degrade instead.
     Io(IoError),
 }
 
@@ -590,11 +595,14 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 ///    probe answer never refuses, applies, or alters a command;
 /// 7. writes the image's field `Out` points to the driver — points a
 ///    component never wrote keep their last output, so a failed step
-///    holds outputs. Under the cyclic contract each write stages the
+///    holds outputs, and a failed write is counted and attributed like
+///    a failed read rather than aborting the scan: a field outage must
+///    degrade the run's telemetry, not end the run that reports it.
+///    Under the cyclic contract each write stages the
 ///    pending output image, publishing on the next scan's exchange —
 ///    the contract's one-scan actuation delay.
 ///
-/// The driver-boundary failures of phases 3, 4, and 6 are also counted
+/// The driver-boundary failures of phases 3, 4, and 7 are also counted
 /// into
 /// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
 /// read, write, or exchange increments its named counter and the
@@ -1261,7 +1269,7 @@ impl<'d> Executor<'d> {
         self.read_inputs(tick);
         self.step_components(tick);
         self.probe_command_verdicts();
-        self.write_outputs()?;
+        self.write_outputs();
         Ok(tick)
     }
 
@@ -2233,7 +2241,13 @@ impl<'d> Executor<'d> {
     /// Points a component never wrote keep no image entry and are left
     /// untouched; internal `Out` points are image-carried for monitoring
     /// and never reach the driver.
-    fn write_outputs(&mut self) -> Result<(), ScanError> {
+    ///
+    /// A failed write is the read boundary's mirror: counted under
+    /// `failed_writes`, attributed as `last_error`, and the scan
+    /// continues — the image still records the intended output, the
+    /// field holds its last written value, and a dead link must never
+    /// take the controller and its telemetry down with it.
+    fn write_outputs(&mut self) {
         let image = self.image.borrow();
         for (point, spec) in self.map.iter() {
             if spec.direction != Direction::Out || spec.internal.is_some() {
@@ -2253,11 +2267,9 @@ impl<'d> Executor<'d> {
                         direction: Direction::Out,
                         error,
                     });
-                    return Err(error.into());
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -3233,12 +3245,10 @@ mod tests {
         executor.scan().unwrap();
         driver.faults.lock().unwrap().insert(PointId(20));
 
-        // The documented write behavior continues — the scan fails with
-        // ScanError — and the failure is counted and attributed.
-        assert_eq!(
-            executor.scan(),
-            Err(ScanError::Io(IoError::Disconnected(PointId(20))))
-        );
+        // The write boundary's degrade rule — the same one reads carry:
+        // the failure is counted and attributed while the scan completes.
+        executor.scan().unwrap();
+        assert_eq!(executor.tick(), Tick(2));
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_writes, 1);
         assert_eq!(health.failed_reads, 0);

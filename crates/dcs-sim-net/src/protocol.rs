@@ -94,6 +94,20 @@ pub enum PlantRequest {
         /// The ownership token the claim asserts.
         owner: u64,
     },
+    /// The re-attach half of the write-ownership claim: takes the claim
+    /// for `owner` only while the field is unclaimed or the standing
+    /// claim already names `owner` — the conditional grant a
+    /// reconnecting field owner asserts to re-arm the claim a server
+    /// restart dropped. Unlike [`ClaimWriter`](Self::ClaimWriter) it
+    /// never preempts: while a *different* owner holds the claim the
+    /// request is refused [`PlantError::Fenced`], so a re-attaching
+    /// superseded peer cannot steal the field back from the attachment
+    /// that claimed it during the outage. A granted request also binds
+    /// `owner` to this connection exactly as `claim_writer` does.
+    EnsureWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
 }
 
 /// The server's answer to one [`PlantRequest`].
@@ -246,6 +260,7 @@ mod tests {
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
             PlantRequest::ClaimWriter { owner: 42 },
+            PlantRequest::EnsureWriter { owner: 43 },
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -277,6 +292,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
             r#"{"op":"claim_writer","owner":42}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::EnsureWriter { owner: 43 }).unwrap(),
+            r#"{"op":"ensure_writer","owner":43}"#
         );
     }
 
