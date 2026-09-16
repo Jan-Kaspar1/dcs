@@ -252,11 +252,21 @@ directory outside the workspace, rewrites only the dependency remote
 to the same `file://` stand-in — the recorded `rev` pin untouched —
 and runs the template's own `ci/check.sh` end to end, including its
 git-only lockfile assertion, its released-tooling stage against
-locally built binaries, the manifest fingerprint check, two runs
+locally built binaries — `validate`/`lint`/`--check` acceptance, the
+`dcs-model schema` and `interface-schema` emissions pinned
+byte-identical to the release record's schema artifacts fetched from
+the pinned revision through the same git remote, `dcs-model diff`
+legs over a doctored compatible revision and the identical document,
+and `summary`/`signal-index` outputs recorded as run evidence — the
+manifest fingerprint check, two runs
 of the scripted simulation, the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
-declaration — the `consumers` stage, which replays that driven run
+declaration, and the `GET /schema` document's structural conformance
+to the fetched block-interfaces artifact (a required-keys/field-shape
+check in stdlib-only python — full draft-2020-12 validation of the
+served document stays workspace-side, where the `jsonschema`
+dependency exists) — the `consumers` stage, which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -303,6 +313,9 @@ The checks' failures are named diagnostics:
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `schema-drift` | `dcs-model schema` or `dcs-model interface-schema` at the pinned rev did not emit the release record's recorded artifact bytes (`plant-model.schema.json` / `block-interfaces.schema.json`) — the emitted schema drifted from what the release record pins. Reported by the reference plant's `ci/check.sh`. |
+| `schema-mismatch` | The driven run's `GET /schema` document failed the recorded artifact's structural conformance — a required field absent or mistyped, a vocabulary outside its `enum`/`const`, or an undeclared field under `additionalProperties: false`. Reported by the reference plant's `ci/check.sh`. |
+| `diff-mismatch` | A `dcs-model diff` leg's expectation failed — a revised document's actual differences went unnamed, the identical document reported differences, or a document outside `MODEL_VERSION` was diffed instead of refused. Reported by the reference plant's `ci/check.sh`. |
 | `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
 | `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
 | `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |

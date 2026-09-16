@@ -38,6 +38,10 @@ ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/deploy_rig.py       the rig-definition consistency check —
                        deploy/compose.yaml against the manifest
+ci/schema_conformance.py  the served-registry structural conformance
+                       check — the driven run's `GET /schema` document
+                       against the release record's
+                       block-interfaces.schema.json (stdlib-only)
 deploy/manifest.json   the deployment declaration
 deploy/compose.yaml    the checked-in rig definition instantiating it
 ```
@@ -95,6 +99,24 @@ cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
     dcs-model dcs-controller dcs-plant
 ```
 
+The stage also exercises the contract's remaining `dcs-model` surfaces.
+The release record's schema artifacts —
+`docs/releases/<tag>/plant-model.schema.json` and
+`docs/releases/<tag>/block-interfaces.schema.json`, where `<tag>` is
+the manifest's `dcs_release` — are fetched through the same git remote
+and pinned revision the crates and tooling resolve over (the record
+lives in the release repository's tree at the pinned commit), and
+`dcs-model schema` / `dcs-model interface-schema` at the pinned rev
+must emit those bytes exactly — a divergence is `schema-drift`.
+`dcs-model diff` runs two legs: against a doctored *compatible*
+revision of the checked-in model it must name the actual change, and
+against the identical document it must report `no changes` — a leg
+whose expectation fails is `diff-mismatch`. Finally `dcs-model
+summary` and `dcs-model signal-index` run over the checked-in model
+with their outputs recorded to the run's evidence — the check
+transcript carries them verbatim with their sha256 digests, identical
+on every pass.
+
 ### 5. Run the simulation
 
 `ci/check.sh` drives `ci/simulate.py`: `dcs-plant-server` serves the
@@ -130,6 +152,19 @@ drives its declaring component to emission, appearing in `GET
 `events` of `GET /resources`; the snapshot's `descriptors` must cover
 every composed component; and `GET /journal` must answer the run's
 recorded transitions. A divergence fails `surface-mismatch`.
+
+The stage then checks the served `GET /schema` document itself against
+the fetched release-record artifact — `ci/schema_conformance.py` runs
+the consumer-side structural conformance the served-registry contract
+intends for non-Rust consumers: every `required` key present, declared
+properties and items carrying their declared JSON types, `enum`/`const`
+vocabularies held, `additionalProperties: false` enforced, and local
+`$ref`/`anyOf`/`oneOf` combinators resolved through the artifact's own
+`$defs`. The boundary is deliberate: this is a required-keys/field-shape
+check in stdlib-only python, while full draft-2020-12 validation —
+every keyword the draft defines — stays with the platform's own checks,
+where the `jsonschema` dependency exists. A missing or mistyped
+required field — any structural divergence — fails `schema-mismatch`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
@@ -267,7 +302,11 @@ silently: a pin that resolves no release crates is `pin-unresolvable`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a
-re-recorded fingerprint is `manifest-fingerprint-mismatch`; a served
+re-recorded fingerprint is `manifest-fingerprint-mismatch`; a recorded
+schema artifact the pinned tooling no longer emits byte-identically is
+`schema-drift`; a served registry document failing the artifact's
+required structure is `schema-mismatch`; a `dcs-model diff` leg whose
+expectation fails is `diff-mismatch`; a served
 operator surface diverging from the emitted model's declaration is
 `surface-mismatch`; a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is

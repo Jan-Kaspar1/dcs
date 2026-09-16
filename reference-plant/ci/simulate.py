@@ -29,7 +29,9 @@ declaration instead of the scenario legs — the check's `surface` stage:
   a measurement or state resource with its bound point, every declared
   parameter as a configuration entry with its `set_parameter` command,
   the point-command verbs on every `In` port, and the block-level
-  `command_settled`/`step_failed` events;
+  `command_settled`/`step_failed` events; with `--schema-out PATH` the
+  served document is also written to PATH for the check's
+  schema-conformance leg (`ci/schema_conformance.py`);
 - every kind-declared command a served interface carries answers a
   structured receipt through `POST /command`'s `invoke` variant and
   settles `applied` through the journaled `command_settled` record;
@@ -653,10 +655,13 @@ def emission_scans(model, component):
     return ticks
 
 
-def run_surface(monitor, model):
+def run_surface(monitor, model, schema_out=None):
     """The `--surface` mode's check: asserts the monitor's served
     operator surface against the emitted model's declaration, over the
-    same deterministic `--driven` run the scenario mode performs."""
+    same deterministic `--driven` run the scenario mode performs.
+    `schema_out` records the served `GET /schema` document to a file —
+    the check's schema-conformance leg then checks it against the
+    release record's artifact."""
     failures = []
     declared = declared_signal_index(model)
     try:
@@ -683,6 +688,9 @@ def run_surface(monitor, model):
         failures.append(f"GET /schema answered {error}")
         schema = None
     if schema is not None:
+        if schema_out is not None:
+            with open(schema_out, "w") as handle:
+                json.dump(schema, handle, indent=2, sort_keys=True)
         failures += schema_mismatches(model, schema)
 
     # The declared command surface: every kind-declared command a
@@ -976,6 +984,11 @@ def main():
         help="assert the served operator surface against the emitted "
         "model instead of running the scenario legs",
     )
+    parser.add_argument(
+        "--schema-out",
+        help="with --surface, write the served GET /schema document to "
+        "this path for the check's schema-conformance leg",
+    )
     args = parser.parse_args()
 
     with open(args.scenario) as handle:
@@ -991,7 +1004,7 @@ def main():
         if args.surface:
             with open(args.model) as handle:
                 model = json.load(handle)
-            return run_surface(monitor, model)
+            return run_surface(monitor, model, args.schema_out)
         plant_client = PlantClient(plant_addr)
         digest_entries, failures = run_legs(
             monitor, plant_client, scenario["legs"]

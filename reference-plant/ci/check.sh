@@ -17,7 +17,17 @@
 #                stale-artifact)
 #   tooling      the released tooling accepts the emitted model —
 #                `dcs-model validate`, `dcs-model lint`,
-#                `dcs-controller --check` (tooling-rejected)
+#                `dcs-controller --check` — and exercises the contract's
+#                remaining dcs-model surfaces: `dcs-model schema` and
+#                `dcs-model interface-schema` emissions byte-identical
+#                to the release record's schema artifacts (fetched from
+#                the pinned revision through the same git remote the
+#                pins resolve over), `dcs-model diff` naming a doctored
+#                compatible revision's changes and none on the
+#                identical document, and `dcs-model summary` /
+#                `dcs-model signal-index` outputs recorded to the run's
+#                evidence (tooling-rejected, pin-unresolvable,
+#                schema-drift, diff-mismatch)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
 #                recorded `model.fingerprint`
 #                (manifest-fingerprint-mismatch)
@@ -44,8 +54,10 @@
 #                kind-emitted events reaching the journal and the
 #                per-instance resource view — matches the emitted
 #                model's declaration, in the same deterministic
-#                --driven run the simulate stage performs
-#                (surface-mismatch)
+#                --driven run the simulate stage performs — plus the
+#                served GET /schema document's structural conformance
+#                to the fetched block-interfaces schema artifact
+#                (surface-mismatch, schema-mismatch)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -98,6 +110,7 @@ TOOLS_REV=""
 UPGRADE_DIR=""
 INSTALL_ROOTS=""
 RIG_DIR=""
+SCRATCH=""
 
 fail() {
     echo "$1" >&2
@@ -107,6 +120,7 @@ fail() {
 cleanup() {
     if [ -n "$UPGRADE_DIR" ]; then rm -rf "$UPGRADE_DIR"; fi
     if [ -n "$RIG_DIR" ]; then rm -rf "$RIG_DIR"; fi
+    if [ -n "$SCRATCH" ]; then rm -rf "$SCRATCH"; fi
     for dir in $INSTALL_ROOTS; do rm -rf "$dir"; done
 }
 trap cleanup EXIT
@@ -213,6 +227,143 @@ echo "$LINT" | grep -q "no findings" \
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
 echo "  validate, lint, and --check accept the checked-in model"
+
+# The release record's schema artifacts: `docs/releases/<tag>/` lives
+# in the same repository the crate and tooling pins resolve from, so
+# the record is fetched through the same mechanism — the pinned
+# revision's git remote. The manifest's `dcs_release` names the record
+# directory; the files are read out of the fetched commit's tree.
+SCRATCH="$(mktemp -d)"
+DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
+git -C "$SCRATCH" init -q -b main
+git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
+    || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
+RECORD="$SCRATCH/record"
+mkdir -p "$RECORD"
+for artifact in block-interfaces.schema.json plant-model.schema.json; do
+    git -C "$SCRATCH" show "FETCH_HEAD:docs/releases/$DCS_RELEASE/$artifact" \
+        > "$RECORD/$artifact" \
+        || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/$artifact"
+done
+
+# `dcs-model <subcommand>` emitted at the pinned rev must equal the
+# recorded artifact byte-for-byte — the consumer's non-drift leg for
+# the served-registry and plant-model schemas the contract records as
+# fetchable release artifacts. A divergence reports schema-drift on
+# stderr and returns 1.
+schema_nondrift() {
+    local emitted
+    emitted="$(mktemp)"
+    if ! "$TOOLS/dcs-model" "$1" > "$emitted"; then
+        rm -f "$emitted"
+        echo "tooling-rejected: dcs-model $1 failed at the pinned rev" >&2
+        return 1
+    fi
+    if ! cmp -s "$emitted" "$2"; then
+        rm -f "$emitted"
+        echo "schema-drift: dcs-model $1 at the pinned rev does not emit the recorded $DCS_RELEASE artifact $3" >&2
+        return 1
+    fi
+    rm -f "$emitted"
+}
+schema_nondrift interface-schema "$RECORD/block-interfaces.schema.json" block-interfaces.schema.json || exit 1
+schema_nondrift schema "$RECORD/plant-model.schema.json" plant-model.schema.json || exit 1
+echo "  schema and interface-schema emit the $DCS_RELEASE record's artifacts byte-identically"
+
+# A drifted artifact must report the diagnostic — the same leg against
+# a doctored copy, so the recorded file stays pristine.
+DOCTORED_SCHEMA="$SCRATCH/block-interfaces.doctored.json"
+python3 - "$RECORD/block-interfaces.schema.json" "$DOCTORED_SCHEMA" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["required"].remove("tick")
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+if out="$(schema_nondrift interface-schema "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
+    fail "schema-drift-unchecked: a drifted record artifact passed the interface-schema non-drift leg"
+fi
+echo "$out" | grep -q "schema-drift" \
+    || fail "schema-drift-unchecked: a drifted record artifact did not report schema-drift: $out"
+echo "  a drifted record artifact refused: schema-drift"
+
+# One `dcs-model diff` leg: $3 is `no changes` — the documents must
+# diff clean — or a field the diff listing must name on the element $4
+# names. A violated expectation reports diff-mismatch on stderr and
+# returns 1; a passing leg prints the listing as the run's evidence.
+assert_diff() {
+    local old="$1" new="$2" want="$3" element="${4:-}" out
+    if ! out="$("$TOOLS/dcs-model" diff "$old" "$new" 2>&1)"; then
+        echo "diff-mismatch: dcs-model diff $old $new refused the documents: $out" >&2
+        return 1
+    fi
+    if [ "$want" = "no changes" ]; then
+        if [ "$out" != "no changes" ]; then
+            echo "diff-mismatch: dcs-model diff $old $new reports differences on identical documents: $out" >&2
+            return 1
+        fi
+    elif ! [[ "$out" == *"$element"* && "$out" == *"$want"* ]]; then
+        echo "diff-mismatch: dcs-model diff $old $new does not name $want on $element: $out" >&2
+        return 1
+    fi
+    printf '%s\n' "$out" | sed 's/^/    /'
+}
+
+# The doctored compatible revision — the same in-place doctoring the
+# upgrade stage applies for the incompatible crossing, but staying
+# inside MODEL_VERSION so the diff loads both sides: the primary level
+# measurement's declared description changes.
+DIFF_REVISED="$SCRATCH/model-revised.json"
+python3 - model/plant.json "$DIFF_REVISED" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+signal = next(s for s in document["signals"] if s["name"] == "level-primary")
+signal["description"] = "Primary wet-well level measurement — revised"
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+echo "  diff over the doctored compatible revision:"
+assert_diff model/plant.json "$DIFF_REVISED" "description:" "signal 10010" || exit 1
+echo "  diff over the identical document:"
+assert_diff model/plant.json model/plant.json "no changes" || exit 1
+
+# A leg whose expectation fails must report the diagnostic — asserting
+# differences on the identical document, asserting none on the doctored
+# revision, and diffing a document outside MODEL_VERSION each report
+# diff-mismatch.
+if out="$(assert_diff model/plant.json model/plant.json "description:" "signal 10010" 2>&1)"; then
+    fail "diff-mismatch-unchecked: asserting differences on the identical document passed"
+fi
+echo "$out" | grep -q "diff-mismatch" \
+    || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
+if out="$(assert_diff model/plant.json "$DIFF_REVISED" "no changes" 2>&1)"; then
+    fail "diff-mismatch-unchecked: asserting no changes on the doctored revision passed"
+fi
+echo "$out" | grep -q "diff-mismatch" \
+    || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
+DIFF_INVALID="$SCRATCH/model-incompatible.json"
+python3 - model/plant.json "$DIFF_INVALID" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["version"] += 1
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+if out="$(assert_diff model/plant.json "$DIFF_INVALID" "description:" "signal 10010" 2>&1)"; then
+    fail "diff-mismatch-unchecked: diffing a document outside MODEL_VERSION passed"
+fi
+echo "$out" | grep -q "diff-mismatch" \
+    || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
+echo "  failed diff expectations refused: diff-mismatch"
+
+# summary and signal-index over the checked-in model, recorded to the
+# run's evidence — the check transcript carries the outputs verbatim
+# with their digests.
+SUMMARY_OUT="$("$TOOLS/dcs-model" summary model/plant.json)" \
+    || fail "tooling-rejected: dcs-model summary refused the checked-in model"
+INDEX_OUT="$("$TOOLS/dcs-model" signal-index model/plant.json)" \
+    || fail "tooling-rejected: dcs-model signal-index refused the checked-in model"
+echo "  dcs-model summary (sha256 $(printf '%s\n' "$SUMMARY_OUT" | sha256sum | cut -d' ' -f1)):"
+printf '%s\n' "$SUMMARY_OUT" | sed 's/^/    /'
+echo "  dcs-model signal-index (sha256 $(printf '%s\n' "$INDEX_OUT" | sha256sum | cut -d' ' -f1)):"
+printf '%s\n' "$INDEX_OUT" | sed 's/^/    /'
 
 echo "== fingerprint =="
 EMITTED_FP="$("$BIN" --fingerprint)"
@@ -340,6 +491,7 @@ echo "  $FIRST"
 echo "== surface =="
 python3 ci/simulate.py \
     --surface \
+    --schema-out "$SCRATCH/served-schema.json" \
     --plant-server "$TOOLS/dcs-plant-server" \
     --controller "$TOOLS/dcs-controller" \
     --model model/plant.json \
@@ -347,12 +499,54 @@ python3 ci/simulate.py \
     --scenario ci/scenario.json \
     || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, emitted events — does not match the emitted model's declared surface"
 
+# The served GET /schema document against the fetched record artifact's
+# declared structure — the consumer-side required-keys/field-shape
+# conformance a non-Rust consumer runs (README §5 documents the
+# boundary: full draft-2020-12 validation stays workspace-side).
+# ci/schema_conformance.py reports schema-mismatch itself.
+python3 ci/schema_conformance.py \
+    --schema "$RECORD/block-interfaces.schema.json" \
+    --document "$SCRATCH/served-schema.json"
+
+# A served document missing or mistyping a required field must report
+# the diagnostic — doctored copies, so the recorded document stays
+# pristine.
+served_case() {
+    local doctored="$SCRATCH/served-$1.json" out
+    python3 - "$SCRATCH/served-schema.json" "$doctored" "$1" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+case = sys.argv[3]
+if case == "missing-required":
+    del document["tick"]
+elif case == "mistyped-required":
+    document["tick"] = "not-a-tick"
+elif case == "mistyped-nested":
+    document["interfaces"][0]["interface"]["version"] = "1"
+else:
+    sys.exit("unknown served case " + case)
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+    if out="$(python3 ci/schema_conformance.py \
+            --schema "$RECORD/block-interfaces.schema.json" \
+            --document "$doctored" 2>&1)"; then
+        fail "schema-mismatch-unchecked: the $1 case passed the served-schema conformance check"
+    fi
+    echo "$out" | grep -q "schema-mismatch" \
+        || fail "schema-mismatch-unchecked: the $1 case did not report schema-mismatch: $out"
+    echo "  $1 refused: schema-mismatch"
+}
+for case in missing-required mistyped-required mistyped-nested; do
+    served_case "$case"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py README.md; do
+for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py \
+        ci/schema_conformance.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
