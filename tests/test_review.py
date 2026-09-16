@@ -422,6 +422,30 @@ class ReviewLaneTests(unittest.TestCase):
         self.supervisor.planner([], [])
         self.assertEqual(self.supervisor.state.candidate('deepen-executor')['disposition'], 'deferred')
 
+    @patch('agent_pool.supervisor.time.time', return_value=10_000)
+    def test_planner_low_water_ignores_dependency_blocked_ready_issues(self, _now):
+        blocker = managed_issue(100)
+        blocker['labels'] = [{'name': 'agent:blocked'}]
+        waiting = [managed_issue(n, dependencies=(100,)) for n in range(1, 7)]
+        self.supervisor.state.set('last_plan', 9_099)
+        self.supervisor.planner([blocker, *waiting], [])
+        self.assertIsNotNone(self.supervisor.state.get('planner'))
+
+    def test_proposal_resolves_same_pass_dependency_keys_to_issue_numbers(self):
+        contract = dict(key='shared-contract', title='Define contract', scope='s',
+                        acceptance='a', tests='t', dependencies=[], priority=1,
+                        milestone='m', group='dcs-core')
+        consumer = dict(key='runtime-consumer', title='Use contract', scope='s',
+                        acceptance='a', tests='t', dependencies=['shared-contract'],
+                        priority=1, milestone='m', group='dcs-runtime')
+        proposal = planning.validate({'issues': [consumer, contract]})
+        self.supervisor.state.set('pending_proposal', proposal)
+        self.supervisor.planner([], [])
+        created = {planning.metadata(i['body'])['key']: i for i in self.github.items}
+        contract_number = created['shared-contract']['number']
+        self.assertEqual(planning.metadata(created['runtime-consumer']['body'])['dependencies'],
+                         [contract_number])
+
     def test_duplicate_candidate_keys_suppressed(self):
         record = self.launched()
         data = report(self.clone, record['run_id'], 'sha-aaa', candidates=[candidate()])

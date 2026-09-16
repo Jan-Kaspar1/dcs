@@ -748,6 +748,30 @@ Repair context: {repair}
         except Exception as exc:
             self.log('QA findings lane failed: ' + str(exc)[:500])
 
+    def ready_frontier(self, issues):
+        """Count ready work that can occupy distinct worker groups now."""
+        closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
+        occupied = {j['concurrency_group'] for j in self.state.jobs(('working', 'pr-open'))}
+        active_improvement = self.state.get('review:active_improvement')
+        frontier = 0
+        for issue in issues:
+            if issue.get('state') != 'OPEN' or self.state.job(issue['number']):
+                continue
+            if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
+                continue
+            try:
+                meta = planning.metadata(issue.get('body') or '')
+            except (ValueError, KeyError):
+                continue
+            if not set(meta['dependencies']) <= closed or meta['group'] in occupied:
+                continue
+            improvement = meta.get('improvement')
+            if improvement and active_improvement and active_improvement != improvement:
+                continue
+            occupied.add(meta['group'])
+            frontier += 1
+        return frontier
+
     def planner(self, issues, prs):
         current = self.state.get('planner')
         if current:
@@ -776,22 +800,29 @@ Repair context: {repair}
                 self.state.set('last_error', 'Discarded malformed pending proposal')
                 self.log('Discarded malformed pending proposal')
                 return
+            pending = planning.validate(pending)
             ready_count = sum('agent:ready' in [l['name'] for l in i.get('labels', [])] and i.get('state') == 'OPEN' for i in issues)
-            known = set()
+            known = {}
             for issue in issues:
                 try:
-                    known.add(planning.metadata(issue.get('body', ''))['key'])
+                    known[planning.metadata(issue.get('body', ''))['key']] = issue['number']
                 except (ValueError, KeyError):
                     pass
             numbers = {i['number'] for i in issues}
             created = {}
-            for item in pending['issues']:
-                if item['key'] in known or ready_count >= 20:
+            for item in planning.ordered_issues(pending['issues']):
+                if item['key'] in known:
                     continue
-                if not set(item['dependencies']) <= numbers:
+                if ready_count >= 20:
+                    continue
+                resolved = [known[d] if isinstance(d, str) else d for d in item['dependencies']]
+                if not set(resolved) <= numbers:
                     raise ValueError('Planner referenced nonexistent dependencies')
-                number = self.github.create_issue(item['title'], planning.body(item), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
+                published = dict(item, dependencies=resolved)
+                number = self.github.create_issue(item['title'], planning.body(published), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
                 created[item['key']] = number
+                known[item['key']] = number
+                numbers.add(number)
                 if item.get('improvement'):
                     self.state.map_improvement(item['improvement'], number)
                 ready_count += 1
@@ -800,8 +831,8 @@ Repair context: {repair}
             return
         now = time.time()
         last = self.state.get('last_plan', 0)
-        ready = sum(i.get('state') == 'OPEN' and 'agent:ready' in [l['name'] for l in i.get('labels', [])] for i in issues)
-        if now - last < 7200 and not (ready < 6 and now - last >= 900):
+        frontier = self.ready_frontier(issues)
+        if now - last < 7200 and not (frontier < 6 and now - last >= 900):
             return
         clone = self.runtime.prepare_clone('coordinator')
         output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
