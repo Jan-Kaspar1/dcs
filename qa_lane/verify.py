@@ -393,7 +393,7 @@ def run(st, record, cfg, log=print):
         try:
             if not runner._wait_monitor(cfg, timeline):
                 raise RuntimeError('monitors did not come up')
-            ctx = runner._scenario_ctx(cfg, record, run_dir,
+            ctx = runner._scenario_ctx(cfg, record, src, run_dir,
                                        evidence_dir, deadline, timeline)
             fn = case_function(case_key)
             if fn is None:
