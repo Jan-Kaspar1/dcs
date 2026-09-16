@@ -102,7 +102,7 @@ impl BusError {
     /// The [`IoError`] this protocol-reported failure presents as at
     /// `point` — the point the caller addressed, whose register the
     /// error names.
-    fn at_point(&self, point: PointId) -> IoError {
+    pub(crate) fn at_point(&self, point: PointId) -> IoError {
         match *self {
             Self::UnknownRegister { .. } => IoError::UnknownPoint(point),
             Self::KindMismatch {
@@ -138,7 +138,7 @@ struct Connection {
 
 /// Writes the request frame and reads the response frame on `stream`,
 /// translating `io::Error`s into the transport vocabulary.
-fn exchange(
+pub(crate) fn exchange(
     stream: &mut BufReader<TcpStream>,
     request: &BusRequest,
 ) -> Result<BusResponse, LinkError> {
