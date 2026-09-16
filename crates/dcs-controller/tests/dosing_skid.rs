@@ -16,12 +16,18 @@
 //! field-owner restart keeps the pair's cadence. Both peers run
 //! `--journal-file`; the field owner also runs `--state-file`.
 //!
+//! The dynamics declaration carries the transport delay the dosing
+//! research names: the summed metered rates feed `injection-rate`, and
+//! a `dead_time` element delays that injected flow into the
+//! `discharge-rate` measurement — the downstream reading lags the
+//! injection point by the declared three scans at dt 1.0.
+//!
 //! The scripted legs, in order:
 //!
 //! 1. **Normal operation** — at the declared dose the flow-paced
 //!    demand tracks a flow sweep, clamping at the declared dose and
 //!    rate bounds with `clamped` asserted; the loop closes through the
-//!    duty pump's run contact and the metered discharge rate.
+//!    duty pump's run contact and the delayed discharge measurement.
 //! 2. **Permissive loss and return** — the flow-proven contact drops
 //!    the demand to the safe value through the pair, and the restart
 //!    stays inhibited — no pump commanded, none running — until the
@@ -36,7 +42,9 @@
 //!    `deviation-monitor`.
 //! 5. **Operator paths** — the dose write and the manual takeover ride
 //!    the journaled, receipted command path on the writable internal
-//!    points, every receipt actor-attributed.
+//!    points, every receipt actor-attributed; the dose step's delayed
+//!    measurement lands tick by tick, `delay` scans behind the
+//!    injected rate.
 //! 6. **Accounting** — the commanded-consumption totalizer integrates
 //!    the demand; the `deviation-monitor` flags the sustained
 //!    divergence the handover gap produces.
@@ -48,10 +56,16 @@
 //!    the accumulated total, and an unacknowledged latch intact; the
 //!    durable journal replays the attributed record verbatim and the
 //!    file's run-boundary marker separates the lifetimes.
-//! 9. **Bumpless promotion** — demote then promote moves the field
-//!    writer to the standby without a field discontinuity, and the
-//!    promoted peer keeps the run — and the receipted command path —
-//!    going.
+//! 9. **Mid-delay bumpless promotion** — a dose step still in flight
+//!    through the transport delay when demote then promote moves the
+//!    field writer to the standby: the promoted peer's scans equal the
+//!    demoted peer's quiesced reference tick for tick while the
+//!    pending sample lands on schedule — no field discontinuity, no
+//!    replayed window, no skipped sample.
+//!
+//! A standalone test alongside the scripted run proves the plant-side
+//! half: the merged map's `capture_state`/`restore_state` carries the
+//! dead-time element's in-flight line across a mid-delay checkpoint.
 //!
 //! Every named behavior is asserted through monitor-client,
 //! plant-protocol, and journal payloads — never printed output; the
@@ -66,7 +80,7 @@ use dcs_core::{
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::Checkpoint;
-use dcs_sim::Fault;
+use dcs_sim::{Fault, ProcessElement, SimDriver};
 use dcs_sim_net::RemoteDriver;
 use std::io::{BufRead, BufReader};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -388,6 +402,7 @@ fn observe(layout: &DosingSkidLayout, owner: &TelemetrySnapshot) -> serde_json::
         "flow_good": s(layout.flow).quality.is_good(),
         "tank_level": float(s(layout.tank_level)),
         "discharge": float(s(layout.discharge_rate)),
+        "injection": float(s(layout.injection_rate)),
         "ratio_demand": float(s(layout.ratio_demand)),
         "ratio_good": s(layout.ratio_demand).quality.is_good(),
         "gated": float(s(layout.gated_demand)),
@@ -698,7 +713,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     assert_eq!(
         served,
         [
-            10, 11, 12, 13, 14, 15, 20, 21, 22, 30, 31, 34, 35, 40, 41, 50, 51, 60, 61, 70, 71,
+            10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 30, 31, 34, 35, 40, 41, 50, 51, 60, 61, 70, 71,
             100, 101, 110, 111
         ]
         .into_iter()
@@ -815,14 +830,47 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     pair_phase(&standby, &active, &field, &layout, &mut trace, 5);
     assert_eq!(f64_of(row(&trace), "demand"), 80.0, "{:?}", row(&trace));
     assert!(bool_of(row(&trace), "clamped"), "the dose bound must clamp");
+    // The transport delay, row by row: the dose write steps the paced
+    // demand 80 → 50. The step reaches the field — and the injected
+    // rate — at base+5; the downstream measurement keeps replaying the
+    // delay line's recorded history — the pre-step 40s still in flight,
+    // then the 80 step landing on its own schedule — until the pending
+    // 50 surfaces exactly `delay` (three) plant steps after the
+    // injected rate turned.
     issued.push(command(
         &active,
         layout.dose,
         ValueKind::Float,
         Value::Float(2.5),
     ));
-    pair_phase(&standby, &active, &field, &layout, &mut trace, 5);
-    assert_eq!(f64_of(row(&trace), "demand"), 50.0, "{:?}", row(&trace));
+    let base = trace.len();
+    pair_phase(&standby, &active, &field, &layout, &mut trace, 10);
+    for lagged in &trace[base..base + 3] {
+        assert_eq!(
+            lagged["discharge"].as_f64().unwrap(),
+            40.0,
+            "the measurement must replay the samples still in flight: {lagged:?}"
+        );
+    }
+    assert_eq!(
+        f64_of(&trace[base + 5], "injection"),
+        50.0,
+        "the injected rate must turn as the step reaches the field: {:?}",
+        trace[base + 5]
+    );
+    for lagged in &trace[base + 3..base + 8] {
+        assert_eq!(
+            lagged["discharge"].as_f64().unwrap(),
+            80.0,
+            "the delayed measurement must replay the earlier step on schedule: {lagged:?}"
+        );
+    }
+    assert_eq!(
+        f64_of(&trace[base + 8], "discharge"),
+        50.0,
+        "the pending delivery must land at the declared delay: {:?}",
+        trace[base + 8]
+    );
     assert!(!bool_of(row(&trace), "clamped"));
 
     // -- Leg 2: permissive loss and return through the redundant pair --
@@ -1375,7 +1423,34 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     pair_phase(&standby, &active, &field, &layout, &mut trace, 8);
     assert_eq!(f64_of(row(&trace), "demand"), 40.0, "{:?}", row(&trace));
 
-    // -- Leg 9: the bumpless promotion -----------------------------------
+    // -- Leg 9: the mid-delay bumpless promotion -------------------------
+    // A dose write puts a rate step in flight through the transport
+    // delay: the injected rate turns as the stepped demand reaches the
+    // field while the downstream measurement still reads the in-flight
+    // delivery — the switchover lands with pending samples in the
+    // delay line, and the promoted peer must continue the line, not
+    // restart it.
+    issued.push(command(
+        &active,
+        layout.dose,
+        ValueKind::Float,
+        Value::Float(2.4),
+    ));
+    let base = trace.len();
+    pair_phase(&standby, &active, &field, &layout, &mut trace, 6);
+    assert_eq!(
+        f64_of(&trace[base + 5], "injection"),
+        48.0,
+        "the injected rate must turn as the step reaches the field: {:?}",
+        trace[base + 5]
+    );
+    assert_eq!(
+        f64_of(&trace[base + 5], "discharge"),
+        40.0,
+        "the promotion must land mid-delay — pending samples in flight: {:?}",
+        trace[base + 5]
+    );
+
     // The documented switchover at the scan boundary: demote the
     // resumed active — its gate closes with the request — then promote
     // the converged standby, whose claim the plant takes before the
@@ -1417,13 +1492,34 @@ fn run_dosing(tag: &str) -> serde_json::Value {
             "the field must hold the old owner's write across the switch: {point:?}"
         );
     }
-    // The promoted peer's first owner scan lifts the gate inside the
-    // requested tick and writes the field — the same values the staged
-    // image already carried: the handover is bumpless.
-    let image = standby.advance(1).unwrap();
-    assert_eq!(image.tick, Tick(promoted.tick.0 + 1));
-    field_carry(&field, &image, &layout);
-    trace.push(observe(&layout, &image));
+    // The promoted run for the stated tick count: every tick the
+    // demoted peer scans quiesced — the uninterrupted reference the
+    // switchover never touched — and the promoted owner's image must
+    // equal it exactly while the field carries only the owner's
+    // writes. The delay line is shared field state, so the pending
+    // sample lands on schedule: rows still read the prior rate, then
+    // the step lands at the declared delay — never a replayed window,
+    // never a skipped sample.
+    let mut first_owner = None;
+    for compared in 0..5u64 {
+        let reference = active.advance(1).unwrap();
+        let continued = standby.advance(1).unwrap();
+        assert_eq!(
+            continued, reference,
+            "the promoted run must match the uninterrupted reference tick for tick"
+        );
+        field_carry(&field, &continued, &layout);
+        trace.push(observe(&layout, &continued));
+        if compared == 0 {
+            assert_eq!(
+                continued.tick,
+                Tick(promoted.tick.0 + 1),
+                "the gate must lift inside the requested tick"
+            );
+            first_owner = Some(continued);
+        }
+    }
+    let first_owner = first_owner.unwrap();
     for (point, value) in [
         layout.pumps[0].cmd,
         layout.pumps[1].cmd,
@@ -1434,16 +1530,30 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     .zip(&held)
     {
         assert_eq!(
-            &field.read(*point).unwrap().value,
+            &image_value(&first_owner, *point),
             value,
             "the promoted peer's first owner scan must not move the field: {point:?}"
         );
     }
     assert_eq!(standby.role().unwrap().role, Role::Active);
-    // The demoted peer's settle scan runs quiesced — gate closed, no
-    // field writes — and the peer is retired.
-    let _quiesced = active.advance(1).unwrap();
     assert_eq!(active.role().unwrap().role, Role::Standby);
+    // The in-flight delivery lands through the promoted run exactly on
+    // the pre-switch schedule — the pending 48 surfaces at the declared
+    // delay boundary, inside the compared ticks.
+    for lagged in &trace[base + 6..base + 8] {
+        assert_eq!(
+            lagged["discharge"].as_f64().unwrap(),
+            40.0,
+            "the delay line must not restart across the switch: {lagged:?}"
+        );
+    }
+    assert_eq!(
+        f64_of(&trace[base + 8], "discharge"),
+        48.0,
+        "the pending delivery must land on schedule through the promoted run: {:?}",
+        trace[base + 8]
+    );
+    // The demoted peer is retired.
     kill(&mut active_process);
 
     // The promoted peer owns the run: the receipted command path lands
@@ -1453,10 +1563,10 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         &standby,
         layout.dose,
         ValueKind::Float,
-        Value::Float(2.4),
+        Value::Float(2.0),
     ));
     let image = owner_phase(&standby, &field, &layout, &mut trace, 6);
-    assert_eq!(f64_of(row(&trace), "demand"), 48.0, "{:?}", row(&trace));
+    assert_eq!(f64_of(row(&trace), "demand"), 40.0, "{:?}", row(&trace));
     assert!(
         image
             .components
@@ -1701,6 +1811,88 @@ fn run_dosing(tag: &str) -> serde_json::Value {
 
     let _ = std::fs::remove_dir_all(&dir);
     digest
+}
+
+/// The merged plant map both `--dynamics` consumers build: the model's
+/// resolved channel map with each declared element merged and
+/// revalidated in document order — what `dcs-plant-server --dynamics`
+/// serves and `RegisterBank::with_dynamics` binds to registers.
+fn merged_plant() -> SimDriver {
+    let model = PlantModel::load(MODEL_SOURCE).unwrap();
+    let mut map = dcs_assembly::sim_channel_map(&model).unwrap();
+    for element in serde_json::from_str::<Vec<ProcessElement>>(
+        &std::fs::read_to_string(PLANT_DYNAMICS).unwrap(),
+    )
+    .unwrap()
+    {
+        map = map.with_element(element);
+        map.validate().unwrap();
+    }
+    SimDriver::new(map).unwrap()
+}
+
+#[test]
+fn the_delay_line_survives_a_mid_delay_capture_and_restore() {
+    // The field-side half of the mid-delay contract #357 landed: the
+    // dead-time element's delay line rides the sim capture/restore
+    // state map. With the checked-in dynamics merged exactly as the
+    // plant server merges them, a capture taken mid-delay — pending
+    // samples in flight — restores into an identical driver and
+    // continues the pre-capture trajectory rather than replaying
+    // `initial`.
+    let reference = merged_plant();
+    let captured = merged_plant();
+    // Pump 201 commanded at 50: the scaled_flow turns the injected
+    // rate on the first step while the delayed measurement still
+    // reads the seeded line.
+    for driver in [&reference, &captured] {
+        driver.write(PointId(100), Value::Bool(true)).unwrap();
+        driver.write(PointId(110), Value::Float(50.0)).unwrap();
+    }
+    reference.step(1.0);
+    captured.step(1.0);
+    assert_eq!(
+        float(captured.read(PointId(16)).unwrap()),
+        50.0,
+        "the injected rate must turn at once"
+    );
+    assert_eq!(
+        float(captured.read(PointId(13)).unwrap()),
+        0.0,
+        "the measurement must still read the seeded line"
+    );
+    // Mid-delay: a second step pushes another pending sample — the
+    // line now holds the seed and two in-flight 50s.
+    reference.step(1.0);
+    captured.step(1.0);
+    let state = captured.capture_state().unwrap();
+    assert_eq!(state.get("element.13.line.t"), Some(Value::Float(2.0)));
+    assert_eq!(state.get("element.13.line.len"), Some(Value::Int(3)));
+    assert_eq!(state.get("element.13.line.0.u"), Some(Value::Float(0.0)));
+    assert_eq!(state.get("element.13.line.1.u"), Some(Value::Float(50.0)));
+    assert_eq!(state.get("element.13.line.2.u"), Some(Value::Float(50.0)));
+
+    // A driver that never ran resumes from the captured line: stepping
+    // both in lockstep, the restored driver's measurement must equal
+    // the uninterrupted reference's at every step — the pending 50
+    // lands at the reference's boundary, not a fresh three-step delay
+    // later.
+    let resumed = merged_plant();
+    resumed.restore_state(&state).unwrap();
+    for _ in 0..4 {
+        reference.step(1.0);
+        resumed.step(1.0);
+        assert_eq!(
+            resumed.read(PointId(13)).unwrap(),
+            reference.read(PointId(13)).unwrap(),
+            "the restored line must continue the pre-capture trajectory"
+        );
+    }
+    assert_eq!(
+        float(resumed.read(PointId(13)).unwrap()),
+        50.0,
+        "the pending delivery lands on the pre-capture schedule"
+    );
 }
 
 #[test]

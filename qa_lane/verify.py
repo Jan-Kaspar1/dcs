@@ -76,6 +76,12 @@ def validate_item(item):
             raise ValueError('invalid verification ' + field)
     if not isinstance(item['fix_sha'], str) or not SHA.match(item['fix_sha']):
         raise ValueError('invalid verification fix_sha')
+    # 'agent' marks a finding whose reproduction is not a deterministic
+    # scenario (an exploratory case identity): the exploration lane
+    # re-runs it, never the qav-* replay path.
+    if item.get('replay') is not None \
+            and item['replay'] not in ('auto', 'agent'):
+        raise ValueError('invalid verification replay')
     return item
 
 
@@ -141,9 +147,9 @@ def case_function(case_key):
 
 def _target_sha(st):
     """The revision a verification run tests: the newest revision the
-    lane would assess anyway — the queued one, else the last
+    lane would assess anyway — the queued assessment, else the last
     attempted."""
-    queued = st.next_queued()
+    queued = st.next_queued('qa')
     if queued is not None:
         return queued['attempted_sha']
     return st.last_attempted_sha()
@@ -244,6 +250,13 @@ def next_run(st, cfg, now, log=print):
     marks = reported(st)
     for item in items:
         key = item['finding_key']
+        if item.get('replay') == 'agent':
+            # The original reproduction is an exploratory case identity no
+            # deterministic scenario implements — the exploration lane
+            # re-runs it and reports the verdict in its verifications
+            # channel. A qav-* run could only answer 'no scenario
+            # implements case identity'.
+            continue
         mark = marks.get(key)
         if mark and mark.get('fix_sha') == item['fix_sha'] \
                 and mark.get('tested_sha') == target \
@@ -380,7 +393,7 @@ def run(st, record, cfg, log=print):
         try:
             if not runner._wait_monitor(cfg, timeline):
                 raise RuntimeError('monitors did not come up')
-            ctx = runner._scenario_ctx(cfg, record, run_dir,
+            ctx = runner._scenario_ctx(cfg, record, src, run_dir,
                                        evidence_dir, deadline, timeline)
             fn = case_function(case_key)
             if fn is None:

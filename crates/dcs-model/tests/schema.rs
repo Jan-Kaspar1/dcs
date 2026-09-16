@@ -19,6 +19,7 @@
 //!   (the recorded split, see `src/schema.rs` and `docs/architecture.md`).
 
 use dcs_model::PlantModel;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -232,29 +233,56 @@ fn schema_output_is_deterministic_across_runs() {
     );
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 #[test]
 fn recorded_release_schema_matches_the_emitted_output() {
-    // The v0.1.0 release record (docs/release-contract.md's release
-    // procedure) carries `dcs-model schema`'s output at the recorded
-    // commit; the recorded file must stay byte-identical to what the
+    // Each release record (docs/release-contract.md's release
+    // procedure) carries `dcs-model schema`'s output at its recorded
+    // commit; a checked-in file must stay byte-identical to what the
     // subcommand emits now or the published schema silently diverges
-    // from the code before the tag is cut. Regenerate it with
-    // `dcs-model schema > docs/releases/v0.1.0/plant-model.schema.json`
-    // whenever the emitted schema legitimately changes.
+    // from the code before the tag is cut. Regenerate a record file
+    // with `dcs-model schema > docs/releases/<tag>/plant-model.schema.json`
+    // whenever the emitted schema legitimately changes — and update
+    // the record's published sha256 with it while the tag is pending.
+    //
+    // `Some(digest)` asserts the file's sha256 equals the digest its
+    // record publishes, keeping the checked-in artifact and the record
+    // from drifting apart. `v0.1.0` carries `None`: its recorded
+    // sha256 pins the tagged emission, which the tracked file has
+    // legitimately moved past since the cut.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let recorded =
-        std::fs::read(workspace_root().join("docs/releases/v0.1.0/plant-model.schema.json"))
-            .expect("the v0.1.0 release record's schema file must exist");
-    assert_eq!(
-        recorded, output.stdout,
-        "docs/releases/v0.1.0/plant-model.schema.json drifted from \
-         `dcs-model schema`'s emitted output — regenerate the record file"
-    );
+    for (path, recorded_sha256) in [
+        ("docs/releases/v0.1.0/plant-model.schema.json", None),
+        (
+            "docs/releases/v0.2.0/plant-model.schema.json",
+            Some("68f77f99081a8e7bdc5e63b180c643b0b2e33b9459a8275ccd0da84362f26fe4"),
+        ),
+    ] {
+        let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
+            panic!("the release record's schema file {path} must exist: {error}")
+        });
+        assert_eq!(
+            recorded, output.stdout,
+            "{path} drifted from `dcs-model schema`'s emitted output — \
+             regenerate the record file"
+        );
+        if let Some(expected) = recorded_sha256 {
+            assert_eq!(
+                sha256_hex(&recorded),
+                expected,
+                "{path}'s sha256 drifted from the digest its record publishes — \
+                 regenerate the record file and update record.md"
+            );
+        }
+    }
 }
 
 #[test]

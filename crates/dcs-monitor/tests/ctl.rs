@@ -445,6 +445,212 @@ fn read_subcommands_roundtrip_the_served_payloads() {
 }
 
 #[test]
+fn schema_prints_the_served_interface_registry() {
+    with_monitor(|_driver, addr, client| {
+        client.advance(1).unwrap();
+
+        // `schema` prints the served SchemaView: one interface per
+        // instance, each carrying the five declared collections — the
+        // `kind` keys the kind-level registry.
+        let schema: dcs_core::SchemaView =
+            serde_json::from_value(ctl_ok(addr, &["schema"])).unwrap();
+        assert_eq!(schema.interfaces.len(), 3);
+        for entry in &schema.interfaces {
+            assert_eq!(entry.interface.version, dcs_core::INTERFACE_VERSION);
+        }
+
+        // The sequencer kind's declared vocabulary serves under the
+        // instance: `advance`/`reset` sit beside the port- and
+        // parameter-adapted generic commands, and the kind-emitted
+        // `step_completed` beside the adapted journal transitions.
+        let seq = schema
+            .interfaces
+            .iter()
+            .find(|entry| entry.name == "seq")
+            .unwrap();
+        assert_eq!(seq.interface.kind, "sequencer");
+        let commands: Vec<&str> = seq
+            .interface
+            .commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        for name in [
+            "advance",
+            "reset",
+            "write_value:run",
+            "set_parameter:step_count",
+        ] {
+            assert!(commands.contains(&name), "{name} missing: {commands:?}");
+        }
+        let events: Vec<&str> = seq
+            .interface
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect();
+        assert!(events.contains(&"step_completed"), "{events:?}");
+        assert!(events.contains(&"command_settled"), "{events:?}");
+
+        // And the port/parameter halves: `run` is a measurement, `done`
+        // a Status-roled state, `step_count` a tunable configuration.
+        assert!(
+            seq.interface
+                .measurements
+                .iter()
+                .any(|measurement| measurement.name == "run" && measurement.point == Some(SEQ_RUN))
+        );
+        assert!(
+            seq.interface
+                .state
+                .iter()
+                .any(|state| state.name == "done" && state.point == Some(SEQ_DONE))
+        );
+        assert!(
+            seq.interface
+                .configuration
+                .iter()
+                .any(|property| property.name == "step_count")
+        );
+    });
+}
+
+#[test]
+fn events_print_each_components_recent_emissions() {
+    with_monitor(|driver, addr, client| {
+        // Before the first scan the retained journal tail is empty —
+        // the empty case prints an empty list for a served component.
+        let events: Vec<dcs_core::JournalEntry> =
+            serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
+        assert!(events.is_empty());
+
+        // Holding `run` through a scan completes the one-tick step: the
+        // kind-emitted `step_completed` journals attributed to `seq` —
+        // the emitted event the run produced reflected in `events`.
+        driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
+        client.advance(1).unwrap();
+        let events: Vec<dcs_core::JournalEntry> =
+            serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
+        assert!(events.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::EventEmitted { event }
+                if event.event == "step_completed"
+                    && event.component == "seq"
+                    && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
+        )));
+
+        // The all-components form keys every served instance's list by
+        // name — `seq`'s carries the same tail, and `level-pid`'s the
+        // first-observation transitions on its bound points.
+        let all: serde_json::Value = ctl_ok(addr, &["events"]);
+        for name in ["level-pid", "plain", "seq"] {
+            assert!(all.get(name).is_some(), "{name} missing: {all}");
+        }
+        assert_eq!(
+            serde_json::from_value::<Vec<dcs_core::JournalEntry>>(all["seq"].clone()).unwrap(),
+            events
+        );
+        assert!(all["level-pid"].as_array().unwrap().iter().any(|entry| {
+            entry["event"]["quality_changed"]["point"] == serde_json::json!(PV.0)
+        }));
+
+        // A name the served registry does not carry fails the
+        // invocation naming it — a lookup miss, not a rejection.
+        let output = ctl(addr, &["events", "ghost"]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("ghost"), "{output:?}");
+    });
+}
+
+#[test]
+fn resources_print_the_served_live_resource_view() {
+    with_monitor(|driver, addr, client| {
+        // One scan so every bound point has a served sample: `run`
+        // held completes the first one-tick step.
+        driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
+        client.advance(1).unwrap();
+
+        // The bare form prints the served ResourceView — the same
+        // document the client's own accessor decodes, one entry per
+        // served instance in scan order.
+        let view: dcs_core::ResourceView =
+            serde_json::from_value(ctl_ok(addr, &["resources"])).unwrap();
+        assert_eq!(view, client.resources().unwrap());
+        assert_eq!(
+            view.components
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["level-pid", "plain", "seq"]
+        );
+
+        // The filtered form prints the named instance's
+        // ComponentResources — the same element of the bare view,
+        // addressed like `events <component>`: measurements and state
+        // joined to the bound points' samples, the current
+        // configuration values, and each command's
+        // `available`/`refusal`.
+        let seq: dcs_core::ComponentResources =
+            serde_json::from_value(ctl_ok(addr, &["resources", "seq"])).unwrap();
+        assert_eq!(
+            seq,
+            *view
+                .components
+                .iter()
+                .find(|entry| entry.name == "seq")
+                .unwrap()
+        );
+        assert_eq!(seq.kind, "sequencer");
+        let run = seq
+            .measurements
+            .iter()
+            .find(|entry| entry.name == "run")
+            .unwrap();
+        assert_eq!(run.point, Some(SEQ_RUN));
+        assert_eq!(run.sample, Some(Sample::good(Value::Bool(true), Tick(1))));
+        let done = seq.state.iter().find(|entry| entry.name == "done").unwrap();
+        assert_eq!(done.point, Some(SEQ_DONE));
+        assert_eq!(done.sample, Some(Sample::good(Value::Bool(false), Tick(1))));
+        assert_eq!(
+            seq.configuration
+                .iter()
+                .find(|entry| entry.name == "step_count")
+                .unwrap()
+                .value,
+            Some(Value::Int(2))
+        );
+        // `advance`/`reset` report admissible; `write_value:run`'s
+        // bound point is not model-declared writable, so its served
+        // refusal is the reason the receipted path would answer.
+        for name in ["advance", "reset"] {
+            let command = seq
+                .commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("{name} missing: {:?}", seq.commands));
+            assert!(command.available, "{name}: {command:?}");
+        }
+        let write_run = seq
+            .commands
+            .iter()
+            .find(|command| command.name == "write_value:run")
+            .unwrap();
+        assert!(!write_run.available);
+        assert_eq!(
+            write_run.refusal.as_deref(),
+            Some("I/O point PointId(50) is not declared writable")
+        );
+
+        // A name the served registry does not carry fails the
+        // invocation naming it — the same lookup `events <component>`
+        // performs, never a rejection.
+        let output = ctl(addr, &["resources", "ghost"]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("ghost"), "{output:?}");
+    });
+}
+
+#[test]
 fn write_parses_per_the_declared_kind_and_reports_receipts() {
     with_monitor(|_driver, addr, client| {
         client.advance(1).unwrap();
@@ -1149,6 +1355,17 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "history", "--point"],
         vec![dead, "history", "--point", "abc"],
         vec![dead, "history", "--point", "10", "--since", "x"],
+        // The interface-surface reads' malformed shapes: `schema`
+        // takes nothing, `events` at most one component name — a
+        // flag-looking name is never a lookup.
+        vec![dead, "schema", "extra"],
+        vec![dead, "schema", "--actor", "op"],
+        vec![dead, "events", "a", "b"],
+        vec![dead, "events", "comp", "--actor", "op"],
+        vec![dead, "events", "--bogus"],
+        vec![dead, "resources", "a", "b"],
+        vec![dead, "resources", "comp", "--actor", "op"],
+        vec![dead, "resources", "--bogus"],
         vec![dead, "write"],
         vec![dead, "write", "10"],
         vec![dead, "write", "abc", "1"],
@@ -1243,6 +1460,9 @@ fn identical_invocations_produce_identical_output() {
             ["receipts"].as_slice(),
             ["journal"].as_slice(),
             ["history", "--point", "10"].as_slice(),
+            ["schema"].as_slice(),
+            ["events"].as_slice(),
+            ["events", "seq"].as_slice(),
         ] {
             let output = ctl(addr, args);
             // Failure messages name the monitor address — an ephemeral

@@ -215,6 +215,58 @@ pub struct CommandQueueDiagnostics {
     pub high_water: usize,
 }
 
+/// One command's standing availability verdict — the probe's answer to
+/// "is this declared `KindDeclared` command invocable at all now".
+///
+/// The verdicts are produced inside the scan boundary — the producer
+/// evaluates each component's availability probe once per declared
+/// [`KindDeclared`](crate::CommandAvailability::KindDeclared) command
+/// after each completed scan — never under a consumer read. They are
+/// advisory only: a submission still validates, queues, and settles
+/// through the receipted path, which remains the sole authority — a
+/// verdict the dispatch disagrees with settles honestly on the receipt
+/// rather than failing the scan or altering the command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandVerdict {
+    /// The command's name — a [`CommandDecl`](crate::CommandDecl) name
+    /// the component's descriptor declares.
+    pub name: String,
+    /// Whether a submission dispatches to the kind's implementation
+    /// now — the probe's standing answer. `true` reports the command
+    /// invocable; dispatch may still refuse argument-dependent or
+    /// kind-invariant reasons, which settle on the receipt.
+    pub available: bool,
+    /// The kind's standing refusal reason when `available` is `false` —
+    /// the same text a refused invocation's
+    /// [`CommandError::CommandRefused`](crate::CommandError) receipt
+    /// carries; absent when `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+}
+
+/// One component's `KindDeclared`-command availability — a
+/// [`TelemetrySnapshot`] `command_verdicts` entry.
+///
+/// `verdicts` covers exactly the commands the component's descriptor
+/// declares [`KindDeclared`](crate::CommandAvailability::KindDeclared):
+/// `Always`-available commands are admissible by construction and
+/// `BoundPointWritable` ones read against the signal index, so neither
+/// takes a probe verdict. A component declaring no `KindDeclared`
+/// commands reports an empty `verdicts`; a kind that does not
+/// implement the probe reports each one `available` — the unconditional
+/// reporting the read model already produced before the section
+/// existed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentCommands {
+    /// The component's name — the join key `components`, `descriptors`,
+    /// and `parameters` share.
+    pub name: String,
+    /// The standing verdict for each `KindDeclared`-declared command,
+    /// in the descriptor's declaration order.
+    #[serde(default)]
+    pub verdicts: Vec<CommandVerdict>,
+}
+
 /// A point-in-time snapshot of a controller run for monitoring consumers.
 ///
 /// A snapshot reports state, not history: each point and each component
@@ -266,6 +318,19 @@ pub struct TelemetrySnapshot {
     /// reads back with a zeroed section.
     #[serde(default)]
     pub command_queue: CommandQueueDiagnostics,
+    /// The `KindDeclared`-command availability section: one
+    /// [`ComponentCommands`] per registered component in the same
+    /// execution order as `components` and `descriptors`, carrying the
+    /// standing verdicts the producer's post-scan availability probe
+    /// evaluated for each declared
+    /// [`KindDeclared`](crate::CommandAvailability::KindDeclared)
+    /// command. The verdicts are advisory — the receipted command path
+    /// stays the sole authority — and are evaluated at the scan
+    /// boundary, never under a consumer read. Absent from snapshots
+    /// serialized before the section existed; such a snapshot reads
+    /// back with an empty section.
+    #[serde(default)]
+    pub command_verdicts: Vec<ComponentCommands>,
     /// The serving monitor's publication-store report — the overload
     /// counters of the bounded read-model storage this snapshot was
     /// published into. `None` — and absent on the wire — on a
@@ -294,6 +359,7 @@ impl PartialEq for TelemetrySnapshot {
             forces,
             parameters,
             command_queue,
+            command_verdicts,
             publication: _,
         } = self;
         tick == &other.tick
@@ -304,6 +370,7 @@ impl PartialEq for TelemetrySnapshot {
             && forces == &other.forces
             && parameters == &other.parameters
             && command_queue == &other.command_queue
+            && command_verdicts == &other.command_verdicts
     }
 }
 
@@ -437,6 +504,20 @@ mod tests {
                 depth: 3,
                 high_water: 6,
             },
+            command_verdicts: vec![
+                ComponentCommands {
+                    name: "scale".to_string(),
+                    verdicts: vec![CommandVerdict {
+                        name: "advance".to_string(),
+                        available: false,
+                        refusal: Some("the run is complete".to_string()),
+                    }],
+                },
+                ComponentCommands {
+                    name: "fragile".to_string(),
+                    verdicts: Vec::new(),
+                },
+            ],
             publication: Some(PublicationHealth {
                 published: 7,
                 coalesced: 3,
@@ -451,15 +532,16 @@ mod tests {
         );
 
         // A snapshot serialized before forces, parameter reporting, the
-        // publication and command-queue sections, and the cyclic exchange
-        // counters existed carries none of those fields and reads back
-        // with empty sections.
+        // publication, command-queue and command-verdict sections, and
+        // the cyclic exchange counters existed carries none of those
+        // fields and reads back with empty sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object_mut().unwrap();
         object.remove("forces");
         object.remove("parameters");
         object.remove("publication");
         object.remove("command_queue");
+        object.remove("command_verdicts");
         object
             .get_mut("io_health")
             .unwrap()
@@ -472,5 +554,6 @@ mod tests {
         assert_eq!(legacy.publication, None);
         assert_eq!(legacy.io_health.failed_exchanges, 0);
         assert_eq!(legacy.command_queue, CommandQueueDiagnostics::default());
+        assert_eq!(legacy.command_verdicts, Vec::new());
     }
 }

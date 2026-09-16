@@ -15,6 +15,7 @@ use dcs_core::{
     CommandAvailability, CommandDecl, ComponentDescriptor, EventDecl, EventField, EventFieldKind,
     EventRetention, PointId, PortDescriptor, PortRole, SchemaView, Tick,
 };
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -31,6 +32,17 @@ fn run_interface_schema_subcommand() -> std::process::Output {
         .arg("interface-schema")
         .output()
         .expect("failed to run dcs-model")
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[test]
@@ -55,6 +67,40 @@ fn interface_schema_output_is_deterministic_across_runs() {
     assert_eq!(
         String::from_utf8(first.stdout).unwrap().trim_end(),
         canonical.trim_end()
+    );
+}
+
+#[test]
+fn recorded_release_interface_schema_matches_the_emitted_output() {
+    // `v0.2.0` is the first release record carrying `dcs-model
+    // interface-schema`'s output — `v0.1.0`'s recorded commit predates
+    // the served registry (#375). The same convention as the
+    // plant-model schema pin in `tests/schema.rs`: the checked-in file
+    // must stay byte-identical to the emitted output, and its sha256
+    // must equal the digest `docs/releases/v0.2.0/record.md`
+    // publishes. Regenerate with `dcs-model interface-schema >
+    // docs/releases/v0.2.0/block-interfaces.schema.json` whenever the
+    // emitted schema legitimately changes — and update the record's
+    // published sha256 with it while the tag is pending.
+    let output = run_interface_schema_subcommand();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = "docs/releases/v0.2.0/block-interfaces.schema.json";
+    let recorded = std::fs::read(workspace_root().join(path))
+        .expect("the v0.2.0 release record's interface-schema file must exist");
+    assert_eq!(
+        recorded, output.stdout,
+        "{path} drifted from `dcs-model interface-schema`'s emitted output — \
+         regenerate the record file"
+    );
+    assert_eq!(
+        sha256_hex(&recorded),
+        "ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a",
+        "{path}'s sha256 drifted from the digest its record publishes — \
+         regenerate the record file and update record.md"
     );
 }
 

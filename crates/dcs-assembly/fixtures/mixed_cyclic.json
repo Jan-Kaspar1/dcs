@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "setpoint": { "direction": "in", "value_type": "float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-cyclic",
+      "parameters": {
+        "address": "__BUS_ADDR__",
+        "exchange_miss_threshold": 2,
+        "stations": {
+          "inlet": {
+            "level-raw": { "register": 4, "initial": { "float": 0.0 } }
+          },
+          "outlet": {
+            "valve-cmd": 9
+          }
+        }
+      },
+      "channels": {
+        "level-raw": { "direction": "in", "value_type": "float" },
+        "valve-cmd": { "direction": "out", "value_type": "float" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "sim-tcp",
+      "parameters": { "address": "__PLANT_ADDR__" },
+      "channels": {
+        "flow-raw": { "direction": "in", "value_type": "float" },
+        "pump-cmd": { "direction": "out", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "setpoint" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 2, "name": "level-raw" },
+      "stale_after_ticks": 2
+    },
+    {
+      "id": 12,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 2, "name": "valve-cmd" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 3, "name": "flow-raw" }
+    },
+    {
+      "id": 14,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 3, "name": "pump-cmd" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "level-setpoint",
+      "source": 10,
+      "unit": "m",
+      "description": "Tank level setpoint"
+    },
+    {
+      "id": 101,
+      "name": "tank-level-raw",
+      "source": 11,
+      "unit": "mA",
+      "description": "Tank level raw measurement, latched through the cyclic exchange"
+    },
+    {
+      "id": 102,
+      "name": "valve-command",
+      "source": 12,
+      "unit": "%",
+      "description": "Inlet valve command, staged for the next exchange"
+    },
+    {
+      "id": 103,
+      "name": "flow-raw",
+      "source": 13,
+      "unit": "mA",
+      "description": "Flow raw measurement, read point-wise from the remote plant"
+    },
+    {
+      "id": 104,
+      "name": "pump-command",
+      "source": 14,
+      "unit": "%",
+      "description": "Pump command, written point-wise to the remote plant"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "pid",
+      "parameters": {
+        "kp": { "float": 0.1 },
+        "ki": { "float": 0.1 },
+        "kd": { "float": 0.0 },
+        "dt": { "float": 0.1 },
+        "out_min": { "float": 4.0 },
+        "out_max": { "float": 20.0 }
+      },
+      "ports": {
+        "sp": { "direction": "in", "value_type": "float" },
+        "pv": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "analog-input",
+      "parameters": {
+        "raw_min": { "float": 4.0 },
+        "raw_max": { "float": 20.0 },
+        "eng_min": { "float": 0.0 },
+        "eng_max": { "float": 100.0 }
+      },
+      "ports": {
+        "raw": { "direction": "in", "value_type": "float" },
+        "out": { "direction": "out", "value_type": "float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "sp" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "raw" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "port": { "component": 2, "name": "pv" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out" } },
+      "to": { "point": 12 }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 3, "name": "raw" } }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out" } },
+      "to": { "point": 14 }
+    }
+  ]
+}

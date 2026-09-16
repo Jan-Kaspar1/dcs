@@ -21,7 +21,13 @@ declares:
 - `controllers` — one service per named controller, each `--listen`
   matching its declared address and publishing its monitor port, and
   the tracking standby's `--standby` flag plus startup ordering wired
-  to the peer the manifest names.
+  to the peer the manifest names;
+- `controllers[].state_file` / `controllers[].journal_file` — the
+  optional durability paths (decisions 35 and 36): each declared
+  container path must be covered by a read-write mount and carried as
+  the `--state-file`/`--journal-file` flag argument; a field the
+  manifest omits means the flag is absent, and a writable mount or
+  flag the manifest does not declare diverges the same way.
 
 The definition is parsed through `docker compose config --format json`
 when a docker CLI is available — which also statically validates the
@@ -114,17 +120,26 @@ def view(service, normalized):
     for volume in service.get("volumes") or []:
         if isinstance(volume, str):
             parts = volume.split(":")
+            # A bare name is a named volume; anything path-like is a
+            # bind source, reduced to a repository-relative path.
+            source = parts[0]
+            named = bool(source) and not source.startswith(("/", ".", "~"))
             mounts.append(
                 {
-                    "source": repo_relative(parts[0], normalized),
+                    "source": source
+                    if named
+                    else repo_relative(source, normalized),
                     "target": parts[1] if len(parts) > 1 else "",
                     "ro": len(parts) > 2 and "ro" in parts[2].split(","),
                 }
             )
         else:
+            named = volume.get("type") == "volume"
             mounts.append(
                 {
-                    "source": repo_relative(volume.get("source", ""), normalized),
+                    "source": volume.get("source", "")
+                    if named
+                    else repo_relative(volume.get("source", ""), normalized),
                     "target": volume.get("target", ""),
                     "ro": bool(volume.get("read_only")),
                 }
@@ -173,6 +188,19 @@ def port_of(address):
         return int(address.rsplit(":", 1)[1])
     except (ValueError, IndexError):
         return None
+
+
+def path_within(path, directory):
+    """`path` names `directory` itself or lives beneath it."""
+    return path == directory or path.startswith(directory.rstrip("/") + "/")
+
+
+# The manifest's optional per-controller durability fields and the
+# invocation flags that carry them (decisions 35 and 36).
+PERSISTENCE = (
+    ("state_file", "--state-file"),
+    ("journal_file", "--journal-file"),
+)
 
 
 def main():
@@ -325,6 +353,47 @@ def main():
             expect(
                 plant_name in svc["depends"],
                 f"{name} does not order on the {plant_name} service",
+            )
+
+        # Durability: a declared state_file/journal_file must ride a
+        # read-write mount — the innermost mount covering the path is
+        # the one the file lands on — and the invocation flag must
+        # carry it; a field the manifest omits means the flag is
+        # absent, and every writable mount must back a declared path.
+        declared_paths = [
+            controller[field] for field, _ in PERSISTENCE if field in controller
+        ]
+        for field, flag_name in PERSISTENCE:
+            declared_path = controller.get(field)
+            actual = flag(svc["argv"], flag_name)
+            if declared_path is None:
+                expect(
+                    actual is None,
+                    f"{name} passes {flag_name} {actual!r} but the manifest "
+                    f"declares no {field}",
+                )
+                continue
+            expect(
+                actual == declared_path,
+                f"{name} {flag_name} is {actual!r}, manifest {field} is "
+                f"{declared_path!r}",
+            )
+            covering = [
+                m for m in svc["mounts"] if path_within(declared_path, m["target"])
+            ]
+            innermost = max(covering, key=lambda m: len(m["target"]), default=None)
+            expect(
+                innermost is not None and not innermost["ro"],
+                f"{name} {field} {declared_path!r} is not covered by a "
+                f"read-write mount; mounts are {svc['mounts']}",
+            )
+        for m in svc["mounts"]:
+            if m["ro"]:
+                continue
+            expect(
+                any(path_within(p, m["target"]) for p in declared_paths),
+                f"{name} carries writable mount {m['source']}:{m['target']} "
+                f"the manifest declares no state_file or journal_file under",
             )
 
     expect(

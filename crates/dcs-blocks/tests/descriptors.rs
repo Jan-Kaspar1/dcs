@@ -18,7 +18,7 @@ use dcs_blocks::{
     SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer,
     Totalizer, UnitBounds, Valve, ZoneIo,
 };
-use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
+use dcs_core::{Command, CommandVerdict, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
 use std::collections::BTreeSet;
@@ -810,5 +810,89 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
     assert_eq!(
         restored.snapshot().parameters,
         executor.snapshot().parameters
+    );
+}
+
+/// Reads `command`'s published verdict on `component` out of the
+/// snapshot's `command_verdicts` section — `None` when the component or
+/// command carries none.
+fn verdict<'a>(
+    snapshot: &'a TelemetrySnapshot,
+    component: &str,
+    command: &str,
+) -> Option<&'a CommandVerdict> {
+    snapshot
+        .command_verdicts
+        .iter()
+        .find(|entry| entry.name == component)
+        .and_then(|entry| entry.verdicts.iter().find(|v| v.name == command))
+}
+
+fn invoke(component: &str, command: &str, arguments: &[(&str, Value)]) -> Command {
+    Command::Invoke {
+        component: component.to_string(),
+        command: command.to_string(),
+        arguments: arguments
+            .iter()
+            .map(|(name, value)| (name.to_string(), *value))
+            .collect(),
+    }
+}
+
+#[test]
+fn a_completed_sequencer_publishes_advances_standing_refusal() {
+    // `seq` is the proving kind: `advance` is `KindDeclared`-available,
+    // `reset` `Always`. The post-scan probe publishes the verdicts on
+    // the snapshot — exactly the declared `KindDeclared` commands, so
+    // `reset` takes no verdict — and the completed table's `advance`
+    // verdict carries the same refusal the receipted path settles.
+    let (sim, point_map, components) = wired();
+    let mut executor = Executor::new(&sim, point_map, components).unwrap();
+    executor.scan().unwrap();
+
+    let snapshot = executor.snapshot();
+    let seq = snapshot
+        .command_verdicts
+        .iter()
+        .find(|entry| entry.name == "seq")
+        .expect("the probe covers every registered component");
+    assert_eq!(
+        seq.verdicts,
+        [CommandVerdict {
+            name: "advance".to_string(),
+            available: true,
+            refusal: None,
+        }]
+    );
+
+    // `advance {count: 9}` lands past the table's last step: the run
+    // completes and the same scan's probe reports the standing refusal.
+    executor.submit_command(invoke("seq", "advance", &[("count", Value::Int(9))]));
+    executor.scan().unwrap();
+    let snapshot = executor.snapshot();
+    assert_eq!(
+        verdict(&snapshot, "seq", "advance"),
+        Some(&CommandVerdict {
+            name: "advance".to_string(),
+            available: false,
+            refusal: Some("the sequence has run to its end; reset restarts it".to_string()),
+        })
+    );
+    // `reset` is `Always`-declared: admissible by construction, so it
+    // takes no verdict — the section covers exactly the declared
+    // `KindDeclared` commands.
+    assert_eq!(verdict(&snapshot, "seq", "reset"), None);
+
+    // `reset` re-opens `advance`: the next scan's probe reports it
+    // invocable again — the verdicts track checkpointed run state.
+    executor.submit_command(invoke("seq", "reset", &[]));
+    executor.scan().unwrap();
+    assert_eq!(
+        verdict(&executor.snapshot(), "seq", "advance"),
+        Some(&CommandVerdict {
+            name: "advance".to_string(),
+            available: true,
+            refusal: None,
+        })
     );
 }

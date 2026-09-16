@@ -100,7 +100,10 @@ plus named `PortRole` hints (`ProcessValue`, `Setpoint`, `Output`, `Status`)
 and `describe::parameter` entries matching the keys `from_parameters` reads,
 with `ParameterRange` bounds from the shared constants (`FINITE_F64`,
 `POSITIVE_F64`, `NONNEGATIVE_F64`, `NONNEGATIVE_INT`). The executor serves one
-descriptor per component in `TelemetrySnapshot.descriptors`.
+descriptor per component in `TelemetrySnapshot.descriptors`. The descriptor
+is also where a kind declares native commands and emitted events
+(`descriptor.commands`/`descriptor.events`) — see *Declared commands and
+emitted events* below.
 
 ### 5. Checkpoint state
 
@@ -359,6 +362,144 @@ assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(3.0));
 assert_eq!(executor.snapshot().descriptors[0].kind, "running-max");
 assert_eq!(executor.snapshot().components[0].step_errors, 0);
 ```
+
+## Declared commands and emitted events
+
+Steps 2 and 4 cover the adapted surface: ports become measurement and
+state resources, parameters become configuration, and the generic
+`write_value`/`force_point`/`unforce_point`/`set_parameter` variants
+adapt into the interface's `commands` entries. A kind may additionally
+declare *native* commands and events — the `Declared`-provenance
+vocabulary decision 82 adds — when a writable point or tunable parameter
+cannot express the behavior: a one-shot action, an action with typed
+arguments, an action whose availability the kind itself decides, or a
+typed event the block emits rather than a point transition the monitor
+observes. The checked-in example is `dcs_blocks::Sequencer`
+(`crates/dcs-blocks/src/sequencer.rs`): it declares the `advance`/`reset`
+commands and the `step_completed` event beside its `run`/`reset` level
+inputs — deliberately not writable-point aliases, because `reset` the
+command is a one-shot where the `reset` input is a held condition.
+
+### Declaring a native command
+
+`describe()`'s returned `ComponentDescriptor.commands` lists
+`CommandDecl`s:
+
+- `name` — the command's stable identity within the interface, unique
+  across the derived `commands` collection (so it may not collide with
+  an adapted `write_value:<port>`/`set_parameter:<param>` name);
+- `request` — the typed argument schema, `CommandArgument`s of
+  `name` plus `ValueKind`;
+- `availability` — `CommandAvailability::Always` (submittable whenever
+  the instance exists) or `KindDeclared` (the kind's own predicate
+  decides per submission and reports the refusal reason).
+
+A consumer submits one as `Command::Invoke { component, command,
+arguments }` — `component` the instance name, `command` the declared
+name, `arguments` keyed by the declared argument names. Submission-time
+validation refuses an unknown component, an undeclared command name, or
+a declared argument carrying the wrong `Value` kind before the command
+ever queues (`UnknownComponent`, `UnknownCommand`,
+`ArgumentTypeMismatch` — each naming the instance); what the schema does
+not constrain — a supplied argument name the schema does not declare, a
+missing argument, a value outside the command's domain, the
+`KindDeclared` predicate — is the implementation's to refuse in
+`Component::invoke_command`, which the executor calls at the scan
+boundary in deterministic submission order.
+`Ok` applies the command; `Err(reason)` settles the invocation
+`command_refused` carrying the reason verbatim. Either way the ordinary
+receipted path answers: one submission, one `CommandReceipt`, one
+journaled `command_settled` — an invoke is never fire-and-forget and
+never an alias of a writable point.
+
+```rust,ignore
+fn invoke_command(
+    &mut self,
+    command: &str,
+    arguments: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    match command {
+        "advance" => { /* validate `count`, mutate run state, Ok(()) */ }
+        _ => unreachable!("submission validates the declared command name"),
+    }
+}
+```
+
+The default hook refuses every invocation, so a kind declaring commands
+it does not serve still settles `command_refused` rather than silently
+succeeding. **Checkpoint obligation:** command-mutated state is run
+state — fold every field the command touches into `capture_state`, or a
+tracking standby will not inherit the effect (decision 84).
+
+A kind declaring a `kind_declared`-availability command also implements
+`Component::command_refusal`, the standing-availability probe the
+executor evaluates once per declared `kind_declared` command at each
+scan's step end and publishes on the snapshot's `command_verdicts`
+section: `None` reports the command invocable now, `Some(reason)` the
+kind's standing refusal — the same text a refused invocation settles.
+The probe is argument-free: it answers whether the command is invocable
+at all now, so argument-domain refusals stay in `invoke_command`.
+Factor the standing predicate once and have dispatch consult it — the
+published verdict and the refusal must be the same expression. The
+verdict is advisory only: submissions still validate, queue, and settle
+through the receipted path, and a verdict dispatch disagrees with
+settles honestly rather than failing the scan. The default reports
+every declared command invocable, matching the read model's earlier
+unconditional `available`.
+
+### Declaring an emitted event
+
+`ComponentDescriptor.events` lists `EventDecl`s: `name` (the stable
+event-kind identity), `payload` (`EventField`s of `name`,
+`EventFieldKind` — a `Value` of a kind, a `Quality`, a `Receipt`, or
+free `Text` — plus an `optional` flag for fields that may carry no
+value), and `retention` (`EventRetention::Journal` for the durable
+transition record; `History`/`Latest` are declared in the vocabulary but
+route to no consumer-visible store yet — treat them as reserved). The
+component emits by pushing `EmittedEvent`s (`event` naming the
+declaration, `fields` keyed by the declared field names) into a buffer
+`Component::drain_events` empties; the executor drains after every
+`step`, success or failure, stamps each event's `component` with the
+registered instance name, and journal-retained emissions land as
+`JournalEvent::EventEmitted` at the producing scan's tick. An emission
+the descriptor never declares still journals — the audit record never
+drops an event — but the drift test treats declaration as the contract.
+
+**Checkpoint obligation for emitting kinds:** an emitted event's
+sequence is derived state. A kind that emits sequence-bearing events
+must checkpoint everything feeding the sequence — decision 84's
+emit-identical rule makes a tracking standby re-derive the same
+emissions, so a kind emitting from non-checkpointed state would break a
+promoted run's indistinguishable journal. `Sequencer` checkpoints the
+step position its `step_completed` emissions report.
+
+### The spec mirror and the generic consumer
+
+A kind declaring commands or events mirrors them on its `dcs-build`
+spec — `declared_commands()`/`declared_events()` returning the same
+`CommandDecl`/`EventDecl` data (`crates/dcs-build/src/specs.rs`, the
+`sequencer` spec is the worked example) — so the engineering
+composition, the runtime descriptor, and the served schema share one
+declaration, pinned by the spec-drift sweep.
+
+A generic consumer needs no kind-specific code:
+
+- `GET /schema` serves the instance-level `BlockInterface` per
+  component — declared commands and events appear under `Declared`
+  provenance beside the adapted entries;
+- `GET /resources` joins the live half — per-command `available` or
+  the named refusal the submission path would answer, and the retained
+  journal tail's entries attributed to the instance, `event_emitted`
+  records included;
+- the monitoring page renders the command table with typed argument
+  controls and the recent-events list from those two documents alone;
+- `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a
+  declared command through the same receipted path without a browser.
+
+A `KindDeclared` command reports `available` in the resource view even
+when the kind's predicate would refuse this submission — the served
+refusal is the settled `command_refused` receipt's, so consumers should
+surface that named reason rather than pre-judging availability.
 
 ## Adding a device kind
 
@@ -1244,6 +1385,7 @@ a monitored run is platform machinery. The split:
 | The scoped `ComponentIo` enforcing declared I/O during `step`, and the deterministic scan order | A `describe()` override for role hints and parameter metadata (a correct default exists) |
 | Per-component diagnostics (`step_errors`, `last_error`, `last_tick`) and point samples in `TelemetrySnapshot`, served by `dcs-monitor`'s HTTP+JSON endpoints | `capture_state`/`restore_state` field coverage for every value carried between scans |
 | Descriptor publication in `TelemetrySnapshot.descriptors`, so the UI renders any registered kind generically | The registration call in the deployed `ComponentRegistry` |
+| The `BlockInterface` derivation, its serving over `GET /schema`/`GET /resources`, invoke submission validation (`UnknownComponent`/`UnknownCommand`/`ArgumentTypeMismatch`), scan-boundary dispatch in submission order, the settled `command_refused` receipt, post-`step` event draining (failing steps included), `event_emitted` journaling at the producing tick, and the emit-identical standby behavior | The `CommandDecl`/`EventDecl` declarations on the descriptor, the `invoke_command`/`drain_events` implementations, the `dcs-build` spec mirror (`declared_commands`/`declared_events`), and `capture_state` coverage of command-mutated and event-sequence state |
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
 | The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook` (and `step_local(dt)` invoking only non-field-facing hooks), and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), the `field_facing` flag, and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |
