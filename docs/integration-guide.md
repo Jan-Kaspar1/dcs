@@ -707,6 +707,531 @@ executor.scan().unwrap();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(100.0));
 ```
 
+### Cyclic device kinds: the `CyclicIoDriver` contract
+
+Everything above is the per-point contract: `read`/`write` answer one
+point per call, and each call may transport. Some field transports do
+not have that shape — a fieldbus like EtherCAT exchanges the whole
+process image once per cycle, inputs arriving atomically in one frame
+while the staged outputs publish in the same frame. Decision 78
+(`docs/architecture.md`) adds the opt-in seam for that shape:
+`IoDriver::cyclic`, defaulting to `None`, answers
+`Some(&dyn CyclicIoDriver + Sync)` on a driver implementing
+`CyclicIoDriver::exchange(tick)` — the one call allowed to touch the
+transport.
+
+The checked-in consumer is the `ethercat` kind (`crates/dcs-ethercat`):
+a `BusMaster` owns the staged output image, the latched input image,
+the miss accounting, and the exchange diagnostics of one logical bus
+over a `BusTransport`; each `EthercatDevice` is the per-device
+`IoDriver` surface, and only the bus's first attacher carries
+`cyclic()` and `diagnostics`, so a shared bus exchanges and counts once
+per scan. `EthercatBuses::with_opener` driving a scripted
+`testing::FakeTransport` is the no-hardware path a cyclic
+integration's contract tests take, and the scripted `CyclicStub` in
+`crates/dcs-runtime`'s executor tests pins every element below.
+
+#### Opting in — and not
+
+A kind opts in only when its transport genuinely turns a process image
+once per scan: the driver then keeps two local images — the *input
+image* the last completed exchange latched and the *output image*
+`write` stages — and its `read`/`write` become image-local, never
+transporting. The extension trait makes support and implementation
+atomic: `cyclic()` can answer `Some` only where an `exchange` impl
+exists.
+
+A kind must *not* opt in when:
+
+- its transport answers per point — the shipped `sim*`, `sim-tcp`,
+  `sim-scripted`, and `sim-bus` kinds all keep the default `None`.
+  There is no once-per-scan frame for `exchange` to run; faking the
+  image would only hide per-point transport behind a no-op boundary and
+  blur the failure semantics the contract exists to make precise — one
+  counted boundary failure, not a fault per covered point;
+- it cannot hold the image semantics below — a `read` that still needs
+  the wire, an input image it cannot latch atomically, or no
+  defensible `exchange_miss_threshold` to declare as device data;
+- its transport has no exchange boundary at all — an event-driven or
+  polled-snapshot device whose freshness is per point, not per frame.
+
+#### The exchange boundary
+
+The executor detects the surface at wiring — `IoDriver::cyclic` on the
+assembled driver — and calls `exchange(tick)` exactly once per scan,
+ordered *after* queued commands apply (so a command-staged write
+publishes in the same exchange) and *before* the per-point input reads
+that serve the image it latched. The scan's write phase runs later
+still, so a value a component writes in scan `t` stages into the output
+image and publishes in scan `t + 1`'s exchange — the contract's
+documented one-scan actuation delay.
+
+A failed `exchange` completes nothing — the input image holds its
+previous latch and the staged output image is retained for the next
+exchange — and counts once at the boundary under
+`IoHealth.failed_exchanges`, `consecutive_failures`, and `last_error`
+(attributed `In`, the boundary it opens). The scan never aborts on it:
+the held image still answers the reads that follow.
+
+#### Image semantics, aging, and escalation
+
+One exchange publishes the output image staged since the previous
+exchange and latches the returned input image atomically, stamping each
+latched sample with the exchange's `tick` as its acquisition stamp.
+That stamp is what a point's declared `stale_after_ticks` budget
+measures (see `docs/model-reference.md`): while exchanges keep landing,
+samples are as fresh as the scan; while they miss, the held value ages
+to `Uncertain(Stale)` past its budget — designed degradation, not
+failure.
+
+While consecutive misses stay under the device's declared
+`exchange_miss_threshold` parameter — the contract-settled name; a
+cyclic kind takes it as device-parameter data exactly like `sim-bus`'s
+register addressing — `read` keeps serving the held image. At or past
+the threshold, reads escalate to `IoError::Disconnected`: an ordinary
+per-point boundary fault from then on, counted under `failed_reads`
+with the point's held value degrading to `Bad`. `write` staging never
+escalates — staged outputs publish on the next exchange that
+completes.
+
+An exchange that completes short — a working-counter shortfall naming
+one station — latches the answering stations' data and escalates only
+the named station's points; an unattributable failure degrades the
+whole bus. Completed-but-short exchanges count under
+`working_counter_mismatches`, not `failed_exchanges`.
+
+#### Diagnostics
+
+A cyclic driver's `diagnostics()` reports the link `Disconnected` while
+any miss stands and carries `exchange: Some(ExchangeDiagnostics)` —
+the `attempted`/`succeeded` counters, `working_counter_mismatches`,
+`last_exchange_tick` (the acquisition stamp the held image carries),
+and `missed_deadlines` for completed-but-late exchanges. These are
+bus-level counters, deliberately distinct from the executor's
+per-point ones; the section is serde-optional, so payloads serialized
+before the contract existed stay readable.
+
+#### Gate and fan-out forwarding
+
+Wrappers forward or aggregate the surface exactly as they do for
+`diagnostics`:
+
+- `dcs_runtime::WriteGate` passes `cyclic()` through — the exchange is
+  not a write, so a quiesced standby still latches fresh inputs while
+  the writes its gate dropped never reached the driver's staged image:
+  nothing the standby computed publishes;
+- `FanoutDriver` answers `Some` when any backend is cyclic; its
+  `exchange` turns each cyclic backend's image in backend order, the
+  first failing backend ending the call — a bus the call never reached
+  simply holds its image for the next scan. Its `diagnostics` merges
+  each reporting backend's `exchange` section — counters sum over the
+  buses and `last_exchange_tick` takes the earliest reported, the
+  freshest exchange every bus completed — so a shared-bus kind must
+  report its counters once, as `ethercat`'s owner-only surface does.
+
+#### Worked example: a cyclic device kind, end to end
+
+This example registers a `demo-bus` kind — a two-image backend whose
+`field` map stands in for the frame a real `exchange` moves — then runs
+a model through it: one exchange per scan, the held image's aging and
+miss-threshold escalation, the one-scan actuation delay, the exchange
+diagnostics, and the write gate's forwarding. It compiles and runs as
+part of the test suite; the shipped reference is `dcs-ethercat`'s
+`EthercatDevice`/`BusMaster`, which holds the same contract over a real
+`BusTransport`.
+
+```rust
+use dcs_assembly::{
+    assemble, resolve_drivers, ComponentRegistry, DeviceBackend, DeviceDriver, DeviceError,
+    DeviceSpec, DriverRegistry,
+};
+use dcs_core::{
+    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
+    LinkState, PointId, Quality, QualityReason, Sample, Tick, Value, ValueKind,
+};
+use dcs_model::{DeviceId, PlantModel};
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// A cyclic backend: `exchange` is the only call that touches the
+/// field — the `field` map stands in for the frame a real transport
+/// moves. `read` serves the input image the last completed exchange
+/// latched and `write` stages the pending output image; neither
+/// transports.
+struct CyclicBus {
+    /// Every bound point's direction and declared value kind.
+    points: HashMap<PointId, (Direction, ValueKind)>,
+    /// The device-declared `exchange_miss_threshold`: consecutive
+    /// uncompleted exchanges before reads escalate to `Disconnected`.
+    miss_threshold: u64,
+    state: Mutex<BusImages>,
+    /// Instrumentation: the transport-call count — `exchange` is the
+    /// only increment — and the outage flag a test asserts against.
+    exchanges: AtomicU64,
+    link_down: AtomicBool,
+}
+
+/// The images and accounting behind the backend's mutex.
+struct BusImages {
+    /// The far side — what the exchange moves data to and from.
+    field: HashMap<PointId, Value>,
+    /// The held input image the last completed exchange latched.
+    latched: HashMap<PointId, Sample>,
+    /// The pending output image `write` stages — retained across a
+    /// failed exchange, published by the next completed one.
+    staged: HashMap<PointId, Value>,
+    /// Consecutive uncompleted exchanges — the miss count the declared
+    /// `exchange_miss_threshold` compares against.
+    misses: u64,
+    /// The exchange counters `diagnostics` reports.
+    attempted: u64,
+    succeeded: u64,
+    last_exchange_tick: Option<Tick>,
+    last_error: Option<String>,
+}
+
+impl CyclicBus {
+    /// Plants `value` on the field — what the far side asserts between
+    /// exchanges. The held image sees it only once an exchange latches.
+    fn field_set(&self, point: PointId, value: Value) {
+        self.state.lock().unwrap().field.insert(point, value);
+    }
+
+    /// What the field currently carries — the published output side.
+    fn field_value(&self, point: PointId) -> Option<Value> {
+        self.state.lock().unwrap().field.get(&point).copied()
+    }
+
+    /// Scripts a transport outage: while down, every exchange fails.
+    fn set_link_down(&self, down: bool) {
+        self.link_down.store(down, Ordering::Relaxed);
+    }
+
+    /// The exchange count — the transport calls per-point access never
+    /// makes.
+    fn exchange_count(&self) -> u64 {
+        self.exchanges.load(Ordering::Relaxed)
+    }
+}
+
+impl IoDriver for CyclicBus {
+    /// Serves the held input image — never the field. At or past the
+    /// declared miss threshold, or for a point the driver does not
+    /// serve, the read fails. An output read serves the pending staged
+    /// image: what the next completed exchange will publish.
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        let (direction, _) = *self
+            .points
+            .get(&point)
+            .ok_or(IoError::UnknownPoint(point))?;
+        let state = self.state.lock().unwrap();
+        if state.misses >= self.miss_threshold {
+            return Err(IoError::Disconnected(point));
+        }
+        match direction {
+            Direction::In => state
+                .latched
+                .get(&point)
+                .copied()
+                .ok_or(IoError::UnknownPoint(point)),
+            Direction::Out => state
+                .staged
+                .get(&point)
+                .map(|&value| Sample::good(value, state.last_exchange_tick.unwrap_or(Tick::ZERO)))
+                .ok_or(IoError::UnknownPoint(point)),
+        }
+    }
+
+    /// Stages the pending output image — never the field. The
+    /// `UnknownPoint`/`TypeMismatch` semantics are the per-point
+    /// contract's, unchanged; the field owns the input image, so an
+    /// `in` point has no writable surface.
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        let (direction, kind) = *self
+            .points
+            .get(&point)
+            .ok_or(IoError::UnknownPoint(point))?;
+        if direction != Direction::Out {
+            return Err(IoError::UnknownPoint(point));
+        }
+        if value.kind() != kind {
+            return Err(IoError::TypeMismatch {
+                point,
+                expected: kind,
+                found: value,
+            });
+        }
+        self.state.lock().unwrap().staged.insert(point, value);
+        Ok(())
+    }
+
+    /// The cyclic half of the I/O-health surface: the exchange counters
+    /// and the link state — `Disconnected` while any miss stands.
+    fn diagnostics(&self) -> Option<DriverDiagnostics> {
+        let state = self.state.lock().unwrap();
+        Some(DriverDiagnostics {
+            link: if state.misses > 0 {
+                LinkState::Disconnected
+            } else {
+                LinkState::Connected
+            },
+            last_error: state.last_error.clone(),
+            exchange: Some(ExchangeDiagnostics {
+                attempted: state.attempted,
+                succeeded: state.succeeded,
+                working_counter_mismatches: 0,
+                last_exchange_tick: state.last_exchange_tick,
+                missed_deadlines: 0,
+            }),
+        })
+    }
+
+    /// `Some` opts the backend into the cyclic contract — the executor
+    /// detects the surface at wiring and calls `exchange` once per scan.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        Some(self)
+    }
+}
+
+impl CyclicIoDriver for CyclicBus {
+    /// One process-image exchange for `tick`: publish the staged output
+    /// image, then latch the returned input image atomically, stamping
+    /// each sample with `tick` — the acquisition stamp a
+    /// `stale_after_ticks` budget measures.
+    fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        self.exchanges.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        state.attempted += 1;
+        if self.link_down.load(Ordering::Relaxed) {
+            // A failed exchange completes nothing: the input image
+            // holds, the staged output image is retained for the next
+            // exchange, and the miss counts once at the boundary.
+            state.misses += 1;
+            state.last_error = Some("the exchange did not complete".to_string());
+            return Err(IoError::Disconnected(
+                *self.points.keys().min().expect("a nonempty image"),
+            ));
+        }
+        for (&point, &value) in &state.staged {
+            state.field.insert(point, value);
+        }
+        let latched: Vec<(PointId, Sample)> = state
+            .field
+            .iter()
+            .filter(|(point, _)| self.points[point].0 == Direction::In)
+            .map(|(&point, &value)| (point, Sample::good(value, tick)))
+            .collect();
+        for (point, sample) in latched {
+            state.latched.insert(point, sample);
+        }
+        state.misses = 0;
+        state.succeeded += 1;
+        state.last_exchange_tick = Some(tick);
+        Ok(())
+    }
+}
+
+fn neutral(kind: ValueKind) -> Value {
+    match kind {
+        ValueKind::Bool => Value::Bool(false),
+        ValueKind::Int => Value::Int(0),
+        ValueKind::Float => Value::Float(0.0),
+    }
+}
+
+/// The `"demo-bus"` kind's factory. `exchange_miss_threshold` is the
+/// contract-settled parameter name a cyclic kind declares — required,
+/// a positive integer.
+fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    for name in spec.parameters.keys() {
+        if name != "exchange_miss_threshold" {
+            return Err(DeviceError::parameters(format!("unknown parameter {name:?}")));
+        }
+    }
+    let miss_threshold = spec
+        .parameters
+        .get("exchange_miss_threshold")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&n| n >= 1)
+        .ok_or_else(|| {
+            DeviceError::parameters("\"exchange_miss_threshold\" must be a positive integer")
+        })?;
+    let mut points = HashMap::new();
+    let mut field = HashMap::new();
+    let mut latched = HashMap::new();
+    let mut staged = HashMap::new();
+    for point in &spec.points {
+        points.insert(point.point, (point.direction, point.kind));
+        match point.direction {
+            // The field asserts inputs; its seed doubles as the
+            // pre-first-exchange held image.
+            Direction::In => {
+                field.insert(point.point, neutral(point.kind));
+                latched.insert(point.point, Sample::good(neutral(point.kind), Tick::ZERO));
+            }
+            // The pending output image seeds with the safe state a
+            // field kind stages before the first exchange.
+            Direction::Out => {
+                staged.insert(point.point, neutral(point.kind));
+            }
+        }
+    }
+    let bus = Arc::new(CyclicBus {
+        points,
+        miss_threshold,
+        state: Mutex::new(BusImages {
+            field,
+            latched,
+            staged,
+            misses: 0,
+            attempted: 0,
+            succeeded: 0,
+            last_exchange_tick: None,
+            last_error: None,
+        }),
+        exchanges: AtomicU64::new(0),
+        link_down: AtomicBool::new(false),
+    });
+    // A field-facing backend — the kind reaches the shared field — with
+    // nothing to step (a field transport advances itself) and no
+    // write-ownership claim to arbitrate. `inspect` carries the backend
+    // so tooling — and this example — can reach its images.
+    let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: bus,
+        step: None,
+        claim: None,
+        inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+let model = PlantModel::load(
+    r#"{
+      "version": 1,
+      "devices": [{
+        "id": 1, "kind": "demo-bus",
+        "parameters": {"exchange_miss_threshold": 3},
+        "channels": {
+          "level": {"direction": "in",  "value_type": "float"},
+          "valve": {"direction": "out", "value_type": "float"}
+        }
+      }],
+      "io_points": [
+        {"id": 1, "direction": "in",  "value_type": "float",
+         "stale_after_ticks": 1,
+         "channel": {"device": 1, "name": "level"}},
+        {"id": 2, "direction": "out", "value_type": "float",
+         "channel": {"device": 1, "name": "valve"}}
+      ],
+      "signals": [{"id": 1, "name": "level", "source": 1}],
+      "components": [],
+      "connections": []
+    }"#,
+)
+.unwrap();
+
+let drivers = DriverRegistry::standard().with("demo-bus", demo_bus);
+let driver = resolve_drivers(&model, &drivers).unwrap().build().unwrap();
+// The fan-out aggregated the cyclic surface: the backend opted in, so
+// the assembled driver answers `Some` and every scan will exchange.
+assert!(driver.cyclic().is_some());
+// The factory's `inspect` handle reaches the backend behind the fan-out.
+let bus = driver.inspect::<CyclicBus>(DeviceId(1)).unwrap();
+let mut executor = assemble(&model, &ComponentRegistry::new(), &driver).unwrap();
+
+// The field asserted 4.0 before the run; the held image still carries
+// the seed — nothing sees the field until an exchange latches it.
+bus.field_set(PointId(1), Value::Float(4.0));
+assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(0.0));
+
+// One exchange ran at the read boundary and the input phase served the
+// fresh latch — while the per-point `read` never transported.
+executor.scan().unwrap();
+assert_eq!(bus.exchange_count(), 1);
+assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
+
+// A write stages into the pending output image — the same call the
+// scan's write phase makes — and the *next* scan's exchange publishes
+// it: the one-scan actuation delay.
+driver.write(PointId(2), Value::Float(7.0)).unwrap();
+assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(0.0)));
+executor.scan().unwrap();
+assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
+
+// The link drops: exchanges fail, each counted once at the boundary,
+// while the held image keeps serving — aging under the point's
+// `stale_after_ticks` budget.
+bus.set_link_down(true);
+bus.field_set(PointId(1), Value::Float(9.0)); // unseen until an exchange lands
+executor.scan().unwrap(); // miss 1 of 3: held value, still inside the budget
+assert_eq!(executor.snapshot().io_health.failed_exchanges, 1);
+assert_eq!(executor.snapshot().io_health.failed_reads, 0);
+assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
+
+// Miss 2: the held sample's acquisition stamp lags past the declared
+// budget — `Uncertain(Stale)`.
+executor.scan().unwrap();
+assert_eq!(
+    executor.sample(PointId(1)).unwrap().quality,
+    Quality::Uncertain(QualityReason::Stale)
+);
+
+// Miss 3 reaches `exchange_miss_threshold`: reads escalate to
+// `Disconnected` — an ordinary boundary fault degrading the held value
+// to `Bad`.
+executor.scan().unwrap();
+let health = &executor.snapshot().io_health;
+assert_eq!(health.failed_exchanges, 3);
+assert_eq!(health.failed_reads, 1);
+assert_eq!(
+    executor.sample(PointId(1)).unwrap().quality,
+    Quality::Bad(QualityReason::CommunicationFault)
+);
+let diagnostics = health.driver.clone().unwrap();
+assert_eq!(diagnostics.link, LinkState::Disconnected);
+assert_eq!(
+    diagnostics.exchange.unwrap(),
+    ExchangeDiagnostics {
+        attempted: 5,
+        succeeded: 2,
+        working_counter_mismatches: 0,
+        last_exchange_tick: Some(Tick(2)),
+        missed_deadlines: 0,
+    }
+);
+
+// The link returns: the next exchange completes — misses reset, the
+// link recovers, and the field's asserted value lands fresh.
+bus.set_link_down(false);
+executor.scan().unwrap();
+assert_eq!(
+    executor.sample(PointId(1)).unwrap(),
+    Sample::good(Value::Float(9.0), Tick(6))
+);
+
+// A `WriteGate` between executor and driver forwards `cyclic()` — the
+// exchange is not a write. A quiesced standby still latches fresh
+// inputs while its dropped writes never stage.
+let gate = dcs_runtime::WriteGate::closed(&driver);
+let mut standby = assemble(&model, &ComponentRegistry::new(), &gate).unwrap();
+bus.field_set(PointId(1), Value::Float(2.0));
+gate.write(PointId(2), Value::Float(5.0)).unwrap(); // accepted and dropped
+standby.scan().unwrap();
+assert_eq!(standby.sample(PointId(1)).unwrap().value, Value::Float(2.0));
+assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
+
+// Lifting the gate lets the next write stage — and the next exchange
+// publish it.
+gate.open();
+gate.write(PointId(2), Value::Float(5.0)).unwrap();
+standby.scan().unwrap();
+assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
+```
+
 ## Automatic versus supplied
 
 Once the two registrations exist, everything between a model declaration and
@@ -722,6 +1247,7 @@ a monitored run is platform machinery. The split:
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
 | The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook` (and `step_local(dt)` invoking only non-field-facing hooks), and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), the `field_facing` flag, and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |
+| The once-per-scan `exchange` at the read boundary for drivers answering `Some` from `cyclic()`, `failed_exchanges` boundary counting, `stale_after_ticks` aging of held samples, and `WriteGate`/`FanoutDriver` forwarding of the cyclic surface | The cyclic kind's `CyclicIoDriver` implementation: the input/output images, the transport-facing `exchange`, the declared `exchange_miss_threshold`, station attribution of short exchanges, and the `ExchangeDiagnostics` section |
 
 ## Where errors surface
 
