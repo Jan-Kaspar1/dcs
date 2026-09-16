@@ -162,8 +162,12 @@ documents, `plant.listen` is the plant server's `--listen`,
 `model.fingerprint` is the identity the checkpoint negotiation
 verifies on the wire. The shape is a recorded contract, not yet a
 schema-enforced document — `reference-plant/deploy/manifest.json`
-instantiates it, and the template's `ci/check.sh` ties its recorded
-fingerprint to a fresh emit.
+instantiates it, `reference-plant/deploy/compose.yaml` instantiates
+the manifest itself as a checked-in rig definition (the consumer-side
+counterpart of this repository's `compose.yaml`), and the template's
+`ci/check.sh` ties its recorded fingerprint to a fresh emit and its
+`deploy` stage asserts the definition and the manifest agree on every
+field — images, mounts, fingerprint, addresses, and pair wiring.
 
 ## The release procedure
 
@@ -277,3 +281,6 @@ The checks' failures are named diagnostics:
 | `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
 | `consumer-interference` | A consumer schedule changed the driven run's outputs or command receipts, or the schedule's own evidence failed — a consumer met a server fault, a held response arrived incomplete, malformed traffic went unrefused, or a restarted UI process found no freshness metadata. Reported by the reference plant's `ci/check.sh`, naming the schedule. |
 | `consumer-nondeterministic` | Two passes of the consumer-schedule stage produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
+| `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
+| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, or the controller pair's standby wiring disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
