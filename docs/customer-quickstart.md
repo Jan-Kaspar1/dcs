@@ -25,7 +25,15 @@ Its `README.md` walks the full customer path:
 6. **Deploy** — `deploy/manifest.json` binds the approved model and its
    fingerprint to the release's images and the redundant controller
    pair, and `deploy/compose.yaml` instantiates the manifest as a
-   checked-in rig definition the check holds in lockstep.
+   checked-in rig definition the check holds in lockstep. The
+   manifest's optional per-controller `state_file`/`journal_file`
+   fields name container paths on writable volumes that the rig
+   definition mounts and carries to the invocation's
+   `--state-file`/`--journal-file` flags: `state_file` lets a
+   restarted container resume in place at its persisted checkpoint,
+   `journal_file` keeps the attributed operator-action record durable
+   past the process lifetime. A consumer without durable storage
+   omits both fields and the flags stay absent.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,
