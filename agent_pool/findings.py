@@ -368,7 +368,7 @@ def issue_key(finding_key):
 
 
 def concurrency_group(module):
-    """The affected module is the serialization group, not a shared bug lane."""
+    """The affected module is the area label, not a shared bug lane."""
     tail = module.strip().rstrip('/').split('/')[-1].lower()
     return tail if GROUP.match(tail) else 'qa'
 
