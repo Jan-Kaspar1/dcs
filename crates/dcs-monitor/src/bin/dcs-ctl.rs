@@ -31,7 +31,10 @@
 //! — a point absent from the index, a component or parameter absent
 //! from the descriptors — the literal's own kind is sent instead, so
 //! the server's receipt still answers with the contract's named
-//! rejection.
+//! rejection. `invoke`'s `--arg` values take the literal forms
+//! outright — `true`/`false`, an integer, a float — and the declared
+//! command's request schema validates them server-side, the settled
+//! [`CommandReceipt`] staying the authority over every submission.
 //!
 //! Every receipted submission can declare the actor identity the
 //! command-path audit-attribution contract journals — the tool-side
@@ -52,6 +55,7 @@ use dcs_core::{
 };
 use dcs_monitor::MonitorClient;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
@@ -77,6 +81,9 @@ operator commands:
                               pin a writable In point to <value>
   unforce <point> [--actor <name>]
                               release a forced point
+  invoke <component> <command> [--arg <name>=<value>]... [--actor <name>]
+                              invoke the component's declared command
+                              with typed arguments
   promote                     promote a converged standby to active
   demote                      demote the field-owning peer to standby
   scan <n>                    run <n> scans; only a driven, unpaced
@@ -91,7 +98,9 @@ switch-request contract has no field for one.
 values: <value> parses per the declared value kind — true|false for
 Bool, an integer for Int, a finite number for Float — declared by the
 served signal index for points and by the component's descriptors for
-parameters. Command subcommands print the CommandReceipt; a rejected
+parameters; invoke's --arg values take the literal forms — true|false,
+an integer, a float — the declared command's request schema validating
+server-side. Command subcommands print the CommandReceipt; a rejected
 receipt still prints and the exit status is nonzero naming the
 CommandError. promote/demote print the resulting RoleReport; a refusal
 exits nonzero naming the SwitchError. An unreachable <addr> exits
@@ -202,6 +211,16 @@ enum Action {
         point: PointId,
         actor: Option<String>,
     },
+    Invoke {
+        component: String,
+        name: String,
+        /// The `--arg` pairs with each value already parsed as a
+        /// literal — no declared kind rules an invoke argument's parse;
+        /// the server's request schema validates and its receipt
+        /// answers.
+        arguments: Vec<(String, Value)>,
+        actor: Option<String>,
+    },
     Promote,
     Demote,
     Scan {
@@ -267,6 +286,22 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             match positional.as_slice() {
                 [point] => Action::Unforce {
                     point: parse_point(point).map_err(usage)?,
+                    actor,
+                },
+                _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+            }
+        }
+        ("invoke", rest) => {
+            let InvokeArgs {
+                positional,
+                arguments,
+                actor,
+            } = invoke_args(rest).map_err(usage)?;
+            match positional.as_slice() {
+                [component, name] => Action::Invoke {
+                    component: (*component).to_string(),
+                    name: (*name).to_string(),
+                    arguments,
                     actor,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
@@ -346,6 +381,65 @@ fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> 
         }
     }
     Ok((positional, actor.or_else(configured_actor)))
+}
+
+/// The `invoke` subcommand's parsed argument list — see
+/// [`invoke_args`].
+struct InvokeArgs<'a> {
+    /// The positional arguments — `<component> <command>`.
+    positional: Vec<&'a str>,
+    /// The `--arg <name>=<value>` pairs in submission order, each value
+    /// already parsed as a literal.
+    arguments: Vec<(String, Value)>,
+    /// The declared actor — `--actor`, else the `DCS_ACTOR` default.
+    actor: Option<String>,
+}
+
+/// The `invoke` subcommand's argument list: the positional arguments,
+/// each `--arg <name>=<value>` pair in submission order, and the
+/// declared actor — `--actor` follows the convention `command_args`
+/// documents, and both flags may sit anywhere in the list. An `--arg`
+/// without its pair, a pair without `=`, an empty or repeated argument
+/// name, or any other `--` flag is malformed usage — and each pair's
+/// value parses as a literal here, so a malformed value fails with
+/// usage before any connection rather than reaching the server.
+fn invoke_args(rest: &[String]) -> Result<InvokeArgs<'_>, String> {
+    let mut parsed = InvokeArgs {
+        positional: Vec::new(),
+        arguments: Vec::new(),
+        actor: None,
+    };
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--actor" {
+            let name = args
+                .next()
+                .ok_or_else(|| "--actor expects a name".to_string())?;
+            if parsed.actor.replace(name.clone()).is_some() {
+                return Err("--actor takes a single name".to_string());
+            }
+        } else if arg == "--arg" {
+            let pair = args
+                .next()
+                .ok_or_else(|| "--arg expects a <name>=<value> pair".to_string())?;
+            let (name, text) = pair
+                .split_once('=')
+                .filter(|(name, _)| !name.is_empty())
+                .ok_or_else(|| "--arg expects <name>=<value>".to_string())?;
+            if parsed.arguments.iter().any(|(seen, _)| seen == name) {
+                return Err(format!("repeated invoke argument {name:?}"));
+            }
+            parsed
+                .arguments
+                .push((name.to_string(), parse_literal(text)?));
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown flag {arg:?}"));
+        } else {
+            parsed.positional.push(arg.as_str());
+        }
+    }
+    parsed.actor = parsed.actor.or_else(configured_actor);
+    Ok(parsed)
 }
 
 /// The environment's configured default actor — a non-empty
@@ -445,6 +539,21 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             client,
             addr,
             Command::UnforcePoint { point: *point },
+            actor.as_deref(),
+        ),
+        Action::Invoke {
+            component,
+            name,
+            arguments,
+            actor,
+        } => command(
+            client,
+            addr,
+            Command::Invoke {
+                component: component.clone(),
+                command: name.clone(),
+                arguments: arguments.iter().cloned().collect::<BTreeMap<_, _>>(),
+            },
             actor.as_deref(),
         ),
         Action::Promote => switchover(client, addr, "/promote", "promote"),
