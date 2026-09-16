@@ -46,6 +46,19 @@
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
+#   restart      the restart-recovery leg (WW-LCM-001's
+#                lone-controller clause): the field-owning controller
+#                runs the deterministic scenario on the
+#                manifest-declared --state-file/--journal-file flags
+#                pointed at runner-owned scratch paths, is stopped at
+#                a leg boundary, and relaunches onto the same files —
+#                the resumed run must continue at the persisted tick
+#                with leg outcomes, receipts, and the field image
+#                equal to an uninterrupted reference pass, the
+#                journal's seq order continuing across the file's
+#                run-boundary marker; a missing or unparseable state
+#                file never passes silently
+#                (restart-resume-failed, restart-resume-nondeterministic)
 #   surface      the served operator surface — the signal index, the
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
@@ -66,6 +79,17 @@
 #                UI process restart — producing identical output and
 #                receipt digests across every schedule and across two
 #                passes (consumer-interference, consumer-nondeterministic)
+#   ctl          the shipped operator CLI against the same driven run:
+#                dcs-ctl's reads answer the served contract — signals,
+#                schema, snapshot, events, resources — its invoke
+#                submits the sequencer's kind-declared advance/reset
+#                through the bounded receipted path with actor
+#                attribution, settling applied receipts visible through
+#                receipts and the journal, and the refusal modes —
+#                undeclared command, malformed argument, unreachable
+#                monitor — exit nonzero naming the failure; two passes
+#                produce identical digests (ctl-failed,
+#                ctl-nondeterministic)
 #   upgrade      the documented repin upgrade (README §7): this tree's
 #                composition is materialized pinned at the recorded
 #                release rev, repinned to a later compatible revision,
@@ -93,10 +117,10 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, and `dcs-plant-server` binaries. When
-#                unset, the check installs them from $DCS_REMOTE at
-#                $DCS_REV — the contract's `cargo install --git`
-#                mechanism — into a scratch root.
+#                `dcs-controller`, `dcs-plant-server`, and `dcs-ctl`
+#                binaries. When unset, the check installs them from
+#                $DCS_REMOTE at $DCS_REV — the contract's `cargo
+#                install --git` mechanism — into a scratch root.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -138,7 +162,7 @@ ensure_tools() {
     local dir
     dir="$(mktemp -d)"
     if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
-            dcs-model dcs-controller dcs-plant --root "$dir"; then
+            dcs-model dcs-controller dcs-plant dcs-monitor --root "$dir"; then
         rm -rf "$dir"
         return 1
     fi
@@ -488,6 +512,52 @@ SECOND="$(run_simulation)" || fail "scenario-failed: the scripted simulation's d
     || fail "scenario-nondeterministic: two simulation runs produced different digests"
 echo "  $FIRST"
 
+echo "== restart =="
+# The lone-controller half of WW-LCM-001's restart-recovery evidence:
+# the field-owning controller launches with the manifest-declared
+# --state-file/--journal-file flags at runner-owned scratch paths,
+# runs the deterministic scenario to a leg boundary — far enough to
+# leave applied receipts and journaled transitions — is stopped, and
+# relaunches onto the same files. The resumed run must continue at the
+# persisted tick, its leg outcomes, receipts, and served field image
+# equal to an uninterrupted reference pass, the journal's seq order
+# continuing across the file's run-boundary marker. Two passes must
+# produce identical digests.
+run_restart() {
+    python3 ci/restart.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_restart)" \
+    || fail "restart-resume-failed: the restart leg did not hold — its evidence lines are above"
+SECOND="$(run_restart)" \
+    || fail "restart-resume-failed: the restart leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "restart-resume-nondeterministic: two restart-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: each tamper at the restart point must surface
+# the named diagnostic — never a silently accepted tick-zero restart.
+# A corrupt state file is refused by the relaunch's startup naming the
+# file; a missing one cold-starts the resumed run at tick zero, which
+# the leg's own checks catch and report.
+for tamper in missing-state-file corrupt-state-file; do
+    if out="$(run_restart --tamper "$tamper" 2>&1)"; then
+        fail "restart-resume-unchecked: a $tamper passed the restart leg"
+    fi
+    case "$tamper" in
+        missing-state-file) evidence="never reported a resume" ;;
+        corrupt-state-file) evidence="does not hold a checkpoint" ;;
+    esac
+    printf '%s\n' "$out" | grep -q "$evidence" \
+        || fail "restart-resume-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, restart-resume-failed"
+done
+
 echo "== surface =="
 python3 ci/simulate.py \
     --surface \
@@ -545,8 +615,8 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py \
-        ci/schema_conformance.py README.md; do
+for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/restart.py \
+        ci/schema_conformance.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
@@ -586,6 +656,28 @@ SECOND="$(run_consumer_schedules)" || exit 1
 [ "$FIRST" = "$SECOND" ] \
     || fail "consumer-nondeterministic: two consumer-stage passes produced different digests"
 echo "  consumer-digest $FIRST identical across every schedule and both passes"
+
+echo "== ctl =="
+# The shipped operator CLI over the simulate stage's driven run: the
+# leg drives scans through `dcs-ctl scan`, exercises the sequencer's
+# kind-declared commands through `dcs-ctl invoke` and reads the served
+# contract through the remaining subcommands — the release set's
+# documented operator surface proven from the released binary alone.
+run_ctl() {
+    python3 ci/ctl.py \
+        --ctl "$TOOLS/dcs-ctl" \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        || fail "ctl-failed: the dcs-ctl leg did not hold — its evidence lines are above"
+}
+FIRST="$(run_ctl)" || exit 1
+SECOND="$(run_ctl)" || exit 1
+[ "$FIRST" = "$SECOND" ] \
+    || fail "ctl-nondeterministic: two ctl-stage passes produced different digests"
+echo "  $FIRST identical across both passes"
 
 if [ "${DCS_UPGRADE:-1}" != "0" ]; then
 

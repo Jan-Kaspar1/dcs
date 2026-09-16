@@ -27,7 +27,10 @@
 //! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
-//! process restart) requiring identical digests, and the `upgrade`
+//! process restart) requiring identical digests, the `ctl` stage,
+//! which exercises the released `dcs-ctl` operator CLI's receipted
+//! `invoke` path, read subcommands, and named refusal modes against
+//! the same driven run, and the `upgrade`
 //! stage, which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -74,8 +77,8 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, and `dcs-plant-server` — are built for the check's
-/// `DCS_TOOLS` substitution.
+/// `dcs-controller`, `dcs-plant-server`, and `dcs-ctl` — are built for
+/// the check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -87,6 +90,8 @@ fn build_tools() -> PathBuf {
             "dcs-controller",
             "-p",
             "dcs-plant",
+            "-p",
+            "dcs-monitor",
         ])
         .current_dir(root())
         .output()
@@ -331,6 +336,19 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         );
     }
     assert!(
+        stdout.contains("== restart =="),
+        "the restart stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("restart-digest"),
+        "the restart leg reported no digest:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("missing-state-file: reported, restart-resume-failed")
+            && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
+        "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
+    );
+    assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
     );
@@ -338,6 +356,25 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("identical across every schedule and both passes"),
         "the consumer schedules did not produce identical digests:\n{stdout}",
     );
+    assert!(
+        stdout.contains("== ctl =="),
+        "the ctl stage did not run:\n{stdout}"
+    );
+    let ctl_line = stdout
+        .lines()
+        .find(|line| line.contains("ctl-digest") && line.contains("identical"))
+        .unwrap_or_else(|| panic!("the ctl stage reported no digest:\n{stdout}"));
+    for phrase in ["receipted submissions", "named refusals"] {
+        let index = ctl_line
+            .find(phrase)
+            .unwrap_or_else(|| panic!("the ctl digest names no '{phrase}' count: {ctl_line}"));
+        let count: usize = ctl_line[..index]
+            .split_whitespace()
+            .next_back()
+            .and_then(|token| token.parse().ok())
+            .unwrap_or_else(|| panic!("the '{phrase}' count is not a number: {ctl_line}"));
+        assert!(count > 0, "the ctl stage proved no {phrase}: {ctl_line}");
+    }
 }
 
 /// The `upgrade` stage is the executable assertion of the documented
