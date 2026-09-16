@@ -177,10 +177,14 @@ it follows:
 ### The first release
 
 `v0.1.0`, tagged on the `main` commit landing this contract (issue
-#348). Its record lives at `docs/releases/v0.1.0/`; the reference
-plant pins `tag = "v0.1.0"` (or the recorded rev) for the crates and
-the recorded digests for the images. The tag itself and the record's
-sha/digest fields are filled when the release is cut.
+#348). Its record is landed at `docs/releases/v0.1.0/` — `record.md`
+with the fillable fields populated and `plant-model.schema.json`
+emitted at the recorded commit, pinned byte-for-byte to `dcs-model
+schema`'s output by the drift test in
+`crates/dcs-model/tests/schema.rs`. The reference plant pins
+`tag = "v0.1.0"` (or the recorded rev) for the crates and the recorded
+digests for the images. The tag itself and the record's image-digest
+fields are filled when the release is cut.
 
 ## The consumer-resolution check
 
