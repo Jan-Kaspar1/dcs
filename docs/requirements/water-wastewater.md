@@ -26,7 +26,7 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 ### WW-FND-004 — Plant authority independent of UI delivery
 
-- **Status:** accepted; partially implemented
+- **Status:** accepted; substantially implemented
 - **Need:** The controller backend owns authoritative plant execution and state. Monitoring pages, historians, and other UI consumers are disposable: absence, slowness, malformed traffic, disconnect, or restart cannot delay a scan, change an output, stop the plant, or become part of the controller's liveness decision.
 - **Acceptance evidence:** A paced reference run produces identical ticks, outputs, checkpoints, and command outcomes with no UI, a normally polling UI, a stalled/disconnected reader, a reconnecting reader, and telemetry load at the declared bound. Read-side delivery consumes immutable published snapshots/events through bounded storage without holding the executor across socket I/O or consumer serialization; slow consumers observe coalescing or an explicit sequence gap/freshness state rather than backpressure on execution. Mutations use only a bounded validated command ingress, settle at the deterministic scan boundary, and return a receipt or a named admission rejection—commands are never fire-and-forget. The UI process can stop and restart while the controller remains active, and a transport failure is reported as consumer/monitoring health rather than a plant shutdown condition.
 
@@ -116,7 +116,7 @@ Station operating-policy evidence and open assumptions are recorded in `docs/res
 
 ### WW-ENG-003 — Independently owned plant project
 
-- **Status:** accepted
+- **Status:** implemented — the `reference-plant` repository is the independently owned consumer: it pins the `v0.1.0` release recorded in `docs/releases/v0.1.0/record.md` (crate `rev` pin, released tooling, recorded image digests), composes and deterministically emits its model through the supported `dcs-build` surface, and its own `ci/check.sh` is the clean-checkout CI covering resolve, git-only lockfile sources, byte-stable emit, released-tooling acceptance, manifest fingerprint, the deterministic scripted simulation, and the served operator surface. The workspace-side proofs are `crates/dcs-build/tests/consumer_release.rs`, `consumer_upgrade.rs`, and `reference_plant.rs`.
 - **Need:** A customer or system integrator owns plant-specific source, parameters, generated model artifacts, simulation fixtures, and deployment configuration independently of the DCS platform source. The plant project consumes a supported DCS release and never needs to become a workspace member, use path dependencies into the platform checkout, or modify platform crates.
 - **Acceptance evidence:** A reference water plant in a separate repository pins versioned DCS engineering and runtime artifacts, composes and deterministically emits its plant model through the supported Rust API, validates and lints it, runs its simulation and operator UI, and deploys it with the generic controller image. Its CI succeeds from a clean checkout with no DCS source tree present. A compatible platform update is exercised by changing the pinned release rather than moving or rewriting the plant source, and incompatible model/API versions fail with documented diagnostics. Platform-owned conformance fixtures may duplicate a minimal case, but they do not satisfy this requirement by themselves.
 

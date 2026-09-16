@@ -222,7 +222,10 @@ locally built binaries, the manifest fingerprint check, two runs
 of the scripted simulation, and the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
-declaration. Its negative cases prove the template's
+declaration — and the `upgrade` stage, which repins the materialized
+tree to the checkout's `HEAD` and re-runs the pipeline under the repin,
+requiring byte-identical emitted bytes and refusing the named
+incompatible crossings. Its negative cases prove the template's
 new stage names surface as the diagnostics below.
 
 ```sh

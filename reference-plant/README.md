@@ -140,7 +140,10 @@ A compatible upgrade is a repin: change the `rev`/`tag` in
 `Cargo.toml`, run `cargo update` to move the lockfile, and re-run
 `ci/check.sh`. Within a release's minor series the supported API and
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
-acceptance.
+acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
+materializes this tree at the recorded release rev, repins it to a
+later compatible revision, and re-runs the full check requiring a
+byte-identical `model/plant.json`.
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;
