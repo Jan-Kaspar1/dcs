@@ -195,6 +195,13 @@ points are the ordinary mechanism and are not flagged. Writability joins
 the point metadata the monitoring surface serves, so the page offers
 command affordances only where commands can succeed.
 
+In the served block interface (decision 82) the mark surfaces as command
+availability: every bound `In` port's adapted `write_value:<port>`,
+`force_point:<port>`, and `unforce_point:<port>` command entries carry
+`bound_point_writable` availability, which `GET /resources` reads live —
+`available` while the point is marked, or the named `not_writable`/
+`unknown_point` refusal a submission would meet.
+
 ### `stale_after_ticks` and input freshness
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
@@ -263,6 +270,16 @@ status point lands with no receipt, and the durable journal file
 replays `point_changed` entries like every other event, continuing
 `seq` numbering across a restart.
 
+The same journal carries the kind-declared emitted events the
+block-interface contract adds (decisions 82, 84): a component kind's
+descriptor may declare `EventDecl`s, and a `Journal`-retained emission
+lands as an `event_emitted` entry at the producing scan's tick —
+`event` naming the declaration, `component` the instance, `fields` the
+typed payload — beside the adapted `point_changed`/`quality_changed`/
+`command_settled`/`step_failed` records. In the served interface the
+`journaled` mark surfaces as the `when_journaled` emission rule on each
+`Bool`/`Int` port's adapted `point_changed:<port>` event entry.
+
 ## `signals`
 
 A list of plant signals: the monitoring/UI-facing names for the values
@@ -304,6 +321,23 @@ exists: kind resolution and parameter checking are assembly's, because
 the registry is a deployment choice. `docs/integration-guide.md` covers
 declaring a kind's parameters; per-kind contracts live beside each
 `dcs-blocks` kind's `KIND`/`from_parameters`/`describe`.
+
+A kind's *native* commands and emitted events are likewise kind-level
+contract, not document data: the descriptor's `commands`/`events`
+declare `CommandDecl`s (a stable name, a typed `CommandArgument`
+request schema, an `always` or `kind_declared` availability rule) and
+`EventDecl`s (a stable event-kind name, a typed payload schema, a
+retention class), so the document carries no command or event keys —
+the instance's whole engineering surface is its declared `kind`,
+`ports`, and `parameters`. Operator submissions arrive at runtime as
+`Command::Invoke` on the receipted path, validated against the
+declaration and dispatched to the component's `invoke_command` at the
+scan boundary; emissions drain after each `step` and journal per their
+declared retention (see `journaled` above). `GET /schema` serves each
+instance's derived `BlockInterface` — ports as measurements/state,
+parameters as configuration, the adapted generic and declared native
+commands, and the adapted and declared events — and `GET /resources`
+its live values, command availability, and attributed events.
 
 Some kinds are variable-arity: the declared `ports` set fixes the
 instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;
