@@ -345,7 +345,7 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     let dir = std::env::temp_dir().join(format!("dcs-failover-transient-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let pair_plant = spawn_plant();
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let pair_model =
         controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
     let active_process = spawn_controller(&pair_model, &[], DT);
@@ -422,7 +422,7 @@ fn an_unconverged_standby_reports_its_state_and_never_promotes() {
     let dir = std::env::temp_dir().join(format!("dcs-failover-unconverged-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let pair_plant = spawn_plant();
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let pair_model =
         controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
 
@@ -472,7 +472,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let dir = std::env::temp_dir().join(format!("dcs-failover-fencing-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let pair_plant = spawn_plant();
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let pair_model =
         controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
     let active_process = spawn_controller(&pair_model, &[], DT);

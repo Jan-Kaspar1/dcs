@@ -67,6 +67,17 @@ pub fn listening_on(line: &str) -> Option<SocketAddr> {
         .map(|addr| addr.parse().unwrap())
 }
 
+/// The announcement `dcs-sim-bus-device` prints once bound: `serving
+/// device <id> on <addr> (declared <listen>)` — returned as the parser
+/// [`spawn`] loops on, matching only the declared `device`'s line.
+pub fn serving_device(device: u64) -> impl Fn(&str) -> Option<SocketAddr> {
+    move |line: &str| {
+        line.strip_prefix(&format!("serving device {device} on "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(|addr| addr.parse().unwrap())
+    }
+}
+
 /// Spawns `binary` with the given stdout disposition, reads stderr
 /// until `parse` resolves a line to the bound address, and returns the
 /// running process plus the lines that preceded it.

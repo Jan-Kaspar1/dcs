@@ -24,17 +24,15 @@
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, IoDriver, JournalEvent, PointId, Quality, QualityReason,
-    Role, StandbySync, SwitchError, TelemetrySnapshot, Value, ValueKind,
+    Role, StandbySync, SwitchError, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::path::Path;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, controller_model, image_value, kill, spawn_controller, spawn_plant};
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out, an analog-input scaling
 /// and a PID parameterized for dt 0.1.
@@ -62,122 +60,6 @@ const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared tank-loop model with every device's kind re-pointed at
-/// `sim-tcp` and `parameters.address` set — the remote-sim path through
-/// the assembly driver registry.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
-}
-
 /// One scripted run of the full hot-swap scenario. Returns the valve
 /// command and raw level the shared plant carried after each tick — the
 /// field's output sequence two runs must reproduce exactly.
@@ -187,20 +69,35 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
 
     // Two shared plants: the pair's and the reference run's — identical
     // model and dynamics, identical request sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    let reference_model = controller_model(
+        &dir,
+        "reference.json",
+        MODEL_SOURCE,
+        reference_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
 
     // The pair: the active first — the standby's --standby names its
     // monitoring address — then the standby, then the reference run on
     // its own plant.
-    let active_process = spawn_controller(&pair_model, &[]);
+    let active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
-    let reference_process = spawn_controller(&reference_model, &[]);
+    let reference_process = spawn_controller(&reference_model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let reference = MonitorClient::new(reference_process.addr);
@@ -395,12 +292,13 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
     let dir = std::env::temp_dir().join(format!("dcs-hot-swap-restart-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut plant = spawn_plant();
-    let model = controller_model(&dir, "pair.json", plant.addr);
-    let active_process = spawn_controller(&model, &[]);
+    let mut plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant.addr, SimTcp::PerDevice).0;
+    let active_process = spawn_controller(&model, &[], DT);
     let standby_process = spawn_controller(
         &model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -410,8 +308,7 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
         standby.advance(1).unwrap();
         active.advance(1).unwrap();
     }
-    plant.child.kill().unwrap();
-    plant.child.wait().unwrap();
+    kill(&mut plant);
 
     // The field owner's next requested scan surfaces the dead plant as
     // the documented IoError — the output write fails `disconnected`,
@@ -440,7 +337,7 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
     // remote drivers never reconnect, so both peers keep surfacing the
     // named error rather than resuming against a reset field — the
     // demoted one's reads stay Bad, the owner's write stays refused.
-    let restarted = spawn_plant();
+    let restarted = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let error = active.advance(1).unwrap_err();
     assert!(error.to_string().contains("disconnected"), "{error}");
     let snapshot = standby.advance(1).unwrap();
