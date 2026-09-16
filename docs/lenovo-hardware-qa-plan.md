@@ -17,8 +17,11 @@ Implementation order: second, after [daily architecture review](daily-architectu
   restart reconciliation of dead runs and labeled orphan containers.
 - `qa_lane/scenarios.py`: deterministic checks over the simulated rig —
   active role + telemetry, standby convergence, writable-point command,
-  demote/promote failover, receipts/journal evidence — all through the
-  documented monitor endpoints.
+  controller restart recovery (`--state-file`/`--journal-file` on
+  runner-owned per-controller paths, with a runner-owned container
+  stop/start action on the run timeline), demote/promote failover,
+  receipts/journal evidence — all through the documented monitor
+  endpoints.
 - `qa_lane/relay.py`: WSL-side sanitizer + publisher pushing
   `qa/latest.json` and `qa/run-<id>.json` through the Pi report key.
 - `qa_lane/deploy/`: generic systemd unit/timer and config example.

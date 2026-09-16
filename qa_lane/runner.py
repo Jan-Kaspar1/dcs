@@ -761,6 +761,75 @@ def _docker_run_args(cfg, run_id, name):
             '--restart', 'no']
 
 
+# Restart recovery (decisions 35/36): each controller runs with
+# --state-file and --journal-file on a runner-owned per-controller
+# directory inside the run dir, bind-mounted into the container at
+# CONTAINER_RUN_DIR. The mount keeps both artifacts inspectable on the
+# host — the restart scenario reads the journal file's run-boundary
+# record — and inside the bounded run directory the retention
+# reconciler removes with the run.
+CONTAINER_RUN_DIR = '/var/lib/dcs-run'
+CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
+CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
+
+
+def _controller_dir(run_dir, name):
+    """The run-dir state directory bind-mounted into controller `name`'s
+    container ('a'/'b'): its --state-file checkpoint and --journal-file
+    audit record live here so a container restart resumes the same run
+    and the files stay inside the bounded run directory."""
+    return Path(run_dir) / 'controllers' / name
+
+
+def restart_controller(run_id, name, timeline):
+    """The scenario-callable controller restart: `docker stop` then
+    `docker start` on one of the run's already-launched controller
+    containers — the supervisor-owned lifecycle action a scenario
+    triggers through ctx['restart_controller'], never a second writer
+    to the field.
+
+    `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
+    container, 'standby' ctrl-b's, whichever role each currently
+    reports. The container keeps its mounts, labels, published port,
+    and bridge name, so the restarted process resumes through the same
+    --state-file and rejoins the pair unchanged. Both halves are
+    recorded on the run's action timeline; a docker failure raises so
+    the calling scenario reports the restart never completed.
+    """
+    container = ('dcs-hw-' + run_id + '-'
+                 + {'active': 'a', 'standby': 'b'}[name])
+    timeline('controller-restart', 'docker stop ' + container)
+    docker('stop', '--time', '2', container, timeout=90)
+    docker('start', container, timeout=60)
+    timeline('controller-restarted', container + ' running')
+
+
+def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
+                  timeline):
+    """The scenario driver's view of the running rig: monitor base URLs
+    per endpoint key, the published plant-protocol endpoint, the run's
+    evidence dir and deadline, the runner-owned controller-restart
+    action, and the host-side per-controller state/journal files the
+    restart scenario reads."""
+    run_id = record['run_id']
+    names = {'active': 'a', 'standby': 'b'}
+    return {
+        'active': 'http://127.0.0.1:' + str(cfg['active_port']),
+        'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+        'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        'evidence_dir': evidence_dir,
+        'deadline': deadline,
+        'restart_controller': lambda name: restart_controller(
+            run_id, name, timeline),
+        'state_files': {key: str(_controller_dir(run_dir, peer)
+                                 / 'state.json')
+                        for key, peer in names.items()},
+        'journal_files': {key: str(_controller_dir(run_dir, peer)
+                                   / 'journal.jsonl')
+                          for key, peer in names.items()},
+    }
+
+
 def _start_rig(cfg, record, src, run_dir, timeline):
     """Start the plant plus redundant pair on a dedicated labeled bridge."""
     run_id, sha = record['run_id'], record['attempted_sha']
@@ -771,6 +840,14 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     for path in (model, dynamics):
         if not path.is_file():
             raise RuntimeError('model fixture missing: ' + str(path))
+    # Each controller's restart-recovery artifacts live in its own
+    # runner-owned directory inside the run dir. Mode 0777 lets the
+    # container's uid-10001 process create its state/journal files
+    # under the runner-owned run directory.
+    for name in ('a', 'b'):
+        directory = _controller_dir(run_dir, name)
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o777)
     # A dedicated bridge per run on a fixed interface name the host
     # egress policy (qa_lane.netpolicy) matches: no new outbound
     # connections leave it — no LAN, no other containers, no IPv6;
@@ -808,19 +885,27 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['active_port']) + ':8080',
            '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(_controller_dir(run_dir, 'a'))
+           + ':' + CONTAINER_RUN_DIR,
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--scan-ms', '100', '--listen', '0.0.0.0:8080')
+           '--scan-ms', '100', '--listen', '0.0.0.0:8080',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
     docker(*_docker_run_args(cfg, run_id, prefix + '-b'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['standby_port']) + ':8081',
            '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(_controller_dir(run_dir, 'b'))
+           + ':' + CONTAINER_RUN_DIR,
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', prefix + '-a:8080',
-           '--scan-ms', '100', '--listen', '0.0.0.0:8081')
+           '--scan-ms', '100', '--listen', '0.0.0.0:8081',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
     timeline('rig-up', 'plant + controller pair on ' + net)
 
 
@@ -1061,11 +1146,8 @@ def run(st, record, cfg, log=print):
         try:
             if not _wait_monitor(cfg, timeline):
                 raise RuntimeError('monitors did not come up')
-            ctx = {'active': 'http://127.0.0.1:' + str(cfg['active_port']),
-                   'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
-                   'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
-                   'evidence_dir': evidence_dir,
-                   'deadline': deadline}
+            ctx = _scenario_ctx(cfg, record, run_dir, evidence_dir,
+                                deadline, timeline)
             results = scenarios.run_all(ctx, timeline)
         finally:
             infra += _teardown_rig(run_id, timeline, st)
