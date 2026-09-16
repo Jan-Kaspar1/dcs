@@ -10,8 +10,9 @@
 //! them by address, inject and clear a register's reported quality —
 //! the bus analogue of `dcs-plant-ctl`'s `fault`/`clear-fault` — and
 //! step the bank's logical tick explicitly, carrying the step's `dt`
-//! for any declared dynamics. It is development tooling,
-//! not part of the operator contract.
+//! for any declared dynamics, and script the outcomes a `sim-cyclic`
+//! device's next `exchange` requests present. It is development
+//! tooling, not part of the operator contract.
 //!
 //! Each invocation connects, sends its request, and prints the server's
 //! answer as JSON. `write` first reads the register to learn its
@@ -22,7 +23,7 @@
 //! arguments print usage and exit nonzero — never a panic.
 
 use dcs_core::{Quality, QualityReason, Tick, Value, ValueKind};
-use dcs_sim_bus::{BusDriver, BusError, BusRequest, BusResponse, LinkError};
+use dcs_sim_bus::{BusDriver, BusError, BusRequest, BusResponse, ExchangeOutcome, LinkError};
 use std::fmt;
 use std::process::ExitCode;
 
@@ -51,6 +52,22 @@ commands:
                             the writer claim does not fence it
   clear-quality <register>  restore a register's stored sample to good
                             quality
+  script-exchange <outcome>...
+                            append outcomes to the device's scripted
+                            exchange queue — each is one of:
+                              complete            the full census answers
+                              miss                the connection drops
+                                                  unanswered
+                              late                the census answers with
+                                                  the late flag
+                              short-station:<n>   station <n>'s registers
+                                                  are withheld
+                              short-registers:<r>[,<r>...]
+                                                  the named registers are
+                                                  withheld
+                            the next exchange requests consume one
+                            outcome each; an empty queue means every
+                            exchange completes
 
 quality reasons: unspecified, substituted, stale, out_of_range,
 communication_fault, device_fault, configuration_fault
@@ -95,6 +112,8 @@ enum Action {
     Step(f64, u64),
     InjectQuality(u16, Quality),
     ClearQuality(u16),
+    /// The scripted exchange outcomes to append to the device's queue.
+    ScriptExchange(Vec<ExchangeOutcome>),
 }
 
 /// One command's failure.
@@ -149,7 +168,18 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ("clear-quality", [register]) => {
             Action::ClearQuality(parse_register(register).map_err(usage)?)
         }
-        ("list" | "read" | "write" | "step" | "inject-quality" | "clear-quality", _) => {
+        ("script-exchange", outcomes @ [_, ..]) => Action::ScriptExchange(
+            outcomes
+                .iter()
+                .map(|arg| parse_outcome(arg))
+                .collect::<Result<_, _>>()
+                .map_err(usage)?,
+        ),
+        (
+            "list" | "read" | "write" | "step" | "inject-quality" | "clear-quality"
+            | "script-exchange",
+            _,
+        ) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -245,6 +275,51 @@ fn execute(driver: &BusDriver, action: &Action) -> Result<BusResponse, Failure> 
             },
             |response| matches!(response, BusResponse::Done),
         ),
+        Action::ScriptExchange(outcomes) => expect(
+            driver,
+            &BusRequest::ScriptExchange {
+                outcomes: outcomes.clone(),
+            },
+            |response| matches!(response, BusResponse::Done),
+        ),
+    }
+}
+
+/// Parses one `script-exchange` outcome argument: `complete`, `miss`,
+/// `late`, `short-station:<name>`, or `short-registers:<r>[,<r>...]`.
+fn parse_outcome(arg: &str) -> Result<ExchangeOutcome, String> {
+    match arg {
+        "complete" => return Ok(ExchangeOutcome::Complete),
+        "miss" => return Ok(ExchangeOutcome::Miss),
+        "late" => return Ok(ExchangeOutcome::Late),
+        _ => {}
+    }
+    let Some((command, operand)) = arg.split_once(':') else {
+        return Err(format!(
+            "invalid outcome {arg:?}: expected complete, miss, late, short-station:<name>, or short-registers:<registers>"
+        ));
+    };
+    match command {
+        "short-station" if !operand.is_empty() => Ok(ExchangeOutcome::ShortStation {
+            station: operand.to_string(),
+        }),
+        "short-registers" => {
+            let mut registers = Vec::new();
+            for register in operand.split(',') {
+                registers.push(parse_register(register).map_err(|error| {
+                    format!("invalid short-registers outcome {arg:?}: {error}")
+                })?);
+            }
+            if registers.is_empty() {
+                return Err(format!(
+                    "invalid outcome {arg:?}: short-registers names at least one register"
+                ));
+            }
+            Ok(ExchangeOutcome::ShortRegisters { registers })
+        }
+        _ => Err(format!(
+            "invalid outcome {arg:?}: expected complete, miss, late, short-station:<name>, or short-registers:<registers>"
+        )),
     }
 }
 
