@@ -36,6 +36,9 @@ ci/simulate.py         the deterministic scripted-simulation runner;
                        commands, emitted events
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
+ci/ctl.py              the dcs-ctl leg — the released operator CLI
+                       driving the same run: receipted invoke, reads,
+                       and the named refusal modes
 ci/deploy_rig.py       the rig-definition consistency check —
                        deploy/compose.yaml against the manifest
 deploy/manifest.json   the deployment declaration
@@ -92,8 +95,15 @@ over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
 cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
-    dcs-model dcs-controller dcs-plant
+    dcs-model dcs-controller dcs-plant dcs-monitor
 ```
+
+The `dcs-monitor` package ships `dcs-ctl`, the released operator CLI —
+`dcs-ctl <addr> schema|resources|events|snapshot|signals|receipts|
+journal` reads the running controller's served contract, `invoke`
+submits a component's declared command through the bounded receipted
+path with `--actor` attribution, and `write`/`set-parameter`/`force`/
+`promote`/`demote`/`scan` cover the rest of the operator surface.
 
 ### 5. Run the simulation
 
@@ -145,6 +155,26 @@ schedule must produce the identical `consumer-digest` over the run's
 leg outcomes and command receipts, and two full passes must produce
 identical digests — a divergence fails `consumer-interference`, a
 nondeterministic stage `consumer-nondeterministic`.
+
+The check's `ctl` stage then proves the shipped operator CLI from the
+released artifacts — `ci/ctl.py` replays the deterministic driven run
+with `dcs-ctl` as the only driver: `dcs-ctl scan` paces the run,
+`dcs-ctl write` holds the exercise program's `run` input, and `dcs-ctl
+invoke sequencer:<id> advance|reset` submits the kind-declared commands
+through the bounded receipted path with `--actor` attribution — each
+`accepted` receipt settling `applied` at the scan boundary, visible
+through `dcs-ctl receipts` and journaled as `command_settled`. The leg
+asserts the read subcommands answer the served contract — `signals`,
+`schema`, `snapshot`, `events`, `resources` — that `resources` reports
+the per-command availability beside the named refusals (the unwritable
+bound point's `not declared writable`, the completed table's
+`command_refused` in the attributed events), that the kind-emitted
+`step_completed` reaches `dcs-ctl events`, and that the refusal modes
+exit nonzero naming the failure: an undeclared command answers
+`unknown_command`, a malformed `invoke` argument fails its
+declared-kind parse, and an unreachable monitor names its address. Two
+passes must produce the identical `ctl-digest` — a divergence fails
+`ctl-failed`, a nondeterministic stage `ctl-nondeterministic`.
 
 The obligations this demonstrates for any monitoring or UI consumer:
 
