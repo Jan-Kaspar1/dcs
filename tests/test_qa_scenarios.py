@@ -1,5 +1,6 @@
 """The deterministic scenarios' unit coverage: stubbed monitor feeds
 drive scenario_consumer_schedule, scenario_served_interface,
+<<<<<<< HEAD
 scenario_force_release, scenario_command_admission, and
 scenario_field_fault through their pass outcomes and the named failures
 their issues call out — a stalled reader whose leg's scan outputs
@@ -19,6 +20,27 @@ monitor and a live plant-protocol peer: activation with journaled
 evidence, acknowledge, bounded shelve and expiry, the named
 NotWritable refusal, OOS-driven suppression, and the inconclusive
 answers a never-reporting status or a claimed field owe."""
+=======
+scenario_force_release, scenario_command_admission,
+scenario_controller_restart, scenario_plant_link_loss, and
+scenario_field_fault through their pass outcomes and the named
+failures their issues call out — a stalled reader whose leg's scan
+outputs stopped advancing, a lagging seq-cursor read answered with
+silently stale data, a served registry missing a declared kind or
+collection, a declared command returning no receipt, an
+emitted-events view that never reflects the produced event, forced
+telemetry missing its Substituted stamp or forces badge, control that
+ignores the force, unattributed or never-journaled settlements, a
+badge that never clears, recovery that never returns to Good, a
+command flood whose submissions meet dropped receipts, HTTP-layer
+faults, unsettled admissions, or a bound that never fills, a restarted
+controller that resumes cold, a plant outage whose telemetry stays
+fresh, whose standby promotes, whose writer claim never re-arms, or
+whose io_health forgets the failures it counted, an injected quality
+fault the served snapshot keeps reporting Good, an error fault that
+never surfaces on io_health, a role that moves under a field fault,
+and a clear that never restores the field value."""
+>>>>>>> origin/main
 import json
 import socket
 import tempfile
@@ -1313,6 +1335,7 @@ class CommandAdmissionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+<<<<<<< HEAD
 
 class ManagedFeed:
     """A stubbed monitor for the managed-alarm scenario, mirroring the
@@ -1499,10 +1522,138 @@ class ManagedFeed:
         path = '/' + url.split('/', 3)[3]
         route, _, query = path.partition('?')
         self._advance()
+=======
+class PlantLinkFeed:
+    """A stubbed pair plus shared plant for the plant-link-loss
+    scenario. ctrl-a owns the field; the plant's wire protocol answers
+    the scenario's census and fencing probes through `plant_request`.
+    `stop`/`start` replace ctx['stop_plant']/ctx['start_plant'] — the
+    runner-owned lifecycle actions — and flip `plant_up`; every
+    snapshot read advances one scan whose point qualities and
+    io_health reflect the link state. Fault flags stage each named
+    failure the issue calls out."""
+
+    def __init__(self):
+        self.tick = 0
+        self.plant_tick = 0
+        self.plant_up = True
+        self.active_up = True
+        self.cycled = False       # the plant went through stop+start
+        self.claimed = True       # a writer claim stands on the plant
+        self.failed_reads = 0
+        self.failed_writes = 0
+        self.consecutive = 0
+        self.last_error = None
+        self.calls = []           # the lifecycle actions run
+        # Fault injection for the named-failure cases.
+        self.fresh_through = False    # telemetry never degrades
+        self.clean_health = False     # io_health never counts the loss
+        self.promoted = False         # the standby reports active
+        self.aborts = False           # the active's monitor dies on loss
+        self.never_returns = False    # start leaves the plant dead
+        self.start_raises = False     # the start action itself fails
+        self.never_recovers = False   # plant back, reads stay bad
+        self.never_reclaims = False   # the claim is never re-taken
+        self.resets_health = False    # io_health zeroes on recovery
+
+    # The runner-owned lifecycle actions — replace
+    # ctx['stop_plant']/ctx['start_plant'].
+    def stop(self):
+        self.calls.append('stop')
+        self.plant_up = False
+        self.claimed = False        # the claim dies with the server
+        if self.aborts:
+            self.active_up = False
+
+    def start(self):
+        self.calls.append('start')
+        if self.start_raises:
+            raise RuntimeError('docker start failed: no such container')
+        if not self.never_returns:
+            self.plant_up = True
+            self.cycled = True
+        if not self.never_reclaims:
+            self.claimed = True     # the field owner re-claimed
+
+    # One completed scan per snapshot read: reads fail at the dead
+    # link, writes keep landing while the plant is up.
+    def _scan(self):
+        self.tick += 1
+        if self._down():
+            if not self.clean_health:
+                self.failed_reads += 5
+                self.failed_writes += 2
+                self.consecutive += 7
+                self.last_error = {
+                    'tick': self.tick, 'point': 10, 'direction': 'in',
+                    'error': {'disconnected': 10}}
+        else:
+            self.consecutive = 0
+            if self.resets_health:
+                self.failed_reads = 0
+                self.failed_writes = 0
+                self.last_error = None
+
+    def _down(self):
+        # The link is severed while the plant is stopped; a feed whose
+        # never_recovers flag is set keeps it severed past the restart.
+        return not self.plant_up \
+            or (self.never_recovers and self.cycled)
+
+    def _link(self):
+        return 'disconnected' if self._down() else 'connected'
+
+    def _quality(self):
+        if self._down():
+            return {'bad': 'communication_fault'}
+        return 'good'
+
+    # The plant wire protocol — replaces scenarios._plant_probe.
+    def plant_request(self, ctx, request, timeout=5):
+        if not self.plant_up:
+            raise urllib.error.URLError('connection refused')
+        if request['op'] == 'list_points':
+            sample = {'value': {'float': 1.5}, 'quality': 'good',
+                      'tick': self.plant_tick}
+            return {'result': 'points', 'points': [
+                {'point': 10, 'direction': 'in', 'sample': sample,
+                 'fault': None},
+                {'point': 11, 'direction': 'in', 'sample': sample,
+                 'fault': None},
+                {'point': 100, 'direction': 'out', 'sample': sample,
+                 'fault': None}]}
+        if request['op'] == 'step':
+            if self.claimed:
+                return {'result': 'error',
+                        'error': {'kind': 'fenced',
+                                  'detail': 'another attachment owns '
+                                            'field writes'}}
+            self.plant_tick += 1
+            return {'result': 'stepped', 'tick': self.plant_tick}
+        raise AssertionError('unexpected plant request %s' % request)
+
+    # The monitor surface — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        route = url.split('/', 3)[3].partition('?')[0]
+        route = '/' + route
+        if host == 'ctrl-b:2':
+            if (method, route) == ('GET', '/role'):
+                role = 'active' if self.promoted else 'standby'
+                report = {'role': role, 'tick': self.tick}
+                if role == 'standby':
+                    report['sync'] = {'tracking': {'aligned': self.tick}}
+                return 200, report
+            raise AssertionError('unexpected request %s %s'
+                                 % (method, url))
+        if not self.active_up:
+            raise urllib.error.URLError('connection refused')
+>>>>>>> origin/main
         if (method, route) == ('GET', '/role'):
             return 200, {'role': 'active', 'tick': self.tick}
         if (method, route) == ('GET', '/signals'):
             return 200, {'points': [
+<<<<<<< HEAD
                 {'point': point, 'signal': None,
                  'name': 'point-' + str(point), 'direction': 'in',
                  'value_type': 'bool',
@@ -1547,11 +1698,46 @@ class ManagedAlarmLifecycleTests(unittest.TestCase):
     a never-shelvable write that applies, OOS statuses that never
     report — and the inconclusive answers the lane owes when a
     monitored status never reports or the field is already claimed."""
+=======
+                {'point': 10, 'signal': None, 'name': 'level-primary',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False},
+                {'point': 11, 'signal': None, 'name': 'level-backup',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False}]}
+        if (method, route) == ('GET', '/snapshot'):
+            self._scan()
+            quality = 'good' if self.fresh_through else self._quality()
+            return 200, {'tick': self.tick, 'points': [
+                {'point': 10, 'sample': {'value': {'float': 1.5},
+                                         'quality': quality}},
+                {'point': 11, 'sample': {'value': {'float': 2.5},
+                                         'quality': quality}},
+                {'point': 100, 'sample': {'value': {'bool': False},
+                                          'quality': 'good'}}],
+                'io_health': {
+                    'failed_reads': self.failed_reads,
+                    'failed_writes': self.failed_writes,
+                    'consecutive_failures': self.consecutive,
+                    'last_error': self.last_error,
+                    'scan_overruns': 0,
+                    'driver': {'link': self._link(),
+                               'last_error': self.last_error
+                               and 'connection reset'}}}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class PlantLinkLossTests(unittest.TestCase):
+    """scenario_plant_link_loss against the stubbed feed: the lifecycle
+    actions cycle the shared plant while the monitor surface and the
+    wire protocol carry the degradation and recovery evidence."""
+>>>>>>> origin/main
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.evidence = Path(self.tmp.name) / 'evidence'
         self.evidence.mkdir()
+<<<<<<< HEAD
         self.plant = FakePlantPeer()
         self.plant.samples[120] = {'value': {'bool': False},
                                    'quality': 'good', 'tick': 0}
@@ -1581,10 +1767,43 @@ class ManagedAlarmLifecycleTests(unittest.TestCase):
     def test_clean_feed_passes_and_validates(self):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
+=======
+        self.feed = PlantLinkFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, ctx_extra=None):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': '127.0.0.1:9',
+               'evidence_dir': str(self.evidence),
+               'stop_plant': self.feed.stop,
+               'start_plant': self.feed.start}
+        ctx.update(ctx_extra or {})
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, '_plant_probe',
+                             self.feed.plant_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'LINK_POLL', 0.001), \
+                patch.object(scenarios, 'LINK_DEGRADE_DEADLINE', 0.05), \
+                patch.object(scenarios, 'LINK_SETTLE', 0.005), \
+                patch.object(scenarios, 'LINK_RECOVERY_DEADLINE', 0.05):
+            return scenarios.scenario_plant_link_loss(ctx)
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_plant_link_loss,
+                      scenarios.SCENARIOS)
+
+    def test_clean_loss_recovery_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.calls, ['stop', 'start'])
+>>>>>>> origin/main
         report.validate_scenario(record)
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
+<<<<<<< HEAD
         # The lifecycle evidence: assert the shelve leg recorded the
         # declared bound and the refusal leg the named rejection.
         shelve = json.loads(
@@ -1675,6 +1894,85 @@ class ManagedAlarmLifecycleTests(unittest.TestCase):
             (self.evidence / 'managed-alarm-oos.json').read_text())
         self.assertEqual(oos['component'],
                          'managed-bool-latching-alarm:35')
+=======
+        outage = json.loads(
+            (self.evidence / 'plant-link-loss-outage.json').read_text())
+        self.assertGreater(
+            outage['health']['failed_reads'], 0)
+        self.assertEqual(outage['health']['driver']['link'],
+                         'disconnected')
+
+    def test_fresh_telemetry_through_outage_fails(self):
+        self.feed.fresh_through = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('kept reading good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unchecked_link_failure_fails(self):
+        self.feed.clean_health = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('io_health', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promotion_during_outage_fails(self):
+        self.feed.promoted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('role', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_aborted_run_fails(self):
+        # The run that dies on field loss: the active's monitor never
+        # answers after the stop — the named 'scans continuing rather
+        # than aborting' violation.
+        self.feed.aborts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('aborted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unreturned_plant_is_inconclusive(self):
+        self.feed.never_returns = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never served again', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_start_action_is_inconclusive(self):
+        self.feed.start_raises = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('start', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unreclaimed_writer_claim_fails(self):
+        self.feed.never_reclaims = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('single-writer claim',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unrecovered_reads_fail(self):
+        self.feed.never_recovers = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('Good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_reset_io_health_fails(self):
+        self.feed.resets_health = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('reset', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_actions_is_inconclusive(self):
+        record = self.run_scenario({'stop_plant': None})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+>>>>>>> origin/main
         report.validate_scenario(record)
 
 
