@@ -7,17 +7,13 @@ endpoints documented in docs/packaging.md (GET /role, /signals,
 only — the Lenovo host needs nothing but Python and Docker. The
 restart scenario also triggers the runner-owned container lifecycle
 action ctx['restart_controller'] carries and reads the per-controller
-<<<<<<< HEAD
 --journal-file the rig bind-mounts into the run directory; the
 managed-alarm case speaks the plant protocol's documented
 request/response surface (`read`/`write`/`list_points` on the
-published plant port) for its field stimulus.
-=======
---journal-file the rig bind-mounts into the run directory. The
-link-loss scenario drives the runner-owned plant stop/start actions
+published plant port) for its field stimulus. The link-loss scenario
+drives the runner-owned plant stop/start actions
 ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
 server directly on ctx['plant'] — the field's own fencing evidence.
->>>>>>> origin/main
 
 The field-fault case additionally opens one plant-protocol connection
 to the run's published plant port — the newline-JSON request/response

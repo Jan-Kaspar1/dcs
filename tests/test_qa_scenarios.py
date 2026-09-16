@@ -1,26 +1,5 @@
 """The deterministic scenarios' unit coverage: stubbed monitor feeds
 drive scenario_consumer_schedule, scenario_served_interface,
-<<<<<<< HEAD
-scenario_force_release, scenario_command_admission, and
-scenario_field_fault through their pass outcomes and the named failures
-their issues call out — a stalled reader whose leg's scan outputs
-stopped advancing, a lagging seq-cursor read answered with silently
-stale data, a served registry missing a declared kind or collection, a
-declared command returning no receipt, an emitted-events view that
-never reflects the produced event, forced telemetry missing its
-Substituted stamp or forces badge, control that ignores the force,
-unattributed or never-journaled settlements, a badge that never clears,
-recovery that never returns to Good, a command flood whose submissions
-meet dropped receipts, HTTP-layer faults, unsettled admissions, or a
-bound that never fills, an injected quality fault the served snapshot
-keeps reporting Good, an error fault that never surfaces on io_health,
-a role that moves under a field fault, and a clear that never restores
-the field value — and the managed-alarm lifecycle against a stubbed
-monitor and a live plant-protocol peer: activation with journaled
-evidence, acknowledge, bounded shelve and expiry, the named
-NotWritable refusal, OOS-driven suppression, and the inconclusive
-answers a never-reporting status or a claimed field owe."""
-=======
 scenario_force_release, scenario_command_admission,
 scenario_controller_restart, scenario_plant_link_loss, and
 scenario_field_fault through their pass outcomes and the named
@@ -39,8 +18,12 @@ fresh, whose standby promotes, whose writer claim never re-arms, or
 whose io_health forgets the failures it counted, an injected quality
 fault the served snapshot keeps reporting Good, an error fault that
 never surfaces on io_health, a role that moves under a field fault,
-and a clear that never restores the field value."""
->>>>>>> origin/main
+and a clear that never restores the field value — and the
+managed-alarm lifecycle against a stubbed monitor and a live
+plant-protocol peer: activation with journaled evidence, acknowledge,
+bounded shelve and expiry, the named NotWritable refusal, OOS-driven
+suppression, and the inconclusive answers a never-reporting status or
+a claimed field owe."""
 import json
 import socket
 import tempfile
@@ -1335,8 +1318,6 @@ class CommandAdmissionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
-<<<<<<< HEAD
-
 class ManagedFeed:
     """A stubbed monitor for the managed-alarm scenario, mirroring the
     pump-station fixture's managed layout: the Bool alarm comp10 reads
@@ -1522,7 +1503,185 @@ class ManagedFeed:
         path = '/' + url.split('/', 3)[3]
         route, _, query = path.partition('?')
         self._advance()
-=======
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': point, 'signal': None,
+                 'name': 'point-' + str(point), 'direction': 'in',
+                 'value_type': 'bool',
+                 'writable': point in self.WRITABLE}
+                for point in sorted(self.values)], 'components': []}
+        if (method, route) == ('GET', '/schema'):
+            return 200, {'tick': self.tick,
+                         'interfaces': self._interfaces()}
+        if (method, route) == ('GET', '/snapshot'):
+            points = [{'point': point,
+                       'sample': {'value': {'bool': value},
+                                  'quality': 'good'}}
+                      for point, value in sorted(self.values.items())]
+            if self.status_absent:
+                points = [entry for entry in points
+                          if entry['point']
+                          not in self.ABSENT_UNDER_FAULT]
+            return 200, {'tick': self.tick, 'points': points,
+                         'parameters': [
+                             {'name': 'managed-latching-alarm:5',
+                              'values': {'max_shelve_ticks':
+                                         {'int': 0}}},
+                             {'name': 'managed-latching-alarm:6',
+                              'values': {'max_shelve_ticks':
+                                         {'int': 8}}}]}
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts)
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1])
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/command'):
+            return 200, self._admit(body)
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class ManagedAlarmLifecycleTests(unittest.TestCase):
+    """scenario_managed_alarm_lifecycle against the stubbed monitor and
+    a live plant-protocol peer: each leg's pass shape plus the named
+    failures — an unasserted driven condition, missing journaled
+    evidence, an unsettled receipt, a shelve that never auto-releases,
+    a never-shelvable write that applies, OOS statuses that never
+    report — and the inconclusive answers the lane owes when a
+    monitored status never reports or the field is already claimed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = FakePlantPeer()
+        self.plant.samples[120] = {'value': {'bool': False},
+                                   'quality': 'good', 'tick': 0}
+        self.feed = ManagedFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': self.plant.address,
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, 'ALARM_POLL', 0.001), \
+                patch.object(scenarios, 'ALARM_DEADLINE', 3.0):
+            return scenarios.scenario_managed_alarm_lifecycle(ctx)
+
+    def test_registered_before_failover(self):
+        # The plant write rides an unclaimed field; a promotion takes
+        # the single-writer claim, so the case runs ahead of failover.
+        order = list(scenarios.SCENARIOS)
+        self.assertLess(order.index(
+            scenarios.scenario_managed_alarm_lifecycle),
+            order.index(scenarios.scenario_failover))
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The lifecycle evidence: assert the shelve leg recorded the
+        # declared bound and the refusal leg the named rejection.
+        shelve = json.loads(
+            (self.evidence / 'managed-alarm-shelve.json').read_text())
+        self.assertEqual(shelve['max_shelve_ticks'], 8)
+        self.assertEqual(shelve['request_standing'], True)
+        refusal = json.loads(
+            (self.evidence / 'managed-alarm-refusal.json').read_text())
+        self.assertEqual(refusal['settled'], 'rejected:not_writable')
+        oos = json.loads(
+            (self.evidence / 'managed-alarm-oos.json').read_text())
+        self.assertEqual(oos['component'],
+                         'managed-bool-latching-alarm:21')
+
+    def test_driven_condition_unasserted_fails(self):
+        self.feed.alarm_never = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('unasserted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_activation_without_journal_evidence_fails(self):
+        self.feed.no_journal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no journaled point_changed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unsettled_receipt_fails(self):
+        self.feed.no_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never settled applied',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_shelve_never_releases_fails(self):
+        self.feed.no_release = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('auto-released', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_never_shelvable_applies_fails(self):
+        self.feed.no_refusal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not refuse NotWritable',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_oos_statuses_never_report_fails(self):
+        self.feed.no_oos_status = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('out_of_service/suppressed statuses',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_status_never_reports_is_inconclusive(self):
+        # A monitored status that never reports is an inconclusive
+        # answer, not the product failure the lane names.
+        self.feed.status_absent = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never report', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_claimed_field_is_inconclusive(self):
+        # The plant's write-ownership already claimed — the fencing
+        # verdict — is an environment answer, not a managed-alarm
+        # failure.
+        self.plant.fence = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('field-write ownership is already claimed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_oos_already_standing_uses_the_other_pump(self):
+        # With comp21's OOS point already standing — the shape an
+        # earlier suite leg leaves behind — the leg drives comp35's.
+        self.feed.values[302] = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        oos = json.loads(
+            (self.evidence / 'managed-alarm-oos.json').read_text())
+        self.assertEqual(oos['component'],
+                         'managed-bool-latching-alarm:35')
+        report.validate_scenario(record)
+
+
 class PlantLinkFeed:
     """A stubbed pair plus shared plant for the plant-link-loss
     scenario. ctrl-a owns the field; the plant's wire protocol answers
@@ -1648,57 +1807,10 @@ class PlantLinkFeed:
                                  % (method, url))
         if not self.active_up:
             raise urllib.error.URLError('connection refused')
->>>>>>> origin/main
         if (method, route) == ('GET', '/role'):
             return 200, {'role': 'active', 'tick': self.tick}
         if (method, route) == ('GET', '/signals'):
             return 200, {'points': [
-<<<<<<< HEAD
-                {'point': point, 'signal': None,
-                 'name': 'point-' + str(point), 'direction': 'in',
-                 'value_type': 'bool',
-                 'writable': point in self.WRITABLE}
-                for point in sorted(self.values)], 'components': []}
-        if (method, route) == ('GET', '/schema'):
-            return 200, {'tick': self.tick,
-                         'interfaces': self._interfaces()}
-        if (method, route) == ('GET', '/snapshot'):
-            points = [{'point': point,
-                       'sample': {'value': {'bool': value},
-                                  'quality': 'good'}}
-                      for point, value in sorted(self.values.items())]
-            if self.status_absent:
-                points = [entry for entry in points
-                          if entry['point']
-                          not in self.ABSENT_UNDER_FAULT]
-            return 200, {'tick': self.tick, 'points': points,
-                         'parameters': [
-                             {'name': 'managed-latching-alarm:5',
-                              'values': {'max_shelve_ticks':
-                                         {'int': 0}}},
-                             {'name': 'managed-latching-alarm:6',
-                              'values': {'max_shelve_ticks':
-                                         {'int': 8}}}]}
-        if (method, route) == ('GET', '/receipts'):
-            return 200, list(self.receipts)
-        if (method, route) == ('GET', '/journal'):
-            since = int(query.split('=', 1)[1])
-            return 200, [entry for entry in self.journal
-                         if entry['seq'] > since]
-        if (method, route) == ('POST', '/command'):
-            return 200, self._admit(body)
-        raise AssertionError('unexpected request %s %s' % (method, url))
-
-
-class ManagedAlarmLifecycleTests(unittest.TestCase):
-    """scenario_managed_alarm_lifecycle against the stubbed monitor and
-    a live plant-protocol peer: each leg's pass shape plus the named
-    failures — an unasserted driven condition, missing journaled
-    evidence, an unsettled receipt, a shelve that never auto-releases,
-    a never-shelvable write that applies, OOS statuses that never
-    report — and the inconclusive answers the lane owes when a
-    monitored status never reports or the field is already claimed."""
-=======
                 {'point': 10, 'signal': None, 'name': 'level-primary',
                  'direction': 'in', 'value_type': 'float',
                  'writable': False},
@@ -1731,43 +1843,11 @@ class PlantLinkLossTests(unittest.TestCase):
     """scenario_plant_link_loss against the stubbed feed: the lifecycle
     actions cycle the shared plant while the monitor surface and the
     wire protocol carry the degradation and recovery evidence."""
->>>>>>> origin/main
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.evidence = Path(self.tmp.name) / 'evidence'
         self.evidence.mkdir()
-<<<<<<< HEAD
-        self.plant = FakePlantPeer()
-        self.plant.samples[120] = {'value': {'bool': False},
-                                   'quality': 'good', 'tick': 0}
-        self.feed = ManagedFeed(self.plant)
-
-    def tearDown(self):
-        self.plant.close()
-        self.tmp.cleanup()
-
-    def run_scenario(self):
-        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
-               'plant': self.plant.address,
-               'evidence_dir': str(self.evidence)}
-        with patch.object(scenarios, 'http_json', self.feed.http_json), \
-                patch.object(scenarios, 'ALARM_POLL', 0.001), \
-                patch.object(scenarios, 'ALARM_DEADLINE', 3.0):
-            return scenarios.scenario_managed_alarm_lifecycle(ctx)
-
-    def test_registered_before_failover(self):
-        # The plant write rides an unclaimed field; a promotion takes
-        # the single-writer claim, so the case runs ahead of failover.
-        order = list(scenarios.SCENARIOS)
-        self.assertLess(order.index(
-            scenarios.scenario_managed_alarm_lifecycle),
-            order.index(scenarios.scenario_failover))
-
-    def test_clean_feed_passes_and_validates(self):
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'passed', record)
-=======
         self.feed = PlantLinkFeed()
 
     def tearDown(self):
@@ -1798,103 +1878,10 @@ class PlantLinkLossTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
         self.assertEqual(self.feed.calls, ['stop', 'start'])
->>>>>>> origin/main
         report.validate_scenario(record)
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
-<<<<<<< HEAD
-        # The lifecycle evidence: assert the shelve leg recorded the
-        # declared bound and the refusal leg the named rejection.
-        shelve = json.loads(
-            (self.evidence / 'managed-alarm-shelve.json').read_text())
-        self.assertEqual(shelve['max_shelve_ticks'], 8)
-        self.assertEqual(shelve['request_standing'], True)
-        refusal = json.loads(
-            (self.evidence / 'managed-alarm-refusal.json').read_text())
-        self.assertEqual(refusal['settled'], 'rejected:not_writable')
-        oos = json.loads(
-            (self.evidence / 'managed-alarm-oos.json').read_text())
-        self.assertEqual(oos['component'],
-                         'managed-bool-latching-alarm:21')
-
-    def test_driven_condition_unasserted_fails(self):
-        self.feed.alarm_never = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('unasserted', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_activation_without_journal_evidence_fails(self):
-        self.feed.no_journal = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('no journaled point_changed',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_unsettled_receipt_fails(self):
-        self.feed.no_settle = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('never settled applied',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_shelve_never_releases_fails(self):
-        self.feed.no_release = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('auto-released', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_never_shelvable_applies_fails(self):
-        self.feed.no_refusal = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('did not refuse NotWritable',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_oos_statuses_never_report_fails(self):
-        self.feed.no_oos_status = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('out_of_service/suppressed statuses',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_status_never_reports_is_inconclusive(self):
-        # A monitored status that never reports is an inconclusive
-        # answer, not the product failure the lane names.
-        self.feed.status_absent = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('never report', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_claimed_field_is_inconclusive(self):
-        # The plant's write-ownership already claimed — the fencing
-        # verdict — is an environment answer, not a managed-alarm
-        # failure.
-        self.plant.fence = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('field-write ownership is already claimed',
-                      record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_oos_already_standing_uses_the_other_pump(self):
-        # With comp21's OOS point already standing — the shape an
-        # earlier suite leg leaves behind — the leg drives comp35's.
-        self.feed.values[302] = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'passed', record)
-        oos = json.loads(
-            (self.evidence / 'managed-alarm-oos.json').read_text())
-        self.assertEqual(oos['component'],
-                         'managed-bool-latching-alarm:35')
-=======
         outage = json.loads(
             (self.evidence / 'plant-link-loss-outage.json').read_text())
         self.assertGreater(
@@ -1972,7 +1959,6 @@ class PlantLinkLossTests(unittest.TestCase):
     def test_missing_actions_is_inconclusive(self):
         record = self.run_scenario({'stop_plant': None})
         self.assertEqual(record['outcome'], 'inconclusive', record)
->>>>>>> origin/main
         report.validate_scenario(record)
 
 
