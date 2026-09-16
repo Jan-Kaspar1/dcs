@@ -97,6 +97,13 @@ DEFAULT_CONFIG = {
     'builder_pids': 512,
     'builder_timeout': 5400,
     'monitor_timeout': 90,
+    # The tracking standby's --auto-promote heartbeat budget: that many
+    # consecutive failed checkpoint pulls — one per 100 ms scan cycle —
+    # self-promote it, so a stopped writer's plant freeze is bounded at
+    # ~12 s. The declared field freshness budget (5 ticks) presents
+    # stale well inside the window, while a healthy container restart
+    # (~3-5 s of misses) never reaches it.
+    'failover_misses': 120,
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
     'dynamics_fixture': 'crates/dcs-demo/fixtures/pump_station_dynamics.json',
     'capabilities': [
@@ -829,6 +836,13 @@ def _controller_dir(run_dir, name):
     return Path(run_dir) / 'controllers' / name
 
 
+def _controller_container(run_id, name):
+    """The run's controller container for a scenario ctx endpoint key:
+    'active' is ctrl-a's container, 'standby' ctrl-b's, whichever role
+    each currently reports."""
+    return 'dcs-hw-' + run_id + '-' + {'active': 'a', 'standby': 'b'}[name]
+
+
 def restart_controller(run_id, name, timeline):
     """The scenario-callable controller restart: `docker stop` then
     `docker start` on one of the run's already-launched controller
@@ -844,12 +858,36 @@ def restart_controller(run_id, name, timeline):
     recorded on the run's action timeline; a docker failure raises so
     the calling scenario reports the restart never completed.
     """
-    container = ('dcs-hw-' + run_id + '-'
-                 + {'active': 'a', 'standby': 'b'}[name])
+    container = _controller_container(run_id, name)
     timeline('controller-restart', 'docker stop ' + container)
     docker('stop', '--time', '2', container, timeout=90)
     docker('start', container, timeout=60)
     timeline('controller-restarted', container + ' running')
+
+
+def stop_controller(run_id, name, timeline):
+    """The stop half of the lifecycle action, alone: `docker stop` on
+    one of the run's controller containers, held down until the scenario
+    issues `start_controller` — the seam the stale-freshness case uses
+    to freeze the shared plant's stepping while it polls the surviving
+    peer. Recorded on the run's action timeline; a docker failure raises
+    so the induction is reported as never completed.
+    """
+    container = _controller_container(run_id, name)
+    timeline('controller-stop', 'docker stop ' + container)
+    docker('stop', '--time', '2', container, timeout=90)
+    timeline('controller-stopped', container + ' down')
+
+
+def start_controller(run_id, name, timeline):
+    """The matching start half: `docker start` on a container
+    `stop_controller` stopped — the resumed process reclaims the shared
+    plant's writer and the tracking peer's checkpoint stream resumes.
+    """
+    container = _controller_container(run_id, name)
+    timeline('controller-start', 'docker start ' + container)
+    docker('start', container, timeout=60)
+    timeline('controller-started', container + ' running')
 
 
 def stop_plant(run_id, timeline):
@@ -958,6 +996,11 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'stop_controller': lambda name: stop_controller(
+            run_id, name, timeline),
+        'start_controller': lambda name: start_controller(
+            run_id, name, timeline),
+        'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
         'start_revised': lambda name: start_revised_controller(
@@ -1046,6 +1089,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', prefix + '-a:8080',
+           '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
