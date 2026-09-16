@@ -301,6 +301,19 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         );
     }
     assert!(
+        stdout.contains("== restart =="),
+        "the restart stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("restart-digest"),
+        "the restart leg reported no digest:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("missing-state-file: reported, restart-resume-failed")
+            && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
+        "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
+    );
+    assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
     );
