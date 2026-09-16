@@ -972,6 +972,10 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|(&point, &value)| ForcedPoint { point, value })
                 .collect(),
+            // The executor reports no publication section: only a
+            // monitor's post-scan publication stamps the store's
+            // overload counters — this view is the executor's own.
+            publication: None,
         }
     }
 

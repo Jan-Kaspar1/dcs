@@ -1983,6 +1983,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             }],
+            publication: None,
         };
         let model =
             dcs_model::PlantModel::load(include_str!("../fixtures/managed_alarms.json")).unwrap();
@@ -2015,6 +2016,7 @@ mod tests {
                     io_health: IoHealth::default(),
                     forces: Vec::new(),
                     parameters: Vec::new(),
+                    publication: None,
                 },
                 &model.signal_index(),
             )
