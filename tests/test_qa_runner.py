@@ -194,6 +194,46 @@ class RestartActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-restart'])
 
 
+class LifecycleActionTests(unittest.TestCase):
+    """The scenario-callable stop/start pair: each action records its
+    own attempt and completion on the run's action timeline, so a
+    scenario can hold a controller down across an observation window
+    instead of taking the whole restart as one step."""
+
+    def test_stop_and_start_record_their_own_events(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        timeline = lambda event, detail=None: events.append(event)
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_controller('qa-1', 'active', timeline)
+            runner.start_controller('qa-1', 'active', timeline)
+        self.assertEqual(calls,
+                         [('stop', '--time', '2', 'dcs-hw-qa-1-a'),
+                          ('start', 'dcs-hw-qa-1-a')])
+        self.assertEqual(events, ['controller-stop', 'controller-stopped',
+                                  'controller-start',
+                                  'controller-started'])
+
+    def test_failed_start_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'start' and check:
+                raise RuntimeError('docker start failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_controller(
+                    'qa-1', 'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['controller-start'])
+
+
 class RigStateFileTests(unittest.TestCase):
     """The rig's per-controller --state-file/--journal-file paths live
     inside the bounded run directory on runner-owned mounts."""
@@ -245,6 +285,34 @@ class RigStateFileTests(unittest.TestCase):
             self.assertIn('--journal-file', launch)
             self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
 
+    def test_standby_launch_arms_the_failover_budget(self):
+        # The declared freshness budget presents inside the writer-loss
+        # window only because the armed --auto-promote bound keeps the
+        # freeze finite — the standby carries it, the active does not.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', fake_docker), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        standby = next(c for c in calls
+                       if c[0] == 'run' and 'dcs-hw-qa-1-b' in c)
+        index = standby.index('--auto-promote')
+        self.assertEqual(standby[index + 1],
+                         str(self.cfg['failover_misses']))
+        active = next(c for c in calls
+                      if c[0] == 'run' and 'dcs-hw-qa-1-a' in c)
+        self.assertNotIn('--auto-promote', active)
+
     def test_scenario_ctx_carries_restart_and_run_dir_paths(self):
         calls, events = [], []
 
@@ -259,13 +327,21 @@ class RigStateFileTests(unittest.TestCase):
                 self.run_dir / 'evidence', 0,
                 lambda event, detail=None: events.append(event))
             ctx['restart_controller']('active')
+            ctx['stop_controller']('standby')
+            ctx['start_controller']('standby')
         for path in ctx['state_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         for path in ctx['journal_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         self.assertEqual(calls[0][0], 'stop')
         self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-a'))
+        self.assertEqual(calls[2][-1], 'dcs-hw-qa-1-b')
+        self.assertEqual(calls[3], ('start', 'dcs-hw-qa-1-b'))
+        self.assertEqual(ctx['failover_misses'],
+                         self.cfg['failover_misses'])
         self.assertIn('controller-restart', events)
+        self.assertIn('controller-stopped', events)
+        self.assertIn('controller-started', events)
 
     def test_controller_state_files_reaped_with_the_run_dir(self):
         # The state/journal mounts sit under runs/<id>/, so the

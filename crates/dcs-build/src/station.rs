@@ -177,6 +177,16 @@ const GATE_OR: i64 = 1;
 /// can trip.
 const PARKED_LIMIT: f64 = 1.0e9;
 
+/// `net-flow`'s declared freshness budget — the one `stale_after_ticks`
+/// declaration the reference station carries, on the point the QA
+/// lane's stale-freshness scenario probes. Sizing: a healthy field read
+/// lags the scan by a tick or two at most, so `5` never trips in
+/// service, while a stopped writer freezes the driver stamps far past
+/// it inside the failover budget that bounds the outage. The point is
+/// deliberately one no component port consumes — the staleness evidence
+/// is presentational, not a perturbation of the control path.
+const NET_FLOW_STALE_AFTER: u64 = 5;
+
 /// The station's tunable contract — setpoints, staging policy, and
 /// alarm hysteresis. [`reference`](Self::reference) is the checked-in
 /// document's configuration.
@@ -459,7 +469,12 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     let level_primary = plant.field_input::<f64>(points::LEVEL_PRIMARY, level_primary_ch, false);
     let level_backup = plant.field_input::<f64>(points::LEVEL_BACKUP, level_backup_ch, false);
     plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
-    plant.field_input::<f64>(points::NET_FLOW, net_flow_ch, false);
+    plant.field_input_stale_after::<f64>(
+        points::NET_FLOW,
+        net_flow_ch,
+        false,
+        NET_FLOW_STALE_AFTER,
+    );
     let power_fail = plant.field_input::<bool>(points::POWER_FAIL, power_fail_ch, false);
     // The power-fail contact is a protection-layer reported state —
     // decision 74's durable record marks it `journaled` so its
