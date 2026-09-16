@@ -221,6 +221,33 @@
 //! generic name-plus-diagnostics-plus-wired-points faceplate, never an
 //! error.
 //!
+//! Every faceplate also carries the schema-driven-interface decision's
+//! generic surface: a per-component disclosure rendering the served
+//! `BlockInterface`'s five resource categories, `GET /schema`'s
+//! per-instance registry joined by component and resource name onto
+//! `GET /resources`' live state. Measurements and runtime state render
+//! as labeled readouts — direction, kind, bound point or `unwired`,
+//! value with unit, and quality or `no sample`; configuration rows
+//! show the current tune and give `tunable` properties the parameter
+//! table's own edit controls, so a configuration edit is the unchanged
+//! receipted `set_parameter` path; every named command — the adapted
+//! `write_value`/`force_point`/`unforce_point`/`set_parameter`
+//! variants and the kind's declared commands alike — is an invocable
+//! row whose typed request arguments render controls, whose served
+//! unavailability disables the row with the refusal reason shown, and
+//! whose submission flows through `submitCommand` so a boundary
+//! refusal or an applied tick lands on the row and in the journal; and
+//! the recent-events list shows the component's attributed journal
+//! tail — bound-point transitions, settled receipts, step failures,
+//! kind-emitted events — newest last. A peer predating the two
+//! endpoints answers 404 and the disclosure renders nothing — the
+//! absent-section convention — and the operator's open/closed choice
+//! and in-flight argument entries survive the one-second re-render.
+//! For a kind with no dedicated presentation the disclosure is the
+//! control surface itself and opens by default; beside dedicated
+//! presentation it stays collapsed until opened — kind-specific
+//! markup is an enhancement, never the only usable surface.
+//!
 //! The alarm pane applies the same descriptor-to-point join to the
 //! two-flag alarm surface: every status-role `Out` port whose live
 //! sample asserts lists with its component, value, quality, and the
