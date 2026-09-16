@@ -11,7 +11,10 @@ The mechanics are proven workspace-side by
 `crates/dcs-build/tests/consumer_release.rs`, which resolves the
 supported crates from an immutable revision of this repository with no
 `path` dependency, composes and deterministically emits a model, and
-passes it through the released tooling. The independent reference-plant
+passes it through the released tooling, and by
+`crates/dcs-build/tests/consumer_upgrade.rs`, which proves the
+same-minor repin is a drop-in upgrade and that the incompatible
+crossings refuse with named diagnostics. The independent reference-plant
 repository — the consumer-shaped proof decision 79 requires — is a
 later slice of the same gate and pins this contract's first release.
 
@@ -202,7 +205,29 @@ the model twice and compares bytes, then runs `dcs-model validate`,
 document. A pinned `rev` works against any commit; consumers pin the
 release tag the same way.
 
-Its failures are named diagnostics:
+The upgrade half of the compatibility policy is proven by
+`crates/dcs-build/tests/consumer_upgrade.rs`:
+
+```sh
+cargo test -p dcs-build --test consumer_upgrade
+```
+
+It materializes the same scratch consumer pinned at the revision this
+document records for `v0.1.0` — the release tag once it exists in the
+checkout, until then the commit that landed this contract — and runs
+the identical resolve/build/deterministic-emit/released-tooling
+pipeline green. It then repins the unchanged consumer source to the
+checkout's `HEAD` — a later commit in the same minor series — and
+reruns the pipeline, asserting the two pins emit byte-identical model
+documents: a divergence is itself the signal this policy asks a
+release record to name, and fails named rather than passing silently.
+The same target records the incompatible crossings: a document
+doctored one version past `MODEL_VERSION` is refused by the released
+`dcs-model validate` with `LoadError::UnsupportedVersion` naming the
+found and supported versions, and an unresolvable tag name fails
+`pin-unresolvable` beside the version-requirement exclusion.
+
+The checks' failures are named diagnostics:
 
 | Diagnostic | Meaning |
 |---|---|
@@ -210,4 +235,6 @@ Its failures are named diagnostics:
 | `surface-incompatible` | The release crates resolved but the consumer's use of the supported API fails to compile — an incompatible pin reaching compile time. |
 | `path-dependency-leak` | The consumer lockfile records a `path` source for a released crate — the no-path-dependency proof itself failed. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
+| `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
