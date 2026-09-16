@@ -431,6 +431,22 @@ succeeding. **Checkpoint obligation:** command-mutated state is run
 state — fold every field the command touches into `capture_state`, or a
 tracking standby will not inherit the effect (decision 84).
 
+A kind declaring a `kind_declared`-availability command also implements
+`Component::command_refusal`, the standing-availability probe the
+executor evaluates once per declared `kind_declared` command at each
+scan's step end and publishes on the snapshot's `command_verdicts`
+section: `None` reports the command invocable now, `Some(reason)` the
+kind's standing refusal — the same text a refused invocation settles.
+The probe is argument-free: it answers whether the command is invocable
+at all now, so argument-domain refusals stay in `invoke_command`.
+Factor the standing predicate once and have dispatch consult it — the
+published verdict and the refusal must be the same expression. The
+verdict is advisory only: submissions still validate, queue, and settle
+through the receipted path, and a verdict dispatch disagrees with
+settles honestly rather than failing the scan. The default reports
+every declared command invocable, matching the read model's earlier
+unconditional `available`.
+
 ### Declaring an emitted event
 
 `ComponentDescriptor.events` lists `EventDecl`s: `name` (the stable

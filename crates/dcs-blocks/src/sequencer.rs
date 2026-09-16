@@ -66,7 +66,9 @@ pub struct SequencerStep {
 /// `advance` moves the active step forward `count` steps (one when the
 /// argument is absent) and `reset` restarts the table — applies at the
 /// scan boundary through `invoke_command`; `advance` is
-/// `KindDeclared`-available and refuses a completed table. The declared
+/// `KindDeclared`-available and refuses a completed table, the standing
+/// refusal `command_refusal` publishes on the snapshot's
+/// `command_verdicts` section. The declared
 /// `step_completed` event emits on the scan a step runs its `ticks` out
 /// and journals at the producing tick. None of the commands aliases a
 /// writable point: `reset` the command is a one-shot action where the
@@ -370,6 +372,22 @@ impl Component for Sequencer {
         descriptor
     }
 
+    /// The standing-availability probe the executor's post-scan
+    /// verdict evaluation calls for the descriptor's `KindDeclared`
+    /// commands: `advance` reports the same standing refusal dispatch
+    /// checks — a completed table — and `reset` stands invocable. The
+    /// argument-dependent refusal (a `count` below 1) stays with
+    /// dispatch: the probe answers whether the command is invocable at
+    /// all now, not what a given request would meet.
+    fn command_refusal(&self, command: &str) -> Option<String> {
+        match command {
+            "advance" if self.completed => {
+                Some("the sequence has run to its end; reset restarts it".to_string())
+            }
+            _ => None,
+        }
+    }
+
     /// The invoke surface the descriptor declares: `advance` moves the
     /// active step forward `count` steps — absent `count` means one —
     /// and `reset` returns the run to the first step, the one-shot
@@ -377,11 +395,13 @@ impl Component for Sequencer {
     ///
     /// `advance` is `KindDeclared`-available: a completed table refuses
     /// it with the declared reason, and `count` must be at least 1.
-    /// Landing past the last step completes the run — the same
-    /// hold-at-end state a `run`-paced table reaches. `reset` is always
-    /// available. Both mutate only the checkpointed
-    /// `step`/`elapsed`/`done` run state, so a tracking standby
-    /// inherits the effect through the ordinary checkpoint.
+    /// The standing half is [`command_refusal`](Self::command_refusal)'s
+    /// — dispatch consults the probe so the published verdict and the
+    /// refusal can never disagree. Landing past the last step completes
+    /// the run — the same hold-at-end state a `run`-paced table
+    /// reaches. `reset` is always available. Both mutate only the
+    /// checkpointed `step`/`elapsed`/`done` run state, so a tracking
+    /// standby inherits the effect through the ordinary checkpoint.
     fn invoke_command(
         &mut self,
         command: &str,
@@ -389,8 +409,8 @@ impl Component for Sequencer {
     ) -> Result<(), String> {
         match command {
             "advance" => {
-                if self.completed {
-                    return Err("the sequence has run to its end; reset restarts it".to_string());
+                if let Some(reason) = self.command_refusal(command) {
+                    return Err(reason);
                 }
                 let count = match arguments.get("count") {
                     None => 1,
@@ -1332,6 +1352,42 @@ mod tests {
             invoke(&mut at_end, "advance", &[("count", Value::Int(0))]).unwrap_err(),
             "count must be at least 1"
         );
+    }
+
+    #[test]
+    fn the_probe_reports_the_standing_advance_refusal() {
+        // The probe is dispatch's standing predicate: `advance` answers
+        // the completed-table refusal — the same text a refused
+        // invocation settles — while `reset` stands invocable, and the
+        // `count` domain stays dispatch-only.
+        let mut block = component();
+        let seq_io = io();
+
+        // Mid-table: no standing refusal, dispatch applies.
+        assert_eq!(block.command_refusal("advance"), None);
+        invoke(&mut block, "advance", &[]).unwrap();
+
+        // Run the table out: the probe's answer is the refusal the
+        // receipted path would carry.
+        for tick in 1..=6 {
+            step(&mut block, &seq_io, true, false, tick);
+        }
+        assert!(done(&seq_io));
+        let standing = block.command_refusal("advance");
+        assert_eq!(
+            standing.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert_eq!(
+            invoke(&mut block, "advance", &[]).unwrap_err(),
+            standing.unwrap()
+        );
+
+        // `reset` is invocable throughout — probe and dispatch agree —
+        // and clears the standing refusal again.
+        assert_eq!(block.command_refusal("reset"), None);
+        invoke(&mut block, "reset", &[]).unwrap();
+        assert_eq!(block.command_refusal("advance"), None);
     }
 
     #[test]

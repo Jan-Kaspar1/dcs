@@ -13,11 +13,12 @@ use crate::checkpoint::{
 use crate::component::{Component, ComponentIo, IoRequirement};
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandQueueDiagnostics,
-    CommandReceipt, ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction,
-    DroppedElement, EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth,
-    ModelFingerprint, PointId, PointTelemetry, Quality, QualityReason, Sample, StateMap,
-    TelemetrySnapshot, Tick, Value, ValueKind,
+    CarriedPoint, CarryoverReport, Command, CommandAvailability, CommandError, CommandOutcome,
+    CommandQueueDiagnostics, CommandReceipt, CommandVerdict, ComponentCommands,
+    ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
+    EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
+    PointTelemetry, Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value,
+    ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -579,7 +580,15 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// 5. steps the components in scan order, each seeing a [`ComponentIo`]
 ///    scoped to its declared points — a failing step is recorded and the
 ///    scan continues;
-/// 6. writes the image's field `Out` points to the driver — points a
+/// 6. probes each component's declared
+///    [`KindDeclared`](dcs_core::CommandAvailability::KindDeclared)
+///    commands through [`command_refusal`](Component::command_refusal) —
+///    once per declared command, on the post-step state — refreshing the
+///    `command_verdicts` section the next
+///    [`snapshot`](Executor::snapshot) carries. The verdicts are
+///    advisory: dispatch stays the receipted path's authority, so a
+///    probe answer never refuses, applies, or alters a command;
+/// 7. writes the image's field `Out` points to the driver — points a
 ///    component never wrote keep their last output, so a failed step
 ///    holds outputs. Under the cyclic contract each write stages the
 ///    pending output image, publishing on the next scan's exchange —
@@ -639,7 +648,12 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// its declared kind — and the applying scan dispatches it to the
 /// component's [`invoke_command`](Component::invoke_command) hook, where
 /// the declared availability predicate or a kind invariant settles the
-/// receipt `Rejected` with the declared refusal reason.
+/// receipt `Rejected` with the declared refusal reason. The sibling
+/// read side is the [`command_refusal`](Component::command_refusal)
+/// probe: the scan's step-end evaluation publishes each declared
+/// `KindDeclared` command's standing verdict in the snapshot's
+/// `command_verdicts` section — advisory reporting only, with the
+/// receipted path remaining the sole authority over what applies.
 ///
 /// A component's declared [`EventDecl`](dcs_core::EventDecl) surface is
 /// the sibling output side: [`drain_events`](Component::drain_events)
@@ -716,6 +730,15 @@ pub struct Executor<'d> {
     /// to a line that does not carry the abandoned scan's emissions, so
     /// the buffer always holds exactly one scan's events.
     emitted: Vec<EmittedEvent>,
+    /// The `KindDeclared`-command availability verdicts the last scan's
+    /// probe produced — one probe call per declared `KindDeclared`
+    /// command per component, evaluated at the end of the scan's step
+    /// phase where component state has settled, and carried verbatim
+    /// into the snapshot's `command_verdicts` section. Like `emitted`
+    /// the buffer is a scan product: empty before the first scan and
+    /// cleared by a checkpoint apply, which converges the run to a line
+    /// whose verdicts the adopted state's next scan re-derives.
+    command_verdicts: Vec<ComponentCommands>,
     /// The executor-collected half of the snapshot's `io_health` section:
     /// the boundary counters and the fed overrun count. Its `driver`
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
@@ -846,6 +869,7 @@ impl<'d> Executor<'d> {
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
             emitted: Vec::new(),
+            command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
             model_fingerprint: None,
@@ -992,7 +1016,12 @@ impl<'d> Executor<'d> {
     /// the same scan order as `components` and `descriptors`. The
     /// `command_queue` section reports the pending-command queue's
     /// admission metrics — attempts, full-queue rejections, the declared
-    /// capacity, and the queue's depth and high-water mark.
+    /// capacity, and the queue's depth and high-water mark. The
+    /// `command_verdicts` section carries each component's probed
+    /// `KindDeclared`-command availability — the verdicts the last
+    /// completed scan's step-end evaluation produced, in the same scan
+    /// order — empty before the first scan and just after a checkpoint
+    /// apply, whose adopted line re-derives them on its next scan.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
         let descriptors: Vec<_> = self
@@ -1072,6 +1101,7 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|(&point, &value)| ForcedPoint { point, value })
                 .collect(),
+            command_verdicts: self.command_verdicts.clone(),
             command_queue: CommandQueueDiagnostics {
                 attempts: self.command_admission.attempts,
                 full_rejections: self.command_admission.full_rejections,
@@ -1230,6 +1260,7 @@ impl<'d> Executor<'d> {
         self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
+        self.probe_command_verdicts();
         self.write_outputs()?;
         Ok(tick)
     }
@@ -1440,9 +1471,12 @@ impl<'d> Executor<'d> {
         // The checkpoint's force set is authoritative: the standby
         // forces exactly what the active forced — no more, no less.
         self.forces.clone_from(&checkpoint.forces);
-        // The last scan's drained emissions belong to the abandoned
-        // line: the adopted run's record starts empty.
+        // The last scan's drained emissions and probed command verdicts
+        // belong to the abandoned line: the adopted run's records start
+        // empty — the next scan re-derives the verdicts from the adopted
+        // component state.
         self.emitted.clear();
+        self.command_verdicts.clear();
         self.adopt_receipts(checkpoint);
         Ok(())
     }
@@ -1599,6 +1633,7 @@ impl<'d> Executor<'d> {
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
         self.emitted.clear();
+        self.command_verdicts.clear();
         self.adopt_receipts(checkpoint);
 
         let initialized = self
@@ -2149,6 +2184,49 @@ impl<'d> Executor<'d> {
                     event
                 }));
         }
+    }
+
+    /// Re-derives every component's `KindDeclared`-command availability
+    /// verdicts for the snapshot's `command_verdicts` section — one
+    /// [`command_refusal`](Component::command_refusal) probe call per
+    /// declared [`CommandAvailability::KindDeclared`] command, in scan
+    /// order.
+    ///
+    /// Runs at the end of the scan's step phase — inside the scan
+    /// boundary where component state has settled for the scan, never
+    /// under a consumer read — so the published verdicts are a pure
+    /// function of post-step state: a tracking standby's scans derive
+    /// identical verdicts from the same adopted state, and a per-peer
+    /// driver-boundary failure cannot skew them. The verdicts are
+    /// advisory only: a `describe`-declared command whose probe reports
+    /// `available` may still be refused at dispatch — by the
+    /// argument-dependent checks the probe never sees — and that
+    /// refusal settles on the ordinary receipt rather than failing the
+    /// scan.
+    fn probe_command_verdicts(&mut self) {
+        self.command_verdicts = self
+            .components
+            .iter()
+            .map(|entry| {
+                let descriptor = entry.component.describe();
+                ComponentCommands {
+                    name: entry.component.name().to_string(),
+                    verdicts: descriptor
+                        .commands
+                        .iter()
+                        .filter(|command| command.availability == CommandAvailability::KindDeclared)
+                        .map(|command| {
+                            let refusal = entry.component.command_refusal(&command.name);
+                            CommandVerdict {
+                                name: command.name.clone(),
+                                available: refusal.is_none(),
+                                refusal,
+                            }
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
     }
 
     /// Writes every field `Out` point the image holds to the driver.
@@ -7249,7 +7327,9 @@ mod tests {
     /// replaces its checkpointed `count` and `bump {by}` adds to it —
     /// `by` defaults to 1, must be at least 1, and is refused once the
     /// count reaches the declared limit, the kind's
-    /// `KindDeclared`-availability analogue. `step` reports the count on
+    /// `KindDeclared`-availability analogue. `bump`'s standing check is
+    /// the `command_refusal` probe's — dispatch and the published
+    /// verdict share one predicate. `step` reports the count on
     /// its `Out` `Int` point.
     struct Commanded {
         name: &'static str,
@@ -7315,6 +7395,15 @@ mod tests {
             }
         }
 
+        fn command_refusal(&self, command: &str) -> Option<String> {
+            match command {
+                "bump" if self.count >= Self::LIMIT => {
+                    Some("the counter is at its limit".to_string())
+                }
+                _ => None,
+            }
+        }
+
         fn invoke_command(
             &mut self,
             command: &str,
@@ -7329,8 +7418,8 @@ mod tests {
                     Ok(())
                 }
                 "bump" => {
-                    if self.count >= Self::LIMIT {
-                        return Err("the counter is at its limit".to_string());
+                    if let Some(reason) = self.command_refusal(command) {
+                        return Err(reason);
                     }
                     let by = match arguments.get("by") {
                         Some(Value::Int(by)) => *by,
@@ -7357,6 +7446,45 @@ mod tests {
             state.ensure_known_fields(self.name, &["count"])?;
             self.count = state.require_i64(self.name, "count")?;
             Ok(())
+        }
+    }
+
+    /// A component declaring a `KindDeclared` command its kind neither
+    /// probes nor serves: the default `command_refusal` reports it
+    /// invocable — the unconditional `available` the read model
+    /// published before the section existed — while the default
+    /// `invoke_command` still refuses every invocation at dispatch.
+    struct Unprobed {
+        name: &'static str,
+    }
+
+    impl Component for Unprobed {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn io_requirements(&self) -> Vec<IoRequirement> {
+            Vec::new()
+        }
+
+        fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> ComponentDescriptor {
+            ComponentDescriptor {
+                name: self.name.to_string(),
+                kind: "unprobed".to_string(),
+                label: self.name.to_string(),
+                ports: Vec::new(),
+                parameters: Vec::new(),
+                commands: vec![CommandDecl {
+                    name: "ping".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::KindDeclared,
+                }],
+                events: Vec::new(),
+            }
         }
     }
 
@@ -8061,5 +8189,220 @@ mod tests {
         standby.scan().unwrap();
         assert_eq!(standby.receipts().len(), 1);
         assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
+    }
+
+    /// Reads `command`'s published verdict on `component` out of the
+    /// snapshot's `command_verdicts` section — `None` when the
+    /// component or command carries none.
+    fn verdict<'a>(
+        snapshot: &'a TelemetrySnapshot,
+        component: &str,
+        command: &str,
+    ) -> Option<&'a CommandVerdict> {
+        snapshot
+            .command_verdicts
+            .iter()
+            .find(|entry| entry.name == component)
+            .and_then(|entry| entry.verdicts.iter().find(|v| v.name == command))
+    }
+
+    #[test]
+    fn the_post_scan_probe_publishes_kind_declared_verdicts() {
+        // `Commanded`'s `bump` is `KindDeclared`: at the limit the
+        // probe reports the standing refusal the receipted path would
+        // settle. `load` is `Always` and takes no verdict — the
+        // section covers exactly the declared `KindDeclared` commands.
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+
+        // A scan product: before the first scan the section is empty.
+        assert!(executor.snapshot().command_verdicts.is_empty());
+
+        executor.scan().unwrap();
+        let snapshot = executor.snapshot();
+        // One entry per registered component, in scan order; `a`
+        // declares no command surface, so its verdict list is empty.
+        assert_eq!(
+            snapshot
+                .command_verdicts
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ctr", "a"]
+        );
+        assert_eq!(
+            snapshot.command_verdicts[0].verdicts,
+            [CommandVerdict {
+                name: "bump".to_string(),
+                available: true,
+                refusal: None,
+            }]
+        );
+        assert!(snapshot.command_verdicts[1].verdicts.is_empty());
+
+        // Drive the count to the limit: the same scan's probe reports
+        // `bump`'s standing refusal — the text dispatch would settle.
+        executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
+        executor.scan().unwrap();
+        let snapshot = executor.snapshot();
+        assert_eq!(
+            verdict(&snapshot, "ctr", "bump"),
+            Some(&CommandVerdict {
+                name: "bump".to_string(),
+                available: false,
+                refusal: Some("the counter is at its limit".to_string()),
+            })
+        );
+
+        // `load` back under the limit re-opens `bump` on the next
+        // scan's probe.
+        executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(0))]));
+        executor.scan().unwrap();
+        assert_eq!(
+            verdict(&executor.snapshot(), "ctr", "bump"),
+            Some(&CommandVerdict {
+                name: "bump".to_string(),
+                available: true,
+                refusal: None,
+            })
+        );
+    }
+
+    #[test]
+    fn probe_and_dispatch_share_the_standing_predicate() {
+        // The proving kind's standing check is one code path: at the
+        // limit the probe's answer is the reason dispatch settles, and
+        // both report the `Always`-available `load` invocable
+        // throughout.
+        let mut commanded = Commanded {
+            name: "ctr",
+            output: PointId(40),
+            count: 0,
+        };
+        let no_arguments = BTreeMap::new();
+        assert_eq!(commanded.command_refusal("bump"), None);
+        assert!(commanded.invoke_command("bump", &no_arguments).is_ok());
+
+        commanded.count = Commanded::LIMIT;
+        let standing = commanded.command_refusal("bump");
+        assert_eq!(standing.as_deref(), Some("the counter is at its limit"));
+        assert_eq!(
+            commanded.invoke_command("bump", &no_arguments).unwrap_err(),
+            standing.unwrap()
+        );
+        // `load` stands invocable — probe and dispatch agree.
+        assert_eq!(commanded.command_refusal("load"), None);
+        let to_zero: BTreeMap<String, Value> =
+            [("to".to_string(), Value::Int(0))].into_iter().collect();
+        assert!(commanded.invoke_command("load", &to_zero).is_ok());
+        assert_eq!(commanded.count, 0);
+    }
+
+    #[test]
+    fn a_kind_without_a_probe_reports_nothing_new() {
+        // The default `command_refusal` reports every declared command
+        // invocable — the unconditional `available` the read model
+        // published before the section existed — so a kind that never
+        // overrides it carries the same reporting it always did.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+            .into_iter()
+            .collect();
+        let mut executor =
+            Executor::new(&driver, map, vec![Box::new(Unprobed { name: "unprobed" })]).unwrap();
+
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.snapshot().command_verdicts,
+            [ComponentCommands {
+                name: "unprobed".to_string(),
+                verdicts: vec![CommandVerdict {
+                    name: "ping".to_string(),
+                    available: true,
+                    refusal: None,
+                }],
+            }]
+        );
+
+        // The verdict is advisory, never a second authority: a
+        // submission the probe calls available still validates, queues,
+        // and settles through the receipted path — here the default
+        // invoke hook's refusal — and the disagreement fails nothing.
+        let receipt = executor.submit_command(invoke("unprobed", "ping", &[]));
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::CommandRefused {
+                    component: "unprobed".to_string(),
+                    command: "ping".to_string(),
+                    reason: "the kind does not serve the declared command \"ping\"".to_string(),
+                }
+            }
+        );
+        // And the verdict itself is untouched by the refused dispatch.
+        assert_eq!(
+            verdict(&executor.snapshot(), "unprobed", "ping"),
+            Some(&CommandVerdict {
+                name: "ping".to_string(),
+                available: true,
+                refusal: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_tracking_standby_publishes_identical_verdicts() {
+        // The verdicts are a pure function of component state evaluated
+        // inside the scan, so a tracking peer re-derives the active's
+        // verdicts from the adopted state — identical sections scan by
+        // scan, like the emitted record.
+        let active_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut active = commanded_rig(&active_driver);
+        let standby_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut standby = commanded_rig(&standby_driver);
+
+        // The active's count reaches the limit before the standby
+        // joins: the adopted state carries `bump`'s standing refusal.
+        active.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        // The abandoned line's verdicts do not linger past the apply:
+        // the adopted line has completed no scan yet.
+        assert!(standby.snapshot().command_verdicts.is_empty());
+
+        for _ in 0..4 {
+            standby.scan().unwrap();
+            active.scan().unwrap();
+            assert_eq!(
+                standby.snapshot().command_verdicts,
+                active.snapshot().command_verdicts
+            );
+            standby.apply(&active.checkpoint()).unwrap();
+        }
+        // Both report `bump`'s standing refusal — the adopted state
+        // carries the limit.
+        standby.scan().unwrap();
+        assert_eq!(
+            verdict(&standby.snapshot(), "ctr", "bump").and_then(|v| v.refusal.as_deref()),
+            Some("the counter is at its limit")
+        );
+
+        // A carried `Accepted` invocation settles at the standby's own
+        // boundary and the same scan's verdicts follow the effect:
+        // `load` below the limit re-opens `bump` on both peers.
+        active.submit_command(invoke("ctr", "load", &[("to", Value::Int(0))]));
+        standby.apply(&active.checkpoint()).unwrap();
+        active.scan().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.snapshot().command_verdicts,
+            active.snapshot().command_verdicts
+        );
+        assert_eq!(
+            verdict(&standby.snapshot(), "ctr", "bump").map(|v| v.available),
+            Some(true)
+        );
     }
 }
