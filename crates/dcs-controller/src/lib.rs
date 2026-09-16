@@ -413,12 +413,17 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(FailoverSelect::KIND, |spec| {
+            // `backup_unhealthy` is the optional standby-health output —
+            // bound only where the model wires it (`ComponentSpec::get`);
+            // an unwired instance selects identically and simply does not
+            // expose the indication.
             boxed(FailoverSelect::from_parameters(
                 spec.name.as_str(),
                 spec.require("primary")?,
                 spec.require("backup")?,
                 spec.require("out")?,
                 spec.require("backup_active")?,
+                spec.get("backup_unhealthy"),
                 spec.parameters,
             ))
         })

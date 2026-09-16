@@ -173,6 +173,8 @@ mod carriers {
     pub const DEVIATING_IN: u64 = 211;
     pub const BACKUP_ACTIVE: u64 = 212;
     pub const BACKUP_ACTIVE_IN: u64 = 213;
+    pub const BACKUP_UNHEALTHY: u64 = 218;
+    pub const BACKUP_UNHEALTHY_IN: u64 = 219;
     pub const MANUAL_ACTIVE: u64 = 214;
     pub const MANUAL_ACTIVE_IN: u64 = 215;
     pub const DISCREPANCY: u64 = 216;
@@ -363,6 +365,9 @@ pub struct IjmuidenLayout {
     pub deviating: PointId,
     /// The failover's `backup_active` carrier — `journaled`.
     pub backup_active: PointId,
+    /// The failover's `backup_unhealthy` carrier — `journaled`; asserts
+    /// while the repeater's own sample is untrusted.
+    pub backup_unhealthy: PointId,
     /// The station's `manual_active` carrier — `journaled`.
     pub manual_active: PointId,
     /// The valve's `discrepancy` carrier — `journaled`.
@@ -409,6 +414,9 @@ pub struct IjmuidenLayout {
     pub rate_of_rise_alarm: AlarmLayout,
     /// The backup-measurement-serving alarm.
     pub backup_active_alarm: AlarmLayout,
+    /// The backup-measurement-unhealthy alarm — the standby-loss
+    /// annunciation issue #502 calls for.
+    pub backup_unhealthy_alarm: AlarmLayout,
     /// The protection-layer trip alarm.
     pub sis_trip_alarm: AlarmLayout,
     /// The protection-layer bypass alarm.
@@ -741,6 +749,10 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     let backup_active = plant.internal_output::<bool>(PointId(carriers::BACKUP_ACTIVE), false);
     let backup_active_in =
         plant.internal_input::<bool>(PointId(carriers::BACKUP_ACTIVE_IN), false, false);
+    let backup_unhealthy =
+        plant.internal_output::<bool>(PointId(carriers::BACKUP_UNHEALTHY), false);
+    let backup_unhealthy_in =
+        plant.internal_input::<bool>(PointId(carriers::BACKUP_UNHEALTHY_IN), false, false);
     let manual_active = plant.internal_output::<bool>(PointId(carriers::MANUAL_ACTIVE), false);
     let manual_active_in =
         plant.internal_input::<bool>(PointId(carriers::MANUAL_ACTIVE_IN), false, false);
@@ -767,6 +779,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     for point in [
         deviating,
         backup_active,
+        backup_unhealthy,
         manual_active,
         discrepancy,
         duty_call,
@@ -877,6 +890,20 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             "level",
         ),
         (
+            carriers::BACKUP_UNHEALTHY,
+            "backup-unhealthy",
+            "",
+            "The remote repeater's own sample is untrusted while the canal level serves",
+            "level",
+        ),
+        (
+            carriers::BACKUP_UNHEALTHY_IN,
+            "backup-unhealthy-in",
+            "",
+            "Backup-unhealthy flag delivered to its alarm",
+            "level",
+        ),
+        (
             carriers::MANUAL_ACTIVE,
             "manual-active",
             "",
@@ -971,8 +998,12 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         signal(&mut plant, PointId(point), name, unit, description, group);
     }
 
-    // The components, each through its typed spec.
-    let failover = plant.add(FailoverSelectSpec::new(parameters([])));
+    // The components, each through its typed spec. The failover
+    // declares its optional `backup_unhealthy` output: the repeater's
+    // scripted comms freeze degrades the standby while the canal level
+    // keeps serving — the annunciation QA's issue-#502 finding calls
+    // for.
+    let failover = plant.add(FailoverSelectSpec::new(parameters([])).with_backup_unhealthy());
     let filter = plant.add(SignalFilterSpec::new(parameters([(
         "alpha",
         Value::Float(config.filter_alpha),
@@ -1092,6 +1123,18 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             "backup-alarm",
         ),
     ));
+    let backup_unhealthy_alarm = plant.add(BoolLatchingAlarmSpec::new(
+        parameters([
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        rationalization(
+            "The remote repeater's own sample is untrusted — the standby path is already lost while the canal level serves",
+            "Restore the remote link before the primary level fails",
+            "backup-unhealthy-alarm",
+        ),
+    ));
     let sis_trip_alarm = plant.add(BoolLatchingAlarmSpec::new(
         parameters([
             ("priority", Value::Int(1)),
@@ -1137,6 +1180,13 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     plant.connect(level_remote, &failover.backup);
     plant.connect(&failover.out, level_sel);
     plant.connect(&failover.backup_active, backup_active);
+    plant.connect(
+        failover
+            .backup_unhealthy
+            .as_ref()
+            .expect("the scenario spec declares backup_unhealthy"),
+        backup_unhealthy,
+    );
     plant.connect(level_filt_in, level_sel);
     plant.connect(level_trend_in, level_sel);
     plant.connect(level_filt_in, &filter.input);
@@ -1159,6 +1209,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     plant.connect(&divergence.deviating, deviating);
     plant.connect(deviating_in, deviating);
     plant.connect(backup_active_in, backup_active);
+    plant.connect(backup_unhealthy_in, backup_unhealthy);
 
     // The command path: the field-reported mode selects between the
     // automatic layer's standing demand and the operator's manual
@@ -1233,6 +1284,14 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     plant.connect(deviating_in, &ror_alarm.input);
     let backup_active_alarm = unmanaged_alarm(&mut plant, 4, &backup_alarm, "backup", "alarms");
     plant.connect(backup_active_in, &backup_alarm.input);
+    let backup_unhealthy_alarm_layout = unmanaged_alarm(
+        &mut plant,
+        8,
+        &backup_unhealthy_alarm,
+        "backup-unhealthy",
+        "alarms",
+    );
+    plant.connect(backup_unhealthy_in, &backup_unhealthy_alarm.input);
     let sis_trip_alarm_layout =
         unmanaged_alarm(&mut plant, 5, &sis_trip_alarm, "sis-trip", "protection");
     plant.connect(sis_trip, &sis_trip_alarm.input);
@@ -1268,6 +1327,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             deviation: PointId(carriers::DEVIATION),
             deviating: PointId(carriers::DEVIATING),
             backup_active: PointId(carriers::BACKUP_ACTIVE),
+            backup_unhealthy: PointId(carriers::BACKUP_UNHEALTHY),
             manual_active: PointId(carriers::MANUAL_ACTIVE),
             discrepancy: PointId(carriers::DISCREPANCY),
             gate_demand: PointId(carriers::GATE_DEMAND),
@@ -1290,6 +1350,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
             discrepancy_alarm: discrepancy_alarm_layout,
             rate_of_rise_alarm,
             backup_active_alarm,
+            backup_unhealthy_alarm: backup_unhealthy_alarm_layout,
             sis_trip_alarm: sis_trip_alarm_layout,
             sis_bypass_alarm: sis_bypass_alarm_layout,
             sis_fault_alarm: sis_fault_alarm_layout,

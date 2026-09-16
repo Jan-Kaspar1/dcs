@@ -316,6 +316,23 @@
       }
     },
     {
+      "id": 222,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 223,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
       "id": 1000,
       "direction": "in",
       "value_type": "bool",
@@ -659,6 +676,60 @@
       "journaled": true
     },
     {
+      "id": 1060,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1063,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1064,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1065,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1066,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1067,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
       "id": 20,
       "direction": "in",
       "value_type": "float",
@@ -898,60 +969,6 @@
       }
     },
     {
-      "id": 1060,
-      "direction": "in",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "writable": true
-    },
-    {
-      "id": 1063,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1064,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1065,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1066,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1067,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
       "id": 1070,
       "direction": "in",
       "value_type": "bool",
@@ -1052,6 +1069,60 @@
     },
     {
       "id": 1087,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1090,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1093,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1094,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1095,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1096,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1097,
       "direction": "out",
       "value_type": "bool",
       "initial": {
@@ -1299,60 +1370,6 @@
       }
     },
     {
-      "id": 1090,
-      "direction": "in",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "writable": true
-    },
-    {
-      "id": 1093,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1094,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1095,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1096,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
-      "id": 1097,
-      "direction": "out",
-      "value_type": "bool",
-      "initial": {
-        "bool": false
-      },
-      "journaled": true
-    },
-    {
       "id": 1100,
       "direction": "in",
       "value_type": "bool",
@@ -1459,6 +1476,60 @@
         "bool": false
       },
       "journaled": true
+    },
+    {
+      "id": 1120,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1123,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1124,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1125,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1126,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1127,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
     }
   ],
   "signals": [
@@ -1483,7 +1554,7 @@
       "name": "inflow",
       "source": 12,
       "unit": "m3/h",
-      "description": "Declared station inflow — the dynamics document's forcing input",
+      "description": "Declared station inflow \u2014 the dynamics document's forcing input",
       "group": "wet-well"
     },
     {
@@ -1555,7 +1626,7 @@
       "name": "power-ok",
       "source": 206,
       "unit": "",
-      "description": "Station power healthy — the inverted power-fail contact",
+      "description": "Station power healthy \u2014 the inverted power-fail contact",
       "group": "station"
     },
     {
@@ -1655,6 +1726,22 @@
       "group": "station"
     },
     {
+      "id": 10222,
+      "name": "backup-unhealthy",
+      "source": 222,
+      "unit": "",
+      "description": "The backup level measurement is untrusted while the primary serves",
+      "group": "station"
+    },
+    {
+      "id": 10223,
+      "name": "backup-unhealthy-in",
+      "source": 223,
+      "unit": "",
+      "description": "Backup-unhealthy flag delivered to its alarm",
+      "group": "station"
+    },
+    {
       "id": 11000,
       "name": "lah-ack",
       "source": 1000,
@@ -1675,7 +1762,7 @@
       "name": "lah-alarm",
       "source": 1003,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1731,7 +1818,7 @@
       "name": "lal-alarm",
       "source": 1013,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1779,7 +1866,7 @@
       "name": "backup-active-alarm",
       "source": 1023,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1827,7 +1914,7 @@
       "name": "none-available-alarm",
       "source": 1033,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1875,7 +1962,7 @@
       "name": "all-faulted-alarm",
       "source": 1043,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1923,7 +2010,7 @@
       "name": "power-fail-alarm",
       "source": 1053,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "station"
     },
     {
@@ -1954,6 +2041,54 @@
       "id": 11057,
       "name": "power-fail-out-of-service",
       "source": 1057,
+      "unit": "",
+      "description": "Out of service on the declared path",
+      "group": "station"
+    },
+    {
+      "id": 11060,
+      "name": "backup-unhealthy-ack",
+      "source": 1060,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "station"
+    },
+    {
+      "id": 11063,
+      "name": "backup-unhealthy-alarm",
+      "source": 1063,
+      "unit": "",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
+      "group": "station"
+    },
+    {
+      "id": 11064,
+      "name": "backup-unhealthy-unacknowledged",
+      "source": 1064,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "station"
+    },
+    {
+      "id": 11065,
+      "name": "backup-unhealthy-shelved",
+      "source": 1065,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "station"
+    },
+    {
+      "id": 11066,
+      "name": "backup-unhealthy-suppressed",
+      "source": 1066,
+      "unit": "",
+      "description": "Suppressed by the declared condition",
+      "group": "station"
+    },
+    {
+      "id": 11067,
+      "name": "backup-unhealthy-out-of-service",
+      "source": 1067,
       "unit": "",
       "description": "Out of service on the declared path",
       "group": "station"
@@ -2003,7 +2138,7 @@
       "name": "p101-mode",
       "source": 300,
       "unit": "",
-      "description": "Manual takeover — false auto, true hand",
+      "description": "Manual takeover \u2014 false auto, true hand",
       "group": "pump-p101"
     },
     {
@@ -2019,7 +2154,7 @@
       "name": "p101-oos",
       "source": 302,
       "unit": "",
-      "description": "Out of service — inhibits auto and hand operation",
+      "description": "Out of service \u2014 inhibits auto and hand operation",
       "group": "pump-p101"
     },
     {
@@ -2043,7 +2178,7 @@
       "name": "p101-auto",
       "source": 305,
       "unit": "",
-      "description": "In auto — the inverted manual-mode point",
+      "description": "In auto \u2014 the inverted manual-mode point",
       "group": "pump-p101"
     },
     {
@@ -2067,7 +2202,7 @@
       "name": "p101-oos-ok",
       "source": 308,
       "unit": "",
-      "description": "In service — the inverted out-of-service point",
+      "description": "In service \u2014 the inverted out-of-service point",
       "group": "pump-p101"
     },
     {
@@ -2123,7 +2258,7 @@
       "name": "p101-thermal-ok",
       "source": 324,
       "unit": "",
-      "description": "Thermal contact healthy — the inverted contact",
+      "description": "Thermal contact healthy \u2014 the inverted contact",
       "group": "pump-p101"
     },
     {
@@ -2139,7 +2274,7 @@
       "name": "p101-moisture-ok",
       "source": 326,
       "unit": "",
-      "description": "Moisture contact healthy — the inverted contact",
+      "description": "Moisture contact healthy \u2014 the inverted contact",
       "group": "pump-p101"
     },
     {
@@ -2183,56 +2318,8 @@
       "group": "pump-p101"
     },
     {
-      "id": 11060,
-      "name": "p101-fault-ack",
-      "source": 1060,
-      "unit": "",
-      "description": "Operator acknowledgment for the alarm",
-      "group": "pump-p101"
-    },
-    {
-      "id": 11063,
-      "name": "p101-fault-alarm",
-      "source": 1063,
-      "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
-      "group": "pump-p101"
-    },
-    {
-      "id": 11064,
-      "name": "p101-fault-unacknowledged",
-      "source": 1064,
-      "unit": "",
-      "description": "Latched until the operator acknowledges",
-      "group": "pump-p101"
-    },
-    {
-      "id": 11065,
-      "name": "p101-fault-shelved",
-      "source": 1065,
-      "unit": "",
-      "description": "Shelved within the declared bound",
-      "group": "pump-p101"
-    },
-    {
-      "id": 11066,
-      "name": "p101-fault-suppressed",
-      "source": 1066,
-      "unit": "",
-      "description": "Suppressed while the pump is out of service",
-      "group": "pump-p101"
-    },
-    {
-      "id": 11067,
-      "name": "p101-fault-out-of-service",
-      "source": 1067,
-      "unit": "",
-      "description": "Out of service with the pump's maintenance state",
-      "group": "pump-p101"
-    },
-    {
       "id": 11070,
-      "name": "p101-thermal-ack",
+      "name": "p101-fault-ack",
       "source": 1070,
       "unit": "",
       "description": "Operator acknowledgment for the alarm",
@@ -2240,15 +2327,15 @@
     },
     {
       "id": 11073,
-      "name": "p101-thermal-alarm",
+      "name": "p101-fault-alarm",
       "source": 1073,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "pump-p101"
     },
     {
       "id": 11074,
-      "name": "p101-thermal-unacknowledged",
+      "name": "p101-fault-unacknowledged",
       "source": 1074,
       "unit": "",
       "description": "Latched until the operator acknowledges",
@@ -2256,7 +2343,7 @@
     },
     {
       "id": 11075,
-      "name": "p101-thermal-shelved",
+      "name": "p101-fault-shelved",
       "source": 1075,
       "unit": "",
       "description": "Shelved within the declared bound",
@@ -2264,7 +2351,7 @@
     },
     {
       "id": 11076,
-      "name": "p101-thermal-suppressed",
+      "name": "p101-fault-suppressed",
       "source": 1076,
       "unit": "",
       "description": "Suppressed while the pump is out of service",
@@ -2272,7 +2359,7 @@
     },
     {
       "id": 11077,
-      "name": "p101-thermal-out-of-service",
+      "name": "p101-fault-out-of-service",
       "source": 1077,
       "unit": "",
       "description": "Out of service with the pump's maintenance state",
@@ -2280,7 +2367,7 @@
     },
     {
       "id": 11080,
-      "name": "p101-moisture-ack",
+      "name": "p101-thermal-ack",
       "source": 1080,
       "unit": "",
       "description": "Operator acknowledgment for the alarm",
@@ -2288,15 +2375,15 @@
     },
     {
       "id": 11083,
-      "name": "p101-moisture-alarm",
+      "name": "p101-thermal-alarm",
       "source": 1083,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "pump-p101"
     },
     {
       "id": 11084,
-      "name": "p101-moisture-unacknowledged",
+      "name": "p101-thermal-unacknowledged",
       "source": 1084,
       "unit": "",
       "description": "Latched until the operator acknowledges",
@@ -2304,7 +2391,7 @@
     },
     {
       "id": 11085,
-      "name": "p101-moisture-shelved",
+      "name": "p101-thermal-shelved",
       "source": 1085,
       "unit": "",
       "description": "Shelved within the declared bound",
@@ -2312,7 +2399,7 @@
     },
     {
       "id": 11086,
-      "name": "p101-moisture-suppressed",
+      "name": "p101-thermal-suppressed",
       "source": 1086,
       "unit": "",
       "description": "Suppressed while the pump is out of service",
@@ -2320,8 +2407,56 @@
     },
     {
       "id": 11087,
-      "name": "p101-moisture-out-of-service",
+      "name": "p101-thermal-out-of-service",
       "source": 1087,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11090,
+      "name": "p101-moisture-ack",
+      "source": 1090,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11093,
+      "name": "p101-moisture-alarm",
+      "source": 1093,
+      "unit": "",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11094,
+      "name": "p101-moisture-unacknowledged",
+      "source": 1094,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11095,
+      "name": "p101-moisture-shelved",
+      "source": 1095,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11096,
+      "name": "p101-moisture-suppressed",
+      "source": 1096,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p101"
+    },
+    {
+      "id": 11097,
+      "name": "p101-moisture-out-of-service",
+      "source": 1097,
       "unit": "",
       "description": "Out of service with the pump's maintenance state",
       "group": "pump-p101"
@@ -2371,7 +2506,7 @@
       "name": "p102-mode",
       "source": 332,
       "unit": "",
-      "description": "Manual takeover — false auto, true hand",
+      "description": "Manual takeover \u2014 false auto, true hand",
       "group": "pump-p102"
     },
     {
@@ -2387,7 +2522,7 @@
       "name": "p102-oos",
       "source": 334,
       "unit": "",
-      "description": "Out of service — inhibits auto and hand operation",
+      "description": "Out of service \u2014 inhibits auto and hand operation",
       "group": "pump-p102"
     },
     {
@@ -2411,7 +2546,7 @@
       "name": "p102-auto",
       "source": 337,
       "unit": "",
-      "description": "In auto — the inverted manual-mode point",
+      "description": "In auto \u2014 the inverted manual-mode point",
       "group": "pump-p102"
     },
     {
@@ -2435,7 +2570,7 @@
       "name": "p102-oos-ok",
       "source": 340,
       "unit": "",
-      "description": "In service — the inverted out-of-service point",
+      "description": "In service \u2014 the inverted out-of-service point",
       "group": "pump-p102"
     },
     {
@@ -2491,7 +2626,7 @@
       "name": "p102-thermal-ok",
       "source": 356,
       "unit": "",
-      "description": "Thermal contact healthy — the inverted contact",
+      "description": "Thermal contact healthy \u2014 the inverted contact",
       "group": "pump-p102"
     },
     {
@@ -2507,7 +2642,7 @@
       "name": "p102-moisture-ok",
       "source": 358,
       "unit": "",
-      "description": "Moisture contact healthy — the inverted contact",
+      "description": "Moisture contact healthy \u2014 the inverted contact",
       "group": "pump-p102"
     },
     {
@@ -2551,56 +2686,8 @@
       "group": "pump-p102"
     },
     {
-      "id": 11090,
-      "name": "p102-fault-ack",
-      "source": 1090,
-      "unit": "",
-      "description": "Operator acknowledgment for the alarm",
-      "group": "pump-p102"
-    },
-    {
-      "id": 11093,
-      "name": "p102-fault-alarm",
-      "source": 1093,
-      "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
-      "group": "pump-p102"
-    },
-    {
-      "id": 11094,
-      "name": "p102-fault-unacknowledged",
-      "source": 1094,
-      "unit": "",
-      "description": "Latched until the operator acknowledges",
-      "group": "pump-p102"
-    },
-    {
-      "id": 11095,
-      "name": "p102-fault-shelved",
-      "source": 1095,
-      "unit": "",
-      "description": "Shelved within the declared bound",
-      "group": "pump-p102"
-    },
-    {
-      "id": 11096,
-      "name": "p102-fault-suppressed",
-      "source": 1096,
-      "unit": "",
-      "description": "Suppressed while the pump is out of service",
-      "group": "pump-p102"
-    },
-    {
-      "id": 11097,
-      "name": "p102-fault-out-of-service",
-      "source": 1097,
-      "unit": "",
-      "description": "Out of service with the pump's maintenance state",
-      "group": "pump-p102"
-    },
-    {
       "id": 11100,
-      "name": "p102-thermal-ack",
+      "name": "p102-fault-ack",
       "source": 1100,
       "unit": "",
       "description": "Operator acknowledgment for the alarm",
@@ -2608,15 +2695,15 @@
     },
     {
       "id": 11103,
-      "name": "p102-thermal-alarm",
+      "name": "p102-fault-alarm",
       "source": 1103,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "pump-p102"
     },
     {
       "id": 11104,
-      "name": "p102-thermal-unacknowledged",
+      "name": "p102-fault-unacknowledged",
       "source": 1104,
       "unit": "",
       "description": "Latched until the operator acknowledges",
@@ -2624,7 +2711,7 @@
     },
     {
       "id": 11105,
-      "name": "p102-thermal-shelved",
+      "name": "p102-fault-shelved",
       "source": 1105,
       "unit": "",
       "description": "Shelved within the declared bound",
@@ -2632,7 +2719,7 @@
     },
     {
       "id": 11106,
-      "name": "p102-thermal-suppressed",
+      "name": "p102-fault-suppressed",
       "source": 1106,
       "unit": "",
       "description": "Suppressed while the pump is out of service",
@@ -2640,7 +2727,7 @@
     },
     {
       "id": 11107,
-      "name": "p102-thermal-out-of-service",
+      "name": "p102-fault-out-of-service",
       "source": 1107,
       "unit": "",
       "description": "Out of service with the pump's maintenance state",
@@ -2648,7 +2735,7 @@
     },
     {
       "id": 11110,
-      "name": "p102-moisture-ack",
+      "name": "p102-thermal-ack",
       "source": 1110,
       "unit": "",
       "description": "Operator acknowledgment for the alarm",
@@ -2656,15 +2743,15 @@
     },
     {
       "id": 11113,
-      "name": "p102-moisture-alarm",
+      "name": "p102-thermal-alarm",
       "source": 1113,
       "unit": "",
-      "description": "Standing alarm state — process truth under every managed flag",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
       "group": "pump-p102"
     },
     {
       "id": 11114,
-      "name": "p102-moisture-unacknowledged",
+      "name": "p102-thermal-unacknowledged",
       "source": 1114,
       "unit": "",
       "description": "Latched until the operator acknowledges",
@@ -2672,7 +2759,7 @@
     },
     {
       "id": 11115,
-      "name": "p102-moisture-shelved",
+      "name": "p102-thermal-shelved",
       "source": 1115,
       "unit": "",
       "description": "Shelved within the declared bound",
@@ -2680,7 +2767,7 @@
     },
     {
       "id": 11116,
-      "name": "p102-moisture-suppressed",
+      "name": "p102-thermal-suppressed",
       "source": 1116,
       "unit": "",
       "description": "Suppressed while the pump is out of service",
@@ -2688,8 +2775,56 @@
     },
     {
       "id": 11117,
-      "name": "p102-moisture-out-of-service",
+      "name": "p102-thermal-out-of-service",
       "source": 1117,
+      "unit": "",
+      "description": "Out of service with the pump's maintenance state",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11120,
+      "name": "p102-moisture-ack",
+      "source": 1120,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11123,
+      "name": "p102-moisture-alarm",
+      "source": 1123,
+      "unit": "",
+      "description": "Standing alarm state \u2014 process truth under every managed flag",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11124,
+      "name": "p102-moisture-unacknowledged",
+      "source": 1124,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11125,
+      "name": "p102-moisture-shelved",
+      "source": 1125,
+      "unit": "",
+      "description": "Shelved within the declared bound",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11126,
+      "name": "p102-moisture-suppressed",
+      "source": 1126,
+      "unit": "",
+      "description": "Suppressed while the pump is out of service",
+      "group": "pump-p102"
+    },
+    {
+      "id": 11127,
+      "name": "p102-moisture-out-of-service",
+      "source": 1127,
       "unit": "",
       "description": "Out of service with the pump's maintenance state",
       "group": "pump-p102"
@@ -2706,6 +2841,10 @@
           "value_type": "float"
         },
         "backup_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "backup_unhealthy": {
           "direction": "out",
           "value_type": "bool"
         },
@@ -3056,6 +3195,59 @@
           "int": 0
         },
         "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The backup level instrument has failed while the primary still serves \u2014 failover redundancy is already lost",
+        "required_action": "Repair the backup level instrument before the primary fails",
+        "reference": "backup-unhealthy-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out_of_service": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "shelved": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "suppressed": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "max_shelve_ticks": {
+          "int": 0
+        },
+        "priority": {
           "int": 1
         },
         "response_ticks": {
@@ -3099,7 +3291,7 @@
       }
     },
     {
-      "id": 9,
+      "id": 10,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3152,7 +3344,7 @@
       }
     },
     {
-      "id": 10,
+      "id": 11,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3199,25 +3391,6 @@
           "value_type": "bool"
         },
         "unacknowledged": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 11,
-      "kind": "digital-input",
-      "parameters": {
-        "invert": {
-          "bool": true
-        }
-      },
-      "ports": {
-        "in": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
           "direction": "out",
           "value_type": "bool"
         }
@@ -3282,6 +3455,25 @@
     },
     {
       "id": 15,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 16,
       "kind": "bool-gate",
       "parameters": {
         "operation": {
@@ -3306,29 +3498,6 @@
           "value_type": "bool"
         },
         "in_5": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 16,
-      "kind": "bool-gate",
-      "parameters": {
-        "operation": {
-          "int": 0
-        }
-      },
-      "ports": {
-        "in_1": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_2": {
           "direction": "in",
           "value_type": "bool"
         },
@@ -3366,7 +3535,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 1
+          "int": 0
         }
       },
       "ports": {
@@ -3389,7 +3558,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 0
+          "int": 1
         }
       },
       "ports": {
@@ -3409,6 +3578,29 @@
     },
     {
       "id": 20,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 21,
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
@@ -3435,7 +3627,7 @@
       }
     },
     {
-      "id": 21,
+      "id": 22,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3496,7 +3688,7 @@
       }
     },
     {
-      "id": 22,
+      "id": 23,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3549,7 +3741,7 @@
       }
     },
     {
-      "id": 23,
+      "id": 24,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3602,30 +3794,11 @@
       }
     },
     {
-      "id": 24,
-      "kind": "digital-input",
-      "parameters": {
-        "invert": {
-          "bool": false
-        }
-      },
-      "ports": {
-        "in": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
       "id": 25,
       "kind": "digital-input",
       "parameters": {
         "invert": {
-          "bool": true
+          "bool": false
         }
       },
       "ports": {
@@ -3698,6 +3871,25 @@
     },
     {
       "id": 29,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 30,
       "kind": "bool-gate",
       "parameters": {
         "operation": {
@@ -3722,29 +3914,6 @@
           "value_type": "bool"
         },
         "in_5": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 30,
-      "kind": "bool-gate",
-      "parameters": {
-        "operation": {
-          "int": 0
-        }
-      },
-      "ports": {
-        "in_1": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_2": {
           "direction": "in",
           "value_type": "bool"
         },
@@ -3782,7 +3951,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 1
+          "int": 0
         }
       },
       "ports": {
@@ -3805,7 +3974,7 @@
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 0
+          "int": 1
         }
       },
       "ports": {
@@ -3825,6 +3994,29 @@
     },
     {
       "id": 34,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 35,
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
@@ -3851,7 +4043,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 36,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3912,7 +4104,7 @@
       }
     },
     {
-      "id": 36,
+      "id": 37,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -3965,7 +4157,7 @@
       }
     },
     {
-      "id": 37,
+      "id": 38,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4018,7 +4210,7 @@
       }
     },
     {
-      "id": 38,
+      "id": 39,
       "kind": "digital-input",
       "parameters": {
         "invert": {
@@ -4104,6 +4296,17 @@
       },
       "to": {
         "point": 216
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "backup_unhealthy"
+        }
+      },
+      "to": {
+        "point": 222
       }
     },
     {
@@ -4279,6 +4482,14 @@
       },
       "to": {
         "point": 218
+      }
+    },
+    {
+      "from": {
+        "point": 223
+      },
+      "to": {
+        "point": 222
       }
     },
     {
@@ -4540,7 +4751,7 @@
       },
       "to": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "ack"
         }
       }
@@ -4548,7 +4759,7 @@
     {
       "from": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "alarm"
         }
       },
@@ -4559,7 +4770,7 @@
     {
       "from": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "unacknowledged"
         }
       },
@@ -4570,7 +4781,7 @@
     {
       "from": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "shelved"
         }
       },
@@ -4581,7 +4792,7 @@
     {
       "from": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "suppressed"
         }
       },
@@ -4592,7 +4803,7 @@
     {
       "from": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "out_of_service"
         }
       },
@@ -4606,7 +4817,7 @@
       },
       "to": {
         "port": {
-          "component": 8,
+          "component": 9,
           "name": "in"
         }
       }
@@ -4617,7 +4828,7 @@
       },
       "to": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "ack"
         }
       }
@@ -4625,7 +4836,7 @@
     {
       "from": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "alarm"
         }
       },
@@ -4636,7 +4847,7 @@
     {
       "from": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "unacknowledged"
         }
       },
@@ -4647,7 +4858,7 @@
     {
       "from": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "shelved"
         }
       },
@@ -4658,7 +4869,7 @@
     {
       "from": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "suppressed"
         }
       },
@@ -4669,7 +4880,7 @@
     {
       "from": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "out_of_service"
         }
       },
@@ -4683,7 +4894,7 @@
       },
       "to": {
         "port": {
-          "component": 9,
+          "component": 10,
           "name": "in"
         }
       }
@@ -4694,7 +4905,7 @@
       },
       "to": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "ack"
         }
       }
@@ -4702,7 +4913,7 @@
     {
       "from": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "alarm"
         }
       },
@@ -4713,7 +4924,7 @@
     {
       "from": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "unacknowledged"
         }
       },
@@ -4724,7 +4935,7 @@
     {
       "from": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "shelved"
         }
       },
@@ -4735,7 +4946,7 @@
     {
       "from": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "suppressed"
         }
       },
@@ -4746,7 +4957,7 @@
     {
       "from": {
         "port": {
-          "component": 10,
+          "component": 11,
           "name": "out_of_service"
         }
       },
@@ -4760,7 +4971,84 @@
       },
       "to": {
         "port": {
-          "component": 10,
+          "component": 11,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1060
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1063
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1064
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1065
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1066
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1067
+      }
+    },
+    {
+      "from": {
+        "point": 223
+      },
+      "to": {
+        "port": {
+          "component": 8,
           "name": "in"
         }
       }
@@ -4779,7 +5067,7 @@
       },
       "to": {
         "port": {
-          "component": 11,
+          "component": 12,
           "name": "in"
         }
       }
@@ -4790,7 +5078,7 @@
       },
       "to": {
         "port": {
-          "component": 12,
+          "component": 13,
           "name": "in"
         }
       }
@@ -4801,7 +5089,7 @@
       },
       "to": {
         "port": {
-          "component": 13,
+          "component": 14,
           "name": "in"
         }
       }
@@ -4812,7 +5100,7 @@
       },
       "to": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "in"
         }
       }
@@ -4839,7 +5127,7 @@
     {
       "from": {
         "port": {
-          "component": 11,
+          "component": 12,
           "name": "out"
         }
       },
@@ -4866,7 +5154,7 @@
     {
       "from": {
         "port": {
-          "component": 12,
+          "component": 13,
           "name": "out"
         }
       },
@@ -4901,7 +5189,7 @@
     {
       "from": {
         "port": {
-          "component": 13,
+          "component": 14,
           "name": "out"
         }
       },
@@ -4920,7 +5208,7 @@
     {
       "from": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "out"
         }
       },
@@ -4942,7 +5230,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in_1"
         }
       }
@@ -4953,7 +5241,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in_2"
         }
       }
@@ -4964,7 +5252,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in_3"
         }
       }
@@ -4975,7 +5263,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in_4"
         }
       }
@@ -4986,7 +5274,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in_5"
         }
       }
@@ -4994,7 +5282,7 @@
     {
       "from": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "out"
         }
       },
@@ -5027,7 +5315,7 @@
       },
       "to": {
         "port": {
-          "component": 16,
+          "component": 17,
           "name": "in_1"
         }
       }
@@ -5038,7 +5326,7 @@
       },
       "to": {
         "port": {
-          "component": 16,
+          "component": 17,
           "name": "in_2"
         }
       }
@@ -5049,7 +5337,7 @@
       },
       "to": {
         "port": {
-          "component": 17,
+          "component": 18,
           "name": "in_1"
         }
       }
@@ -5060,7 +5348,7 @@
       },
       "to": {
         "port": {
-          "component": 17,
+          "component": 18,
           "name": "in_2"
         }
       }
@@ -5068,28 +5356,14 @@
     {
       "from": {
         "port": {
-          "component": 16,
+          "component": 17,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 18,
+          "component": 19,
           "name": "in_1"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 17,
-          "name": "out"
-        }
-      },
-      "to": {
-        "port": {
-          "component": 18,
-          "name": "in_2"
         }
       }
     },
@@ -5103,6 +5377,20 @@
       "to": {
         "port": {
           "component": 19,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 19,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 20,
           "name": "in_1"
         }
       }
@@ -5113,7 +5401,7 @@
       },
       "to": {
         "port": {
-          "component": 19,
+          "component": 20,
           "name": "in_2"
         }
       }
@@ -5121,13 +5409,13 @@
     {
       "from": {
         "port": {
-          "component": 19,
+          "component": 20,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 20,
+          "component": 21,
           "name": "cmd"
         }
       }
@@ -5138,7 +5426,7 @@
       },
       "to": {
         "port": {
-          "component": 20,
+          "component": 21,
           "name": "run"
         }
       }
@@ -5146,7 +5434,7 @@
     {
       "from": {
         "port": {
-          "component": 20,
+          "component": 21,
           "name": "out"
         }
       },
@@ -5168,7 +5456,7 @@
     {
       "from": {
         "port": {
-          "component": 20,
+          "component": 21,
           "name": "fault"
         }
       },
@@ -5209,7 +5497,7 @@
       },
       "to": {
         "port": {
-          "component": 24,
+          "component": 25,
           "name": "in"
         }
       }
@@ -5217,7 +5505,7 @@
     {
       "from": {
         "port": {
-          "component": 24,
+          "component": 25,
           "name": "out"
         }
       },
@@ -5235,11 +5523,11 @@
     },
     {
       "from": {
-        "point": 1060
+        "point": 1070
       },
       "to": {
         "port": {
-          "component": 21,
+          "component": 22,
           "name": "ack"
         }
       }
@@ -5250,7 +5538,7 @@
       },
       "to": {
         "port": {
-          "component": 21,
+          "component": 22,
           "name": "oos"
         }
       }
@@ -5261,85 +5549,8 @@
       },
       "to": {
         "port": {
-          "component": 21,
-          "name": "suppress"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 21,
-          "name": "alarm"
-        }
-      },
-      "to": {
-        "point": 1063
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 21,
-          "name": "unacknowledged"
-        }
-      },
-      "to": {
-        "point": 1064
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 21,
-          "name": "shelved"
-        }
-      },
-      "to": {
-        "point": 1065
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 21,
-          "name": "suppressed"
-        }
-      },
-      "to": {
-        "point": 1066
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 21,
-          "name": "out_of_service"
-        }
-      },
-      "to": {
-        "point": 1067
-      }
-    },
-    {
-      "from": {
-        "point": 314
-      },
-      "to": {
-        "port": {
-          "component": 21,
-          "name": "in"
-        }
-      }
-    },
-    {
-      "from": {
-        "point": 1070
-      },
-      "to": {
-        "port": {
           "component": 22,
-          "name": "ack"
+          "name": "suppress"
         }
       }
     },
@@ -5400,7 +5611,7 @@
     },
     {
       "from": {
-        "point": 60
+        "point": 314
       },
       "to": {
         "port": {
@@ -5477,11 +5688,88 @@
     },
     {
       "from": {
-        "point": 80
+        "point": 60
       },
       "to": {
         "port": {
           "component": 23,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1090
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1093
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1094
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1095
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1096
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1097
+      }
+    },
+    {
+      "from": {
+        "point": 80
+      },
+      "to": {
+        "port": {
+          "component": 24,
           "name": "in"
         }
       }
@@ -5500,7 +5788,7 @@
       },
       "to": {
         "port": {
-          "component": 25,
+          "component": 26,
           "name": "in"
         }
       }
@@ -5511,7 +5799,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 27,
           "name": "in"
         }
       }
@@ -5522,7 +5810,7 @@
       },
       "to": {
         "port": {
-          "component": 27,
+          "component": 28,
           "name": "in"
         }
       }
@@ -5533,7 +5821,7 @@
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "in"
         }
       }
@@ -5560,7 +5848,7 @@
     {
       "from": {
         "port": {
-          "component": 25,
+          "component": 26,
           "name": "out"
         }
       },
@@ -5587,7 +5875,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 27,
           "name": "out"
         }
       },
@@ -5622,7 +5910,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 28,
           "name": "out"
         }
       },
@@ -5641,7 +5929,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 29,
           "name": "out"
         }
       },
@@ -5663,7 +5951,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_1"
         }
       }
@@ -5674,7 +5962,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_2"
         }
       }
@@ -5685,7 +5973,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_3"
         }
       }
@@ -5696,7 +5984,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_4"
         }
       }
@@ -5707,7 +5995,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "in_5"
         }
       }
@@ -5715,7 +6003,7 @@
     {
       "from": {
         "port": {
-          "component": 29,
+          "component": 30,
           "name": "out"
         }
       },
@@ -5748,7 +6036,7 @@
       },
       "to": {
         "port": {
-          "component": 30,
+          "component": 31,
           "name": "in_1"
         }
       }
@@ -5759,7 +6047,7 @@
       },
       "to": {
         "port": {
-          "component": 30,
+          "component": 31,
           "name": "in_2"
         }
       }
@@ -5770,7 +6058,7 @@
       },
       "to": {
         "port": {
-          "component": 31,
+          "component": 32,
           "name": "in_1"
         }
       }
@@ -5781,7 +6069,7 @@
       },
       "to": {
         "port": {
-          "component": 31,
+          "component": 32,
           "name": "in_2"
         }
       }
@@ -5789,28 +6077,14 @@
     {
       "from": {
         "port": {
-          "component": 30,
+          "component": 31,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 32,
+          "component": 33,
           "name": "in_1"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 31,
-          "name": "out"
-        }
-      },
-      "to": {
-        "port": {
-          "component": 32,
-          "name": "in_2"
         }
       }
     },
@@ -5824,6 +6098,20 @@
       "to": {
         "port": {
           "component": 33,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 33,
+          "name": "out"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 34,
           "name": "in_1"
         }
       }
@@ -5834,7 +6122,7 @@
       },
       "to": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "in_2"
         }
       }
@@ -5842,13 +6130,13 @@
     {
       "from": {
         "port": {
-          "component": 33,
+          "component": 34,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 35,
           "name": "cmd"
         }
       }
@@ -5859,7 +6147,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 35,
           "name": "run"
         }
       }
@@ -5867,7 +6155,7 @@
     {
       "from": {
         "port": {
-          "component": 34,
+          "component": 35,
           "name": "out"
         }
       },
@@ -5889,7 +6177,7 @@
     {
       "from": {
         "port": {
-          "component": 34,
+          "component": 35,
           "name": "fault"
         }
       },
@@ -5930,7 +6218,7 @@
       },
       "to": {
         "port": {
-          "component": 38,
+          "component": 39,
           "name": "in"
         }
       }
@@ -5938,7 +6226,7 @@
     {
       "from": {
         "port": {
-          "component": 38,
+          "component": 39,
           "name": "out"
         }
       },
@@ -5956,11 +6244,11 @@
     },
     {
       "from": {
-        "point": 1090
+        "point": 1100
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 36,
           "name": "ack"
         }
       }
@@ -5971,7 +6259,7 @@
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 36,
           "name": "oos"
         }
       }
@@ -5982,85 +6270,8 @@
       },
       "to": {
         "port": {
-          "component": 35,
-          "name": "suppress"
-        }
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 35,
-          "name": "alarm"
-        }
-      },
-      "to": {
-        "point": 1093
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 35,
-          "name": "unacknowledged"
-        }
-      },
-      "to": {
-        "point": 1094
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 35,
-          "name": "shelved"
-        }
-      },
-      "to": {
-        "point": 1095
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 35,
-          "name": "suppressed"
-        }
-      },
-      "to": {
-        "point": 1096
-      }
-    },
-    {
-      "from": {
-        "port": {
-          "component": 35,
-          "name": "out_of_service"
-        }
-      },
-      "to": {
-        "point": 1097
-      }
-    },
-    {
-      "from": {
-        "point": 346
-      },
-      "to": {
-        "port": {
-          "component": 35,
-          "name": "in"
-        }
-      }
-    },
-    {
-      "from": {
-        "point": 1100
-      },
-      "to": {
-        "port": {
           "component": 36,
-          "name": "ack"
+          "name": "suppress"
         }
       }
     },
@@ -6121,7 +6332,7 @@
     },
     {
       "from": {
-        "point": 61
+        "point": 346
       },
       "to": {
         "port": {
@@ -6198,11 +6409,88 @@
     },
     {
       "from": {
-        "point": 81
+        "point": 61
       },
       "to": {
         "port": {
           "component": 37,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1120
+      },
+      "to": {
+        "port": {
+          "component": 38,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1123
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1124
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "shelved"
+        }
+      },
+      "to": {
+        "point": 1125
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "suppressed"
+        }
+      },
+      "to": {
+        "point": 1126
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "out_of_service"
+        }
+      },
+      "to": {
+        "point": 1127
+      }
+    },
+    {
+      "from": {
+        "point": 81
+      },
+      "to": {
+        "port": {
+          "component": 38,
           "name": "in"
         }
       }

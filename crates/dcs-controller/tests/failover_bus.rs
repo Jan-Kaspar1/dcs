@@ -288,6 +288,16 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
         reference_devices[&device].addr.to_string()
     });
 
+    // Observers on the banks — the field the run asserts on; the
+    // setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments, so every later
+    // access is a read. `reference_ao` is the register the promoted
+    // peer's writes must equal, stamped tick for stamped tick.
+    let pair_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let pair_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    let reference_ao = attach(reference_devices[&AO_DEVICE].addr, AO_POINTS);
+    pair_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
+
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed. Arming is
     // honest here because every field-facing device arbitrates a single
@@ -307,7 +317,8 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
     let standby = MonitorClient::new(standby_process.addr);
 
     // The reference: the same model in-process against its own device
-    // servers — its gate starts open, the field owner's posture.
+    // servers — its gate starts open, the field owner's posture, and
+    // its banks are never claimed.
     let model = PlantModel::load(&std::fs::read_to_string(&reference_model).unwrap()).unwrap();
     let reference_field = resolve_drivers(&model, &DriverRegistry::standard())
         .unwrap()
@@ -322,15 +333,6 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
         gate: &reference_gate,
         field: &reference_field,
     };
-
-    // Observers on the banks — the field the run asserts on; the
-    // setpoint lands once, before any claim exists. `reference_ao` is
-    // the register the promoted peer's writes must equal, stamped tick
-    // for stamped tick.
-    let pair_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
-    let pair_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    let reference_ao = attach(reference_devices[&AO_DEVICE].addr, AO_POINTS);
-    pair_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Phase 1: N converged ticks — the standby tracks the active's
@@ -463,6 +465,12 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     let pair_model = bus_model(&dir, "pair.json", |device| {
         pair_devices[&device].addr.to_string()
     });
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments from boot.
+    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    attach(pair_devices[&AI_DEVICE].addr, AI_POINTS)
+        .write(SETPOINT, Value::Float(50.0))
+        .unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
@@ -478,10 +486,6 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    attach(pair_devices[&AI_DEVICE].addr, AI_POINTS)
-        .write(SETPOINT, Value::Float(50.0))
-        .unwrap();
 
     // Converge first.
     for _ in 0..N {
@@ -602,6 +606,11 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let pair_model = bus_model(&dir, "pair.json", |device| {
         pair_devices[&device].addr.to_string()
     });
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments from boot.
+    let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
@@ -616,9 +625,6 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
-    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     for _ in 0..N {
         standby.advance(1).unwrap();
@@ -631,7 +637,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     relay.partition(true);
     for miss in 1..BUDGET {
         standby.advance(1).unwrap();
-        // Still unclaimed field: the old owner's register writes land.
+        // The old owner's claim still stands: its register writes land.
         active.advance(1).unwrap();
         assert_eq!(standby.role().unwrap().role, Role::Standby, "miss {miss}");
     }

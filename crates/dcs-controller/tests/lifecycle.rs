@@ -11,9 +11,10 @@
 //! active's `GET /checkpoint` and can rewrite the wire shape — the two
 //! knobs the loss-detection and negotiation legs need.
 //!
-//! The legs, in script order — the plant's writer claim is irrevocable
-//! once taken, so legs needing an unclaimed or unfenced field run
-//! before the takeover legs:
+//! The legs, in script order — the launched active holds the plant's
+//! writer claim from boot and the script's field attachment shares it
+//! under the pinned `--owner-token`, so legs needing a field-side write
+//! still run before the takeover legs re-token the claim:
 //!
 //! 1. **Checkpoint negotiation (#66, #133)** — the standby converges on
 //!    a version-0 wire shape (`format_version` absent); an unsupported
@@ -96,6 +97,12 @@ const N: u64 = 8;
 const M: u64 = 6;
 /// Revised-model field ticks closing the run.
 const M2: u64 = 10;
+/// The field-ownership token the launched active pins via
+/// `--owner-token` — the claim the test's field attachment shares, so
+/// the divergence leg's skewed write keeps passing the plant's fencing
+/// while the active owns the field (and across the state-file restart,
+/// whose respawned process claims the same token).
+const OWNER_TOKEN: u64 = 499_003;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
@@ -462,6 +469,8 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         &[
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
+            "--owner-token".to_string(),
+            OWNER_TOKEN.to_string(),
         ],
         DT,
     );
@@ -481,6 +490,11 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     let standby = MonitorClient::new(standby_process.addr);
     let fixture_client = MonitorClient::new(fixture.addr);
     let field = RemoteDriver::connect(plant.addr).unwrap();
+    // The launched active holds the plant's single-writer claim from
+    // startup: this attachment joins that claim — the pinned token's
+    // other half — so the divergence leg's field-side write still lands
+    // where any third attachment's would fence.
+    field.claim_writer(OWNER_TOKEN).unwrap();
 
     // The run's operator inputs land by command — the held setpoint the
     // revision carries and the v1-only knob the revision drops.
@@ -722,6 +736,8 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         &[
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
+            "--owner-token".to_string(),
+            OWNER_TOKEN.to_string(),
         ],
         DT,
     );
@@ -766,9 +782,9 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     // -- Leg 4: automatic failover with field-side fencing --------------
     // The heartbeat path partitions; the converged standby counts the
     // misses without promoting — the field keeps carrying the old
-    // owner's writes, still unclaimed — and the budget-th miss's scan
-    // boundary self-promotes it: the plant's writer claim taken and the
-    // gate lifted inside the same requested scan.
+    // owner's writes under its held claim — and the budget-th miss's
+    // scan boundary self-promotes it: the plant's writer claim taken
+    // and the gate lifted inside the same requested scan.
     let at_partition = standby.snapshot().unwrap().tick;
     relay.partition(true);
     for miss in 1..BUDGET {
