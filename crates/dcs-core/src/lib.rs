@@ -42,6 +42,7 @@ mod descriptor;
 mod fingerprint;
 mod history;
 mod interface;
+mod interface_schema;
 mod io;
 mod journal;
 mod resources;
