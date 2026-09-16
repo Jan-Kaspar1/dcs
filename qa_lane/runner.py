@@ -831,11 +831,10 @@ def start_plant(run_id, timeline):
 def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
-    per endpoint key, the run's evidence dir and deadline, the
-    runner-owned controller-restart and plant stop/start actions, the
-    plant server's published address for the link-loss scenario's
-    fencing probes, and the host-side per-controller state/journal
-    files the restart scenario reads."""
+    per endpoint key, the published plant-protocol endpoint, the run's
+    evidence dir and deadline, the runner-owned controller-restart and
+    plant stop/start actions, and the host-side per-controller
+    state/journal files the restart scenario reads."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b'}
     return {
