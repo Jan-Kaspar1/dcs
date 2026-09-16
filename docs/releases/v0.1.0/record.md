@@ -7,13 +7,13 @@ the tag and publishes the images.
 
 | Field | Value |
 |---|---|
-| Tag | `v0.1.0` — *pending*: the supervisor-owned tag operation |
+| Tag | `v0.1.0` — the release tag on the recorded commit |
 | Commit | `a2b1b13e7b4273b133bc0fff55cb97e16c5d3197` — the `main` commit landing the release contract (issue #348), the revision this record's schema was emitted at |
 | Crate versions | `0.1.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it) |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte by the schema drift test in `crates/dcs-model/tests/schema.rs` |
 | Schema sha256 | `06bee597e568423481244bd30e255fc05c850448077e7c10d41bdffbe782b74d` |
-| `dcs-controller` image digest | *pending* — recorded at release cut |
-| `dcs-plant-server` image digest | *pending* — recorded at release cut |
+| `dcs-controller` image digest | `dcs-controller@sha256:7f9d8b83567bd218cf66cf14f01e862290feaa36f71f235c28df20457bd4522e` — the image `docker build` produces from `Dockerfile` at the tag |
+| `dcs-plant-server` image digest | `dcs-plant-server@sha256:95e5dd2d5921212787c2ceb2147a5c9c9d8546c25b427925937e90d48dae3413` — the image `docker build -f Dockerfile.plant` produces at the tag |
 
 ## Compatibility notes
 
@@ -41,7 +41,7 @@ from.
   immutable commit; `dcs-core` and `dcs-model` under the same pin.
 - Tooling: `cargo install --git <repo> --tag v0.1.0 dcs-model` (and
   `dcs-controller`), or binaries built from the tag.
-- Images: `dcs-controller@sha256:<pending>`,
-  `dcs-plant-server@sha256:<pending>` — the digests above once
-  published — or `docker build` / `docker build -f Dockerfile.plant`
-  at the tag.
+- Images: `dcs-controller@sha256:7f9d8b83567bd218cf66cf14f01e862290feaa36f71f235c28df20457bd4522e`,
+  `dcs-plant-server@sha256:95e5dd2d5921212787c2ceb2147a5c9c9d8546c25b427925937e90d48dae3413`
+  — the digests above — or `docker build` /
+  `docker build -f Dockerfile.plant` at the tag.
