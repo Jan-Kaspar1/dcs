@@ -219,14 +219,19 @@ to the same `file://` stand-in — the recorded `rev` pin untouched —
 and runs the template's own `ci/check.sh` end to end, including its
 git-only lockfile assertion, its released-tooling stage against
 locally built binaries, the manifest fingerprint check, two runs
-of the scripted simulation, and the served-operator-surface stage —
+of the scripted simulation, the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
-declaration — and the `upgrade` stage, which repins the materialized
-tree to the checkout's `HEAD` and re-runs the pipeline under the repin,
-requiring byte-identical emitted bytes and refusing the named
-incompatible crossings. Its negative cases prove the template's
-new stage names surface as the diagnostics below.
+declaration — the `consumers` stage, which replays that driven run
+under each consumer schedule — no UI attached, normal polling, a
+stalled reader, disconnect/reconnect churn, malformed and flooded
+traffic within the declared limits, and a UI process restart —
+requiring identical output and receipt digests across the schedules
+and across two passes — and the `upgrade` stage, which repins the
+materialized tree to the checkout's `HEAD` and re-runs the pipeline
+under the repin, requiring byte-identical emitted bytes and refusing
+the named incompatible crossings. Its negative cases prove the
+template's new stage names surface as the diagnostics below.
 
 ```sh
 cargo test -p dcs-build --test reference_plant
@@ -270,3 +275,5 @@ The checks' failures are named diagnostics:
 | `scenario-failed` | The scripted simulation's declared leg outcomes did not hold against the checked-in model and dynamics. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-nondeterministic` | Two scripted-simulation runs produced different outcome digests. Reported by the reference plant's `ci/check.sh`. |
 | `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
+| `consumer-interference` | A consumer schedule changed the driven run's outputs or command receipts, or the schedule's own evidence failed — a consumer met a server fault, a held response arrived incomplete, malformed traffic went unrefused, or a restarted UI process found no freshness metadata. Reported by the reference plant's `ci/check.sh`, naming the schedule. |
+| `consumer-nondeterministic` | Two passes of the consumer-schedule stage produced different digests. Reported by the reference plant's `ci/check.sh`. |
