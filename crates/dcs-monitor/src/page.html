@@ -87,6 +87,19 @@
   .faceplate .param-status { font-size: 0.8rem; color: #666; }
   .faceplate .param-status.warn { color: #a60; }
   .faceplate .param-status.bad { color: #b00; font-weight: bold; }
+  .faceplate details.interface { margin-top: 0.5rem; font-size: 0.85rem; }
+  .faceplate details.interface > summary { cursor: pointer; color: #555; }
+  .faceplate .res { margin: 0.4rem 0 0.4rem 0.6rem; }
+  .faceplate .res h4 { margin: 0.25rem 0; font-weight: 600; color: #445;
+    text-transform: capitalize; }
+  .faceplate .res-empty { margin: 0.15rem 0; color: #999; font-style: italic; }
+  .faceplate .command-arg { width: 5rem; }
+  .faceplate select.command-arg { width: auto; }
+  .faceplate button.invoke { margin-left: 0.3rem; }
+  .faceplate button.invoke:disabled { color: #888; }
+  .faceplate .command-status { font-size: 0.8rem; color: #666; }
+  .faceplate .command-status.warn { color: #a60; }
+  .faceplate .command-status.bad { color: #b00; font-weight: bold; }
   #overview-cards { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .pair-card { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 22rem; background: #fdfdfd; }
@@ -239,6 +252,28 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // role hints and no parameters — a kind that shipped no custom
 // describe — degrades to a generic
 // name-plus-diagnostics-plus-wired-points view, never an error.
+//
+// The schema-driven interface surface (the block-interface decision):
+// every faceplate also carries the component's five declared resource
+// categories, fetched as GET /schema (the per-instance BlockInterface
+// registry — measurements, configuration, state, commands, events)
+// joined onto GET /resources (the same publication's live values,
+// command availability and refusal reasons, and the retained journal
+// tail attributed per component). The join is by component and
+// resource name; a peer predating the endpoints answers 404 and the
+// surface simply renders nothing — the absent-section convention.
+// Measurements and state render as labeled readouts with quality;
+// configuration rows carry the tunable entries' edit controls through
+// the same receipted set_parameter path the parameter table uses;
+// every named command — the adapted generic variants and the kind's
+// declared commands alike — is an invocable action whose declared
+// request arguments get typed controls, whose live unavailability
+// disables the control and shows the served refusal reason, and whose
+// submission flows through the receipted command path so a scan-
+// boundary refusal surfaces on the row and in the events list. Kind-
+// specific presentation is never the only usable surface: a kind with
+// no dedicated markup is fully operable through this generic rendering
+// alone.
 //
 // Operator forcing (the input-forcing decision's UI slice): the
 // snapshot's force set marks each forced point — a badge beside its
@@ -439,6 +474,26 @@ const paramStatus = new Map();
 function paramKey(component, name) {
   return component + "\n" + name;
 }
+// component name -> its served BlockInterface (GET /schema): the
+// declared five-category surface the generic faceplate rendering reads.
+// Rebuilt on every poll like descriptorByName.
+const interfaceByName = new Map();
+// component name -> its served ComponentResources (GET /resources): the
+// live values, command availability/refusals, and recent events joined
+// onto the interface.
+const resourcesByName = new Map();
+// commandKey(component, command) -> { text, warn, bad }: the receipted
+// path's latest answer for a faceplate command invocation — what its
+// row's status cell shows. The map survives the per-poll re-render.
+const commandStatus = new Map();
+function commandKey(component, name) {
+  return component + "\n" + name;
+}
+// component name -> its interface <details> open state, snapshotted
+// before each faceplate re-render so a poll never collapses the section
+// the operator opened. Absent means the default: open for a generic
+// faceplate, closed beside dedicated presentation.
+const interfaceOpen = new Map();
 // ack point -> the earliest snapshot tick at which its release write may
 // go: the pulse's second half, armed by submitAck once the acknowledge
 // write is accepted — see the alarm pane's notes on the level-observed
@@ -884,7 +939,24 @@ async function refresh() {
     await pollRoles();
     renderPair();
     const base = peers[source].base;
-    const snapshot = await (await fetch(base + "/snapshot")).json();
+    // The snapshot and the decision-82 views ride the same publication:
+    // fetched together so the schema, the live resource state, and the
+    // telemetry all name one read model. A peer predating /schema or
+    // /resources answers 404 — the interface surface then renders
+    // nothing, the absent-section convention.
+    const [snapshot, schema, resources] = await Promise.all([
+      fetch(base + "/snapshot").then(r => r.json()),
+      fetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    interfaceByName.clear();
+    for (const entry of (schema && schema.interfaces) || []) {
+      interfaceByName.set(entry.name, entry.interface);
+    }
+    resourcesByName.clear();
+    for (const entry of (resources && resources.components) || []) {
+      resourcesByName.set(entry.name, entry);
+    }
     const peerNote = peers.length > 1 ? " — active peer " + peers[source].name : "";
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
@@ -1388,6 +1460,10 @@ function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
     parts.push(parameterTable(descriptor, parameters.get(descriptor.name)));
   }
   parts.push(diagnosticsMarkup(diag));
+  // The five-category resource surface renders for every component —
+  // for a kind with dedicated presentation it is the collapsed generic
+  // surface; for a generic kind it is the control surface itself.
+  parts.push(interfaceMarkup(descriptor.name, generic));
   parts.push("</section>");
   return parts.join("");
 }
@@ -1407,6 +1483,17 @@ function renderFaceplates(snapshot, telemetry, forced) {
     const key = paramKey(control.dataset.component, control.dataset.param);
     pending.set(key, control.value);
     if (control === document.activeElement) focused = key;
+  }
+  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    pending.set(key, input.value);
+    if (input === document.activeElement) focused = key;
+  }
+  // The interface disclosure's open state is the operator's: snapshot
+  // it before the rebuild so a poll never collapses an opened section.
+  for (const details of document.querySelectorAll("#faceplates details.interface")) {
+    interfaceOpen.set(details.dataset.component, details.open);
   }
   descriptorByName.clear();
   for (const descriptor of snapshot.descriptors) {
@@ -1434,6 +1521,391 @@ function renderFaceplates(snapshot, telemetry, forced) {
     if (pending.has(key)) control.value = pending.get(key);
     if (key === focused) control.focus();
   }
+  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    if (pending.has(key)) {
+      input.value = pending.get(key);
+    } else if (input.dataset.initial != null) {
+      // A command-argument input is a typed affordance the page seeds
+      // with the declared default once: an untouched control submits
+      // the default, matching a CLI that omitted the flag.
+      input.value = input.dataset.initial;
+    }
+    if (key === focused) input.focus();
+  }
+}
+
+// ---- Interface resources ----
+//
+// The decision-82 surface: every faceplate carries a disclosure
+// rendering the component's five declared resource categories from the
+// served schema — GET /schema's per-instance BlockInterface, joined by
+// resource name onto GET /resources' live ComponentResources. The
+// schema is authoritative for identities, kinds, and command request
+// schemas; the resource view supplies current values, availability,
+// refusals, and the recent journal tail. A peer predating the
+// endpoints serves no interface entries and the disclosure renders
+// nothing — the absent-section convention — so the surface is purely
+// additive beside whatever dedicated presentation the kind already
+// had. For a kind with no dedicated presentation it is the control
+// surface itself, and it opens by default; beside a dedicated
+// presentation it stays collapsed until the operator opens it.
+
+// Client-side display bound on the per-component event list; the
+// served tail is bounded already.
+const EVENT_LIMIT = 8;
+
+// One resource collection's live entries, keyed by resource name for
+// the join onto the interface's declared specs.
+function resourcesByResource(readings) {
+  return new Map((readings || []).map(reading => [reading.name, reading]));
+}
+
+// The measurements and runtime-state readouts: one labeled row per
+// declared resource carrying its direction, kind, bound point, live
+// value with unit, and quality — an unbound port or a point with no
+// sample renders "no sample" rather than failing.
+function resourceTable(category, specs, readings) {
+  const byName = resourcesByResource(readings);
+  return "<div class=\"res\" data-category=\"" + category + "\">" +
+    "<h4>" + category + "</h4>" +
+    (specs.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Name</th><th>Dir</th><th>Kind</th><th>Point</th>" +
+        "<th>Value</th><th>Quality</th>" +
+        "</tr></thead><tbody>" +
+        specs.map(spec => {
+          const sample = (byName.get(spec.name) || {}).sample;
+          const meta = spec.point == null ? null : metaByPoint.get(spec.point);
+          return "<tr><td>" + esc(spec.name) + "</td><td>" + esc(spec.direction) +
+            "</td><td>" + esc(pascal(spec.kind)) +
+            "</td><td>" + (spec.point == null ? "unwired"
+              : "point " + spec.point + (meta ? " · " + esc(meta.name) : "")) +
+            "</td><td class=\"value\">" +
+            (sample ? esc(formatValue(sample.value)) : "") +
+            (spec.unit ? " " + esc(spec.unit) : "") +
+            "</td><td class=\"" + (sample ? qualityClass(sample.quality) : "nosample") +
+            "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
+            "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The configuration rows: one per declared ConfigProperty, showing the
+// current value the resource view reports. A `tunable` property gets
+// the same edit control and `set` button the parameter table renders —
+// the .param-value/.tune markup is deliberately identical so its
+// submission flows through the existing receipted set_parameter path
+// unchanged, status cell included. An `engineering_fixed` property is
+// read-only: no edit affordance, matching the descriptor rule.
+function configTable(component, properties, values) {
+  const byName = resourcesByResource(values);
+  return "<div class=\"res\" data-category=\"configuration\">" +
+    "<h4>configuration</h4>" +
+    (properties.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"params\"><thead><tr>" +
+        "<th>Name</th><th>Kind</th><th>Range</th><th>Current</th>" +
+        "<th>Set</th><th></th>" +
+        "</tr></thead><tbody>" +
+        properties.map(property => {
+          const current = byName.get(property.name);
+          const status = paramStatus.get(paramKey(component, property.name));
+          return "<tr><td>" + esc(property.name) + "</td><td>" +
+            esc(pascal(property.kind)) + "</td><td>" +
+            (property.range
+              ? esc(formatValue(property.range.min)) + " … " +
+                esc(formatValue(property.range.max))
+              : "unbounded") +
+            "</td><td class=\"param-current\">" +
+            (current && current.value != null ? esc(formatValue(current.value)) : "") +
+            "</td><td>" +
+            (property.capability === "tunable"
+              ? parameterControl(component, property) +
+                "<button type=\"button\" class=\"tune\" data-component=\"" +
+                esc(component) + "\" data-param=\"" + esc(property.name) +
+                "\">set</button>"
+              : "fixed") +
+            "</td><td class=\"param-status" +
+            (status && status.warn ? " warn" : "") +
+            (status && status.bad ? " bad" : "") + "\" data-component=\"" +
+            esc(component) + "\" data-param=\"" + esc(property.name) + "\">" +
+            (status ? esc(status.text) : "") + "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The verb a command row's button wears: the adapted generic command's
+// short name, or "invoke" for a kind-declared command — the action the
+// CommandSpec's provenance names.
+function commandVerb(spec) {
+  switch (spec.adapted) {
+    case "write_value": return "write";
+    case "force_point": return "force";
+    case "unforce_point": return "release";
+    case "set_parameter": return "set";
+    default: return "invoke";
+  }
+}
+
+// The seed a `value` argument's control starts from: the resource
+// view's current reading — the bound point's sample for a point
+// command, the current tune for set_parameter. A declared command's
+// arguments seed nothing; an omitted entry means the kind's own
+// default applies.
+function argumentInitial(spec, argument, resources) {
+  if (argument.name !== "value" || !resources) return null;
+  if (spec.adapted === "write_value" || spec.adapted === "force_point") {
+    const reading = (resources.measurements || [])
+      .concat(resources.state || [])
+      .find(reading => reading.point === spec.point);
+    return reading && reading.sample ? formatValue(reading.sample.value) : null;
+  }
+  if (spec.adapted === "set_parameter") {
+    const name = spec.name.slice("set_parameter:".length);
+    const entry = (resources.configuration || [])
+      .find(value => value.name === name);
+    return entry && entry.value != null ? formatValue(entry.value) : null;
+  }
+  return null;
+}
+
+// One declared request argument's typed control — a true/false select
+// for Bool, a text input otherwise, seeded with argumentInitial's
+// value where the resource view supplies one. The data-* attributes
+// are what the submit handler and the re-render's pending-value
+// restore read.
+function argumentControl(component, spec, argument, resources) {
+  const initial = argumentInitial(spec, argument, resources);
+  const attrs = " data-component=\"" + esc(component) +
+    "\" data-command=\"" + esc(spec.name) +
+    "\" data-arg=\"" + esc(argument.name) +
+    "\" data-kind=\"" + esc(argument.kind) + "\"" +
+    (initial != null ? " data-initial=\"" + esc(initial) + "\"" : "");
+  if (argument.kind === "bool") {
+    return "<select class=\"command-arg\"" + attrs + ">" +
+      "<option value=\"true\">true</option>" +
+      "<option value=\"false\">false</option></select>";
+  }
+  return "<input class=\"command-arg\"" + attrs + " size=\"7\"" +
+    (argument.kind === "int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
+    " placeholder=\"" + esc(argument.name) + "\">";
+}
+
+// The named-command rows: every CommandSpec is an invocable action —
+// the adapted generic variants and the kind's declared commands alike.
+// The resource view's CommandState rules the row: an unavailable
+// command's control disables and its status cell carries the served
+// refusal text, so the declared surface is never silently hidden and
+// the refusal reason is on the row before any attempt. An available
+// command submits through the receipted path — a boundary refusal the
+// served state could not pre-empt (a KindDeclared predicate, a role
+// gate) still surfaces its named reason there.
+function commandTable(component, specs, states, resources) {
+  const byName = resourcesByResource(states);
+  return "<div class=\"res\" data-category=\"commands\">" +
+    "<h4>commands</h4>" +
+    (specs.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Command</th><th>Availability</th><th>Arguments</th>" +
+        "<th></th><th></th>" +
+        "</tr></thead><tbody>" +
+        specs.map(spec => {
+          const state = byName.get(spec.name);
+          const available = !state || state.available;
+          const status = commandStatus.get(commandKey(component, spec.name));
+          const statusText = state && !state.available
+            ? state.refusal || "unavailable"
+            : status ? status.text : "";
+          return "<tr><td>" + esc(spec.name) + "</td><td>" +
+            (state == null ? "—"
+              : state.available ? "available" : "unavailable") +
+            "</td><td>" +
+            spec.request.map(argument =>
+              argumentControl(component, spec, argument, resources)).join(" ") +
+            "</td><td><button type=\"button\" class=\"invoke\"" +
+            " data-component=\"" + esc(component) +
+            "\" data-command=\"" + esc(spec.name) + "\"" +
+            (available ? "" : " disabled") + ">" + commandVerb(spec) +
+            "</button></td>" +
+            "<td class=\"command-status" +
+            (state && !state.available ? " warn"
+              : status && status.warn ? " warn" : "") +
+            (status && status.bad ? " bad" : "") +
+            "\" data-component=\"" + esc(component) +
+            "\" data-command=\"" + esc(spec.name) + "\">" +
+            esc(statusText) + "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The recent-events list: the component's retained journal tail —
+// point transitions on its bound points, its commands' settled
+// receipts, its step failures, and its kind-emitted events — rendered
+// through the same describeEvent the journal pane uses, newest last.
+function eventList(events) {
+  const recent = (events || []).slice(-EVENT_LIMIT);
+  return "<div class=\"res\" data-category=\"events\">" +
+    "<h4>events</h4>" +
+    (recent.length === 0
+      ? "<p class=\"res-empty\">no recent events</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Seq</th><th>Tick</th><th>Event</th>" +
+        "</tr></thead><tbody>" +
+        recent.map(entry =>
+          "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+          "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>"
+        ).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The per-component interface disclosure. `generic` — the
+// no-dedicated-presentation case — opens the section by default; an
+// operator's open/close choice survives re-renders through
+// interfaceOpen.
+function interfaceMarkup(name, generic) {
+  const iface = interfaceByName.get(name);
+  if (!iface) return "";
+  const resources = resourcesByName.get(name);
+  const open = interfaceOpen.has(name) ? interfaceOpen.get(name) : generic;
+  return "<details class=\"interface\" data-component=\"" + esc(name) + "\"" +
+    (open ? " open" : "") + ">" +
+    "<summary>interface</summary>" +
+    resourceTable("measurements", iface.measurements,
+      resources && resources.measurements) +
+    configTable(name, iface.configuration,
+      resources && resources.configuration) +
+    resourceTable("state", iface.state,
+      resources && resources.state) +
+    commandTable(name, iface.commands,
+      resources && resources.commands, resources) +
+    eventList(resources && resources.events) +
+    "</details>";
+}
+
+// Records the receipted path's latest answer for one named command and
+// paints it into every matching status cell — the same store-and-paint
+// rule the parameter status follows.
+function setCommandStatus(component, name, status) {
+  commandStatus.set(commandKey(component, name), status);
+  for (const cell of document.querySelectorAll("#faceplates .command-status")) {
+    if (cell.dataset.component === component && cell.dataset.command === name) {
+      cell.textContent = status.text;
+      cell.className = "command-status" + (status.warn ? " warn" : "") +
+        (status.bad ? " bad" : "");
+    }
+  }
+}
+
+// The interface row a settled receipt belongs to — the journal's
+// command_settled entries update the named command's status cell with
+// the authority's final word, the rule the parameter rows already
+// follow. Component-addressed commands map directly; a point command
+// finds the spec whose bound point and adapted variant match.
+function settledCommandKey(command) {
+  if ("invoke" in command) {
+    return { component: command.invoke.component, name: command.invoke.command };
+  }
+  if ("set_parameter" in command) {
+    const tuning = command.set_parameter;
+    return { component: tuning.component, name: "set_parameter:" + tuning.name };
+  }
+  const verb = "write_value" in command ? "write_value"
+    : "force_point" in command ? "force_point"
+    : "unforce_point" in command ? "unforce_point" : null;
+  if (!verb) return null;
+  const point = command[verb].point;
+  for (const [component, iface] of interfaceByName) {
+    const spec = iface.commands.find(spec =>
+      spec.adapted === verb && spec.point === point);
+    if (spec) return { component, name: spec.name };
+  }
+  return null;
+}
+
+// The wire command a CommandSpec's submission builds: the adapted
+// variants reconstruct their generic Command — the spec's identity
+// holds the addressing fields its request schema omits — and a
+// declared command goes as the Invoke variant carrying the typed
+// argument map.
+function specCommand(component, spec, args) {
+  const value = args.value;
+  switch (spec.adapted) {
+    case "write_value":
+      return { write_value: {
+        point: spec.point, kind: spec.request[0].kind, value: value } };
+    case "force_point":
+      return { force_point: {
+        point: spec.point, kind: spec.request[0].kind, value: value } };
+    case "unforce_point":
+      return { unforce_point: { point: spec.point } };
+    case "set_parameter":
+      return { set_parameter: {
+        component: component,
+        name: spec.name.slice("set_parameter:".length),
+        value: value } };
+    default:
+      return { invoke: {
+        component: component, command: spec.name, arguments: args } };
+  }
+}
+
+// A named command's submission from its interface row: reads the
+// request schema's typed controls, builds the CommandSpec's wire
+// command, and submits through the same receipted, active-peer-routed
+// path every operator command takes. An adapted command's required
+// `value` entry warns client-side when empty — the parameter edit's
+// rule — while a declared command's omitted argument simply means the
+// kind's default applies. The answer lands on the row's status cell.
+async function submitInterfaceCommand(button) {
+  const component = button.dataset.component;
+  const name = button.dataset.command;
+  const iface = interfaceByName.get(component);
+  const spec = iface && iface.commands.find(candidate => candidate.name === name);
+  if (!spec) return;
+  const args = {};
+  for (const input of button.closest("tr").querySelectorAll(".command-arg")) {
+    const text = input.value.trim();
+    if (input.dataset.kind === "bool") {
+      args[input.dataset.arg] = { bool: text === "true" };
+    } else if (text !== "") {
+      args[input.dataset.arg] = commandValue(input.dataset.kind, text);
+    }
+  }
+  if (spec.adapted !== "declared" && spec.request.length > 0 && args.value == null) {
+    setCommandStatus(component, name,
+      { text: "enter a value", warn: true, bad: false });
+    return;
+  }
+  if (spec.point == null &&
+      (spec.adapted === "write_value" || spec.adapted === "force_point" ||
+       spec.adapted === "unforce_point")) {
+    setCommandStatus(component, name,
+      { text: "unbound — no point to command", warn: false, bad: true });
+    return;
+  }
+  let answer;
+  try {
+    answer = await submitCommand(specCommand(component, spec, args));
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+    setCommandStatus(component, name,
+      { text: "command failed: " + error, warn: false, bad: true });
+    return;
+  }
+  const verdict = answer && answer.outcome
+    ? describeOutcome(answer.outcome)
+    : answer === null
+      ? "not sent: no peer reports role active"
+      : String(answer);
+  setCommandStatus(component, name, {
+    text: verdict,
+    warn: false,
+    bad: !answer || !answer.outcome || "rejected" in answer.outcome,
+  });
 }
 
 // ---- Alarm pane ----
@@ -2053,6 +2525,19 @@ async function refreshJournal(base) {
           bad: "rejected" in settled.receipt.outcome,
         });
       }
+      // The same settled receipt is the authority's final word on an
+      // interface command's invocation: the applied tick or the named
+      // rejection surfaces on its row as well.
+      if (settled) {
+        const key = settledCommandKey(settled.receipt.command);
+        if (key) {
+          setCommandStatus(key.component, key.name, {
+            text: describeOutcome(settled.receipt.outcome),
+            warn: false,
+            bad: "rejected" in settled.receipt.outcome,
+          });
+        }
+      }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
@@ -2066,10 +2551,26 @@ async function refreshJournal(base) {
     esc(describeEvent(entry.event)) + "</td></tr>").join("");
 }
 
+// One emitted-event payload field: an EventValue serializes as
+// {"value": <Value>} | {"quality": <Quality>} | {"receipt":
+// <CommandReceipt>} | {"text": <string>}.
+function describeEventField(field) {
+  if ("value" in field) return formatValue(field.value);
+  if ("quality" in field) return formatQuality(field.quality);
+  if ("receipt" in field) {
+    return describeCommand(field.receipt.command) + " — " +
+      describeOutcome(field.receipt.outcome);
+  }
+  if ("text" in field) return field.text;
+  return JSON.stringify(field);
+}
+
 // Journal events serialize as {"point_changed": ...} |
 // {"quality_changed": ...} | {"command_settled": ...} |
 // {"step_failed": ...} | {"role_changed": {from, to}} |
-// {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
+// {"divergence_detected": {mismatches}} | {"reinitialized": {report}} |
+// {"event_emitted": {event: {event, component, fields}}} — the
+// kind-declared event's durable record.
 function describeEvent(event) {
   if ("point_changed" in event) {
     const change = event.point_changed;
@@ -2119,12 +2620,21 @@ function describeEvent(event) {
             : "driver state").join(", ")
         : "");
   }
+  if ("event_emitted" in event) {
+    const emitted = event.event_emitted.event;
+    const fields = Object.entries(emitted.fields || {})
+      .map(([name, field]) => name + "=" + describeEventField(field))
+      .join(", ");
+    return emitted.component + " emitted " + emitted.event +
+      (fields === "" ? "" : " (" + fields + ")");
+  }
   return JSON.stringify(event);
 }
 
 // A command serializes as {"write_value": {point, kind, value}} |
 // {"force_point": {point, kind, value}} | {"unforce_point": {point}} |
-// {"set_parameter": {component, name, value}}.
+// {"set_parameter": {component, name, value}} |
+// {"invoke": {component, command, arguments}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
@@ -2141,6 +2651,13 @@ function describeCommand(command) {
     const tuning = command.set_parameter;
     return "tune " + tuning.component + "." + tuning.name + " := " +
       formatValue(tuning.value);
+  }
+  if ("invoke" in command) {
+    const call = command.invoke;
+    const args = Object.entries(call.arguments || {})
+      .map(([name, value]) => name + "=" + formatValue(value))
+      .join(", ");
+    return "invoke " + call.component + "." + call.command + "(" + args + ")";
   }
   return JSON.stringify(command);
 }
@@ -2166,7 +2683,9 @@ function describeOutcome(outcome) {
 // refusal — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
-// each carrying the offending component.
+// each carrying the offending component — | the invoke surface's
+// {"unknown_command"|"argument_type_mismatch"|"command_refused":
+// {component, command, ...}}.
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
@@ -2220,6 +2739,21 @@ function describeReason(reason) {
     const rejection = reason.invalid_parameter;
     return rejection.component + " rejected parameter " + rejection.parameter +
       ": " + rejection.detail;
+  }
+  if ("unknown_command" in reason) {
+    const rejection = reason.unknown_command;
+    return rejection.component + " declares no command " + rejection.command;
+  }
+  if ("argument_type_mismatch" in reason) {
+    const rejection = reason.argument_type_mismatch;
+    return "command " + rejection.component + "." + rejection.command +
+      " argument " + rejection.argument + " expects " +
+      pascal(rejection.expected) + ", found " + pascal(rejection.found);
+  }
+  if ("command_refused" in reason) {
+    const rejection = reason.command_refused;
+    return rejection.component + " refused command " + rejection.command +
+      ": " + rejection.reason;
   }
   return JSON.stringify(reason);
 }
@@ -2429,6 +2963,12 @@ async function init() {
       refresh();
       return;
     }
+    const invoke = event.target.closest("button.invoke");
+    if (invoke) {
+      await submitInterfaceCommand(invoke);
+      refresh();
+      return;
+    }
     const force = event.target.closest("button.force");
     if (force) {
       await submitForce(force);
@@ -2494,6 +3034,12 @@ async function init() {
     if (input) {
       const button = input.parentElement.querySelector("button.write");
       if (button) button.click();
+      return;
+    }
+    const arg = event.target.closest(".command-arg");
+    if (arg) {
+      const invoke = arg.closest("tr").querySelector("button.invoke");
+      if (invoke) invoke.click();
       return;
     }
     const control = event.target.closest(".param-value");

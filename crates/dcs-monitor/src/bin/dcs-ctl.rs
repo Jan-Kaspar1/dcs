@@ -33,6 +33,19 @@
 //! the server's receipt still answers with the contract's named
 //! rejection.
 //!
+//! `invoke <component> <command> [<name>=<value>]...` exercises the
+//! declared-command surface: the served `SchemaView`'s per-instance
+//! [`BlockInterface`](dcs_core::BlockInterface) supplies the command's
+//! request schema, each `name=value` pair parses per the declared
+//! argument's [`ValueKind`], and the submission is the
+//! [`Command::Invoke`] variant — the same receipted path the page's
+//! interface surface drives, reachable without a browser. A component
+//! or command the schema does not declare keeps the literal-kind
+//! fallback, so the server's `unknown_component`/`unknown_command`
+//! rejection still answers by name; a kind's own refusal — the
+//! `command_refused` an unavailable declared command settles — arrives
+//! as the ordinary rejected receipt.
+//!
 //! Every receipted submission can declare the actor identity the
 //! command-path audit-attribution contract journals — the tool-side
 //! source beside the page's `?operator=` parameter: `--actor <name>`
@@ -52,6 +65,7 @@ use dcs_core::{
 };
 use dcs_monitor::MonitorClient;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
@@ -77,6 +91,10 @@ operator commands:
                               pin a writable In point to <value>
   unforce <point> [--actor <name>]
                               release a forced point
+  invoke <component> <command> [<name>=<value>]... [--actor <name>]
+                              invoke a component's declared command;
+                              arguments parse per the served schema's
+                              declared request kinds
   promote                     promote a converged standby to active
   demote                      demote the field-owning peer to standby
   scan <n>                    run <n> scans; only a driven, unpaced
@@ -90,8 +108,9 @@ switch-request contract has no field for one.
 
 values: <value> parses per the declared value kind — true|false for
 Bool, an integer for Int, a finite number for Float — declared by the
-served signal index for points and by the component's descriptors for
-parameters. Command subcommands print the CommandReceipt; a rejected
+served signal index for points, by the component's descriptors for
+parameters, and by the served schema's request schema for invoke
+arguments. Command subcommands print the CommandReceipt; a rejected
 receipt still prints and the exit status is nonzero naming the
 CommandError. promote/demote print the resulting RoleReport; a refusal
 exits nonzero naming the SwitchError. An unreachable <addr> exits
@@ -202,6 +221,14 @@ enum Action {
         point: PointId,
         actor: Option<String>,
     },
+    Invoke {
+        component: String,
+        command: String,
+        /// The `<name>=<value>` pairs, unparsed — the served schema's
+        /// declared request kinds rule their parse at execution.
+        arguments: Vec<(String, String)>,
+        actor: Option<String>,
+    },
     Promote,
     Demote,
     Scan {
@@ -267,6 +294,18 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             match positional.as_slice() {
                 [point] => Action::Unforce {
                     point: parse_point(point).map_err(usage)?,
+                    actor,
+                },
+                _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+            }
+        }
+        ("invoke", rest) => {
+            let (positional, actor) = command_args(rest).map_err(usage)?;
+            match positional.as_slice() {
+                [component, command, arguments @ ..] => Action::Invoke {
+                    component: (*component).to_string(),
+                    command: (*command).to_string(),
+                    arguments: parse_invoke_arguments(arguments).map_err(usage)?,
                     actor,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
@@ -346,6 +385,23 @@ fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> 
         }
     }
     Ok((positional, actor.or_else(configured_actor)))
+}
+
+/// The `invoke` subcommand's trailing `<name>=<value>` pairs — split
+/// into key and unparsed text here, parsed per the declared argument
+/// kinds once the served schema answers. A pair with no `=` or an
+/// empty name is malformed usage, never a submission.
+fn parse_invoke_arguments(args: &[&str]) -> Result<Vec<(String, String)>, String> {
+    args.iter()
+        .map(|arg| match arg.split_once('=') {
+            Some((name, value)) if !name.is_empty() => {
+                Ok((name.to_string(), value.to_string()))
+            }
+            _ => Err(format!(
+                "invalid invoke argument {arg:?}: expected <name>=<value>"
+            )),
+        })
+        .collect()
 }
 
 /// The environment's configured default actor — a non-empty
@@ -447,6 +503,24 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             Command::UnforcePoint { point: *point },
             actor.as_deref(),
         ),
+        Action::Invoke {
+            component,
+            command: name,
+            arguments,
+            actor,
+        } => {
+            let arguments = invoke_arguments(client, addr, component, name, arguments)?;
+            command(
+                client,
+                addr,
+                Command::Invoke {
+                    component: component.clone(),
+                    command: name.clone(),
+                    arguments,
+                },
+                actor.as_deref(),
+            )
+        }
         Action::Promote => switchover(client, addr, "/promote", "promote"),
         Action::Demote => switchover(client, addr, "/demote", "demote"),
         Action::Scan { scans } => print_json(
@@ -510,6 +584,48 @@ fn declared_parameter_kind(
                 .find(|parameter| parameter.name == name)
         })
         .map(|parameter| parameter.kind))
+}
+
+/// The invocation's typed argument map: `GET /schema` resolves the
+/// component's declared command — the served `SchemaView` is the
+/// declaration the same instance's page surface reads — and each
+/// `<name>=<value>` pair parses per the request argument's declared
+/// [`ValueKind`], strictly. A component or command absent from the
+/// served schema has no request to parse against — each literal parses
+/// as it reads, so the server's `unknown_component`/`unknown_command`
+/// rejection still answers by name; a pair naming an argument the
+/// declared request does not carry likewise keeps the literal's kind,
+/// the receipted path staying the authority.
+fn invoke_arguments(
+    client: &MonitorClient,
+    addr: SocketAddr,
+    component: &str,
+    command: &str,
+    arguments: &[(String, String)],
+) -> Result<BTreeMap<String, Value>, Failure> {
+    let schema = client.schema().map_err(|e| transport(addr, e))?;
+    let spec = schema
+        .interfaces
+        .iter()
+        .find(|entry| entry.name == component)
+        .and_then(|entry| {
+            entry
+                .interface
+                .commands
+                .iter()
+                .find(|spec| spec.name == command)
+        });
+    let mut parsed = BTreeMap::new();
+    for (name, text) in arguments {
+        let kind = spec.and_then(|spec| {
+            spec.request
+                .iter()
+                .find(|argument| argument.name == *name)
+                .map(|argument| argument.kind)
+        });
+        parsed.insert(name.clone(), parse_operand(kind, text).map_err(Failure::usage)?);
+    }
+    Ok(parsed)
 }
 
 /// Parses a `<value>` argument: per the declared kind when the target
