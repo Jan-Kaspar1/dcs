@@ -29,6 +29,13 @@
 #                journal — matches the emitted model's declaration, in
 #                the same deterministic --driven run the simulate stage
 #                performs (surface-mismatch)
+#   upgrade      the documented repin upgrade (README §7): this tree's
+#                composition is materialized pinned at the recorded
+#                release rev, repinned to a later compatible revision,
+#                and re-emitted — the bytes must equal the checked-in
+#                model/plant.json — and the full pipeline re-runs under
+#                the repin; the named incompatible crossings are refused
+#                (emit-divergent, pin-unresolvable, crossing-unrefused)
 #
 # Environment:
 #
@@ -38,6 +45,13 @@
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the v0.1.0 rev this
 #                repository's manifest records).
+#   DCS_UPGRADE_REV
+#                the later compatible revision the upgrade stage repins
+#                to (default: $DCS_REV — a same-revision repin, still
+#                proving the mechanics; the workspace-side proof
+#                substitutes the checkout's HEAD).
+#   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
+#                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
 #                `dcs-controller`, and `dcs-plant-server` binaries. When
 #                unset, the check installs them from $DCS_REMOTE at
@@ -49,8 +63,12 @@ cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-a2b1b13e7b4273b133bc0fff55cb97e16c5d3197}"
-TOOLS="${DCS_TOOLS:-}"
-INSTALL_ROOT=""
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
+DCS_TOOLS="${DCS_TOOLS:-}"
+TOOLS=""
+TOOLS_REV=""
+UPGRADE_DIR=""
+INSTALL_ROOTS=""
 
 fail() {
     echo "$1" >&2
@@ -58,9 +76,53 @@ fail() {
 }
 
 cleanup() {
-    if [ -n "$INSTALL_ROOT" ]; then rm -rf "$INSTALL_ROOT"; fi
+    if [ -n "$UPGRADE_DIR" ]; then rm -rf "$UPGRADE_DIR"; fi
+    for dir in $INSTALL_ROOTS; do rm -rf "$dir"; done
 }
 trap cleanup EXIT
+
+# Resolves the released tooling's binaries into $TOOLS: the caller's
+# $DCS_TOOLS directory when set, else `cargo install --git $DCS_REMOTE
+# --rev <$1>` into a tracked scratch root — the contract's install
+# mechanism — cached by the revision already resolved.
+ensure_tools() {
+    if [ -n "$DCS_TOOLS" ]; then
+        TOOLS="$DCS_TOOLS"
+        return
+    fi
+    if [ "$TOOLS_REV" = "$1" ] && [ -n "$TOOLS" ]; then return; fi
+    local dir
+    dir="$(mktemp -d)"
+    if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
+            dcs-model dcs-controller dcs-plant --root "$dir"; then
+        rm -rf "$dir"
+        return 1
+    fi
+    INSTALL_ROOTS="$INSTALL_ROOTS $dir"
+    TOOLS="$dir/bin"
+    TOOLS_REV="$1"
+}
+
+# Rewrites the release-crate specifiers in $UPGRADE_DIR/Cargo.toml: $1
+# replaces each dependency's pin fragment — `rev = "<sha>"`,
+# `tag = "<name>"`, optionally carrying a `version = "…"` requirement —
+# while the remote stays exactly as this tree records it.
+repin() {
+    python3 - "$UPGRADE_DIR/Cargo.toml" "$DCS_REMOTE" "$1" <<'PY'
+import re, sys
+path, remote, spec = sys.argv[1], sys.argv[2], sys.argv[3]
+toml = open(path).read()
+for name in ("dcs-build", "dcs-model"):
+    toml, count = re.subn(
+        name + r' = \{[^}]+\}',
+        lambda _: name + ' = { git = "' + remote + '", ' + spec + ' }',
+        toml,
+    )
+    if count != 1:
+        sys.exit(f"repin: expected one {name} dependency, rewrote {count}")
+open(path, "w").write(toml)
+PY
+}
 
 echo "== resolve =="
 cargo fetch --locked 2>/dev/null || {
@@ -110,13 +172,8 @@ cmp -s "$SCEN_1" ci/scenario.json \
 echo "  emit is byte-stable and matches the checked-in artifacts"
 
 echo "== tooling =="
-if [ -z "$TOOLS" ]; then
-    INSTALL_ROOT="$(mktemp -d)"
-    cargo install --quiet --git "$DCS_REMOTE" --rev "$DCS_REV" \
-        dcs-model dcs-controller dcs-plant --root "$INSTALL_ROOT" \
-        || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_REV failed"
-    TOOLS="$INSTALL_ROOT/bin"
-fi
+ensure_tools "$DCS_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_REV failed"
 "$TOOLS/dcs-model" validate model/plant.json \
     || fail "tooling-rejected: dcs-model validate refused the checked-in model"
 LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
@@ -158,4 +215,86 @@ python3 ci/simulate.py \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
     || fail "surface-mismatch: the served operator surface does not match the emitted model's declared surface"
+
+if [ "${DCS_UPGRADE:-1}" != "0" ]; then
+
+echo "== upgrade =="
+# README §7's customer path exercised against this repository's own
+# composition: materialize the tree pinned at the recorded release rev,
+# repin to a later compatible revision, move the lockfile, and re-run
+# the check — a same-minor repin is a drop-in upgrade, so the emitted
+# bytes must not change (emit-divergent). The copy keeps the working
+# tree untouched.
+UPGRADE_DIR="$(mktemp -d)"
+for path in Cargo.toml Cargo.lock rust-toolchain.toml src model deploy ci; do
+    cp -r "$path" "$UPGRADE_DIR/"
+done
+export CARGO_TARGET_DIR="$UPGRADE_DIR/target"
+
+# The baseline: the composition as the recorded release rev emits it.
+repin "rev = \"$DCS_REV\""
+( cd "$UPGRADE_DIR" && cargo fetch ) \
+    || fail "pin-unresolvable: the recorded release rev $DCS_REV did not resolve"
+( cd "$UPGRADE_DIR" && cargo build --quiet ) \
+    || fail "surface-incompatible: the composition does not compile against the recorded release rev"
+UPGRADE_BIN="$UPGRADE_DIR/target/debug/pump-station"
+"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-released.json"
+cmp -s "$UPGRADE_DIR/emit-released.json" model/plant.json \
+    || fail "emit-divergent: the recorded release rev emits different bytes than the approved model/plant.json"
+
+# The repin: only the pin changes — src/, deploy/, and model/ are the
+# unchanged tree. The fetch re-resolves and moves the copied lockfile,
+# README §7's `cargo update` step.
+repin "rev = \"$DCS_UPGRADE_REV\""
+( cd "$UPGRADE_DIR" && cargo fetch ) \
+    || fail "pin-unresolvable: the repinned revision $DCS_UPGRADE_REV did not resolve"
+( cd "$UPGRADE_DIR" && cargo build --quiet ) \
+    || fail "surface-incompatible: the composition does not compile against the repinned revision"
+"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-upgraded.json"
+cmp -s "$UPGRADE_DIR/emit-upgraded.json" model/plant.json \
+    || fail "emit-divergent: the unchanged composition emitted different model bytes under $DCS_UPGRADE_REV"
+echo "  byte-identical emit across the repin $DCS_REV -> $DCS_UPGRADE_REV"
+
+# The full pipeline under the repin — this check's own stages re-run
+# against the repinned materialization, with the release tooling
+# resolved at the repinned revision.
+ensure_tools "$DCS_UPGRADE_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_UPGRADE_REV failed"
+(
+    cd "$UPGRADE_DIR"
+    DCS_UPGRADE=0 DCS_REMOTE="$DCS_REMOTE" DCS_REV="$DCS_UPGRADE_REV" \
+        DCS_TOOLS="$TOOLS" bash ci/check.sh
+) || { echo "the repinned pipeline failed — its named diagnostic is above" >&2; exit 1; }
+echo "  the full pipeline passes under the repin"
+
+# The named incompatible crossings, against this tree: each must be
+# refused — a crossing that resolves is the contract's
+# crossing-unrefused.
+expect_pin_refused() {
+    repin "$1"
+    local out
+    if out="$( cd "$UPGRADE_DIR" && cargo fetch 2>&1 )"; then
+        fail "crossing-unrefused: pin \`$1\` resolved — the incompatible crossing must be refused"
+    fi
+    echo "  $2 refused: pin-unresolvable"
+    echo "$out" | tail -n 1 | sed 's/^/    /'
+}
+expect_pin_refused 'tag = "no-such-release"' "the unresolvable tag \`no-such-release\`"
+expect_pin_refused "rev = \"$DCS_UPGRADE_REV\", version = \">=99\"" \
+    "the pin outside the supported version window"
+
+# A document outside MODEL_VERSION is refused by the released tooling.
+DOCTORED="$UPGRADE_DIR/model-doctored.json"
+python3 - model/plant.json "$DOCTORED" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+document["version"] += 1
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+if "$TOOLS/dcs-model" validate "$DOCTORED" >/dev/null 2>&1; then
+    fail "crossing-unrefused: dcs-model validate accepted a document outside MODEL_VERSION"
+fi
+echo "  a document outside MODEL_VERSION is refused"
+
+fi
 echo "check ok"
