@@ -2661,12 +2661,21 @@ impl Spec for ThresholdChainSpec {
 ///
 /// Ports mirror the descriptor: `primary` (`In`, `Float`), `backup`
 /// (`In`, `Float`), `out` (`Out`, `Float`), `backup_active` (`Out`,
-/// `Bool`). The kind takes no parameters.
+/// `Bool`), and `backup_unhealthy` (`Out`, `Bool`) — the standby-health
+/// report, declared only when the spec's `backup_unhealthy` flag is
+/// set. The kind takes no parameters.
 pub struct FailoverSelectSpec {
     /// The instance's parameter map — the kind declares no parameters,
     /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
     /// at `build`.
     pub parameters: Parameters,
+    /// Whether the instance declares the optional `backup_unhealthy`
+    /// port. `true` emits an instance whose health output the model
+    /// must wire — the station alarms it so a failed standby
+    /// annunciates before it is needed; `false` emits an instance
+    /// with no `backup_unhealthy` to wire, the form documents emitted
+    /// before the port existed take.
+    pub backup_unhealthy: bool,
 }
 
 /// Typed port handles for a `failover-select` instance.
@@ -2683,6 +2692,11 @@ pub struct FailoverSelectInstance {
     /// `backup_active` port (`Out`, `Bool`): asserts while the backup
     /// is selected.
     pub backup_active: Source<bool>,
+    /// `backup_unhealthy` port (`Out`, `Bool`): asserts while the
+    /// backup's own sample is non-`Good` or non-finite — `Some` only
+    /// when the spec declared the port; wiring a handle the emitted
+    /// instance does not carry is `UnknownPort` at `build`.
+    pub backup_unhealthy: Option<Source<bool>>,
 }
 
 impl FailoverSelectSpec {
@@ -2693,8 +2707,12 @@ impl FailoverSelectSpec {
     pub const PARAMETERS: &'static [ParamDecl] = &[];
 
     /// A spec carrying `parameters` as the instance's parameter map.
-    pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+    /// `backup_unhealthy` declares the optional standby-health port.
+    pub fn new(parameters: Parameters, backup_unhealthy: bool) -> Self {
+        Self {
+            parameters,
+            backup_unhealthy,
+        }
     }
 }
 
@@ -2706,12 +2724,16 @@ impl Spec for FailoverSelectSpec {
     }
 
     fn ports(&self) -> Vec<PortDecl> {
-        vec![
+        let mut ports = vec![
             port("primary", Direction::In, ValueKind::Float),
             port("backup", Direction::In, ValueKind::Float),
             port("out", Direction::Out, ValueKind::Float),
             port("backup_active", Direction::Out, ValueKind::Bool),
-        ]
+        ];
+        if self.backup_unhealthy {
+            ports.push(port("backup_unhealthy", Direction::Out, ValueKind::Bool));
+        }
+        ports
     }
 
     fn declared_parameters(&self) -> Option<&[ParamDecl]> {
@@ -2729,6 +2751,9 @@ impl Spec for FailoverSelectSpec {
             backup: Sink::port(id, "backup"),
             out: Source::port(id, "out"),
             backup_active: Source::port(id, "backup_active"),
+            backup_unhealthy: self
+                .backup_unhealthy
+                .then(|| Source::port(id, "backup_unhealthy")),
         }
     }
 }

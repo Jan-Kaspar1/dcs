@@ -490,6 +490,23 @@
       }
     },
     {
+      "id": 218,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 219,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
       "id": 214,
       "direction": "out",
       "value_type": "bool",
@@ -837,6 +854,33 @@
       "journaled": true
     },
     {
+      "id": 1080,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1081,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1082,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
       "id": 1050,
       "direction": "in",
       "value_type": "bool",
@@ -1152,6 +1196,22 @@
       "group": "level"
     },
     {
+      "id": 10218,
+      "name": "backup-unhealthy",
+      "source": 218,
+      "unit": "",
+      "description": "The remote repeater's own sample is untrusted while the canal level serves",
+      "group": "level"
+    },
+    {
+      "id": 10219,
+      "name": "backup-unhealthy-in",
+      "source": 219,
+      "unit": "",
+      "description": "Backup-unhealthy flag delivered to its alarm",
+      "group": "level"
+    },
+    {
       "id": 10214,
       "name": "manual-active",
       "source": 214,
@@ -1464,6 +1524,30 @@
       "group": "alarms"
     },
     {
+      "id": 11080,
+      "name": "backup-unhealthy-ack",
+      "source": 1080,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11081,
+      "name": "backup-unhealthy-alarm",
+      "source": 1081,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "alarms"
+    },
+    {
+      "id": 11082,
+      "name": "backup-unhealthy-unacknowledged",
+      "source": 1082,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "alarms"
+    },
+    {
       "id": 11050,
       "name": "sis-trip-ack",
       "source": 1050,
@@ -1547,6 +1631,10 @@
           "value_type": "float"
         },
         "backup_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "backup_unhealthy": {
           "direction": "out",
           "value_type": "bool"
         },
@@ -2003,6 +2091,44 @@
           "int": 1
         },
         "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The remote repeater's own sample is untrusted — the standby path is already lost while the canal level serves",
+        "required_action": "Restore the remote link before the primary level fails",
+        "reference": "backup-unhealthy-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
           "int": 1
         },
         "response_ticks": {
@@ -2034,7 +2160,7 @@
       }
     },
     {
-      "id": 14,
+      "id": 15,
       "kind": "bool-latching-alarm",
       "parameters": {
         "class": {
@@ -2072,7 +2198,7 @@
       }
     },
     {
-      "id": 15,
+      "id": 16,
       "kind": "bool-latching-alarm",
       "parameters": {
         "class": {
@@ -2153,6 +2279,17 @@
       },
       "to": {
         "point": 212
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "backup_unhealthy"
+        }
+      },
+      "to": {
+        "point": 218
       }
     },
     {
@@ -2371,6 +2508,14 @@
       },
       "to": {
         "point": 212
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "point": 218
       }
     },
     {
@@ -2850,7 +2995,7 @@
     },
     {
       "from": {
-        "point": 1050
+        "point": 1080
       },
       "to": {
         "port": {
@@ -2867,13 +3012,57 @@
         }
       },
       "to": {
-        "point": 1051
+        "point": 1081
       }
     },
     {
       "from": {
         "port": {
           "component": 13,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1082
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1050
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1051
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
           "name": "unacknowledged"
         }
       },
@@ -2887,7 +3076,7 @@
       },
       "to": {
         "port": {
-          "component": 13,
+          "component": 14,
           "name": "in"
         }
       }
@@ -2898,7 +3087,7 @@
       },
       "to": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "ack"
         }
       }
@@ -2906,7 +3095,7 @@
     {
       "from": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "alarm"
         }
       },
@@ -2917,7 +3106,7 @@
     {
       "from": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "unacknowledged"
         }
       },
@@ -2931,7 +3120,7 @@
       },
       "to": {
         "port": {
-          "component": 14,
+          "component": 15,
           "name": "in"
         }
       }
@@ -2942,7 +3131,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "ack"
         }
       }
@@ -2950,7 +3139,7 @@
     {
       "from": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "alarm"
         }
       },
@@ -2961,7 +3150,7 @@
     {
       "from": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "unacknowledged"
         }
       },
@@ -2975,7 +3164,7 @@
       },
       "to": {
         "port": {
-          "component": 15,
+          "component": 16,
           "name": "in"
         }
       }

@@ -351,6 +351,7 @@ fn observe(layout: &IjmuidenLayout, owner: &TelemetrySnapshot) -> serde_json::Va
         "manual_active": b(layout.manual_active),
         "discrepancy": b(layout.discrepancy),
         "backup_active": b(layout.backup_active),
+        "backup_unhealthy": b(layout.backup_unhealthy),
         "deviating": b(layout.deviating),
         "duty_call": b(layout.duty_call),
         "lag_call": b(layout.lag_call),
@@ -368,6 +369,7 @@ fn observe(layout: &IjmuidenLayout, owner: &TelemetrySnapshot) -> serde_json::Va
         "disc": managed(&layout.discrepancy_alarm),
         "ror": unmanaged(&layout.rate_of_rise_alarm),
         "backup": unmanaged(&layout.backup_active_alarm),
+        "buh": unmanaged(&layout.backup_unhealthy_alarm),
         "trip": unmanaged(&layout.sis_trip_alarm),
         "bypass": unmanaged(&layout.sis_bypass_alarm),
         "fault": unmanaged(&layout.sis_fault_alarm),
@@ -403,6 +405,7 @@ fn managed_lists(
     let unmanaged = [
         &layout.rate_of_rise_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.sis_trip_alarm,
         &layout.sis_bypass_alarm,
         &layout.sis_fault_alarm,
@@ -879,9 +882,17 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             }
             // The primary recovers.
             26 => field.clear_fault(points::LEVEL).unwrap(),
-            // The backup-serving annunciation is acknowledged.
-            28 => issued.push(ack_unmanaged(&active, &layout.backup_active_alarm)),
-            29 => issued.push(release_unmanaged(&active, &layout.backup_active_alarm)),
+            // The backup-serving annunciation is acknowledged — and the
+            // standby-health annunciation the frozen repeater already
+            // raised.
+            28 => {
+                issued.push(ack_unmanaged(&active, &layout.backup_active_alarm));
+                issued.push(ack_unmanaged(&active, &layout.backup_unhealthy_alarm));
+            }
+            29 => {
+                issued.push(release_unmanaged(&active, &layout.backup_active_alarm));
+                issued.push(release_unmanaged(&active, &layout.backup_unhealthy_alarm));
+            }
             // Shelving: the request stands past the declared bound —
             // `shelved` asserts inside it and expires while the request
             // still stands.
@@ -1142,6 +1153,22 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         .unwrap(),
         Quality::Good
     );
+    // The issue-#502 annunciation: the repeater's stale sample makes
+    // the standby leg unhealthy from the first stale presentation —
+    // before the primary ever fails — and its alarm latches until the
+    // scan-28 ack.
+    assert!(
+        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+            .iter()
+            .all(|row| bool_of(row, "backup_unhealthy")),
+        "the standby leg must annunciate while the repeater's own sample is untrusted"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|row| alarm_pair(row, "buh", 0) && alarm_pair(row, "buh", 1))
+    );
+    assert!(trace[28..].iter().all(|row| !alarm_pair(row, "buh", 1)));
     // The `Bad` primary flips the failover onto that stale repeater —
     // `backup_active` stands and its alarm latches until the scan-28
     // ack; the selected level carries the degraded quality through.

@@ -998,9 +998,25 @@ fn specs_match_registered_kinds_descriptors() {
         .unwrap()
         .describe(),
     ));
+    // `failover-select`'s `backup_unhealthy` is an optional port —
+    // declared only where bound, so models emitted before the port
+    // existed keep assembling; the spec is checked against both
+    // instances.
     covered.insert(check(
-        &FailoverSelectSpec::new(Default::default()),
-        &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4)).describe(),
+        &FailoverSelectSpec::new(Default::default(), true),
+        &FailoverSelect::new(
+            "fsel",
+            point(1),
+            point(2),
+            point(3),
+            point(4),
+            Some(point(5)),
+        )
+        .describe(),
+    ));
+    covered.insert(check(
+        &FailoverSelectSpec::new(Default::default(), false),
+        &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4), None).describe(),
     ));
     // `flow-paced-ratio`'s `trim` is the optional port — declared only
     // where bound, so the spec is checked against both instances.

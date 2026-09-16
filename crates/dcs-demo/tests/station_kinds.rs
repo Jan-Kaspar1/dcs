@@ -322,6 +322,19 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
             .map(|s| s.quality),
         Some(bad)
     );
+
+    // The issue-#502 leg: the backup stood Bad on its own while the
+    // primary kept serving — `backup_unhealthy` asserted for the
+    // fault's whole standing without `backup_active` ever rising, the
+    // standby-loss annunciation the composition alarms.
+    assert!(
+        (49..=56).all(|scan| bool_at(at(scan), points::BACKUP_UNHEALTHY)),
+        "backup_unhealthy must stand while the unused backup is Bad"
+    );
+    assert!(
+        (48..=57).all(|scan| !bool_at(at(scan), points::BACKUP_ACTIVE)),
+        "the primary keeps serving — backup_active must stay down"
+    );
 }
 
 #[test]
