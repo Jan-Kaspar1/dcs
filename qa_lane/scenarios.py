@@ -1042,6 +1042,16 @@ LEG_DEADLINE = 30   # bound on one leg's window or a settlement wait
 FLOOD_BATCH = 40    # journaled submissions per journal-flood round
 FLOOD_ROUNDS = 40   # rounds cap — 1600 submissions bound the roll
 
+# The command-admission flood (decision 83's bounded-ingress half):
+# each pipelined burst submits twice the served queue bound on one
+# keep-alive connection — the whole batch lands inside the server's
+# read buffer faster than a scan boundary can drain pending entries —
+# and rounds repeat until the named queue_full rejection appears. A
+# trickle keeps validated submissions arriving inside the measured leg.
+ADMISSION_ROUNDS = 8        # pipelined bursts before the flood is 'insufficient'
+ADMISSION_TRICKLE = 8       # submissions per poll round inside a flood leg
+ADMISSION_MAX_CAPACITY = 512  # a served bound past this is beyond the lane's reach
+
 # The malformed set the consumer schedules declare, each with the
 # status the documented endpoints answer: unparseable bodies and bad
 # queries are 400, unknown paths and refused verbs 404, a valid
@@ -1096,6 +1106,78 @@ def _connect(base, timeout=5):
     hostname, _, port = host.rpartition(':')
     return socket.create_connection(
         (hostname or '127.0.0.1', int(port or 80)), timeout=timeout)
+
+
+def _parse_responses(raw):
+    """Split `raw` into as many complete HTTP responses as it holds.
+    Returns ([(status, json-body-or-None)], leftover) — a truncated or
+    unframed answer stays in leftover for the next chunk."""
+    replies = []
+    while raw:
+        head, sep, rest = raw.partition(b'\r\n\r\n')
+        if not sep:
+            break
+        lines = head.split(b'\r\n')
+        try:
+            status = int(lines[0].split(None, 2)[1])
+        except (IndexError, ValueError):
+            status = None
+        length = None
+        for line in lines[1:]:
+            name, colon, value = line.partition(b':')
+            if colon and name.strip().lower() == b'content-length':
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = None
+        if length is None or len(rest) < length:
+            break
+        payload, raw = rest[:length], rest[length:]
+        try:
+            replies.append((status, json.loads(payload)))
+        except ValueError:
+            replies.append((status, None))
+    return replies, raw
+
+
+def _pipelined_commands(base, commands, timeout=15):
+    """POST every command envelope on one keep-alive connection, all
+    requests sent back-to-back before the first answer is read — the
+    flood channel: submissions land inside the server's read buffer
+    faster than a scan boundary can drain the pending queue. Returns
+    [(status, receipt-or-None)] in submission order, one entry per
+    command; a missing or unparseable answer reads (None, None) — the
+    no-receipt case the admission contract forbids."""
+    bodies = [json.dumps(command).encode() for command in commands]
+    request = b''
+    for index, body in enumerate(bodies):
+        tail = b'Connection: close\r\n' if index == len(bodies) - 1 else b''
+        request += (b'POST /command HTTP/1.1\r\nHost: qa\r\n'
+                    b'Content-Type: application/json\r\nContent-Length: '
+                    + str(len(body)).encode() + b'\r\n' + tail + b'\r\n'
+                    + body)
+    stream = _connect(base, timeout=timeout)
+    try:
+        stream.sendall(request)
+        stream.settimeout(timeout)
+        replies, raw = [], b''
+        deadline = time.monotonic() + timeout
+        while len(replies) < len(commands) \
+                and time.monotonic() < deadline:
+            try:
+                chunk = stream.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            raw += chunk
+            found, raw = _parse_responses(raw)
+            replies += found
+        found, raw = _parse_responses(raw)
+        replies += found
+        return (replies + [(None, None)] * len(commands))[:len(commands)]
+    finally:
+        stream.close()
 
 
 def _publication(snapshot):
@@ -1209,7 +1291,7 @@ class _Overlay:
     and deterministic, and its own measurement requests are never the
     interference under test."""
 
-    def __init__(self, kind, base, watch):
+    def __init__(self, kind, base, watch, flood=None):
         self.kind = kind
         self.base = base
         self.statuses = []    # every HTTP status the consumer read back
@@ -1222,6 +1304,12 @@ class _Overlay:
         self.surfaces = ['/snapshot', '/receipts', '/journal?since=0',
                          '/history?point=' + str(watch) + '&since=0',
                          '/checkpoint', '/role', '/signals', '/']
+        # The command-flood leg's admission record: flood carries the
+        # served bound and the probe point; submissions logs every
+        # (status, normalized outcome, receipt-log index) the flood met.
+        self.flood = flood
+        self.submissions = []
+        self._receipts_base = None
 
     def _send(self, method, path, body=None):
         try:
@@ -1289,6 +1377,37 @@ class _Overlay:
         finally:
             stream.close()
 
+    @property
+    def queue_fulls(self):
+        """The flood submissions the named queue_full rejection met."""
+        return sum(1 for submission in self.submissions
+                   if submission['outcome'] == 'rejected:queue_full')
+
+    def _flood_command(self):
+        return {'command': {'write_value': {
+            'point': self.flood['point'], 'kind': 'bool',
+            'value': {'bool': True}}},
+            'actor': 'qa-lane'}
+
+    def _record_submission(self, status, receipt):
+        """One flood submission's verdict: its HTTP status, its
+        receipt's normalized outcome, and the receipt-log index the
+        append-only log assigns it — every POST /command appends exactly
+        one receipt, in submission order."""
+        if status is not None:
+            self.statuses.append(status)
+        self.submissions.append({
+            'status': status,
+            'outcome': _outcome_key(receipt) if isinstance(receipt, dict)
+            else 'none',
+            'index': self._receipts_base + len(self.submissions)
+            if self._receipts_base is not None else None})
+
+    def _flood_burst(self, count):
+        for status, receipt in _pipelined_commands(
+                self.base, [self._flood_command()] * count):
+            self._record_submission(status, receipt)
+
     def start(self):
         if self.kind == 'stalled-reader':
             # Issue the request, then go silent without reading a byte
@@ -1306,6 +1425,20 @@ class _Overlay:
                 status = self._send(method, path, body)
                 if status is not None:
                     self.malformed[method + ' ' + path] = status
+        elif self.kind == 'command-flood':
+            # The bounded admission flood: pipelined bursts of twice the
+            # served queue bound until the named queue_full rejection
+            # appears — the whole batch lands inside one server read
+            # buffer, faster than a scan boundary drains pending entries.
+            try:
+                _, body = http_json('GET', self.base + '/receipts')
+                self._receipts_base = len(_receipt_list(body))
+            except Exception as exc:
+                self.errors.append('receipts base: ' + str(exc)[:150])
+            rounds = 0
+            while rounds < ADMISSION_ROUNDS and not self.queue_fulls:
+                self._flood_burst(2 * self.flood['capacity'])
+                rounds += 1
 
     def poll(self):
         if self.kind == 'polling':
@@ -1316,6 +1449,10 @@ class _Overlay:
             self._send('GET', self._next_surface())
             if self._index % 4 == 1:
                 self._raw_probes()
+        elif self.kind == 'command-flood':
+            # A small pipelined trickle each measurement round — the
+            # admission path stays loaded through the leg's scan window.
+            self._flood_burst(ADMISSION_TRICKLE)
 
     def finish(self):
         """Drains held resources and returns the leg's named evidence
@@ -1370,6 +1507,71 @@ class _Overlay:
                 failures.append('malformed probes answered outside the '
                                 'declared limits: '
                                 + json.dumps(wrong, sort_keys=True)[:600])
+        if self.kind == 'command-flood':
+            if not self.submissions:
+                failures.append('the command flood never ran')
+            no_receipt = sum(1 for submission in self.submissions
+                             if submission['status'] is None)
+            if no_receipt:
+                failures.append(str(no_receipt) + ' flood submissions '
+                                'returned no receipt')
+            http_errors = sorted({submission['status']
+                                  for submission in self.submissions
+                                  if submission['status'] is not None
+                                  and submission['status'] != 200})
+            if http_errors:
+                failures.append('flood submissions met HTTP-layer '
+                                'errors: ' + str(http_errors))
+            outside = sorted({submission['outcome']
+                              for submission in self.submissions
+                              if submission['status'] == 200
+                              and submission['outcome'] not in
+                              ('accepted', 'applied',
+                               'rejected:queue_full')})
+            if outside:
+                failures.append('flood receipts answered outside the '
+                                'admission vocabulary: ' + str(outside))
+            if self.submissions and not self.queue_fulls:
+                failures.append('the named queue_full rejection never '
+                                'appeared under '
+                                + str(len(self.submissions))
+                                + ' submissions against the served '
+                                'capacity ' + str(self.flood['capacity']))
+            elif not any(submission['outcome'] == 'accepted'
+                         for submission in self.submissions):
+                failures.append('no flood submission was admitted')
+            if self._receipts_base is None:
+                failures.append('the receipt log was unreadable at '
+                                'flood start — settlement cannot be '
+                                'audited')
+            elif not (no_receipt or http_errors or outside):
+                # Every admitted command's receipt must settle applied
+                # at its scan boundary — the receipt log is append-only
+                # and each submission's index is known.
+                pending = [submission['index']
+                           for submission in self.submissions
+                           if submission['outcome'] == 'accepted']
+
+                def drained():
+                    try:
+                        _, body = http_json('GET',
+                                            self.base + '/receipts')
+                    except Exception:
+                        return None
+                    receipts = _receipt_list(body)
+                    for index in pending:
+                        if len(receipts) <= index \
+                                or _outcome_key(receipts[index]) \
+                                != 'applied':
+                            return None
+                    return True
+
+                if pending and not wait_for(
+                        drained, time.monotonic() + LEG_DEADLINE,
+                        interval=LEG_POLL):
+                    failures.append('admitted flood commands never '
+                                    'settled applied at a scan '
+                                    'boundary')
         if any(status >= 500 for status in self.statuses):
             failures.append('a consumer saw a server fault: '
                             + str(sorted(set(self.statuses))))
@@ -1667,6 +1869,147 @@ def scenario_consumer_schedule(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The bounded command-admission contract (decision 83's ingress half):
+# commands submitted faster than the scan boundary drains them must each
+# take a structured receipt — a settlement or the named queue_full
+# rejection — never a silent drop, a hang, or a server fault. The flood
+# volume derives from the snapshot's served command_queue.capacity, and
+# the flood leg's scan outputs and probe receipts must equal the
+# bracketing no-flood legs'.
+
+def scenario_command_admission(ctx):
+    """A bounded command flood meets the receipted admission contract —
+    decision 83's bounded-ingress half on the simulated rig."""
+    case = Case('command-admission',
+                'Bounded command admission under flood',
+                'a command flood past the served command_queue capacity '
+                'answers every submission with a receipted settlement '
+                'or the named queue_full rejection — never a silent '
+                'drop, a hang, or a server fault — admitted commands '
+                'settle applied at their scan boundary, and the leg\'s '
+                'scan outputs and probe receipts match the no-flood '
+                'legs')
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30, interval=LEG_POLL)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('command flood against ' + active
+                     + ' (' + base + ')')
+        _, signals = http_json('GET', base + '/signals')
+        targets = _signal_targets(signals)
+        if targets is None:
+            return case.finish('inconclusive',
+                               'no writable bool command point or '
+                               'non-writable point in the model')
+        snapshot = _snapshot(ctx, base)
+        queue = snapshot.get('command_queue') or {}
+        capacity = queue.get('capacity')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'command-admission-signals.json',
+                            {'signals': signals,
+                             'command_queue': queue})
+        case.evidence('file', ref, 'signal index and the served '
+                      'admission bound')
+        if not isinstance(capacity, int) or isinstance(capacity, bool) \
+                or capacity < 1:
+            return case.finish('inconclusive',
+                               'the served snapshot carries no '
+                               'command_queue capacity')
+        if capacity > ADMISSION_MAX_CAPACITY:
+            return case.finish(
+                'inconclusive', 'the served command_queue capacity '
+                + str(capacity) + ' is beyond the lane\'s flood reach '
+                '(bound ' + str(ADMISSION_MAX_CAPACITY) + ')')
+        case.observe('served command_queue capacity ' + str(capacity))
+
+        legs = []
+        signatures = {}
+        for index, kind in enumerate(
+                ('reference', 'command-flood', 'reference')):
+            name = 'reference-' + ('a' if not signatures else 'b') \
+                if kind == 'reference' else kind
+            flood = {'point': targets['write'], 'capacity': capacity} \
+                if kind == 'command-flood' else None
+            overlay = _Overlay(kind, base, targets['watch'], flood)
+            try:
+                signature, failures = _consumer_leg(
+                    ctx, base, targets, overlay, index % 2 == 0)
+            except Exception as exc:
+                # A flood leg that lost the monitor mid-run is the
+                # submission path reaching the plant — a named failure;
+                # a reference leg that cannot read the rig at all is
+                # inconclusive like the other scenarios.
+                if kind == 'reference':
+                    raise
+                signature, failures = None, ['leg errored: '
+                                             + str(exc)[:200]]
+            leg = {'leg': name, 'signature': signature,
+                   'statuses': overlay.statuses[:40],
+                   'errors': overlay.errors[:5]}
+            if overlay.submissions:
+                leg['submissions'] = len(overlay.submissions)
+                outcomes = {}
+                for submission in overlay.submissions:
+                    key = str(submission['status']) + ':' \
+                        + submission['outcome']
+                    outcomes[key] = outcomes.get(key, 0) + 1
+                leg['outcomes'] = outcomes
+            legs.append(leg)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'command-admission-legs.json', legs)
+            if len(legs) == 1:
+                case.evidence('file', ref)
+            if kind == 'command-flood':
+                snap = _try_snapshot(ctx, base) or {}
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'command-admission-flood.json',
+                    {'capacity': capacity,
+                     'submissions': len(overlay.submissions),
+                     'queue_full': overlay.queue_fulls,
+                     'command_queue': snap.get('command_queue')})
+                case.evidence('file', ref, 'flood outcome counts and '
+                              'the served queue metrics after the leg')
+            if failures:
+                return case.finish('failed',
+                                   name + ': ' + '; '.join(failures))
+            case.observe('leg ' + name + ': '
+                         + json.dumps(signature, sort_keys=True))
+            signatures[name] = signature
+            if kind == 'reference':
+                continue
+            if signature != signatures['reference-a']:
+                return case.finish(
+                    'failed',
+                    name + ' diverged from the no-flood legs: '
+                    + json.dumps(signature, sort_keys=True) + ' vs '
+                    + json.dumps(signatures['reference-a'],
+                                 sort_keys=True))
+        reference = signatures['reference-a']
+        for key, healthy in (('scan', True), ('applied', True),
+                             ('write', 'applied'),
+                             ('reject', 'rejected:not_writable')):
+            if reference[key] != healthy:
+                return case.finish(
+                    'failed', 'the no-flood reference leg is '
+                    'unhealthy at ' + key + ': '
+                    + json.dumps(reference, sort_keys=True))
+        if reference['history'] not in ('contiguous', 'gapped'):
+            return case.finish(
+                'failed', 'the no-flood reference leg is unhealthy '
+                'at history: ' + json.dumps(reference, sort_keys=True))
+        if signatures['reference-b'] != reference:
+            return case.finish('failed',
+                               'the post-flood reference leg '
+                               'diverged from the first')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
@@ -1674,7 +2017,8 @@ def scenario_consumer_schedule(ctx):
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_failover, scenario_evidence_capture,
-             scenario_served_interface, scenario_consumer_schedule)
+             scenario_served_interface, scenario_consumer_schedule,
+             scenario_command_admission)
 
 
 def run_all(ctx, timeline):
