@@ -10,6 +10,7 @@ Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
 """
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -125,6 +126,18 @@ def _journal_covers(journal, point):
         if write.get('point') == point:
             return True
     return False
+
+
+def _settled_active(ctx):
+    """The ctx endpoint key whose peer currently reports role=active,
+    or None while the pair is mid-transition."""
+    for name in ('active', 'standby'):
+        try:
+            if _role(ctx, ctx[name]).get('role') == 'active':
+                return name
+        except Exception:
+            pass
+    return None
 
 
 def scenario_controller_active(ctx):
@@ -323,16 +336,8 @@ def scenario_evidence_capture(ctx):
         # goes to whichever peer reports settled active — the original
         # finding read the audit off the pair after a command and a
         # switchover.
-        def settled_active():
-            for name in ('active', 'standby'):
-                try:
-                    if _role(ctx, ctx[name]).get('role') == 'active':
-                        return name
-                except Exception:
-                    pass
-            return None
-
-        active = wait_for(settled_active, time.monotonic() + 30)
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
         if active is None:
             return case.finish('failed', 'no peer reports role=active')
         other = 'standby' if active == 'active' else 'active'
@@ -462,9 +467,649 @@ def scenario_evidence_capture(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The consumer-failure schedule (WW-FND-004, decision 83): the lane's
+# per-revision proof that a slow, disconnected, malformed, or restarted
+# consumer can never reach the control loop. Every leg measures the
+# same signature — one publication per completed scan, an honest
+# seq-cursor history stream, identical receipted command outcomes —
+# while one consumer behavior overlaps it, and each interference leg's
+# signature must equal the bracketing no-consumer reference legs'.
+
+LEG_TICKS = 8       # completed scans each leg's window spans
+LEG_POLL = 0.1      # measurement cadence inside a leg's window
+LEG_DEADLINE = 30   # bound on one leg's window or a settlement wait
+FLOOD_BATCH = 40    # journaled submissions per journal-flood round
+FLOOD_ROUNDS = 40   # rounds cap — 1600 submissions bound the roll
+
+# The malformed set the consumer schedules declare, each with the
+# status the documented endpoints answer: unparseable bodies and bad
+# queries are 400, unknown paths and refused verbs 404, a valid
+# POST /scan meets the paced monitor's named 409, and POST /promote on
+# the settled active the named already_active 409. No well-formed
+# command appears — a receipted command is a run input, not
+# interference.
+MALFORMED_PROBES = (
+    ('GET', '/nonexistent', None, 404),
+    ('POST', '/snapshot', None, 404),
+    ('DELETE', '/receipts', None, 404),
+    ('PUT', '/scan', None, 404),
+    ('GET', '/history?point=abc', None, 400),
+    ('GET', '/history?since=-1', None, 400),
+    ('GET', '/journal?since=soon', None, 400),
+    ('POST', '/command', '{', 400),
+    ('POST', '/command', '{"command":{"bogus":1}}', 400),
+    ('POST', '/command', '{"actor":3}', 400),
+    ('POST', '/command',
+     '{"write_value":{"point":10,"kind":"float","value":"high"}}', 400),
+    ('POST', '/scan', '{', 400),
+    ('POST', '/scan', '{"scans":-1}', 400),
+    ('POST', '/scan', '{"scans":1}', 409),
+    ('POST', '/promote', None, 409),
+)
+
+
+def _request_status(method, url, body=None, timeout=10):
+    """(status, raw body) — unlike http_json, a non-2xx answer returns
+    instead of raising: the malformed probes' refusals are the data."""
+    if isinstance(body, str):
+        data = body.encode()
+    elif body is not None:
+        data = json.dumps(body).encode()
+    else:
+        data = None
+    request = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        request.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        return exc.code, None
+
+
+def _connect(base, timeout=5):
+    """A raw TCP connection to a monitor base URL — the transport the
+    held/churning/raw-probe consumers speak below the HTTP layer."""
+    host = base.split('://', 1)[-1]
+    hostname, _, port = host.rpartition(':')
+    return socket.create_connection(
+        (hostname or '127.0.0.1', int(port or 80)), timeout=timeout)
+
+
+def _publication(snapshot):
+    """A snapshot's `publication` section — the store's overload
+    counters as of that publish: produced, coalesced, retained depth,
+    configured window."""
+    return snapshot.get('publication') or {}
+
+
+def _history_seqs(payload, point):
+    """One point's served history seqs out of a `/history` answer."""
+    if isinstance(payload, list):
+        for entry in payload:
+            if entry.get('point') == point:
+                return [sample.get('seq')
+                        for sample in entry.get('samples', [])]
+    return []
+
+
+def _history_cursor(ctx, base, point):
+    """A consumer's `?since=` cursor on the point's history stream —
+    the newest served seq, or 0 while the stream is empty."""
+    _, body = http_json('GET', base + '/history?point=' + str(point)
+                        + '&since=0')
+    seqs = _history_seqs(body, point)
+    return seqs[-1] if seqs else 0
+
+
+def _journal_seqs(payload):
+    return [entry.get('seq') for entry in _journal_list(payload)]
+
+
+def _journal_cursor(ctx, base):
+    """The newest served journal seq — a consumer's `?since=` cursor."""
+    _, body = http_json('GET', base + '/journal?since=0')
+    seqs = _journal_seqs(body)
+    return seqs[-1] if seqs else 0
+
+
+def _journal_first(ctx, base):
+    """The oldest retained journal seq — where the bounded window
+    currently opens."""
+    _, body = http_json('GET', base + '/journal?since=0')
+    seqs = _journal_seqs(body)
+    return seqs[0] if seqs else 0
+
+
+def _outcome_key(receipt):
+    """A receipt's normalized verdict — 'accepted', 'applied', or
+    'rejected:<reason>' — the cross-leg comparable."""
+    outcome = (receipt or {}).get('outcome')
+    if not isinstance(outcome, dict) or not outcome:
+        return 'unknown'
+    name = next(iter(outcome))
+    if name == 'rejected':
+        body = outcome.get('rejected')
+        reason = body.get('reason') if isinstance(body, dict) else {}
+        return 'rejected:' + (next(iter(reason))
+                              if isinstance(reason, dict) and reason
+                              else '?')
+    return name
+
+
+def _settled_outcome(ctx, base, index):
+    """The outcome key of `receipts[index]` once it is final — None
+    while it still reads `accepted` or the log cannot be read."""
+    try:
+        _, body = http_json('GET', base + '/receipts')
+    except Exception:
+        return None
+    receipts = _receipt_list(body)
+    if len(receipts) <= index:
+        return None
+    outcome = _outcome_key(receipts[index])
+    return None if outcome == 'accepted' else outcome
+
+
+def _try_snapshot(ctx, base):
+    """`/snapshot` or None — for wait loops a dropped read is one lost
+    sample, not the leg's verdict."""
+    try:
+        return _snapshot(ctx, base)
+    except Exception:
+        return None
+
+
+def _signal_targets(signals):
+    """The scenario's probe points out of the SignalIndex: a writable
+    bool command point (the operator-command target 'p101-oos' when
+    present), any non-writable point for the named rejection, and the
+    point whose history stream the legs watch."""
+    write = reject = None
+    for entry in signals.get('points', []):
+        if entry.get('name') == 'p101-oos' and entry.get('writable'):
+            write = entry.get('point')
+        elif write is None and entry.get('writable') \
+                and entry.get('direction') == 'in' \
+                and entry.get('value_type') == 'bool':
+            write = entry.get('point')
+        if reject is None and not entry.get('writable'):
+            reject = entry.get('point')
+    if write is None or reject is None:
+        return None
+    return {'write': write, 'reject': reject, 'watch': write}
+
+
+class _Overlay:
+    """One leg's consumer behavior, driven inline: `start` runs before
+    the leg's tick window, `poll` once per measurement round inside it,
+    `finish` after the leg's probes. The scenario stays single-threaded
+    and deterministic, and its own measurement requests are never the
+    interference under test."""
+
+    def __init__(self, kind, base, watch):
+        self.kind = kind
+        self.base = base
+        self.statuses = []    # every HTTP status the consumer read back
+        self.errors = []      # transport failures the consumer met
+        self.probes = 0       # raw socket probes that became no request
+        self.held = None      # the stalled reader's held (status, body)
+        self.malformed = {}   # 'METHOD path' -> status
+        self._held_socket = None
+        self._index = 0
+        self.surfaces = ['/snapshot', '/receipts', '/journal?since=0',
+                         '/history?point=' + str(watch) + '&since=0',
+                         '/checkpoint', '/role', '/signals', '/']
+
+    def _send(self, method, path, body=None):
+        try:
+            status, _ = _request_status(method, self.base + path, body)
+        except Exception as exc:
+            self.errors.append(str(exc)[:200])
+            return None
+        self.statuses.append(status)
+        return status
+
+    def _next_surface(self):
+        path = self.surfaces[self._index % len(self.surfaces)]
+        self._index += 1
+        return path
+
+    def _raw_probes(self):
+        # Garbage bytes and a half-sent request — traffic that never
+        # becomes a request at all.
+        for payload, how in (
+                (b'\x89not-an-http-request\x90\r\n\r\n', socket.SHUT_WR),
+                (b'GET /snapshot HTT', socket.SHUT_RDWR)):
+            try:
+                stream = _connect(self.base)
+            except OSError as exc:
+                self.errors.append(str(exc)[:200])
+                continue
+            try:
+                stream.sendall(payload)
+                stream.shutdown(how)
+                stream.settimeout(0.25)
+                try:
+                    stream.recv(4096)
+                except OSError:
+                    pass
+            except OSError as exc:
+                self.errors.append(str(exc)[:200])
+            finally:
+                stream.close()
+            self.probes += 1
+
+    def _churn(self):
+        # Connect, issue a read, take some or none of the response,
+        # drop — the disconnect mid-session.
+        path = self._next_surface()
+        try:
+            stream = _connect(self.base)
+        except OSError as exc:
+            self.errors.append(str(exc)[:200])
+            return
+        try:
+            stream.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: x\r\n'
+                            'Connection: close\r\n\r\n').encode())
+            stream.settimeout(0.25)
+            try:
+                head = stream.recv(512)
+            except OSError:
+                head = b''
+            if head.startswith(b'HTTP'):
+                try:
+                    self.statuses.append(int(head.split(None, 2)[1]))
+                except (ValueError, IndexError):
+                    pass
+        except OSError as exc:
+            self.errors.append(str(exc)[:200])
+        finally:
+            stream.close()
+
+    def start(self):
+        if self.kind == 'stalled-reader':
+            # Issue the request, then go silent without reading a byte
+            # of the response until the leg ends — the held-connection
+            # case the publication split exists for.
+            try:
+                stream = _connect(self.base)
+                stream.sendall(b'GET /snapshot HTTP/1.1\r\nHost: x\r\n'
+                               b'Connection: close\r\n\r\n')
+                self._held_socket = stream
+            except OSError as exc:
+                self.errors.append(str(exc)[:200])
+        elif self.kind == 'malformed-and-flood':
+            for method, path, body, _expected in MALFORMED_PROBES:
+                status = self._send(method, path, body)
+                if status is not None:
+                    self.malformed[method + ' ' + path] = status
+
+    def poll(self):
+        if self.kind == 'polling':
+            self._send('GET', self._next_surface())
+        elif self.kind == 'disconnect-reconnect':
+            self._churn()
+        elif self.kind == 'malformed-and-flood':
+            self._send('GET', self._next_surface())
+            if self._index % 4 == 1:
+                self._raw_probes()
+
+    def finish(self):
+        """Drains held resources and returns the leg's named evidence
+        failures — interference that never happened, or a consumer that
+        met a server fault."""
+        failures = []
+        if self._held_socket is not None:
+            stream, self._held_socket = self._held_socket, None
+            try:
+                stream.settimeout(5)
+                chunks = []
+                while True:
+                    try:
+                        chunk = stream.recv(65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                text = b''.join(chunks).decode(errors='replace')
+                try:
+                    status = int(text.split(None, 2)[1]) \
+                        if text.startswith('HTTP') else 0
+                except (ValueError, IndexError):
+                    status = 0
+                self.held = (status, text[:2000])
+            finally:
+                stream.close()
+        if self.kind == 'stalled-reader':
+            if self.held is None:
+                failures.append('the stalled reader never held a '
+                                'response')
+            elif self.held[0] != 200:
+                failures.append('the held response answered '
+                                + str(self.held[0]))
+            elif '"tick"' not in self.held[1]:
+                failures.append('the held response was not a complete '
+                                'snapshot')
+        if self.kind in ('polling', 'disconnect-reconnect') \
+                and not self.statuses:
+            failures.append('the ' + self.kind + ' consumers never ran')
+        if self.kind == 'malformed-and-flood':
+            if not self.probes:
+                failures.append('no raw probes reached the socket')
+            expected = {method + ' ' + path: want
+                        for method, path, _body, want
+                        in MALFORMED_PROBES}
+            wrong = {key: [self.malformed.get(key), want]
+                     for key, want in expected.items()
+                     if self.malformed.get(key) != want}
+            if wrong:
+                failures.append('malformed probes answered outside the '
+                                'declared limits: '
+                                + json.dumps(wrong, sort_keys=True)[:600])
+        if any(status >= 500 for status in self.statuses):
+            failures.append('a consumer saw a server fault: '
+                            + str(sorted(set(self.statuses))))
+        if self.errors:
+            failures.append('consumer transport errors: '
+                            + '; '.join(self.errors[:3]))
+        return failures
+
+
+def _consumer_leg(ctx, base, targets, overlay, want):
+    """One measured leg: LEG_TICKS completed scans under the overlay's
+    consumer behavior, then the leg's two receipted probe commands.
+
+    Returns (signature, failures) — signature is None when the leg's
+    scan outputs stopped advancing; that failure is named in failures.
+    """
+    failures = []
+    start = _snapshot(ctx, base)
+    tick0 = start.get('tick') or 0
+    published0 = _publication(start).get('published') or 0
+    h0 = _history_cursor(ctx, base, targets['watch'])
+    deadline = time.monotonic() + LEG_DEADLINE
+    try:
+        overlay.start()
+    except Exception as exc:
+        overlay.errors.append('start: ' + str(exc)[:150])
+    end = None
+    while time.monotonic() < deadline:
+        try:
+            overlay.poll()
+        except Exception as exc:
+            overlay.errors.append('poll: ' + str(exc)[:150])
+        try:
+            snap = _snapshot(ctx, base)
+        except Exception:
+            snap = None
+        if snap and (snap.get('tick') or 0) >= tick0 + LEG_TICKS:
+            end = snap
+            break
+        time.sleep(LEG_POLL)
+    if end is None:
+        failures.append('scan outputs stopped advancing under '
+                        + overlay.kind + ' at tick ' + str(tick0))
+        failures += overlay.finish()
+        return None, failures
+
+    # The leg's receipted probes: one writable write (the leg's
+    # alternating value), one statically invalid write — the two
+    # command-path outcomes every leg must reproduce identically.
+    _, receipts_body = http_json('GET', base + '/receipts')
+    index = len(_receipt_list(receipts_body))
+    http_json('POST', base + '/command',
+              {'command': {'write_value': {
+                  'point': targets['write'], 'kind': 'bool',
+                  'value': {'bool': want}}},
+               'actor': 'qa-lane'})
+    _, rejected = http_json('POST', base + '/command',
+                            {'command': {'write_value': {
+                                'point': targets['reject'],
+                                'kind': 'bool',
+                                'value': {'bool': True}}},
+                             'actor': 'qa-lane'})
+    settled = wait_for(lambda: _settled_outcome(ctx, base, index),
+                       time.monotonic() + LEG_DEADLINE, interval=LEG_POLL)
+    applied = wait_for(
+        lambda: _point_value(_try_snapshot(ctx, base) or {},
+                             targets['write']) == want or None,
+        time.monotonic() + LEG_DEADLINE, interval=LEG_POLL)
+    _, history_body = http_json(
+        'GET', base + '/history?point=' + str(targets['watch'])
+        + '&since=' + str(h0))
+    seqs = _history_seqs(history_body, targets['watch'])
+    failures += overlay.finish()
+
+    tick1 = end.get('tick') or 0
+    published1 = _publication(end).get('published') or 0
+    if not seqs or any(not isinstance(seq, int) or seq <= h0
+                       for seq in seqs):
+        honesty = 'stale'
+    elif seqs != list(range(seqs[0], seqs[0] + len(seqs))):
+        honesty = 'dishonest'
+    else:
+        honesty = 'gapped' if seqs[0] > h0 + 1 else 'contiguous'
+    signature = {
+        'scan': tick1 > tick0 and tick1 - tick0 == published1 - published0,
+        'history': honesty,
+        'write': settled or 'never-settled',
+        'reject': _outcome_key(rejected),
+        'applied': bool(applied),
+    }
+    return signature, failures
+
+
+def scenario_consumer_schedule(ctx):
+    """Slow, disconnected, malformed, and restarted consumers cannot
+    reach the control loop — the WW-FND-004 / decision-83 schedule on
+    the simulated rig."""
+    case = Case('consumer-schedule',
+                'Consumer-failure schedule leaves the control loop '
+                'untouched',
+                'polling, a stalled reader, disconnect/reconnect, and '
+                'malformed-within-limits traffic leave scan outputs and '
+                'command receipts identical to the no-consumer legs, '
+                'and a lagging seq-cursor read gets the named '
+                'gap/coalesced answer')
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30, interval=LEG_POLL)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('consumer schedule against ' + active
+                     + ' (' + base + ')')
+        _, signals = http_json('GET', base + '/signals')
+        targets = _signal_targets(signals)
+        if targets is None:
+            return case.finish('inconclusive',
+                               'no writable bool command point or '
+                               'non-writable point in the model')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'consumer-schedule-signals.json', signals)
+        case.evidence('file', ref, 'signal index naming the probe points')
+        case.observe('probe points: write ' + str(targets['write'])
+                     + ' reject ' + str(targets['reject']))
+        journal_cursor = _journal_cursor(ctx, base)
+
+        legs = []
+        signatures = {}
+        for index, kind in enumerate(
+                ('reference', 'polling', 'stalled-reader',
+                 'disconnect-reconnect', 'malformed-and-flood',
+                 'reference')):
+            name = 'reference-' + ('a' if not signatures else 'b') \
+                if kind == 'reference' else kind
+            overlay = _Overlay(kind, base, targets['watch'])
+            try:
+                signature, failures = _consumer_leg(
+                    ctx, base, targets, overlay, index % 2 == 0)
+            except Exception as exc:
+                # An interference leg that lost the monitor mid-run is
+                # the consumer reaching the plant — a named failure; a
+                # reference leg that cannot read the rig at all is
+                # inconclusive like the other scenarios.
+                if kind == 'reference':
+                    raise
+                signature, failures = None, ['leg errored: '
+                                             + str(exc)[:200]]
+            legs.append({'leg': name, 'signature': signature,
+                         'statuses': overlay.statuses[:40],
+                         'errors': overlay.errors[:5],
+                         'probes': overlay.probes,
+                         'held': (overlay.held or [None])[0]})
+            ref = save_evidence(ctx['evidence_dir'],
+                                'consumer-schedule-legs.json', legs)
+            if len(legs) == 1:
+                case.evidence('file', ref)
+            if failures:
+                return case.finish('failed',
+                                   name + ': ' + '; '.join(failures))
+            case.observe('leg ' + name + ': '
+                         + json.dumps(signature, sort_keys=True))
+            signatures[name] = signature
+            if kind == 'reference':
+                continue
+            if signature != signatures['reference-a']:
+                return case.finish(
+                    'failed',
+                    name + ' diverged from the no-consumer legs: '
+                    + json.dumps(signature, sort_keys=True) + ' vs '
+                    + json.dumps(signatures['reference-a'],
+                                 sort_keys=True))
+        reference = signatures['reference-a']
+        for key, healthy in (('scan', True), ('applied', True),
+                             ('write', 'applied'),
+                             ('reject', 'rejected:not_writable')):
+            if reference[key] != healthy:
+                return case.finish(
+                    'failed', 'the no-consumer reference leg is '
+                    'unhealthy at ' + key + ': '
+                    + json.dumps(reference, sort_keys=True))
+        # An honest gap is a fine answer; silently stale or dishonest
+        # history in even the no-consumer legs is not.
+        if reference['history'] not in ('contiguous', 'gapped'):
+            return case.finish(
+                'failed', 'the no-consumer reference leg is unhealthy '
+                'at history: ' + json.dumps(reference, sort_keys=True))
+        if signatures['reference-b'] != reference:
+            return case.finish('failed',
+                               'the post-schedule reference leg '
+                               'diverged from the first')
+
+        # A consumer holding a cursor behind the retained publication
+        # window gets the named gap, not silent staleness: the served
+        # snapshot's publication section accounts the evicted stretch
+        # (`coalesced`) and answers the latest state.
+        before = _snapshot(ctx, base)
+        cursor = _publication(before).get('published') or 0
+        lagged = None
+        deadline = time.monotonic() + LEG_DEADLINE
+        while time.monotonic() < deadline and lagged is None:
+            snap = _snapshot(ctx, base)
+            health = _publication(snap)
+            if (health.get('published') or 0) \
+                    - (health.get('depth') or 0) > cursor:
+                lagged = (snap, health)
+            else:
+                time.sleep(LEG_POLL)
+        if lagged is None:
+            return case.finish('failed',
+                               'the retained publication window never '
+                               'rolled past the held cursor '
+                               + str(cursor))
+        snap, health = lagged
+        through = (health.get('published') or 0) \
+            - (health.get('depth') or 0)
+        coalesced = health.get('coalesced') or 0
+        ref = save_evidence(ctx['evidence_dir'],
+                            'consumer-schedule-gap.json',
+                            {'cursor': cursor,
+                             'before': _publication(before),
+                             'after': health, 'tick': snap.get('tick')})
+        case.evidence('file', ref, 'lagged publication-cursor read')
+        if coalesced < through:
+            return case.finish(
+                'failed', 'the lost stretch through publication '
+                + str(through) + ' went unaccounted: coalesced '
+                + str(coalesced))
+        if (snap.get('tick') or 0) <= (before.get('tick') or 0):
+            return case.finish('failed',
+                               'the lagged read served a stale '
+                               'snapshot')
+        case.observe('lagged publication cursor ' + str(cursor)
+                     + ': gap through ' + str(through) + ', coalesced '
+                     + str(coalesced) + ', serving tick '
+                     + str(snap.get('tick')))
+
+        # The literal seq-cursor read: journaled submissions roll the
+        # bounded journal window past the cursor recorded at the
+        # scenario's start, then `?since=` it — the answer must open on
+        # the retained tail (the numbering gap naming the evicted
+        # stretch), never fabricate the lost entries.
+        rolled = 0
+        rounds = 0
+        while rounds < FLOOD_ROUNDS and not rolled:
+            for _ in range(FLOOD_BATCH):
+                status, receipt = http_json(
+                    'POST', base + '/command',
+                    {'command': {'write_value': {
+                        'point': targets['reject'], 'kind': 'bool',
+                        'value': {'bool': True}}},
+                     'actor': 'qa-lane'})
+                if status != 200 or 'rejected' not in \
+                        ((receipt or {}).get('outcome') or {}):
+                    return case.finish(
+                        'failed', 'a flood probe was not refused by '
+                        'name: ' + json.dumps(receipt)[:300])
+            rounds += 1
+            first = _journal_first(ctx, base)
+            if first > journal_cursor + 1:
+                rolled = first
+        if not rolled:
+            return case.finish(
+                'inconclusive', 'the journal window never rolled past '
+                'cursor ' + str(journal_cursor) + ' under '
+                + str(rounds * FLOOD_BATCH) + ' journaled submissions')
+        _, page_body = http_json('GET', base + '/journal?since='
+                                 + str(journal_cursor))
+        page = _journal_seqs(page_body)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'consumer-schedule-journal-gap.json',
+                            {'cursor': journal_cursor,
+                             'retained_from': rolled,
+                             'page_head': page[:5],
+                             'page_len': len(page)})
+        case.evidence('file', ref, 'seq-cursor read since the lagged '
+                      'journal cursor')
+        if not page or page[0] <= journal_cursor + 1 \
+                or page[0] < rolled:
+            return case.finish(
+                'failed', 'the lagging seq-cursor read returned '
+                'silently stale data: cursor ' + str(journal_cursor)
+                + ' answered from seq '
+                + str(page[0] if page else None)
+                + ' while retention starts at ' + str(rolled))
+        if page != list(range(page[0], page[0] + len(page))):
+            return case.finish('failed',
+                               'the retained tail is not the '
+                               'contiguous coalesced answer')
+        case.observe('journal cursor ' + str(journal_cursor)
+                     + ' lags retention from seq ' + str(rolled)
+                     + ': the read opens at ' + str(page[0])
+                     + ' — the named gap')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_failover,
-             scenario_evidence_capture)
+             scenario_evidence_capture, scenario_consumer_schedule)
 
 
 def run_all(ctx, timeline):

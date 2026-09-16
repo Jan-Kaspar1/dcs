@@ -29,7 +29,12 @@ ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface
+ci/consumers.py        the consumer-boundary driver — replays the same
+                       driven run under each consumer schedule
+ci/deploy_rig.py       the rig-definition consistency check —
+                       deploy/compose.yaml against the manifest
 deploy/manifest.json   the deployment declaration
+deploy/compose.yaml    the checked-in rig definition instantiating it
 ```
 
 ## The customer path
@@ -108,6 +113,42 @@ snapshot's `descriptors` must cover every composed component; and
 `GET /journal` must answer the run's recorded transitions. A
 divergence fails `surface-mismatch`.
 
+The check's `consumers` stage then proves the replaceable-consumer
+boundary end to end — `ci/consumers.py --schedule <name>` replays the
+identical driven run once per consumer schedule: `zero-clients` (no UI
+attached, the control run), `polling`, `stalled-reader` (a `GET
+/snapshot` response held unread across the whole run),
+`disconnect-reconnect` (connect/read/drop churn, sometimes dropped
+mid-response), `malformed-and-flood` (garbage bytes, half-sent
+requests, refused verbs, and malformed bodies within the declared
+limits, beside a read flood over every surface), and `ui-restart` (a
+separate consumer process killed mid-run and restarted). Every
+schedule must produce the identical `consumer-digest` over the run's
+leg outcomes and command receipts, and two full passes must produce
+identical digests — a divergence fails `consumer-interference`, a
+nondeterministic stage `consumer-nondeterministic`.
+
+The obligations this demonstrates for any monitoring or UI consumer:
+
+- **Tolerate sequence gaps and freshness metadata.** Reads are served
+  from bounded storage; a consumer that falls behind finds its `since`
+  cursor's successors evicted — visible as a numbering gap on
+  `GET /journal` and `GET /history` — and the served snapshot's
+  `publication` section reports how much was published and coalesced
+  while it was away. Coalesce onto the retained tail or the latest
+  snapshot; never assume continuity.
+- **Never treat UI or session loss as a plant-stopping event.** The
+  controller owns execution; a consumer that stalls, disconnects, or
+  restarts changes nothing — the `ui-restart` schedule's run produces
+  byte-identical outputs and receipts. A transport failure is consumer
+  health, not a plant condition.
+- **Submit mutations only through the bounded receipted path.**
+  `POST /command` is validated, bounded, and answered with a receipt —
+  accepted, or a named rejection — settling at the scan boundary.
+  Nothing else mutates the run: malformed bodies are refused at parse
+  (`400`), refused verbs get their named status, and a consumer can
+  never turn a read into a write.
+
 Run the whole check yourself:
 
 ```sh
@@ -134,6 +175,51 @@ commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
 and `dcs-controller <model> --remote <addr> [--standby <peer>]
 --listen <addr>`.
 
+`deploy/compose.yaml` instantiates the manifest as a checked-in rig
+definition — the same declaration the platform's `docs/packaging.md`
+records as run commands: one `dcs-plant-server` container serving the
+mounted model and dynamics documents read-only, and the `ctrl-a` /
+`ctrl-b` pair attaching to its listener through `--remote`, the standby
+following the duty's monitor through `--standby`, both monitor ports
+published. Each controller invocation carries the manifest's
+fingerprint in its `DCS_MODEL_FINGERPRINT` environment — the identity
+checkpoint negotiation verifies on the wire. The check's `deploy`
+stage parses the file through `docker compose config` (or an
+equivalent YAML parser) and asserts it agrees with the manifest on
+every field — release, images, mounts, fingerprint, listen addresses,
+and pair wiring; a divergence fails `rig-mismatch`, an unparsable file
+`rig-invalid`, a host with neither parser `rig-unverifiable`.
+
+Running the rig is the customer action: with the release's images
+available — pulled by their recorded digests or built at the release
+tag per the platform's `docs/packaging.md` —
+
+```sh
+docker compose -f deploy/compose.yaml up -d
+```
+
+starts the three containers. `docker compose -f deploy/compose.yaml
+ps` shows them; the monitoring page presents the pair as one logical
+controller — open either peer's published monitor port and pass the
+other as `?peer=`:
+
+```
+http://localhost:8080/?peer=localhost:8081
+```
+
+The documented switchover is `POST /demote` on the field-owning peer's
+published port followed by `POST /promote` on the converged standby's;
+`docker compose -f deploy/compose.yaml down` removes the containers
+and the rig network.
+
+The two-machine shape is the same declaration spread across hosts with
+published addresses in place of network names — the cross-host form
+the platform's `docs/packaging.md` records: the plant publishes its
+`9001` listener on its host, each controller runs on its own machine
+with `--remote <plant-host>:9001`, and the standby's `--standby` names
+the duty's reachable monitor address, `<active-host>:8080` in place of
+`ctrl-a:8080`.
+
 ### 7. Upgrade by repinning
 
 A compatible upgrade is a repin: change the `rev`/`tag` in
@@ -152,6 +238,9 @@ a pin whose supported API no longer compiles your composition is
 is `tooling-rejected`; a model whose semantic content changed under a
 re-recorded fingerprint is `manifest-fingerprint-mismatch`; a served
 operator surface diverging from the emitted model's declaration is
-`surface-mismatch`. The names are recorded in the platform's
+`surface-mismatch`; a consumer schedule changing the driven run's
+outputs or receipts — or failing its own evidence — is
+`consumer-interference`; and two consumer-stage passes diverging is
+`consumer-nondeterministic`. The names are recorded in the platform's
 `docs/release-contract.md` — the same vocabulary the platform's own
 consumer-boundary checks report.

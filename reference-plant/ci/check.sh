@@ -21,6 +21,14 @@
 #   fingerprint  the emitted model's fingerprint equals the manifest's
 #                recorded `model.fingerprint`
 #                (manifest-fingerprint-mismatch)
+#   deploy       the checked-in rig definition deploy/compose.yaml
+#                instantiates every field of deploy/manifest.json —
+#                release, images, mounted model and dynamics paths,
+#                the fingerprint propagated into the controller
+#                invocations, listen addresses, and the pair's standby
+#                wiring — parsed and validated through
+#                `docker compose config` or the fallback parser
+#                (rig-invalid, rig-unverifiable, rig-mismatch)
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
@@ -29,6 +37,14 @@
 #                journal — matches the emitted model's declaration, in
 #                the same deterministic --driven run the simulate stage
 #                performs (surface-mismatch)
+#   consumers    the replaceable-consumer boundary: the simulate
+#                stage's deterministic driven run replays under each
+#                consumer schedule — no UI attached, normal polling, a
+#                stalled reader, disconnect/reconnect churn, malformed
+#                and flooded traffic within the declared limits, and a
+#                UI process restart — producing identical output and
+#                receipt digests across every schedule and across two
+#                passes (consumer-interference, consumer-nondeterministic)
 #   upgrade      the documented repin upgrade (README §7): this tree's
 #                composition is materialized pinned at the recorded
 #                release rev, repinned to a later compatible revision,
@@ -191,6 +207,11 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
 
+echo "== deploy =="
+# The rig-definition consistency check reports its own named
+# diagnostics (rig-invalid, rig-unverifiable, rig-mismatch) on stderr.
+python3 ci/deploy_rig.py
+
 echo "== simulate =="
 run_simulation() {
     python3 ci/simulate.py \
@@ -216,6 +237,52 @@ python3 ci/simulate.py \
     --scenario ci/scenario.json \
     || fail "surface-mismatch: the served operator surface does not match the emitted model's declared surface"
 
+echo "== consumers =="
+# The boundary lint half, alongside the lockfile stage's rule: the
+# stage's driver and the README's consumer obligations name only
+# released artifacts and documented endpoints — never a path into a
+# platform checkout.
+for file in ci/consumers.py ci/deploy_rig.py README.md; do
+    if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
+        fail "path-dependency-leak: $file references a platform-checkout path"
+    fi
+done
+# The behavioral half: the simulate stage's deterministic driven run
+# replays once per consumer schedule. Identical digests across the
+# schedules prove no consumer behavior — absent, polling, stalled,
+# churning, malformed, or restarted — can change an output or a
+# receipt; identical digests across two passes prove the stage itself
+# is deterministic.
+run_consumer_schedules() {
+    local reference="" out digest
+    for schedule in zero-clients polling stalled-reader \
+            disconnect-reconnect malformed-and-flood ui-restart; do
+        out="$(python3 ci/consumers.py \
+            --plant-server "$TOOLS/dcs-plant-server" \
+            --controller "$TOOLS/dcs-controller" \
+            --model model/plant.json \
+            --dynamics model/dynamics.json \
+            --scenario ci/scenario.json \
+            --schedule "$schedule")" \
+            || fail "consumer-interference: the $schedule schedule did not hold — its evidence lines are above"
+        digest="$(printf '%s\n' "$out" | sed -n 's/^consumer-digest //p')"
+        [ -n "$digest" ] \
+            || fail "consumer-interference: the $schedule schedule reported no digest"
+        if [ -z "$reference" ]; then
+            reference="$digest"
+        elif [ "$digest" != "$reference" ]; then
+            fail "consumer-interference: the $schedule schedule changed the run's outputs and receipts (digest $digest, reference $reference)"
+        fi
+        echo "  $schedule: consumer-digest $digest" >&2
+    done
+    echo "$reference"
+}
+FIRST="$(run_consumer_schedules)" || exit 1
+SECOND="$(run_consumer_schedules)" || exit 1
+[ "$FIRST" = "$SECOND" ] \
+    || fail "consumer-nondeterministic: two consumer-stage passes produced different digests"
+echo "  consumer-digest $FIRST identical across every schedule and both passes"
+
 if [ "${DCS_UPGRADE:-1}" != "0" ]; then
 
 echo "== upgrade =="
@@ -226,7 +293,7 @@ echo "== upgrade =="
 # bytes must not change (emit-divergent). The copy keeps the working
 # tree untouched.
 UPGRADE_DIR="$(mktemp -d)"
-for path in Cargo.toml Cargo.lock rust-toolchain.toml src model deploy ci; do
+for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md src model deploy ci; do
     cp -r "$path" "$UPGRADE_DIR/"
 done
 export CARGO_TARGET_DIR="$UPGRADE_DIR/target"
