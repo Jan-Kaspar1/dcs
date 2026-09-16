@@ -24,6 +24,11 @@
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
 #                scenario-nondeterministic)
+#   surface      the served operator surface — the signal index, the
+#                monitoring page, the snapshot's descriptors, and the
+#                journal — matches the emitted model's declaration, in
+#                the same deterministic --driven run the simulate stage
+#                performs (surface-mismatch)
 #
 # Environment:
 #
@@ -143,4 +148,14 @@ SECOND="$(run_simulation)" || fail "scenario-failed: the scripted simulation's d
 [ "$FIRST" = "$SECOND" ] \
     || fail "scenario-nondeterministic: two simulation runs produced different digests"
 echo "  $FIRST"
+
+echo "== surface =="
+python3 ci/simulate.py \
+    --surface \
+    --plant-server "$TOOLS/dcs-plant-server" \
+    --controller "$TOOLS/dcs-controller" \
+    --model model/plant.json \
+    --dynamics model/dynamics.json \
+    --scenario ci/scenario.json \
+    || fail "surface-mismatch: the served operator surface does not match the emitted model's declared surface"
 echo "check ok"

@@ -1983,6 +1983,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             }],
+            command_queue: Default::default(),
             publication: None,
         };
         let model =
@@ -2016,6 +2017,7 @@ mod tests {
                     io_health: IoHealth::default(),
                     forces: Vec::new(),
                     parameters: Vec::new(),
+                    command_queue: Default::default(),
                     publication: None,
                 },
                 &model.signal_index(),

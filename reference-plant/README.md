@@ -27,7 +27,8 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
-ci/simulate.py         the deterministic scripted-simulation runner
+ci/simulate.py         the deterministic scripted-simulation runner;
+                       --surface asserts the served operator surface
 deploy/manifest.json   the deployment declaration
 ```
 
@@ -94,6 +95,19 @@ observable outcomes — duty and lag staging, the high-level alarm's
 recovery, manual takeover, out-of-service suppression, and the
 pumped-down all-stop — identically on every run.
 
+The check's `surface` stage then drives the same deterministic
+`--driven` run — `ci/simulate.py --surface` — asserting the served
+operator surface against the emitted model's declaration: `GET
+/signals` must serve exactly the declared signal index, so every
+writable command point the composition declares (the alarm
+`ack`/`shelve`/`oos` points, the per-pump `mode`/`hand`/`oos` takeover
+points) appears `writable: true` while the never-shelvable high-level
+alarm's `shelve` point stays read-only, and every named signal carries
+its declared group; `GET /` must serve the monitoring page; the
+snapshot's `descriptors` must cover every composed component; and
+`GET /journal` must answer the run's recorded transitions. A
+divergence fails `surface-mismatch`.
+
 Run the whole check yourself:
 
 ```sh
@@ -133,6 +147,8 @@ silently: a pin that resolves no release crates is `pin-unresolvable`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a
-re-recorded fingerprint is `manifest-fingerprint-mismatch`. The names
-are recorded in the platform's `docs/release-contract.md` — the same
-vocabulary the platform's own consumer-boundary checks report.
+re-recorded fingerprint is `manifest-fingerprint-mismatch`; a served
+operator surface diverging from the emitted model's declaration is
+`surface-mismatch`. The names are recorded in the platform's
+`docs/release-contract.md` — the same vocabulary the platform's own
+consumer-boundary checks report.

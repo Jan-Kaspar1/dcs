@@ -7,15 +7,17 @@
 //! → write deterministically.
 
 use crate::checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, CommandAdmissionCounts, RestoreError,
+    SUPPORTED_FORMAT_VERSIONS,
 };
 use crate::component::{Component, ComponentIo, IoRequirement};
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt,
-    ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
-    ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId, PointTelemetry,
-    Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value, ValueKind,
+    CarriedPoint, CarryoverReport, Command, CommandError, CommandOutcome, CommandQueueDiagnostics,
+    CommandReceipt, ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction,
+    DroppedElement, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
+    PointTelemetry, Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value,
+    ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -522,6 +524,20 @@ enum Resolved {
     Unforce { point: PointId },
 }
 
+/// The default bound on the pending-command queue — how many accepted
+/// commands may wait for their scan boundary before
+/// [`Executor::submit_command`] refuses further admissions with
+/// [`CommandError::QueueFull`](dcs_core::CommandError::QueueFull).
+///
+/// The queue drains at every scan boundary, so the bound only has to
+/// cover one scan period's ingress: 64 is roomy for operator and tooling
+/// bursts inside that window while staying a hard bound a flooded
+/// command path cannot pass — the bounded command-ingress half of the
+/// controller-owns-execution decision. Declare a different bound at
+/// construction through
+/// [`Executor::with_command_queue_capacity`].
+pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
+
 /// A deterministic fixed-step executor over registered components.
 ///
 /// The scan order is the order `components` were registered in — explicit
@@ -609,6 +625,17 @@ enum Resolved {
 /// the next scan, where a component-side refusal turns the receipt
 /// `Rejected` without changing anything.
 ///
+/// Ingress is bounded — the controller-owns-execution decision's
+/// command half: the pending queue holds at most `command_capacity`
+/// accepted commands (default [`DEFAULT_COMMAND_QUEUE_CAPACITY`],
+/// declared at construction through
+/// [`with_command_queue_capacity`](Executor::with_command_queue_capacity)),
+/// and a validated submission past the bound is refused at submission
+/// with a [`CommandError::QueueFull`] receipt — named, receipted, and
+/// queued as nothing — rather than piling up until the next boundary
+/// drains. The queue's admission metrics ride
+/// [`snapshot`](Executor::snapshot)'s `command_queue` section.
+///
 /// The forcing pair — [`Command::ForcePoint`] /
 /// [`Command::UnforcePoint`] — is the persistent sibling of a write:
 /// it targets the same writable `In` surface and applies at the same
@@ -644,8 +671,19 @@ pub struct Executor<'d> {
     /// snapshots and checkpoints serialize deterministically.
     forces: BTreeMap<PointId, Value>,
     /// Indices into `receipts` of the queued commands awaiting their scan
-    /// boundary; the command itself rides inside its receipt.
+    /// boundary; the command itself rides inside its receipt. Bounded by
+    /// `command_capacity`: admission past the bound is refused at
+    /// submission with [`CommandError::QueueFull`], so submissions can
+    /// never pile up unbounded between scans.
     pending_commands: VecDeque<usize>,
+    /// The declared pending-command bound — construction configuration
+    /// set through [`with_command_queue_capacity`](Executor::with_command_queue_capacity),
+    /// not run state: checkpoints do not carry it.
+    command_capacity: usize,
+    /// The queue's admission counters, reported through the snapshot's
+    /// `command_queue` section and carried in checkpoints beside the
+    /// receipt log they measure — the pair's one command-ingress audit.
+    command_admission: CommandAdmissionCounts,
     receipts: Vec<CommandReceipt>,
     /// The executor-collected half of the snapshot's `io_health` section:
     /// the boundary counters and the fed overrun count. Its `driver`
@@ -773,6 +811,8 @@ impl<'d> Executor<'d> {
             components: entries,
             image,
             pending_commands: VecDeque::new(),
+            command_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
+            command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
@@ -793,6 +833,31 @@ impl<'d> Executor<'d> {
     pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
         self.model_fingerprint = Some(fingerprint);
         self
+    }
+
+    /// Declares the pending-command queue's capacity bound — how many
+    /// accepted commands may queue awaiting their scan boundary before
+    /// [`submit_command`](Self::submit_command) refuses admission with a
+    /// [`CommandError::QueueFull`] rejection receipt. The default is
+    /// [`DEFAULT_COMMAND_QUEUE_CAPACITY`]; `0` refuses every admission.
+    ///
+    /// The bound is construction configuration, not run state: a
+    /// checkpoint does not carry it, so an [`Executor::restore`]d or
+    /// reconfigured run re-declares it through this method. A pending
+    /// set adopted from a checkpoint is exempt — carried entries are
+    /// preserved verbatim and still settle at their boundaries — so a
+    /// queue restored at or over the bound simply admits nothing new
+    /// until a scan drains it below the bound.
+    pub fn with_command_queue_capacity(mut self, capacity: usize) -> Self {
+        self.command_capacity = capacity;
+        self
+    }
+
+    /// The declared pending-command bound — what
+    /// [`with_command_queue_capacity`](Self::with_command_queue_capacity)
+    /// set, or [`DEFAULT_COMMAND_QUEUE_CAPACITY`].
+    pub fn command_queue_capacity(&self) -> usize {
+        self.command_capacity
     }
 
     /// The fingerprint this run was assembled with — the value
@@ -892,7 +957,10 @@ impl<'d> Executor<'d> {
     /// [`report_parameters`](Component::report_parameters) result
     /// filtered to the names its descriptor declares, so only declared
     /// names appear even when a kind's internal state holds more — in
-    /// the same scan order as `components` and `descriptors`.
+    /// the same scan order as `components` and `descriptors`. The
+    /// `command_queue` section reports the pending-command queue's
+    /// admission metrics — attempts, full-queue rejections, the declared
+    /// capacity, and the queue's depth and high-water mark.
     pub fn snapshot(&self) -> TelemetrySnapshot {
         let image = self.image.borrow();
         let descriptors: Vec<_> = self
@@ -972,6 +1040,13 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|(&point, &value)| ForcedPoint { point, value })
                 .collect(),
+            command_queue: CommandQueueDiagnostics {
+                attempts: self.command_admission.attempts,
+                full_rejections: self.command_admission.full_rejections,
+                capacity: self.command_capacity,
+                depth: self.pending_commands.len(),
+                high_water: self.command_admission.high_water,
+            },
             // The executor reports no publication section: only a
             // monitor's post-scan publication stamps the store's
             // overload counters — this view is the executor's own.
@@ -1000,6 +1075,14 @@ impl<'d> Executor<'d> {
     /// refuses the tuned value — exactly one receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
     ///
+    /// Admission is bounded: a validated command submitted while
+    /// `command_capacity` commands are already queued is refused with a
+    /// [`CommandError::QueueFull`] rejection receipt — naming the bound —
+    /// and queues nothing, so ingress can never grow the pending set
+    /// unbounded between scans. Validation still precedes admission: a
+    /// statically invalid command takes its named validation rejection
+    /// even when the queue is full.
+    ///
     /// The receipt is unattributed; [`submit_command_as`](Self::submit_command_as)
     /// is the attributed variant the audit path submits through.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
@@ -1016,8 +1099,22 @@ impl<'d> Executor<'d> {
     /// attribution. `None` submits unattributed — identical to
     /// [`submit_command`](Self::submit_command).
     pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+        self.command_admission.attempts += 1;
         let outcome = match self.check_command(&command) {
             Err(reason) => CommandOutcome::Rejected { reason },
+            // Validation precedes admission: a statically invalid
+            // command takes its named rejection even when the queue is
+            // full, and a full queue refuses a valid command without
+            // queueing it — never fire-and-forget.
+            Ok(_) if self.pending_commands.len() >= self.command_capacity => {
+                self.command_admission.full_rejections += 1;
+                CommandOutcome::Rejected {
+                    reason: CommandError::QueueFull {
+                        point: command.point(),
+                        capacity: self.command_capacity,
+                    },
+                }
+            }
             Ok(_) => CommandOutcome::Accepted {
                 apply_tick: Tick(self.tick.0 + 1),
             },
@@ -1031,6 +1128,10 @@ impl<'d> Executor<'d> {
         self.receipts.push(receipt.clone());
         if accepted {
             self.pending_commands.push_back(self.receipts.len() - 1);
+            self.command_admission.high_water = self
+                .command_admission
+                .high_water
+                .max(self.pending_commands.len());
         }
         receipt
     }
@@ -1133,6 +1234,7 @@ impl<'d> Executor<'d> {
                 .collect(),
             forces: self.forces.clone(),
             receipts: self.receipts.clone(),
+            command_admission: self.command_admission,
         }
     }
 
@@ -1303,6 +1405,8 @@ impl<'d> Executor<'d> {
     /// taken over between its submission boundary and its applying scan
     /// is run state like the image's: the restoring run applies it at
     /// its own next boundary, so a switchover mid-flight never drops it.
+    /// The admission counters converge with the audit they measure, so
+    /// the pair's `command_queue` telemetry section answers identically.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
         self.receipts.clone_from(&checkpoint.receipts);
         self.pending_commands = checkpoint
@@ -1312,6 +1416,16 @@ impl<'d> Executor<'d> {
             .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
             .map(|(index, _)| index)
             .collect();
+        // Carried entries are adopted verbatim past the bound: they are
+        // run state, not new admission, so a restored queue at or over
+        // capacity still settles them at their boundaries while refusing
+        // new submissions until a scan drains it. The adoption is real
+        // depth and joins the high-water record.
+        self.command_admission = checkpoint.command_admission;
+        self.command_admission.high_water = self
+            .command_admission
+            .high_water
+            .max(self.pending_commands.len());
     }
 
     /// Consumes a checkpoint captured under a *different* model — the
@@ -4021,6 +4135,245 @@ mod tests {
     }
 
     #[test]
+    fn a_full_command_queue_refuses_admission_until_a_scan_drains_it() {
+        // The bounded-ingress bound: at capacity a validated command is
+        // refused with the named `queue_full` rejection — nothing queues
+        // — and the next scan's drain re-opens admission.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver).with_command_queue_capacity(2);
+        assert_eq!(executor.command_queue_capacity(), 2);
+
+        // Fill the queue to the declared bound.
+        for value in [3.0, 4.0] {
+            let receipt =
+                executor.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
+            assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        }
+        assert_eq!(executor.snapshot().command_queue.depth, 2);
+
+        // Past the bound: the named rejection, nothing queued.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: Some(PointId(10)),
+                    capacity: 2,
+                }
+            }
+        );
+        assert_eq!(executor.receipts().len(), 3);
+        assert_eq!(executor.snapshot().command_queue.depth, 2);
+
+        // The scan drains the queue: the queued commands still apply in
+        // submission order and settle their receipts.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(
+            executor.receipts()[1].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(driver_value(&driver, 10), Value::Float(4.0));
+        assert_eq!(executor.snapshot().command_queue.depth, 0);
+
+        // Admission succeeds again once a scan drained the queue.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+    }
+
+    #[test]
+    fn queue_full_rejection_carries_the_actor_and_follows_validation() {
+        // The admission refusal composes with attribution, and the
+        // existing validation order is unchanged: a statically invalid
+        // command takes its own named rejection even on a full queue.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = tuning_rig(&driver).with_command_queue_capacity(1);
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(1.0)));
+
+        // An invalid command on a full queue gets its own named
+        // rejection — validation precedes admission.
+        let receipt = executor.submit_command_as(
+            write_value(99, ValueKind::Float, Value::Float(1.0)),
+            Some("operator-7".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownPoint { point: PointId(99) }
+            }
+        );
+        assert_eq!(receipt.actor.as_deref(), Some("operator-7"));
+
+        // A valid point command past the bound: `queue_full` naming the
+        // target point, attributed like every other rejection, and
+        // joining the receipt log's audit.
+        let receipt = executor.submit_command_as(
+            write_value(10, ValueKind::Float, Value::Float(2.0)),
+            Some("operator-7".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: Some(PointId(10)),
+                    capacity: 1,
+                }
+            }
+        );
+        assert_eq!(receipt.actor.as_deref(), Some("operator-7"));
+        assert_eq!(executor.receipts().last().unwrap(), &receipt);
+
+        // A valid parameter command names no point target.
+        let receipt = executor.submit_command(set_parameter("loop", "gain", Value::Float(3.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: None,
+                    capacity: 1,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn restored_queue_at_capacity_admits_nothing_until_it_drains() {
+        // Checkpoint interplay: pending commands are run state, adopted
+        // verbatim past the bound — they still settle at their boundary
+        // while new admissions refuse until a scan drains the queue.
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = setpoint_rig(&active_driver);
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(3.0)));
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        let checkpoint = active.checkpoint();
+
+        // A standby restoring under a tighter bound (1 < 2 pending).
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = Executor::restore(
+            &standby_driver,
+            PointMap::new()
+                .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+                .with_point(PointId(20), Direction::Out, ValueKind::Float)
+                .with_point(PointId(30), Direction::Out, ValueKind::Float),
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+            &checkpoint,
+            None,
+        )
+        .unwrap()
+        .with_command_queue_capacity(1);
+        assert_eq!(standby.snapshot().command_queue.depth, 2);
+
+        // Over the bound: new admissions refuse until the carried set
+        // drains.
+        let receipt = standby.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: Some(PointId(10)),
+                    capacity: 1,
+                }
+            }
+        );
+
+        // The carried entries still settle at their boundary, in
+        // submission order.
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(
+            standby.receipts()[1].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+        assert_eq!(driver_value(&standby_driver, 10), Value::Float(4.0));
+
+        // Drained below the bound: admission succeeds again.
+        let receipt = standby.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+
+        // `apply` — the running standby's half — adopts the pending set
+        // under the same rule.
+        let tracking_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut tracking = setpoint_rig(&tracking_driver).with_command_queue_capacity(1);
+        tracking.apply(&checkpoint).unwrap();
+        assert_eq!(tracking.snapshot().command_queue.depth, 2);
+        assert!(matches!(
+            tracking
+                .submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)))
+                .outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull { .. }
+            }
+        ));
+        tracking.scan().unwrap();
+        assert_eq!(driver_value(&tracking_driver, 10), Value::Float(4.0));
+    }
+
+    #[test]
+    fn command_queue_metrics_count_attempts_rejections_and_depth() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver).with_command_queue_capacity(2);
+        assert_eq!(
+            executor.snapshot().command_queue,
+            CommandQueueDiagnostics {
+                attempts: 0,
+                full_rejections: 0,
+                capacity: 2,
+                depth: 0,
+                high_water: 0,
+            }
+        );
+
+        // Two accepted submissions fill the queue; a validation refusal
+        // and a full-queue refusal each still count as attempts.
+        for value in [3.0, 4.0] {
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
+        }
+        executor.submit_command(write_value(99, ValueKind::Float, Value::Float(1.0)));
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+        assert_eq!(
+            executor.snapshot().command_queue,
+            CommandQueueDiagnostics {
+                attempts: 4,
+                full_rejections: 1,
+                capacity: 2,
+                depth: 2,
+                high_water: 2,
+            }
+        );
+
+        // The drain clears the depth; the counters and the high-water
+        // persist across it.
+        executor.scan().unwrap();
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
+        assert_eq!(
+            executor.snapshot().command_queue,
+            CommandQueueDiagnostics {
+                attempts: 5,
+                full_rejections: 1,
+                capacity: 2,
+                depth: 1,
+                high_water: 2,
+            }
+        );
+    }
+
+    #[test]
     fn checkpoint_rejects_a_force_on_an_unforceable_point() {
         // A checkpoint naming a forced point this map does not serve as
         // a writable `In` — or whose kind disagrees — is a different
@@ -5567,6 +5920,7 @@ mod tests {
             .collect(),
             forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
             receipts: Vec::new(),
+            command_admission: CommandAdmissionCounts::default(),
         }
     }
 
