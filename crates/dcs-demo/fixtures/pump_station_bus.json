@@ -145,7 +145,8 @@
       "channel": {
         "device": 1,
         "name": "net-flow"
-      }
+      },
+      "stale_after_ticks": 5
     },
     {
       "id": 120,
