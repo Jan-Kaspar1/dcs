@@ -17,12 +17,16 @@
   "controllers": [
     {
       "name": "ctrl-a",
-      "listen": "0.0.0.0:8080"
+      "listen": "0.0.0.0:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     },
     {
       "name": "ctrl-b",
       "listen": "0.0.0.0:8081",
-      "standby": "ctrl-a:8080"
+      "standby": "ctrl-a:8080",
+      "state_file": "/var/tmp/state.json",
+      "journal_file": "/var/tmp/journal.jsonl"
     }
   ]
 }
