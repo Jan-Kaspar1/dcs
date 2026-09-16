@@ -13,7 +13,9 @@ Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
 """
 import json
+import os
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -2316,15 +2318,395 @@ def scenario_command_admission(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The shipped operator CLI as an external consumer (WW-FND-004's
+# replaceable-consumer contract, WW-OPS-001/002's operator-facing
+# surface): the lane's one proof that the real dcs-ctl binary — not a
+# test harness — reads and commands a deployed pair. The binary comes
+# from the run's image build (the bounded builder's
+# `cargo build -p dcs-monitor --bin dcs-ctl` beside the image
+# binaries), handed to the scenario as ctx['dcs_ctl']; every asserted
+# read and mutation travels through CLI invocations against the
+# published monitor addresses. The leg is read-mostly by construction:
+# its single mutation is the writable-safe declared command the
+# served-interface case's selection logic picks, and the refusal
+# probes are rejected before they can perturb the plant.
+
+DCS_CTL_TIMEOUT = 20   # bound on one dcs-ctl invocation
+CTL_DEADLINE = 30      # bound on the journaled-settlement wait
+CTL_ACTOR = 'qa-lane-dcs-ctl'  # the --actor the invoke declares
+
+
+def _ctl_addr(base):
+    """A monitor base URL as dcs-ctl's `<addr>` argument — host:port."""
+    return base.split('://', 1)[-1]
+
+
+def _run_ctl(binary, addr, args):
+    """One dcs-ctl invocation, captured — the subprocess seam the pool
+    tests fake."""
+    return subprocess.run([binary, addr, *args], capture_output=True,
+                          text=True, timeout=DCS_CTL_TIMEOUT)
+
+
+def _value_literal(value):
+    """A wire `{"bool": true}`-shaped Value as dcs-ctl's `<value>` text."""
+    if 'bool' in value:
+        return 'true' if value['bool'] else 'false'
+    if 'int' in value:
+        return str(value['int'])
+    return repr(value['float'])
+
+
+def _ctl_command_args(command):
+    """The dcs-ctl argv submitting the picked receipted-path command:
+    `invoke`, `set_parameter`, and `write_value` map to the same-named
+    subcommands; any other variant has no CLI spelling and returns
+    None."""
+    if 'invoke' in command:
+        body = command['invoke']
+        return ['invoke', str(body['component']), str(body['command'])] \
+            + [str(name) + '=' + _value_literal(value)
+               for name, value in
+               (body.get('arguments') or {}).items()]
+    if 'set_parameter' in command:
+        body = command['set_parameter']
+        return ['set-parameter', str(body['component']),
+                str(body['name']), _value_literal(body['value'])]
+    if 'write_value' in command:
+        body = command['write_value']
+        return ['write', str(body['point']), _value_literal(body['value'])]
+    return None
+
+
+def scenario_dcs_ctl(ctx):
+    """The shipped dcs-ctl binary against the deployed pair — the
+    replaceable-consumer contract exercised through the operator CLI
+    rather than raw HTTP."""
+    case = Case('dcs-ctl',
+                'dcs-ctl consumes the served contract externally',
+                'the lane-built dcs-ctl binary reports exactly one '
+                'active and one standby across the pair, its schema '
+                'read covers every component kind the rig model '
+                'declares, the command the served-interface selection '
+                'logic picks settles a receipt journaled with the '
+                '--actor the leg passed, the emitted-events read '
+                'attributes a produced event to its component, and an '
+                'undeclared or unavailable invocation is refused by '
+                'name — never silently accepted')
+    transcript = []
+
+    def done(outcome, detail=None):
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-transcript.json', transcript)
+        if not any(entry['ref'] == ref
+                   for entry in case.record['evidence']):
+            case.evidence('file', ref,
+                          'the dcs-ctl invocation transcript')
+        return case.finish(outcome, detail)
+
+    def ctl(base, *args):
+        """Run the binary; append the invocation to the transcript;
+        return (exit, parsed-stdout-or-None, stderr)."""
+        addr = _ctl_addr(base)
+        entry = {'argv': [addr] + [str(arg) for arg in args]}
+        transcript.append(entry)
+        try:
+            result = _run_ctl(binary, addr, entry['argv'][1:])
+        except Exception as exc:
+            entry['error'] = str(exc)[:300]
+            return None, None, str(exc)[:300]
+        entry['exit'] = result.returncode
+        try:
+            body = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            body = None
+            entry['stdout'] = str(result.stdout)[:300]
+        stderr = str(result.stderr or '').strip()
+        if result.returncode or stderr:
+            entry['stderr'] = stderr[:300]
+        return result.returncode, body, stderr
+
+    try:
+        binary = ctx.get('dcs_ctl')
+        if binary is None:
+            return done('inconclusive', 'the run context carries no '
+                        'dcs-ctl binary path')
+        if not Path(binary).is_file() \
+                or not os.access(binary, os.X_OK):
+            return done('inconclusive', 'no executable dcs-ctl at '
+                        + str(binary) + ' — the documented seam '
+                        '(cargo build -p dcs-monitor --bin dcs-ctl '
+                        'inside the lane\'s bounded image build) '
+                        'produced nothing')
+        case.observe('dcs-ctl binary: ' + str(binary) + ' — built by '
+                     'the run\'s image build (cargo build --release '
+                     '--locked -p dcs-monitor --bin dcs-ctl)')
+
+        # The pair must be serving before the tool's answers mean
+        # anything — the same liveness gate the other post-failover
+        # cases apply, so a down monitor stays a rig failure rather
+        # than masquerading as a CLI defect.
+        if wait_for(lambda: _settled_active(ctx),
+                    time.monotonic() + 30) is None:
+            return done('failed', 'no peer reports role=active')
+
+        roles = {}
+        for name in ('active', 'standby'):
+            rc, body, err = ctl(ctx[name], 'role')
+            if rc != 0 or not isinstance(body, dict):
+                return done('failed', 'dcs-ctl role failed on ' + name
+                            + ' against a serving monitor: exit '
+                            + str(rc) + ' ' + str(err)[:200])
+            roles[name] = body.get('role')
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-roles.json',
+                            roles)
+        case.evidence('file', ref, 'dcs-ctl role on both endpoints')
+        if sorted(str(role) for role in roles.values()) \
+                != ['active', 'standby']:
+            return done('failed', 'the post-failover pair is not one '
+                        'active plus one standby: '
+                        + json.dumps(roles, sort_keys=True))
+        active = next(name for name in roles if roles[name] == 'active')
+        base = ctx[active]
+        case.observe('post-failover layout per dcs-ctl: '
+                     + json.dumps(roles, sort_keys=True))
+
+        rc, signals, err = ctl(base, 'signals')
+        if rc != 0 or not isinstance(signals, dict):
+            return done('failed', 'dcs-ctl signals failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        rc, schema, err = ctl(base, 'schema')
+        if rc != 0 or not isinstance(schema, dict):
+            return done('failed', 'dcs-ctl schema failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-schema.json',
+                            {'signals': signals, 'schema': schema})
+        case.evidence('file', ref, 'the CLI-printed signal index and '
+                      'interface registry')
+        declared = signals.get('components') or []
+        if not declared:
+            return done('inconclusive', 'the signal index serves no '
+                        'component records to check coverage against')
+        served = {}
+        for entry in schema.get('interfaces') or []:
+            if isinstance(entry, dict):
+                served[entry.get('name')] = entry.get('interface') or {}
+        missing = [record for record in declared
+                   if (served.get(record.get('name')) or {}).get('kind')
+                   != record.get('kind')]
+        if missing:
+            return done(
+                'failed', 'the schema read misses declared kinds '
+                + ', '.join(sorted({str(r.get('kind'))
+                                    for r in missing}))
+                + ' (instances: '
+                + ', '.join(str(r.get('name')) for r in missing[:8])
+                + ')')
+        kinds = sorted({str(record.get('kind')) for record in declared})
+        case.observe('schema read covers ' + str(len(declared))
+                     + ' declared instances across '
+                     + str(len(kinds)) + ' kinds ('
+                     + ', '.join(kinds) + ')')
+
+        picked = _pick_declared_command(schema.get('interfaces') or [],
+                                        signals)
+        if picked is None:
+            return done('inconclusive', 'no served command translates '
+                        'to the receipted path')
+        component, spec, command = picked
+        argv = _ctl_command_args(command)
+        if argv is None:
+            return done('inconclusive', 'the picked command has no '
+                        'dcs-ctl spelling: ' + json.dumps(command))
+        case.observe('picked command: ' + str(component) + ' '
+                     + str(spec.get('name')) + ' -> dcs-ctl '
+                     + ' '.join(argv) + ' --actor ' + CTL_ACTOR)
+        rc, receipt, err = ctl(base, *argv, '--actor', CTL_ACTOR)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'dcs-ctl-invoke.json',
+            {'argv': argv + ['--actor', CTL_ACTOR], 'exit': rc,
+             'receipt': receipt, 'stderr': err})
+        case.evidence('file', ref, 'the command\'s printed receipt')
+        outcome = receipt.get('outcome') if isinstance(receipt, dict) \
+            else None
+        if not isinstance(receipt, dict) \
+                or receipt.get('command') != command \
+                or not isinstance(outcome, dict) or not outcome:
+            return done('failed', 'the command returned no settled '
+                        'receipt: exit ' + str(rc) + ' '
+                        + json.dumps(receipt)[:300] + ' '
+                        + str(err)[:200])
+        case.observe('receipt outcome: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        # The attributed CommandSettled in the served journal, read
+        # through `dcs-ctl journal` — GET /journal through the shipped
+        # consumer.
+        observed = {}
+
+        def journaled():
+            rc, journal, _err = ctl(base, 'journal', '--since', '0')
+            if rc != 0 or not isinstance(journal, list):
+                return None
+            observed['journal_len'] = len(journal)
+            for entry in journal:
+                settled = ((entry or {}).get('event') or {}) \
+                    .get('command_settled') or {}
+                if (settled.get('receipt') or {}).get('command') \
+                        == command:
+                    observed['entry'] = entry
+                    return True
+            return None
+
+        covered = wait_for(journaled,
+                           time.monotonic() + CTL_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'dcs-ctl-journal.json',
+            {'entry': observed.get('entry'),
+             'journal_len': observed.get('journal_len')})
+        case.evidence('file', ref, 'the CLI-read journal covering the '
+                      'command\'s settlement')
+        if not covered:
+            return done('failed', 'the served journal never recorded '
+                        'the command\'s CommandSettled')
+        settled = (observed['entry'].get('event') or {}) \
+            .get('command_settled', {}).get('receipt') or {}
+        if settled.get('actor') != CTL_ACTOR:
+            return done('failed', 'the journaled receipt is '
+                        'unattributed: actor='
+                        + json.dumps(settled.get('actor')))
+        case.observe('journal carries the settled receipt attributed '
+                     'to ' + CTL_ACTOR)
+
+        # The emitted-events read: the produced event — the command's
+        # settled receipt — attributed to its component.
+        rc, events, err = ctl(base, 'events', component)
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-events.json',
+                            {'component': component, 'exit': rc,
+                             'events': events})
+        case.evidence('file', ref, 'the emitted-events read for '
+                      + str(component))
+        if rc != 0 or not isinstance(events, list):
+            return done('failed', 'dcs-ctl events failed for '
+                        + str(component) + ': exit ' + str(rc) + ' '
+                        + str(err)[:200])
+        match = None
+        for entry in events:
+            event = (entry or {}).get('event') or {}
+            settled_receipt = (event.get('command_settled') or {}) \
+                .get('receipt') or {}
+            if settled_receipt.get('command') == command \
+                    or event.get('event_emitted'):
+                match = entry
+                break
+        if match is None:
+            return done('failed', 'the emitted-events read attributes '
+                        'no produced event to ' + str(component))
+        case.observe('events read attributes '
+                     + next(iter(match.get('event') or {}), '?')
+                     + ' to ' + str(component))
+
+        # The refusal legs: an invoke the served contract does not
+        # declare, and — when the resource view advertises one — a
+        # command whose availability rule currently refuses. Both must
+        # answer the named refusal, never a silent accept.
+        refusals = {}
+        declared_names = {str(item.get('name'))
+                          for item in (served.get(component) or {})
+                          .get('commands') or []}
+        probe = 'dcs-ctl-undeclared'
+        while probe in declared_names:
+            probe += '-x'
+        rc, refused, err = ctl(base, 'invoke', component, probe,
+                               '--actor', CTL_ACTOR)
+        refusals['undeclared'] = {
+            'argv': ['invoke', component, probe, '--actor', CTL_ACTOR],
+            'exit': rc, 'receipt': refused, 'stderr': err}
+
+        unavailable = None
+        try:
+            _, resources = http_json('GET', base + '/resources')
+        except Exception:
+            resources = {}
+        for record in (resources or {}).get('components') or []:
+            interface = served.get(record.get('name')) or {}
+            states = {state.get('name'): state
+                      for state in record.get('commands') or []}
+            for cspec in interface.get('commands') or []:
+                state = states.get(cspec.get('name'))
+                if not state or state.get('available') is not False:
+                    continue
+                submission = _command_for_spec(record.get('name'),
+                                               cspec)
+                un_argv = (_ctl_command_args(submission)
+                           if submission else None)
+                if un_argv:
+                    unavailable = (record.get('name'), cspec.get('name'),
+                                   un_argv, state.get('refusal'))
+                    break
+            if unavailable:
+                break
+        if unavailable:
+            un_component, un_name, un_argv, advertised = unavailable
+            rc, refused, err = ctl(base, *un_argv,
+                                   '--actor', CTL_ACTOR)
+            refusals['unavailable'] = {
+                'argv': un_argv + ['--actor', CTL_ACTOR], 'exit': rc,
+                'receipt': refused, 'stderr': err,
+                'component': un_component, 'command': un_name,
+                'advertised_refusal': advertised}
+        else:
+            case.observe('no unavailable command advertised; the '
+                         'undeclared probe covers the refusal leg')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-refusals.json', refusals)
+        case.evidence('file', ref, 'the named refusals')
+
+        def rejection(leg):
+            """The named rejection a refusal leg answered, or None."""
+            receipt = leg['receipt']
+            reason = ((receipt or {}).get('outcome') or {}) \
+                .get('rejected') if isinstance(receipt, dict) else None
+            reason = (reason or {}).get('reason') \
+                if isinstance(reason, dict) else None
+            return next(iter(reason), None) \
+                if isinstance(reason, dict) and reason else None
+
+        undeclared = refusals['undeclared']
+        if undeclared['exit'] == 0 \
+                or rejection(undeclared) != 'unknown_command':
+            return done('failed', 'the undeclared invoke was not '
+                        'refused by name: exit '
+                        + str(undeclared['exit']) + ' '
+                        + json.dumps(undeclared['receipt'])[:300])
+        case.observe('undeclared invoke refused by name: '
+                     + rejection(undeclared))
+        if 'unavailable' in refusals:
+            if refusals['unavailable']['exit'] == 0 \
+                    or rejection(refusals['unavailable']) is None:
+                return done('failed', 'the contract-named unavailable '
+                            'command was silently accepted: '
+                            + json.dumps(refusals['unavailable'])[:300])
+            case.observe('unavailable command refused by name: '
+                         + rejection(refusals['unavailable']))
+        return done('passed')
+    except Exception as exc:
+        return done('inconclusive', str(exc))
+
+
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
-# watches reconverge.
+# watches reconverge. The dcs-ctl case runs last: it observes the
+# post-failover role layout and perturbs nothing earlier cases
+# established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_failover, scenario_evidence_capture,
              scenario_served_interface, scenario_force_release,
-             scenario_consumer_schedule, scenario_command_admission)
+             scenario_consumer_schedule, scenario_command_admission,
+             scenario_dcs_ctl)
 
 
 def run_all(ctx, timeline):

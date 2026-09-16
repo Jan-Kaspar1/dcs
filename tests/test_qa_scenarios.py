@@ -1055,5 +1055,413 @@ class CommandAdmissionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class CtlResult:
+    """A faked CompletedProcess for the _run_ctl seam."""
+
+    def __init__(self, stdout='', stderr='', returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+class CtlFeed:
+    """The faked-subprocess side of the dcs-ctl scenario: run_ctl
+    answers each argv the way the real binary would against the
+    post-failover rig — reads print the served payloads and exit 0,
+    receipted subcommands print the receipt and exit nonzero on a
+    named rejection — while http_json covers the raw liveness gate and
+    the resources read the unavailable-command probe selects through.
+    Fault flags stage each named failure the issue calls out."""
+
+    COMPONENTS = ({'name': 'digital-input:12', 'kind': 'digital-input'},
+                  {'name': 'motor:21', 'kind': 'motor'})
+    BOUND = {'digital-input:12': {302}, 'motor:21': {302}}
+    KINDS = {302: 'bool', 10: 'float'}  # the point kinds /signals declares
+    WRITABLE = {302}
+
+    def __init__(self):
+        self.tick = 0
+        self.next_seq = 1
+        self.journal = []
+        self.calls = []      # the recorded (addr, argv) transcript
+        self.binaries = []   # the binary path each invocation ran
+        # Fault injection for the named-failure cases.
+        self.role_mismatch = False     # the CLI's role reads both standby
+        self.missing_kind = False      # the schema read drops an instance
+        self.command_fails = False     # receipted submissions die transport-side
+        self.no_journal_entry = False  # the settlement never journals
+        self.wrong_actor = False       # the journaled receipt loses the actor
+        self.no_events = False         # the events read attributes nothing
+        self.silent_accept = False     # the undeclared invoke applies
+
+    @staticmethod
+    def _ok(payload):
+        return json.dumps(payload), 0, ''
+
+    # The subprocess seam — replaces scenarios._run_ctl: one argv
+    # answered the way the real binary would against this fake rig.
+    def run_ctl(self, binary, addr, args):
+        self.binaries.append(binary)
+        self.calls.append((addr, list(args)))
+        stdout, rc, stderr = self._dispatch(addr, list(args))
+        return CtlResult(stdout=stdout, stderr=stderr, returncode=rc)
+
+    def _dispatch(self, addr, args):
+        self.tick += 1
+        if args == ['role']:
+            role = 'standby' if self.role_mismatch else \
+                ('active' if addr == 'ctrl-b:2' else 'standby')
+            return self._ok({'role': role, 'tick': self.tick})
+        if args == ['signals']:
+            return self._ok(self._signals())
+        if args == ['schema']:
+            return self._ok({'publication': self.tick,
+                             'tick': self.tick,
+                             'interfaces': self._interfaces()})
+        if args[0] == 'journal':
+            since = int(args[args.index('--since') + 1]) \
+                if '--since' in args else 0
+            return self._ok([entry for entry in self.journal
+                             if entry['seq'] > since])
+        if args[0] == 'events':
+            component = args[1]
+            if self.no_events:
+                return self._ok([])
+            return self._ok([entry for entry in self.journal
+                             if self._attributed(entry, component)])
+        # Receipted subcommands — `write`, `set-parameter`, `invoke`:
+        # the receipt prints to stdout; a named rejection exits 1.
+        actor = None
+        if '--actor' in args:
+            index = args.index('--actor')
+            actor = args[index + 1]
+            del args[index:index + 2]
+        if self.command_fails:
+            return '', 1, 'dcs-ctl: ' + addr + ': connection refused'
+        command = self._command_from_args(args)
+        refused = self._refusal(command)
+        if refused is None:
+            receipt = {'command': command,
+                       'outcome': {'applied': {'tick': self.tick}},
+                       'actor': actor}
+            rc, stderr = 0, ''
+        else:
+            receipt = {'command': command,
+                       'outcome': {'rejected': {'reason': refused}},
+                       'actor': actor}
+            rc = 1
+            stderr = 'dcs-ctl: ' + addr + ': command rejected: ' \
+                + next(iter(refused))
+        # Rejected receipts settle at submission and journal like
+        # applied ones — the real executor's durable record.
+        if not self.no_journal_entry:
+            settled = dict(receipt)
+            if self.wrong_actor:
+                settled['actor'] = 'qa-lane'
+            self.journal.append({'seq': self.next_seq, 'tick': self.tick,
+                                 'event': {'command_settled': {
+                                     'receipt': settled}}})
+            self.next_seq += 1
+        return json.dumps(receipt), rc, stderr
+
+    @staticmethod
+    def _literal(text):
+        if text == 'true':
+            return {'bool': True}
+        if text == 'false':
+            return {'bool': False}
+        try:
+            return {'int': int(text)}
+        except ValueError:
+            return {'float': float(text)}
+
+    def _command_from_args(self, args):
+        """The Command a receipted argv denotes — write/set-parameter/
+        invoke with the declared point kind the real binary reads out
+        of the signal index."""
+        if args[0] == 'write':
+            point = int(args[1])
+            value = self._literal(args[2])
+            kind = self.KINDS.get(point) or next(iter(value))
+            return {'write_value': {'point': point, 'kind': kind,
+                                    'value': value}}
+        if args[0] == 'set-parameter':
+            return {'set_parameter': {'component': args[1],
+                                      'name': args[2],
+                                      'value': self._literal(args[3])}}
+        if args[0] == 'invoke':
+            arguments = {}
+            for pair in args[3:]:
+                name, _, text = pair.partition('=')
+                arguments[name] = self._literal(text)
+            return {'invoke': {'component': args[1],
+                               'command': args[2],
+                               'arguments': arguments}}
+        raise AssertionError('unexpected dcs-ctl argv %s' % args)
+
+    def _refusal(self, command):
+        """The named rejection a submission meets — mirroring the
+        executor's validation order — or None when it is admitted."""
+        write = command.get('write_value')
+        if write is not None and write['point'] not in self.WRITABLE:
+            return {'not_writable': {'point': write['point']}}
+        invoke = command.get('invoke')
+        if invoke is not None:
+            interface = self._served().get(invoke['component'])
+            if interface is None:
+                return {'unknown_component':
+                        {'component': invoke['component']}}
+            names = {spec['name'] for spec in interface['commands']}
+            if invoke['command'] not in names \
+                    and not self.silent_accept:
+                return {'unknown_command': {
+                    'component': invoke['component'],
+                    'command': invoke['command']}}
+        return None
+
+    def _interface(self, kind):
+        """One kind's declared interface — a writable-bool write, an
+        unavailable non-writable write (the unavailable probe's
+        target), a parameter tune, and the emitted settled-event
+        entry."""
+        return {'version': 1, 'kind': kind,
+                'measurements': [{'name': 'in', 'kind': 'bool'}],
+                'configuration': [], 'state': [],
+                'commands': [
+                    {'name': 'write_value:in', 'point': 302,
+                     'request': [{'name': 'value', 'kind': 'bool'}],
+                     'availability': 'bound_point_writable',
+                     'adapted': 'write_value'},
+                    {'name': 'write_value:raw', 'point': 10,
+                     'request': [{'name': 'value', 'kind': 'float'}],
+                     'availability': 'bound_point_writable',
+                     'adapted': 'write_value'},
+                    {'name': 'set_parameter:invert',
+                     'request': [{'name': 'value', 'kind': 'bool'}],
+                     'availability': 'always',
+                     'adapted': 'set_parameter'}],
+                'events': [{'name': 'command_settled', 'payload': [],
+                            'retention': 'journal',
+                            'emission': 'on_command_settled',
+                            'adapted': 'command_settled'}]}
+
+    def _interfaces(self):
+        interfaces = [{'name': record['name'],
+                       'interface': self._interface(record['kind'])}
+                      for record in self.COMPONENTS]
+        return interfaces[:1] if self.missing_kind else interfaces
+
+    def _served(self):
+        return {entry['name']: entry['interface']
+                for entry in self._interfaces()}
+
+    def _signals(self):
+        return {'points': [
+            {'point': 302, 'signal': 10302, 'name': 'p101-oos',
+             'direction': 'in', 'value_type': 'bool', 'writable': True},
+            {'point': 10, 'signal': 10010, 'name': 'level-primary',
+             'direction': 'in', 'value_type': 'float',
+             'writable': False}],
+            'components': [dict(record) for record in self.COMPONENTS]}
+
+    def _resources(self, record):
+        commands = []
+        for spec in self._interface(record['kind'])['commands']:
+            available = spec.get('adapted') != 'write_value' \
+                or spec.get('point') in self.WRITABLE
+            commands.append({'name': spec['name'], 'available': available,
+                             'refusal': None if available else
+                             'point ' + str(spec.get('point'))
+                             + ' is not writable'})
+        return {'name': record['name'], 'kind': record['kind'],
+                'measurements': [], 'configuration': [], 'state': [],
+                'commands': commands, 'events': []}
+
+    def _attributed(self, entry, name):
+        """The per-component events attribution, mirroring the served
+        view's rule: commands settle against their component or their
+        bound point; emitted events name their producer."""
+        event = entry.get('event') or {}
+        bound = self.BOUND.get(name, set())
+        emitted = event.get('event_emitted') or {}
+        if emitted.get('component') == name:
+            return True
+        receipt = (event.get('command_settled') or {}) \
+            .get('receipt') or {}
+        command = receipt.get('command') or {}
+        component = (command.get('invoke') or {}).get('component') \
+            or (command.get('set_parameter') or {}).get('component') \
+            or (command.get('force') or {}).get('component')
+        point = (command.get('write_value') or {}).get('point')
+        return component == name or point in bound
+
+    # The raw channel the scenario still crosses — the pair's liveness
+    # gate and the resources read the unavailable probe selects
+    # through.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active' if host == 'ctrl-b:2'
+                         else 'standby', 'tick': self.tick}
+        if (method, route) == ('GET', '/resources'):
+            return 200, {'publication': self.tick, 'tick': self.tick,
+                         'components': [self._resources(record)
+                                        for record in self.COMPONENTS]}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class DcsCtlTests(unittest.TestCase):
+    """scenario_dcs_ctl behind the faked-subprocess seam: CtlFeed
+    models the binary's argv contract so every pass/fail leg the issue
+    calls out — role layout, schema coverage, the journaled and
+    actor-attributed settlement, event attribution, the named refusals,
+    and an unavailable binary — runs through the real scenario path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.binary = Path(self.tmp.name) / 'dcs-ctl'
+        self.binary.write_text('#!/bin/sh\nexit 0\n')
+        self.binary.chmod(0o755)
+        self.feed = CtlFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'dcs_ctl': str(self.binary)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, '_run_ctl', self.feed.run_ctl), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'CTL_DEADLINE', 0.5):
+            return scenarios.scenario_dcs_ctl(ctx)
+
+    def test_registered_last_and_replayable(self):
+        self.assertIs(scenarios.SCENARIOS[-1],
+                      scenarios.scenario_dcs_ctl)
+        self.assertIs(verify.case_function('dcs-ctl'),
+                      scenarios.scenario_dcs_ctl)
+
+    def test_clean_rig_passes_with_full_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        for name in ('dcs-ctl-roles', 'dcs-ctl-schema', 'dcs-ctl-invoke',
+                     'dcs-ctl-journal', 'dcs-ctl-events',
+                     'dcs-ctl-refusals', 'dcs-ctl-transcript'):
+            self.assertTrue((self.evidence / (name + '.json')).is_file(),
+                            name)
+        transcript = json.loads(
+            (self.evidence / 'dcs-ctl-transcript.json').read_text())
+        argvs = [entry['argv'] for entry in transcript]
+        # The consumer contract end to end: role on both endpoints, the
+        # picked command with the declared actor, the journal and
+        # events reads, and both refusal probes.
+        self.assertIn(['ctrl-a:1', 'role'], argvs)
+        self.assertIn(['ctrl-b:2', 'role'], argvs)
+        self.assertIn(['ctrl-b:2', 'write', '302', 'true',
+                       '--actor', scenarios.CTL_ACTOR], argvs)
+        self.assertIn(['ctrl-b:2', 'events', 'digital-input:12'], argvs)
+        self.assertIn(['ctrl-b:2', 'invoke', 'digital-input:12',
+                       'dcs-ctl-undeclared', '--actor',
+                       scenarios.CTL_ACTOR], argvs)
+        self.assertIn(['ctrl-b:2', 'write', '10', '1.0',
+                       '--actor', scenarios.CTL_ACTOR], argvs)
+        self.assertTrue(self.feed.binaries)
+        self.assertTrue(all(binary == str(self.binary)
+                            for binary in self.feed.binaries))
+        refusals = json.loads(
+            (self.evidence / 'dcs-ctl-refusals.json').read_text())
+        self.assertEqual(refusals['undeclared']['exit'], 1)
+        self.assertEqual(refusals['unavailable']['exit'], 1)
+
+    def test_two_runs_produce_identical_transcript(self):
+        record = self.run_scenario()
+        first = (self.evidence / 'dcs-ctl-transcript.json').read_text()
+        self.evidence = self.evidence.parent / 'evidence-2'
+        self.evidence.mkdir()
+        self.feed = CtlFeed()
+        again = self.run_scenario()
+        second = (self.evidence / 'dcs-ctl-transcript.json').read_text()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(again['outcome'], 'passed', again)
+        self.assertEqual(first, second)
+
+    def test_role_mismatch_fails(self):
+        self.feed.role_mismatch = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('one standby', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_schema_kind_fails(self):
+        self.feed.missing_kind = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('misses declared kinds', record.get('detail', ''))
+        self.assertIn('motor', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_receipt_fails(self):
+        self.feed.command_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no settled receipt', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unjournaled_settlement_fails(self):
+        self.feed.no_journal_entry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never recorded', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unattributed_actor_fails(self):
+        self.feed.wrong_actor = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('unattributed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unattributed_event_fails(self):
+        self.feed.no_events = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('attributes no produced event',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_silently_accepted_undeclared_invoke_fails(self):
+        self.feed.silent_accept = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('not refused by name', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unavailable_binary_is_inconclusive(self):
+        stub = Path(self.tmp.name) / 'stub-ctl'
+        stub.write_text('')   # present but not executable
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence)}
+        for value in (None, str(Path(self.tmp.name) / 'no-such-ctl'),
+                      str(stub)):
+            if value is None:
+                ctx.pop('dcs_ctl', None)
+            else:
+                ctx['dcs_ctl'] = value
+            record = scenarios.scenario_dcs_ctl(ctx)
+            self.assertEqual(record['outcome'], 'inconclusive',
+                             (value, record))
+            report.validate_scenario(record)
+
+
 if __name__ == '__main__':
     unittest.main()

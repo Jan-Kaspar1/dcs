@@ -16,7 +16,11 @@ repository; this directory is the contract those copies mirror.
   `reports/<run_id>.json` staged for the WSL relay, `repo.git/` the
   bare mirror the relay pushes (fix-ancestry checks for verification
   runs), and `verifications.json` the pending fix-verification queue
-  the relay delivers from the supervisor.
+  the relay delivers from the supervisor. `build-cache/` also holds
+  the bounded builder's `target/` — beside the image binaries it
+  carries the host-side `dcs-ctl` the dcs-ctl scenario execs against
+  the published monitor ports (`cargo build --release --locked
+  -p dcs-monitor --bin dcs-ctl` in the revision under test).
 
 ## Install
 

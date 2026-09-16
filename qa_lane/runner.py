@@ -718,7 +718,9 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
            'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant',
+           '-p dcs-controller -p dcs-plant '
+           '&& cargo build --release --locked '
+           '-p dcs-monitor --bin dcs-ctl',
            timeout=cfg['builder_timeout'])
     digests = {}
     for crate, binary, tag in (
@@ -746,7 +748,21 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
                           '--format', '{{.Id}}').stdout.strip()
         digests[crate] = image_id
         timeline('image-built', crate + ' ' + image_id[:19])
+    # The operator CLI ships as a host-side binary, not an image: the
+    # same bounded builder compile produces it, and the dcs-ctl
+    # scenario execs it against the pair's published monitor ports.
+    if not _dcs_ctl_path(cfg).is_file():
+        raise RuntimeError('build produced no dcs-ctl')
+    timeline('tool-built', 'dcs-ctl ' + str(_dcs_ctl_path(cfg)))
     return digests
+
+
+def _dcs_ctl_path(cfg):
+    """The host-side dcs-ctl binary the lane's image build produces —
+    the operator-CLI seam the dcs-ctl scenario consumes through
+    ctx['dcs_ctl']."""
+    return Path(cfg['state_dir']) / 'build-cache' / 'target' \
+        / 'release' / 'dcs-ctl'
 
 
 def _docker_run_args(cfg, run_id, name):
@@ -825,6 +841,7 @@ def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
         'journal_files': {key: str(_controller_dir(run_dir, peer)
                                    / 'journal.jsonl')
                           for key, peer in names.items()},
+        'dcs_ctl': str(_dcs_ctl_path(cfg)),
     }
 
 
