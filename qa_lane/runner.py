@@ -33,6 +33,7 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -914,8 +915,21 @@ def start_plant(run_id, timeline):
     timeline('plant-started', container + ' running')
 
 
+def _revised_peer_role(cfg):
+    """The run's third controller's served RoleReport, or None when
+    its monitor is unreachable — the relaunch guard's read of whether
+    the existing '-c' container currently owns the field."""
+    try:
+        with urllib.request.urlopen(
+                'http://127.0.0.1:' + str(cfg['revised_port'])
+                + '/role', timeout=3) as response:
+            return json.loads(response.read() or b'null')
+    except Exception:
+        return None
+
+
 def start_revised_controller(cfg, record, run_dir, model, active,
-                             timeline):
+                             timeline, incompatible=False):
     """The scenario-callable rolling model-revision action
     (WW-LCM-001's deployment-update clause, the rolling
     model-revision decision): derive the revised model document from
@@ -936,8 +950,26 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     timeline; a derivation or docker failure raises so the calling
     scenario reports the action never completed.
 
+    `incompatible=True` runs the refusal half: the derivation applies
+    the checked-in post-derivation step (revision-incompatible.json)
+    that retypes a carried point so the crossing refuses with the
+    named carryover error, and the derived document lands at
+    model-revised-incompatible.json instead.
+
+    A second call relaunches the third container: a leftover '-c' —
+    the incompatible scenario's degraded standby, or a killed
+    earlier attempt — is removed first, but only after its served
+    /role proves it does not own the field; an active or promoting
+    '-c' refuses removal by name rather than silently orphaning the
+    plant's writer claim. Its runner-owned state and journal files
+    reset with the container so the new lifetime starts cold: a
+    state file left by the old document would fail the fingerprint
+    resume gate, and a second run boundary in one journal file would
+    misread the new lifetime.
+
     Returns the derivation summary (revised document path and the
-    recipe's added point/signal ids) plus the container name.
+    recipe's added point/signal ids — plus the retyped point on the
+    incompatible variant) plus the container name.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
@@ -946,17 +978,45 @@ def start_revised_controller(cfg, record, run_dir, model, active,
         raise RuntimeError('start_revised expects the active endpoint '
                            'key, got ' + repr(active))
     peer_name, peer_port = peers[active]
-    revised_doc = Path(run_dir) / 'model-revised.json'
-    info = revision.derive_revised_model(model, revised_doc)
+    name = ('model-revised-incompatible.json' if incompatible
+            else 'model-revised.json')
+    revised_doc = Path(run_dir) / name
+    info = (revision.derive_incompatible_model(model, revised_doc)
+            if incompatible
+            else revision.derive_revised_model(model, revised_doc))
     directory = _controller_dir(run_dir, 'c')
+    container = prefix + '-c'
+    listed = docker('ps', '-a', '--filter',
+                    'name=^/' + container + '$', '--format', '{{.ID}}',
+                    check=False)
+    if listed.returncode != 0:
+        raise RuntimeError('start_revised cannot prove the third '
+                           'controller is absent: docker ps failed: '
+                           + listed.stderr.strip()[:300])
+    if listed.stdout.strip():
+        report = _revised_peer_role(cfg)
+        if report and report.get('role') in ('active', 'promoting'):
+            raise RuntimeError('start_revised refuses to replace '
+                               + container + ': it reports role '
+                               + str(report['role']))
+        timeline('model-revision-replace',
+                 'docker rm -f ' + container
+                 + ' (served role ' + str((report or {}).get('role'))
+                 + ')')
+        docker('rm', '-f', container, timeout=60)
+        directory.mkdir(parents=True, exist_ok=True)
+        for artifact in ('state.json', 'journal.jsonl'):
+            (directory / artifact).unlink(missing_ok=True)
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
-    container = prefix + '-c'
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
     timeline('model-revision-start',
              'derive ' + revised_doc.name + ' (+points '
              + str(info['added_points']) + ', +signals '
-             + str(info['added_signals']) + '); launch ' + container
+             + str(info['added_signals'])
+             + (', retyped point ' + str(info['retyped_point'])
+                if incompatible else '')
+             + '); launch ' + container
              + ' --standby ' + standby + ' --revised')
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
@@ -1003,9 +1063,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
-        'start_revised': lambda name: start_revised_controller(
-            cfg, record, run_dir, src / cfg['model_fixture'], name,
-            timeline),
+        'start_revised': lambda name, incompatible=False:
+            start_revised_controller(
+                cfg, record, run_dir, src / cfg['model_fixture'],
+                name, timeline, incompatible),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},

@@ -623,6 +623,143 @@ class ModelRevisionActionTests(unittest.TestCase):
         self.assertTrue(
             (self.run_dir / 'model-revised.json').is_file())
 
+    def _retyped_model(self):
+        """A mounted model carrying the checked-in spec's retype
+        target — point 302 writable internal bool — so the
+        incompatible derivation applies."""
+        document = json.loads(self.model.read_text())
+        document['io_points'].append(
+            {'id': 302, 'direction': 'in', 'value_type': 'bool',
+             'writable': True, 'journaled': True,
+             'initial': {'bool': False}})
+        self.model.write_text(json.dumps(document))
+
+    def test_incompatible_variant_derives_and_launches(self):
+        self._retyped_model()
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby',
+                lambda event, detail=None: events.append(
+                    (event, detail)), incompatible=True)
+        launch = next(c for c in calls if c[0] == 'run')
+        document = str(self.run_dir
+                       / 'model-revised-incompatible.json')
+        self.assertIn(document + ':/model/revised.json:ro', launch)
+        self.assertIn('--revised', launch)
+        self.assertIn('--standby', launch)
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+        self.assertEqual(info['retyped_point'], 302)
+        self.assertEqual(info['document'], document)
+        derived = json.loads(Path(document).read_text())
+        points = {p['id']: p for p in derived['io_points']}
+        self.assertEqual(points[302]['value_type'], 'int')
+        self.assertEqual(points[900]['value_type'], 'bool')
+        self.assertEqual(revision.lint(derived), [])
+        self.assertIn('retyped point 302', events[0][1])
+
+    def test_incompatible_derivation_without_the_point_raises(self):
+        # The checked-in spec names point 302 — a mounted model
+        # lacking it fails the derivation before any container moves.
+        events = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            raise AssertionError('docker must not run')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(revision.RevisionError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby',
+                    lambda event, detail=None: events.append(event),
+                    incompatible=True)
+        self.assertEqual(events, [])
+
+    def test_second_launch_replaces_the_degraded_third(self):
+        # The incompatible scenario's leftover '-c' is removed before
+        # the compatible control launch — after its served role proves
+        # it does not own the field.
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'ps' and 'name=' in str(args):
+                return Result('ccc\n')
+            return Result('')
+
+        directory = self.run_dir / 'controllers' / 'c'
+        directory.mkdir(parents=True)
+        for artifact in ('state.json', 'journal.jsonl'):
+            (directory / artifact).write_text('stale')
+        with patch.object(runner, 'docker', fake_docker), \
+                patch.object(runner, '_revised_peer_role',
+                             return_value={'role': 'standby'}):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby',
+                lambda event, detail=None: events.append(event))
+        removed = [c for c in calls
+                   if c[:2] == ('rm', '-f')
+                   and 'dcs-hw-qa-1-c' in c]
+        self.assertEqual(len(removed), 1)
+        self.assertIn('model-revision-replace', events)
+        # The runner-owned artifacts reset with the container so the
+        # new lifetime starts cold.
+        for artifact in ('state.json', 'journal.jsonl'):
+            self.assertFalse((directory / artifact).exists())
+
+    def test_relaunch_refuses_a_field_owning_third(self):
+        def fake_docker(*args, timeout=120, check=True):
+            if args[0] == 'ps' and 'name=' in str(args):
+                return Result('ccc\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker), \
+                patch.object(runner, '_revised_peer_role',
+                             return_value={'role': 'active'}):
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+
+    def test_relaunch_replaces_an_unreachable_third(self):
+        # A leftover whose monitor does not answer cannot own the
+        # field — the replacement proceeds.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'ps' and 'name=' in str(args):
+                return Result('ccc\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker), \
+                patch.object(runner, '_revised_peer_role',
+                             return_value=None):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: None)
+        self.assertTrue(any(c[:2] == ('rm', '-f') for c in calls))
+
+    def test_failed_listing_fails_closed(self):
+        def fake_docker(*args, timeout=120, check=True):
+            if args[0] == 'ps':
+                return Result('boom', returncode=1)
+            raise AssertionError('docker must not run past the '
+                                 'listing')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+
     def test_teardown_reconciles_the_third_container(self):
         # The launched -c container carries the run label like the rest
         # of the rig, so the shared teardown removes it with them.
