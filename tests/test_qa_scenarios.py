@@ -1,21 +1,34 @@
 """The deterministic scenarios' unit coverage: stubbed monitor feeds
-drive scenario_consumer_schedule, scenario_served_interface, and
-scenario_command_admission through their pass outcomes and the named
+drive scenario_consumer_schedule, scenario_served_interface,
+scenario_force_release, scenario_command_admission,
+scenario_controller_restart, scenario_plant_link_loss, and
+scenario_field_fault through their pass outcomes and the named
 failures their issues call out — a stalled reader whose leg's scan
 outputs stopped advancing, a lagging seq-cursor read answered with
 silently stale data, a served registry missing a declared kind or
-collection, a declared command returning no receipt, an emitted-events
-view that never reflects the produced event, and a command flood whose
-submissions meet dropped receipts, HTTP-layer faults, unsettled
-admissions, or a bound that never fills."""
+collection, a declared command returning no receipt, an
+emitted-events view that never reflects the produced event, forced
+telemetry missing its Substituted stamp or forces badge, control that
+ignores the force, unattributed or never-journaled settlements, a
+badge that never clears, recovery that never returns to Good, a
+command flood whose submissions meet dropped receipts, HTTP-layer
+faults, unsettled admissions, or a bound that never fills, a restarted
+controller that resumes cold, a plant outage whose telemetry stays
+fresh, whose standby promotes, whose writer claim never re-arms, or
+whose io_health forgets the failures it counted, an injected quality
+fault the served snapshot keeps reporting Good, an error fault that
+never surfaces on io_health, a role that moves under a field fault,
+and a clear that never restores the field value."""
 import json
+import socket
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import report, scenarios
+from qa_lane import report, scenarios, verify
 
 
 HELD_RESPONSE = (b'HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\n'
@@ -738,6 +751,476 @@ class ServedInterfaceTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class FakePlantPeer:
+    """A plant-protocol peer on 127.0.0.1: a real listener speaking the
+    documented newline-JSON request/response surface — list_points,
+    read, inject_fault, clear_fault — over a fixed table of stable
+    in-points with per-point fault state, mirroring the plant server's
+    semantics: a quality fault substitutes the served sample's quality,
+    an error fault answers the point's IoError."""
+
+    def __init__(self):
+        self.samples = {
+            20: {'value': {'float': 1.5}, 'quality': 'good', 'tick': 0},
+            40: {'value': {'bool': False}, 'quality': 'good',
+                 'tick': 0},
+        }
+        self.faults = {}
+        self.requests = []
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,
+                                 1)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen(4)
+        self.listener.settimeout(30)
+        self.address = '127.0.0.1:' \
+            + str(self.listener.getsockname()[1])
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        try:
+            while True:
+                try:
+                    conn, _ = self.listener.accept()
+                except OSError:
+                    return
+                threading.Thread(target=self._handle, args=(conn,),
+                                 daemon=True).start()
+        finally:
+            self.listener.close()
+
+    def _handle(self, conn):
+        try:
+            buffer = b''
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buffer += chunk
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    if line:
+                        response = self.dispatch(json.loads(line))
+                        conn.sendall(json.dumps(response).encode()
+                                     + b'\n')
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def served(self, point):
+        """The sample a reader observes: stored value, injected
+        quality applied — error faults live at the read boundary."""
+        sample = dict(self.samples[point])
+        fault = self.faults.get(point)
+        if isinstance(fault, dict) and 'quality' in fault:
+            sample['quality'] = fault['quality']
+        return sample
+
+    def dispatch(self, request):
+        self.requests.append(request)
+        op, point = request.get('op'), request.get('point')
+        if op == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': p, 'direction': 'in', 'sample': self.served(p),
+                 'fault': self.faults.get(p)}
+                for p in sorted(self.samples)]}
+        if op == 'read':
+            fault = self.faults.get(point)
+            if fault in ('disconnected', 'timeout'):
+                return {'result': 'error',
+                        'error': {'kind': 'io', 'error': {fault: point}}}
+            return {'result': 'sample', 'sample': self.served(point)}
+        if op == 'inject_fault':
+            self.faults[point] = request.get('fault')
+            return {'result': 'done'}
+        if op == 'clear_fault':
+            self.faults.pop(point, None)
+            return {'result': 'done'}
+        return {'result': 'error',
+                'error': {'kind': 'invalid_request',
+                          'detail': 'unknown op'}}
+
+    def close(self):
+        self.listener.close()
+        self.thread.join(timeout=5)
+
+
+class FieldFaultFeed:
+    """A stubbed monitor pair for the field-fault scenario. Each
+    `http_json` call is one completed scan: the snapshot serves every
+    plant point with the quality its fault state implies — substituted
+    quality under a quality fault, bad:communication_fault plus the
+    io_health counters under an error fault — and the role stays
+    active. Fault flags stage each named failure the issue calls out."""
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.failed_reads = 0
+        self.last_error = None
+        self.ever_faulted = set()
+        # Fault injection for the named-failure cases.
+        self.ignore_quality_fault = False  # snapshot keeps serving Good
+        self.hide_io_fault = False         # io_health never counts
+        self.demote_on_fault = False       # a field fault moves the role
+        self.stuck_recovery = False        # a cleared point stays bad
+
+    def http_json(self, method, url, body=None, timeout=10):
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        self.tick += 1
+        if (method, route) == ('GET', '/role'):
+            role = 'active'
+            if self.demote_on_fault and self.plant.faults:
+                role = 'standby'
+            return 200, {'role': role, 'tick': self.tick}
+        if (method, route) == ('GET', '/snapshot'):
+            points = []
+            for point in sorted(self.plant.samples):
+                fault = self.plant.faults.get(point)
+                if isinstance(fault, dict) and 'quality' in fault:
+                    self.ever_faulted.add(point)
+                quality = 'good'
+                if isinstance(fault, dict) and 'quality' in fault \
+                        and not self.ignore_quality_fault:
+                    quality = fault['quality']
+                elif fault in ('disconnected', 'timeout'):
+                    quality = {'bad': 'communication_fault'}
+                    if not self.hide_io_fault:
+                        self.failed_reads += 1
+                        self.last_error = {
+                            'tick': self.tick, 'point': point,
+                            'direction': 'in',
+                            'error': {fault: point}}
+                if self.stuck_recovery and point in self.ever_faulted:
+                    quality = {'bad': 'device_fault'}
+                points.append({'point': point, 'direction': 'in',
+                               'sample': dict(
+                                   self.plant.samples[point],
+                                   quality=quality,
+                                   tick=self.tick)})
+            return 200, {
+                'tick': self.tick, 'points': points,
+                'io_health': {
+                    'failed_reads': self.failed_reads,
+                    'failed_writes': 0,
+                    'consecutive_failures': 0,
+                    'last_error': self.last_error,
+                    'scan_overruns': 0,
+                    'driver': {'link': 'connected',
+                               'last_error': None,
+                               'exchange': None}}}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class FieldFaultTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = FakePlantPeer()
+        self.feed = FieldFaultFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': self.plant.address,
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'FAULT_PROBE', 0.01), \
+                patch.object(scenarios, 'FAULT_DEADLINE', 2.0):
+            return scenarios.scenario_field_fault(ctx)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The conversation stayed on the documented request surface and
+        # the run left no fault behind.
+        ops = [request.get('op') for request in self.plant.requests]
+        self.assertEqual(ops.count('inject_fault'), 2)
+        self.assertGreaterEqual(ops.count('clear_fault'), 2)
+        self.assertIn('list_points', ops)
+        self.assertEqual(self.plant.faults, {})
+
+    def test_quality_fault_kept_good_fails(self):
+        # The named bad-data clause: the injected quality never reaches
+        # the served sample — the point keeps reading Good.
+        self.feed.ignore_quality_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never surfaced', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_error_fault_hidden_from_io_health_fails(self):
+        self.feed.hide_io_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never surfaced on io_health',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_role_change_under_field_fault_fails(self):
+        # A field fault that reads as peer loss — the scenario's
+        # role-stability check must catch it.
+        self.feed.demote_on_fault = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('moved the active role', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_clear_without_recovery_fails(self):
+        self.feed.stuck_recovery = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never restored', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class ForceFeed:
+    """A stubbed monitor pair for the force-release scenario: a tiny
+    internal-point executor over the rig's writable p101-oos point and
+    its inverted p101-oos-ok carrier. Every call on the measurement
+    channel is one completed scan — reads observe, commands queue for
+    the next scan boundary and journal as they settle — mirroring the
+    held-value/force substitution semantics the executor documents for
+    an internal `In` point. Fault flags stage each named failure the
+    issue calls out."""
+
+    def __init__(self):
+        self.tick = 0
+        self.held = False       # p101-oos's held operator value
+        self.force = None       # the forced value while a force stands
+        self.receipts = []
+        self.journal = []
+        self.next_seq = 1
+        # Fault injection for the named-failure cases.
+        self.force_unseen = False     # telemetry never shows the force
+        self.forces_omitted = False   # the forces list stays empty
+        self.control_ignores = False  # oos-ok never follows the force
+        self.never_settled = False    # commands apply but never settle
+        self.wrong_actor = False      # settled receipts lose attribution
+        self.release_sticks = False   # unforce never clears the force
+        self.release_refused = False  # unforce is rejected at submission
+        self.no_recovery = False      # the point never reads Good again
+        self.no_oos = False           # the signal index lacks the target
+
+    # The plant half: one completed scan per measurement call, applying
+    # each accepted command whose apply_tick has arrived — the force map
+    # substitutes the point's read while it stands, and the held-value
+    # rule keeps the last stamp once a release lands.
+    def _advance(self):
+        self.tick += 1
+        for receipt in self.receipts:
+            accepted = receipt['outcome'].get('accepted')
+            if accepted is None or self.tick < accepted['apply_tick']:
+                continue
+            command = receipt['command']
+            if 'force_point' in command:
+                self.force = command['force_point']['value']['bool']
+            elif 'unforce_point' in command:
+                if not self.release_sticks:
+                    self.force = None
+            elif 'write_value' in command:
+                self.held = command['write_value']['value']['bool']
+            if self.never_settled:
+                continue
+            receipt['outcome'] = {'applied': {'tick': self.tick}}
+            settled = dict(receipt)
+            if self.wrong_actor:
+                settled['actor'] = 'the-plant-server'
+            self.journal.append(
+                {'seq': self.next_seq, 'tick': self.tick,
+                 'event': {'command_settled': {'receipt': settled}}})
+            self.next_seq += 1
+
+    # What the scan's input read reports for point 302: the forced value
+    # at Substituted while a force stands, else the held value — whose
+    # quality this stub can hold at Substituted to model a release that
+    # never recovers Good.
+    def _oos_sample(self):
+        if self.force is not None and not self.force_unseen:
+            return {'value': {'bool': self.force},
+                    'quality': {'uncertain': 'substituted'},
+                    'tick': self.tick}
+        quality = {'uncertain': 'substituted'} if self.no_recovery \
+            else 'good'
+        return {'value': {'bool': self.held}, 'quality': quality,
+                'tick': self.tick}
+
+    # digital-input:12's inverted carrier: p101-oos-ok = NOT the
+    # observed oos sample, propagating its quality — the control image
+    # the scenario watches follow the force.
+    def _oos_ok_sample(self, oos):
+        observed = oos['value']['bool']
+        driven = not self.held if self.control_ignores else not observed
+        return {'value': {'bool': driven}, 'quality': oos['quality'],
+                'tick': self.tick}
+
+    def http_json(self, method, url, body=None, timeout=10):
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._advance()
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            points = [
+                {'point': 302, 'signal': 10302, 'name': 'p101-oos',
+                 'direction': 'in', 'value_type': 'bool',
+                 'writable': True},
+                {'point': 308, 'signal': 10308, 'name': 'p101-oos-ok',
+                 'direction': 'out', 'value_type': 'bool',
+                 'writable': False}]
+            if self.no_oos:
+                points = points[1:]
+            return 200, {'points': points, 'components': []}
+        if (method, route) == ('GET', '/snapshot'):
+            oos = self._oos_sample()
+            forces = [] if self.force is None or self.forces_omitted \
+                else [{'point': 302, 'value': {'bool': self.force}}]
+            return 200, {
+                'tick': self.tick, 'forces': forces,
+                'points': [
+                    {'point': 302, 'direction': 'in', 'sample': oos},
+                    {'point': 308, 'direction': 'out',
+                     'sample': self._oos_ok_sample(oos)}]}
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts)
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1]) if '=' in query else 0
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/command'):
+            command = body['command']
+            if 'unforce_point' in command and self.release_refused:
+                return 200, {'command': command,
+                             'outcome': {'rejected': {'reason': {
+                                 'not_writable': {'point': 302}}}},
+                             'actor': body.get('actor')}
+            receipt = {'command': command,
+                       'outcome': {'accepted': {
+                           'apply_tick': self.tick + 1}},
+                       'actor': body.get('actor')}
+            self.receipts.append(receipt)
+            return 200, receipt
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class ForceReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = ForceFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'FORCE_DEADLINE', 0.5):
+            return scenarios.scenario_force_release(ctx)
+
+    def test_registered_and_replayable(self):
+        # The case joins the deterministic set, and the verification
+        # lane's case-identity lookup resolves it back to its function.
+        self.assertIn(scenarios.scenario_force_release,
+                      scenarios.SCENARIOS)
+        self.assertIs(verify.case_function('force-release'),
+                      scenarios.scenario_force_release)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        self.assertTrue(
+            any('Substituted' in note for note in record['observations']))
+        self.assertTrue(
+            any('journal' in note for note in record['observations']))
+
+    def test_forced_telemetry_never_substitutes_fails(self):
+        self.feed.force_unseen = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('forced telemetry never showed',
+                      record.get('detail', ''))
+        self.assertIn('Substituted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_forces_list_omits_point_fails(self):
+        self.feed.forces_omitted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('snapshot.forces', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_control_ignoring_the_force_fails(self):
+        self.feed.control_ignores = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('control following the force',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_commands_never_settling_fails(self):
+        self.feed.never_settled = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no settled force receipt', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_journaled_receipts_without_attribution_fail(self):
+        self.feed.wrong_actor = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('unattributed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_release_that_never_clears_the_badge_fails(self):
+        self.feed.release_sticks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('forces badge never cleared',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_release_refused_fails(self):
+        self.feed.release_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('release refused', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_recovery_that_never_reads_good_fails(self):
+        self.feed.no_recovery = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not recover', record.get('detail', ''))
+        self.assertIn('Good quality', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_force_target_is_inconclusive(self):
+        self.feed.no_oos = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+
 class CommandAdmissionTests(unittest.TestCase):
     """scenario_command_admission against the stubbed feed: the flood
     channel's pipelined submissions fill the fake's bounded queue inside
@@ -1136,6 +1619,286 @@ class FailoverTests(unittest.TestCase):
         record = self.run_scenario(switched=True)
         self.assertEqual(record['outcome'], 'passed', record)
         self.assertEqual(self.feed.role['b'], 'active')
+        report.validate_scenario(record)
+
+
+class PlantLinkFeed:
+    """A stubbed pair plus shared plant for the plant-link-loss
+    scenario. ctrl-a owns the field; the plant's wire protocol answers
+    the scenario's census and fencing probes through `plant_request`.
+    `stop`/`start` replace ctx['stop_plant']/ctx['start_plant'] — the
+    runner-owned lifecycle actions — and flip `plant_up`; every
+    snapshot read advances one scan whose point qualities and
+    io_health reflect the link state. Fault flags stage each named
+    failure the issue calls out."""
+
+    def __init__(self):
+        self.tick = 0
+        self.plant_tick = 0
+        self.plant_up = True
+        self.active_up = True
+        self.cycled = False       # the plant went through stop+start
+        self.claimed = True       # a writer claim stands on the plant
+        self.failed_reads = 0
+        self.failed_writes = 0
+        self.consecutive = 0
+        self.last_error = None
+        self.calls = []           # the lifecycle actions run
+        # Fault injection for the named-failure cases.
+        self.fresh_through = False    # telemetry never degrades
+        self.clean_health = False     # io_health never counts the loss
+        self.promoted = False         # the standby reports active
+        self.aborts = False           # the active's monitor dies on loss
+        self.never_returns = False    # start leaves the plant dead
+        self.start_raises = False     # the start action itself fails
+        self.never_recovers = False   # plant back, reads stay bad
+        self.never_reclaims = False   # the claim is never re-taken
+        self.resets_health = False    # io_health zeroes on recovery
+
+    # The runner-owned lifecycle actions — replace
+    # ctx['stop_plant']/ctx['start_plant'].
+    def stop(self):
+        self.calls.append('stop')
+        self.plant_up = False
+        self.claimed = False        # the claim dies with the server
+        if self.aborts:
+            self.active_up = False
+
+    def start(self):
+        self.calls.append('start')
+        if self.start_raises:
+            raise RuntimeError('docker start failed: no such container')
+        if not self.never_returns:
+            self.plant_up = True
+            self.cycled = True
+        if not self.never_reclaims:
+            self.claimed = True     # the field owner re-claimed
+
+    # One completed scan per snapshot read: reads fail at the dead
+    # link, writes keep landing while the plant is up.
+    def _scan(self):
+        self.tick += 1
+        if self._down():
+            if not self.clean_health:
+                self.failed_reads += 5
+                self.failed_writes += 2
+                self.consecutive += 7
+                self.last_error = {
+                    'tick': self.tick, 'point': 10, 'direction': 'in',
+                    'error': {'disconnected': 10}}
+        else:
+            self.consecutive = 0
+            if self.resets_health:
+                self.failed_reads = 0
+                self.failed_writes = 0
+                self.last_error = None
+
+    def _down(self):
+        # The link is severed while the plant is stopped; a feed whose
+        # never_recovers flag is set keeps it severed past the restart.
+        return not self.plant_up \
+            or (self.never_recovers and self.cycled)
+
+    def _link(self):
+        return 'disconnected' if self._down() else 'connected'
+
+    def _quality(self):
+        if self._down():
+            return {'bad': 'communication_fault'}
+        return 'good'
+
+    # The plant wire protocol — replaces scenarios._plant_probe.
+    def plant_request(self, ctx, request, timeout=5):
+        if not self.plant_up:
+            raise urllib.error.URLError('connection refused')
+        if request['op'] == 'list_points':
+            sample = {'value': {'float': 1.5}, 'quality': 'good',
+                      'tick': self.plant_tick}
+            return {'result': 'points', 'points': [
+                {'point': 10, 'direction': 'in', 'sample': sample,
+                 'fault': None},
+                {'point': 11, 'direction': 'in', 'sample': sample,
+                 'fault': None},
+                {'point': 100, 'direction': 'out', 'sample': sample,
+                 'fault': None}]}
+        if request['op'] == 'step':
+            if self.claimed:
+                return {'result': 'error',
+                        'error': {'kind': 'fenced',
+                                  'detail': 'another attachment owns '
+                                            'field writes'}}
+            self.plant_tick += 1
+            return {'result': 'stepped', 'tick': self.plant_tick}
+        raise AssertionError('unexpected plant request %s' % request)
+
+    # The monitor surface — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        route = url.split('/', 3)[3].partition('?')[0]
+        route = '/' + route
+        if host == 'ctrl-b:2':
+            if (method, route) == ('GET', '/role'):
+                role = 'active' if self.promoted else 'standby'
+                report = {'role': role, 'tick': self.tick}
+                if role == 'standby':
+                    report['sync'] = {'tracking': {'aligned': self.tick}}
+                return 200, report
+            raise AssertionError('unexpected request %s %s'
+                                 % (method, url))
+        if not self.active_up:
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': 10, 'signal': None, 'name': 'level-primary',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False},
+                {'point': 11, 'signal': None, 'name': 'level-backup',
+                 'direction': 'in', 'value_type': 'float',
+                 'writable': False}]}
+        if (method, route) == ('GET', '/snapshot'):
+            self._scan()
+            quality = 'good' if self.fresh_through else self._quality()
+            return 200, {'tick': self.tick, 'points': [
+                {'point': 10, 'sample': {'value': {'float': 1.5},
+                                         'quality': quality}},
+                {'point': 11, 'sample': {'value': {'float': 2.5},
+                                         'quality': quality}},
+                {'point': 100, 'sample': {'value': {'bool': False},
+                                          'quality': 'good'}}],
+                'io_health': {
+                    'failed_reads': self.failed_reads,
+                    'failed_writes': self.failed_writes,
+                    'consecutive_failures': self.consecutive,
+                    'last_error': self.last_error,
+                    'scan_overruns': 0,
+                    'driver': {'link': self._link(),
+                               'last_error': self.last_error
+                               and 'connection reset'}}}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class PlantLinkLossTests(unittest.TestCase):
+    """scenario_plant_link_loss against the stubbed feed: the lifecycle
+    actions cycle the shared plant while the monitor surface and the
+    wire protocol carry the degradation and recovery evidence."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = PlantLinkFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, ctx_extra=None):
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': '127.0.0.1:9',
+               'evidence_dir': str(self.evidence),
+               'stop_plant': self.feed.stop,
+               'start_plant': self.feed.start}
+        ctx.update(ctx_extra or {})
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, '_plant_probe',
+                             self.feed.plant_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'LINK_POLL', 0.001), \
+                patch.object(scenarios, 'LINK_DEGRADE_DEADLINE', 0.05), \
+                patch.object(scenarios, 'LINK_SETTLE', 0.005), \
+                patch.object(scenarios, 'LINK_RECOVERY_DEADLINE', 0.05):
+            return scenarios.scenario_plant_link_loss(ctx)
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_plant_link_loss,
+                      scenarios.SCENARIOS)
+
+    def test_clean_loss_recovery_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.calls, ['stop', 'start'])
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        outage = json.loads(
+            (self.evidence / 'plant-link-loss-outage.json').read_text())
+        self.assertGreater(
+            outage['health']['failed_reads'], 0)
+        self.assertEqual(outage['health']['driver']['link'],
+                         'disconnected')
+
+    def test_fresh_telemetry_through_outage_fails(self):
+        self.feed.fresh_through = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('kept reading good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unchecked_link_failure_fails(self):
+        self.feed.clean_health = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('io_health', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promotion_during_outage_fails(self):
+        self.feed.promoted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('role', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_aborted_run_fails(self):
+        # The run that dies on field loss: the active's monitor never
+        # answers after the stop — the named 'scans continuing rather
+        # than aborting' violation.
+        self.feed.aborts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('aborted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unreturned_plant_is_inconclusive(self):
+        self.feed.never_returns = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never served again', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_start_action_is_inconclusive(self):
+        self.feed.start_raises = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('start', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unreclaimed_writer_claim_fails(self):
+        self.feed.never_reclaims = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('single-writer claim',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unrecovered_reads_fail(self):
+        self.feed.never_recovers = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('Good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_reset_io_health_fails(self):
+        self.feed.resets_health = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('reset', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_actions_is_inconclusive(self):
+        record = self.run_scenario({'stop_plant': None})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
         report.validate_scenario(record)
 
 
