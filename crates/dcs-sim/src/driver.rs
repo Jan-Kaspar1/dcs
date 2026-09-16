@@ -640,8 +640,10 @@ impl IoDriver for SimDriver {
     /// / `.fault` (the last only while a fault is active), and
     /// `element.{id}` — a `Float` accumulator for every variant but a
     /// `threshold`, whose standing contact captures as a `Bool` — plus
-    /// `element.{id}.v` for second-order lags and `element.{id}.rng` for
-    /// noise elements' generator state —
+    /// `element.{id}.v` for second-order lags, `element.{id}.rng` for
+    /// noise elements' generator state, and a dead time's delay line as
+    /// `element.{id}.line.t` / `.len` / `.{i}.t` / `.{i}.u` — the line's
+    /// clock and its history ring, oldest first —
     /// keyed by the element's driven point id. Loopbacks and element
     /// definitions are map configuration, not state, so they are not
     /// captured. This is what transfers the simulated process to a
@@ -687,6 +689,20 @@ impl IoDriver for SimDriver {
                     format!("element.{output}.rng"),
                     Value::Int(element.rng as i64),
                 );
+            }
+            if let ProcessElement::DeadTime(_) = element.element {
+                // Constructed in `new` for every dead-time element.
+                let line = element.delay_line.as_ref().unwrap();
+                let prefix = format!("element.{output}.line");
+                captured.insert(format!("{prefix}.t"), Value::Float(line.t));
+                captured.insert(
+                    format!("{prefix}.len"),
+                    Value::Int(line.history.len() as i64),
+                );
+                for (index, &(t, u)) in line.history.iter().enumerate() {
+                    captured.insert(format!("{prefix}.{index}.t"), Value::Float(t));
+                    captured.insert(format!("{prefix}.{index}.u"), Value::Float(u));
+                }
             }
         }
         Some(captured)
@@ -787,7 +803,42 @@ impl IoDriver for SimDriver {
                 rng = state.require_i64(STATE_ELEMENT, &field)? as u64;
                 known.push(field);
             }
-            ys.push((y, v, rng, contact));
+            let mut delay_line = None;
+            if let ProcessElement::DeadTime(_) = element.element {
+                let prefix = format!("element.{output}.line");
+                let t = state.require_f64(STATE_ELEMENT, &format!("{prefix}.t"))?;
+                if !t.is_finite() || t < 0.0 {
+                    return Err(invalid(format!("{prefix}.t"), Value::Float(t)));
+                }
+                let len = state.require_i64(STATE_ELEMENT, &format!("{prefix}.len"))?;
+                // The ring always holds at least its seed sample; an
+                // empty restored line could never answer a lookup.
+                if len < 1 {
+                    return Err(invalid(format!("{prefix}.len"), Value::Int(len)));
+                }
+                known.extend([format!("{prefix}.t"), format!("{prefix}.len")]);
+                let mut history = VecDeque::with_capacity(len as usize);
+                let mut previous = 0.0;
+                for index in 0..len {
+                    let field = format!("{prefix}.{index}");
+                    let sample_t = state.require_f64(STATE_ELEMENT, &format!("{field}.t"))?;
+                    // A produced ring is oldest-first — samples at or
+                    // after 0, non-decreasing — with none ahead of the
+                    // line's clock.
+                    if !sample_t.is_finite() || sample_t < previous || sample_t > t {
+                        return Err(invalid(format!("{field}.t"), Value::Float(sample_t)));
+                    }
+                    let u = state.require_f64(STATE_ELEMENT, &format!("{field}.u"))?;
+                    if !u.is_finite() {
+                        return Err(invalid(format!("{field}.u"), Value::Float(u)));
+                    }
+                    known.extend([format!("{field}.t"), format!("{field}.u")]);
+                    history.push_back((sample_t, u));
+                    previous = sample_t;
+                }
+                delay_line = Some(DelayLine { t, history });
+            }
+            ys.push((y, v, rng, contact, delay_line));
         }
 
         let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
@@ -799,11 +850,12 @@ impl IoDriver for SimDriver {
             point_state.sample = Sample::new(value, quality, Tick(sample_tick as u64));
             point_state.fault = fault;
         }
-        for (element, (y, v, rng, contact)) in current.elements.iter_mut().zip(ys) {
+        for (element, (y, v, rng, contact, delay_line)) in current.elements.iter_mut().zip(ys) {
             element.y = y;
             element.v = v;
             element.rng = rng;
             element.contact = contact;
+            element.delay_line = delay_line;
         }
         Ok(())
     }
@@ -1256,6 +1308,130 @@ mod tests {
         }
         sim.step(0.1);
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(9.0));
+    }
+
+    #[test]
+    fn captured_state_restores_dead_time_line_mid_flight() {
+        let map = dead_time_map(0.4);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(5.0)).unwrap();
+        // Capture mid-delay, inputs still in flight on the line: the
+        // line's clock and history ring are part of the transferred
+        // field state.
+        for _ in 0..2 {
+            sim.step(0.1);
+        }
+        let state = sim.capture_state().unwrap();
+        assert_eq!(state.get("element.2.line.t"), Some(Value::Float(0.2)));
+        assert_eq!(state.get("element.2.line.len"), Some(Value::Int(3)));
+        assert_eq!(state.get("element.2.line.0.u"), Some(Value::Float(-1.0)));
+        assert_eq!(state.get("element.2.line.2.u"), Some(Value::Float(5.0)));
+
+        let fresh = SimDriver::new(map).unwrap();
+        fresh.restore_state(&state).unwrap();
+        // The in-flight inputs land on the same steps — no `initial`
+        // replay window — and a further input step delays identically.
+        sim.write(PointId(1), Value::Float(7.5)).unwrap();
+        fresh.write(PointId(1), Value::Float(7.5)).unwrap();
+        for _ in 0..10 {
+            sim.step(0.1);
+            fresh.step(0.1);
+            assert_eq!(
+                fresh.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn captured_state_resyncs_a_standbys_drifted_delay_line() {
+        let map = dead_time_map(0.4);
+        let sim = SimDriver::new(map.clone()).unwrap();
+        sim.write(PointId(1), Value::Float(5.0)).unwrap();
+        for _ in 0..3 {
+            sim.step(0.1);
+        }
+        let state = sim.capture_state().unwrap();
+
+        // The tracking standby's local backend kept stepping between
+        // pulls, so its line holds a divergent clock and input
+        // trajectory of its own.
+        let standby = SimDriver::new(map).unwrap();
+        standby.write(PointId(1), Value::Float(-40.0)).unwrap();
+        for _ in 0..6 {
+            standby.step(0.1);
+        }
+        standby.restore_state(&state).unwrap();
+
+        // The rebuild is wholesale — the restored driver's full state
+        // is the captured one, the drifted line resynced, not merged.
+        assert_eq!(standby.capture_state().unwrap(), state);
+        for _ in 0..10 {
+            sim.step(0.1);
+            standby.step(0.1);
+            assert_eq!(
+                standby.read(PointId(2)).unwrap(),
+                sim.read(PointId(2)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn restore_rejects_dead_time_maps_without_their_line() {
+        let sim = SimDriver::new(dead_time_map(0.3)).unwrap();
+        sim.write(PointId(1), Value::Float(5.0)).unwrap();
+        sim.step(0.1);
+        let state = sim.capture_state().unwrap();
+
+        // A checkpoint from a driver that produced no line section.
+        let mut stripped = StateMap::new();
+        for (field, value) in state.iter() {
+            if !field.starts_with("element.2.line.") {
+                stripped.insert(field, value);
+            }
+        }
+        assert_eq!(
+            sim.restore_state(&stripped).unwrap_err(),
+            StateError::MissingField {
+                element: "sim-driver".to_string(),
+                field: "element.2.line.t".to_string(),
+            }
+        );
+        // A rejected restore changes nothing.
+        assert_eq!(sim.tick(), Tick(1));
+
+        // A field inside the section the driver never captured.
+        let mut foreign = state.clone();
+        foreign.insert("element.2.line.99.u", Value::Float(0.0));
+        assert_eq!(
+            sim.restore_state(&foreign).unwrap_err(),
+            StateError::UnknownField {
+                element: "sim-driver".to_string(),
+                field: "element.2.line.99.u".to_string(),
+            }
+        );
+        assert_eq!(sim.tick(), Tick(1));
+
+        // Line fields are foreign to elements of every other variant.
+        let scalar = SimDriver::new(
+            ChannelMap::new()
+                .with_point(float_point(1, Direction::In))
+                .with_point(float_point(2, Direction::In))
+                .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
+                    input: PointId(1),
+                    output: PointId(2),
+                    time_constant: 1.0,
+                    initial: 0.0,
+                })),
+        )
+        .unwrap();
+        assert_eq!(
+            scalar.restore_state(&state).unwrap_err(),
+            StateError::UnknownField {
+                element: "sim-driver".to_string(),
+                field: "element.2.line.0.t".to_string(),
+            }
+        );
     }
 
     fn noise_map(amplitude: f64, seed: u64) -> ChannelMap {
