@@ -155,6 +155,36 @@ pub struct IoHealth {
     pub driver: Option<DriverDiagnostics>,
 }
 
+/// The snapshot's command-ingress section: admission metrics for the
+/// executor's bounded pending-command queue — the overload visibility
+/// the bounded-ingress decision requires beside the bound itself.
+///
+/// The counters are the run's command-ingress audit like the receipt
+/// log they measure: the checkpoint carries them, so a peer that
+/// adopted one answers this section identically to the active. The two
+/// queue descriptors are local facts, not carried state: `capacity` is
+/// construction configuration and `depth` is the adopted pending set —
+/// an over-capacity restore reads as `depth >= capacity` until a scan
+/// drains it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandQueueDiagnostics {
+    /// Commands presented for admission — every submission the
+    /// executor's command path received, whether it settled accepted,
+    /// was refused by validation, or was refused by a full queue.
+    pub attempts: u64,
+    /// Submissions that passed validation but were refused because the
+    /// pending queue was already at `capacity` — each answered with a
+    /// `queue_full` rejection receipt and queued nothing.
+    pub full_rejections: u64,
+    /// The declared bound on commands queued awaiting their scan
+    /// boundary.
+    pub capacity: usize,
+    /// Commands currently queued awaiting the next scan boundary.
+    pub depth: usize,
+    /// The deepest the pending queue has run — the high-water mark.
+    pub high_water: usize,
+}
+
 /// A point-in-time snapshot of a controller run for monitoring consumers.
 ///
 /// A snapshot reports state, not history: each point and each component
@@ -197,6 +227,15 @@ pub struct TelemetrySnapshot {
     /// before the section existed.
     #[serde(default)]
     pub parameters: Vec<ComponentParameters>,
+    /// The command-ingress section: the bounded pending-command queue's
+    /// admission metrics — submissions attempted, full-queue rejections,
+    /// the declared capacity, and the queue's current depth and
+    /// high-water mark — so a monitoring consumer sees command-path
+    /// overload as telemetry rather than as timing failure. Absent from
+    /// snapshots serialized before the bound existed; such a snapshot
+    /// reads back with a zeroed section.
+    #[serde(default)]
+    pub command_queue: CommandQueueDiagnostics,
 }
 
 #[cfg(test)]
@@ -318,6 +357,13 @@ mod tests {
                     values: BTreeMap::new(),
                 },
             ],
+            command_queue: CommandQueueDiagnostics {
+                attempts: 9,
+                full_rejections: 2,
+                capacity: 64,
+                depth: 3,
+                high_water: 6,
+            },
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
@@ -325,13 +371,15 @@ mod tests {
             snapshot
         );
 
-        // A snapshot serialized before forces, parameter reporting, and
-        // the cyclic exchange counters existed carries none of those
-        // fields and reads back with empty sections.
+        // A snapshot serialized before forces, parameter reporting, the
+        // cyclic exchange counters, and the command-queue section existed
+        // carries none of those fields and reads back with empty
+        // sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object_mut().unwrap();
         object.remove("forces");
         object.remove("parameters");
+        object.remove("command_queue");
         object
             .get_mut("io_health")
             .unwrap()
@@ -342,5 +390,6 @@ mod tests {
         assert_eq!(legacy.forces, Vec::new());
         assert_eq!(legacy.parameters, Vec::new());
         assert_eq!(legacy.io_health.failed_exchanges, 0);
+        assert_eq!(legacy.command_queue, CommandQueueDiagnostics::default());
     }
 }

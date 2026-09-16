@@ -54,7 +54,12 @@
 //!   standby or mid-transition instance the command is refused with a
 //!   [`CommandError::NotActive`] rejection receipt, so an operator write
 //!   is never reported applied while the write gate keeps it from the
-//!   field
+//!   field. The executor's pending queue is bounded
+//!   ([`Executor::with_command_queue_capacity`]): a validated command
+//!   arriving while the queue is full is refused with a
+//!   [`CommandError::QueueFull`] rejection receipt — admission is
+//!   receipted, never fire-and-forget — and the queue's admission
+//!   metrics ride the snapshot's `command_queue` section
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
 //!   refused with `409` on a paced monitor (see below)

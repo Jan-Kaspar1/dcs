@@ -37,6 +37,12 @@
 //! writable `In` points: writes to unmarked points and to every `Out`
 //! point are refused at submission with
 //! [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable).
+//! The queue is bounded by
+//! [`Executor::with_command_queue_capacity`] — a validated submission
+//! past the bound is refused with
+//! [`CommandError::QueueFull`](dcs_core::CommandError::QueueFull) —
+//! and its admission metrics ride the snapshot's `command_queue`
+//! section.
 //! `force_point`/`unforce_point` share that surface: a force pins a
 //! point's image to an operator value stamped
 //! [`Quality::Uncertain`](dcs_core::Quality::Uncertain)`(Substituted)`
@@ -73,12 +79,14 @@ mod peer;
 mod revision;
 
 pub use checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS,
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, CommandAdmissionCounts, RestoreError,
+    SUPPORTED_FORMAT_VERSIONS,
 };
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
 pub use executor::{
-    ComponentStatus, Executor, LinkError, PointMap, PointSpec, ScanError, WiringError,
+    ComponentStatus, DEFAULT_COMMAND_QUEUE_CAPACITY, Executor, LinkError, PointMap, PointSpec,
+    ScanError, WiringError,
 };
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange, TrackReport, Transfer};
