@@ -3,7 +3,8 @@
 //! consumer repository. This test materializes it into a scratch
 //! directory *outside* the workspace, rewrites only the dependency
 //! remote to a `file://` stand-in for the published origin — the
-//! recorded `rev` pin untouched — and runs the tree's own `ci/check.sh`
+//! recorded `rev` pin untouched, with the stand-in seeded to serve
+//! exactly that commit — and runs the tree's own `ci/check.sh`
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance, the manifest fingerprint check, and the
@@ -25,8 +26,9 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Mutex;
 
-use common::{CARGO, repo_url, root};
+use common::{CARGO, PIN_UNRESOLVABLE, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
@@ -72,6 +74,89 @@ fn build_tools() -> PathBuf {
     target_dir().join("debug")
 }
 
+/// The `rev = "…"` pin the template's manifest records for the release
+/// crates — the object the stand-in remote must serve.
+fn pinned_rev(dir: &Path) -> String {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    for line in manifest.lines() {
+        if let Some(start) = line.find("rev = \"") {
+            let rest = &line[start + "rev = \"".len()..];
+            if let Some(end) = rest.find('"') {
+                return rest[..end].to_owned();
+            }
+        }
+    }
+    panic!("the template's Cargo.toml records no rev pin");
+}
+
+/// Runs `git args` in `dir`, asserting success.
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Ensures the checkout's object store contains `rev`. CI checkouts
+/// are shallow (`actions/checkout` fetches at depth 1), so the
+/// recorded release commit may be absent; fetch it from `origin` — the
+/// published origin itself — when the store lacks it.
+fn ensure_commit(rev: &str) {
+    static FETCH_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = FETCH_LOCK.lock().unwrap();
+    let present = Command::new("git")
+        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
+        .current_dir(root())
+        .output()
+        .expect("git cat-file runs");
+    if present.status.success() {
+        return;
+    }
+    for remote in ["origin", PUBLISHED_REMOTE] {
+        let fetch = Command::new("git")
+            .args(["fetch", "--depth", "1", remote, rev])
+            .current_dir(root())
+            .output()
+            .expect("git fetch runs");
+        if fetch.status.success() {
+            return;
+        }
+    }
+    panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
+}
+
+/// A `file://` stand-in for the published origin: a bare repository in
+/// the materialized scratch that serves exactly the recorded rev. The
+/// workspace checkout alone cannot play the remote in CI — its shallow
+/// object store lacks the pinned commit and serves no way to name it —
+/// so the stand-in is seeded with that commit, the same object the
+/// published origin serves for the recorded rev.
+fn serve_pinned_rev(scratch: &Path) -> String {
+    let rev = pinned_rev(scratch);
+    ensure_commit(&rev);
+    let remote = scratch.join("dcs-remote.git");
+    git(scratch, &["init", "--bare", "dcs-remote.git"]);
+    // The local transport serves the object directly; the published
+    // origin is the fallback when the checkout cannot.
+    let fetch = Command::new("git")
+        .args(["fetch", "--depth", "1", &root().display().to_string(), &rev])
+        .current_dir(&remote)
+        .output()
+        .expect("git fetch runs");
+    if !fetch.status.success() {
+        git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
+    }
+    git(&remote, &["update-ref", "refs/heads/main", &rev]);
+    format!("file://{}", remote.display())
+}
+
 /// Copies `src` into `dst` recursively.
 fn copy_tree(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
@@ -90,6 +175,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// removed on drop.
 struct Materialized {
     dir: PathBuf,
+    remote: String,
 }
 
 impl Materialized {
@@ -105,14 +191,15 @@ impl Materialized {
                 .as_nanos()
         ));
         copy_tree(&root().join("reference-plant"), &dir);
+        let remote = serve_pinned_rev(&dir);
         let manifest = dir.join("Cargo.toml");
         let source = std::fs::read_to_string(&manifest).unwrap();
         assert!(
             source.contains(PUBLISHED_REMOTE),
             "the template no longer pins the published remote"
         );
-        std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &repo_url())).unwrap();
-        Self { dir }
+        std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &remote)).unwrap();
+        Self { dir, remote }
     }
 
     /// Runs the template's own clean-CI path against the `file://`
@@ -122,7 +209,7 @@ impl Materialized {
         Command::new("bash")
             .arg("ci/check.sh")
             .current_dir(&self.dir)
-            .env("DCS_REMOTE", repo_url())
+            .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()
