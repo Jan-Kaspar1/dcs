@@ -71,12 +71,11 @@ def main():
     elif args.command == 'upgrade':
         subprocess.run([sys.executable, str(Path(args.source).resolve() / 'scripts/install_agents.py')], check=True)
     elif args.command == 'wait-service':
+        # Keepalive: start the supervisor once, then hold WSL open. Exiting
+        # when the service stops would strand upgrades, which require the stop.
         subprocess.run(['systemctl', '--user', 'start', 'dcs-agents.service'], check=True)
         while True:
-            status = subprocess.run(['systemctl', '--user', 'show', '-p', 'ActiveState', '--value', 'dcs-agents.service'], capture_output=True, text=True).stdout.strip()
-            if status in ('inactive', 'failed'):
-                break
-            time.sleep(10)
+            time.sleep(3600)
 
 if __name__ == '__main__':
     main()
