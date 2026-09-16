@@ -232,6 +232,76 @@
           "if": {
             "properties": {
               "kind": {
+                "const": "sim-cyclic"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "exchange_miss_threshold": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "stations": {
+                    "additionalProperties": {
+                      "additionalProperties": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/register-index"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "initial": {
+                                "$ref": "#/$defs/value"
+                              },
+                              "register": {
+                                "$ref": "#/$defs/register-index"
+                              }
+                            },
+                            "required": [
+                              "register"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "minProperties": 1,
+                      "type": "object"
+                    },
+                    "minProperties": 1,
+                    "type": "object"
+                  },
+                  "timeout_ms": {
+                    "$ref": "#/$defs/nonneg-int"
+                  }
+                },
+                "required": [
+                  "address",
+                  "exchange_miss_threshold",
+                  "stations"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
                 "const": "sim-scripted"
               }
             },
