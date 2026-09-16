@@ -49,6 +49,17 @@
 //! `command_refused` an unavailable declared command settles — arrives
 //! as the ordinary rejected receipt.
 //!
+//! The interface surface's read half is `schema` and `events`:
+//! `schema` prints the served [`SchemaView`](dcs_core::SchemaView) —
+//! the block-interface registry, every served instance's declared
+//! measurements, configuration, state, commands, and events — and
+//! `events [<component>]` prints the [`ResourceView`](dcs_core::ResourceView)'s
+//! per-instance `events`, the retained journal tail attributed to the
+//! named component, or every component's list keyed by name when the
+//! argument is absent. A name the served registry does not carry
+//! fails the invocation naming it — the read is a lookup, never a
+//! submission, so there is no receipt to answer with.
+//!
 //! Every receipted submission can declare the actor identity the
 //! command-path audit-attribution contract journals — the tool-side
 //! source beside the page's `?operator=` parameter: `--actor <name>`
@@ -64,7 +75,8 @@
 //! change unattributed.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, PointId, RoleReport, SwitchError, Value, ValueKind,
+    Command, CommandOutcome, CommandReceipt, JournalEntry, PointId, RoleReport, SwitchError, Value,
+    ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use serde::Serialize;
@@ -79,6 +91,12 @@ usage: dcs-ctl <addr> <command> [args]
 read commands:
   snapshot                    the executor's current TelemetrySnapshot
   signals                     the served SignalIndex
+  schema                      the served block-interface registry — each
+                              instance's declared ports, parameters,
+                              commands, and events
+  events [<component>]        the recently emitted events attributed to
+                              <component>, or every component's keyed
+                              by name
   role                        the instance's RoleReport
   receipts                    the executor's receipt log
   journal [--since <seq>]     journal entries with a seq above <seq>
@@ -195,6 +213,11 @@ fn resolve(arg: &str) -> Result<SocketAddr, Failure> {
 enum Action {
     Snapshot,
     Signals,
+    Schema,
+    Events {
+        /// `None` prints every served component's list.
+        component: Option<String>,
+    },
     Role,
     Receipts,
     Journal {
@@ -252,6 +275,14 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
     let action = match (command.as_str(), rest) {
         ("snapshot", []) => Action::Snapshot,
         ("signals", []) => Action::Signals,
+        ("schema", []) => Action::Schema,
+        ("events", rest) => match rest {
+            [] => Action::Events { component: None },
+            [component] if !component.starts_with("--") => Action::Events {
+                component: Some((*component).to_string()),
+            },
+            _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+        },
         ("role", []) => Action::Role,
         ("receipts", []) => Action::Receipts,
         ("journal", rest) => Action::Journal {
@@ -319,7 +350,10 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ("scan", [scans]) => Action::Scan {
             scans: parse_count(scans).map_err(usage)?,
         },
-        ("snapshot" | "signals" | "role" | "receipts" | "promote" | "demote" | "scan", _) => {
+        (
+            "snapshot" | "signals" | "schema" | "role" | "receipts" | "promote" | "demote" | "scan",
+            _,
+        ) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -443,6 +477,37 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
     match action {
         Action::Snapshot => print_json(&client.snapshot().map_err(|e| transport(addr, e))?, addr),
         Action::Signals => print_json(&client.signals().map_err(|e| transport(addr, e))?, addr),
+        Action::Schema => print_json(&client.schema().map_err(|e| transport(addr, e))?, addr),
+        Action::Events { component } => {
+            // The resource view's per-instance `events` is the served
+            // event record — the retained journal tail attributed to
+            // each instance, so between-scans entries (a refused
+            // command, say) appear ahead of the stamped publication.
+            let view = client.resources().map_err(|e| transport(addr, e))?;
+            match component {
+                Some(name) => print_json(
+                    &view
+                        .components
+                        .iter()
+                        .find(|entry| entry.name == *name)
+                        .ok_or_else(|| {
+                            Failure::message(format!(
+                                "dcs-ctl: {addr}: no served component named {name:?}"
+                            ))
+                        })?
+                        .events,
+                    addr,
+                ),
+                None => {
+                    let events: BTreeMap<&str, &[JournalEntry]> = view
+                        .components
+                        .iter()
+                        .map(|entry| (entry.name.as_str(), entry.events.as_slice()))
+                        .collect();
+                    print_json(&events, addr)
+                }
+            }
+        }
         Action::Role => print_json(&client.role().map_err(|e| transport(addr, e))?, addr),
         Action::Receipts => print_json(&client.receipts().map_err(|e| transport(addr, e))?, addr),
         Action::Journal { since } => print_json(
