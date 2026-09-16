@@ -1003,7 +1003,7 @@ fn specs_match_registered_kinds_descriptors() {
     // existed keep assembling; the spec is checked against both
     // instances.
     covered.insert(check(
-        &FailoverSelectSpec::new(Default::default(), true),
+        &FailoverSelectSpec::new(Default::default()).with_backup_unhealthy(),
         &FailoverSelect::new(
             "fsel",
             point(1),
@@ -1015,7 +1015,7 @@ fn specs_match_registered_kinds_descriptors() {
         .describe(),
     ));
     covered.insert(check(
-        &FailoverSelectSpec::new(Default::default(), false),
+        &FailoverSelectSpec::new(Default::default()),
         &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4), None).describe(),
     ));
     // `flow-paced-ratio`'s `trim` is the optional port — declared only

@@ -1003,7 +1003,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
     // scripted comms freeze degrades the standby while the canal level
     // keeps serving — the annunciation QA's issue-#502 finding calls
     // for.
-    let failover = plant.add(FailoverSelectSpec::new(parameters([]), true));
+    let failover = plant.add(FailoverSelectSpec::new(parameters([])).with_backup_unhealthy());
     let filter = plant.add(SignalFilterSpec::new(parameters([(
         "alpha",
         Value::Float(config.filter_alpha),

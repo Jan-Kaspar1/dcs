@@ -708,7 +708,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     // `backup_unhealthy` output: a failed standby annunciates while the
     // primary still serves, closing the silent-redundancy-loss gap QA
     // found (issue #502).
-    let failover = plant.add(FailoverSelectSpec::new(parameters([]), true));
+    let failover = plant.add(FailoverSelectSpec::new(parameters([])).with_backup_unhealthy());
     let chain = plant.add(ThresholdChainSpec::new(parameters([
         ("cutoff", Value::Float(config.cutoff)),
         ("stop", Value::Float(config.stop)),

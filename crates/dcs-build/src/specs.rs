@@ -2707,12 +2707,21 @@ impl FailoverSelectSpec {
     pub const PARAMETERS: &'static [ParamDecl] = &[];
 
     /// A spec carrying `parameters` as the instance's parameter map.
-    /// `backup_unhealthy` declares the optional standby-health port.
-    pub fn new(parameters: Parameters, backup_unhealthy: bool) -> Self {
+    /// The emitted instance declares no `backup_unhealthy` port — the
+    /// form documents emitted before the port existed take.
+    pub fn new(parameters: Parameters) -> Self {
         Self {
             parameters,
-            backup_unhealthy,
+            backup_unhealthy: false,
         }
+    }
+
+    /// Declares the optional `backup_unhealthy` port — the form a
+    /// station alarms so a failed standby annunciates before it is
+    /// needed.
+    pub fn with_backup_unhealthy(mut self) -> Self {
+        self.backup_unhealthy = true;
+        self
     }
 }
 

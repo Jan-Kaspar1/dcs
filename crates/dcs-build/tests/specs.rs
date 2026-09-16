@@ -739,7 +739,7 @@ fn failover_select_spec_emits_an_assembling_document() {
     let out = plant.internal_output::<f64>(PointId(20), 0.0);
     let backup_active = plant.internal_output::<bool>(PointId(21), false);
 
-    let select = plant.add(FailoverSelectSpec::new(Default::default(), false));
+    let select = plant.add(FailoverSelectSpec::new(Default::default()));
     plant.connect(primary, select.primary);
     plant.connect(backup, select.backup);
     plant.connect(&select.out, out);
@@ -765,10 +765,10 @@ fn failover_select_rejects_an_undeclared_parameter() {
     let out = plant.internal_output::<f64>(PointId(20), 0.0);
     let backup_active = plant.internal_output::<bool>(PointId(21), false);
 
-    let select = plant.add(FailoverSelectSpec::new(
-        parameters([("latch", Value::Bool(true))]),
-        false,
-    ));
+    let select = plant.add(FailoverSelectSpec::new(parameters([(
+        "latch",
+        Value::Bool(true),
+    )])));
     plant.connect(primary, select.primary);
     plant.connect(backup, select.backup);
     plant.connect(&select.out, out);
