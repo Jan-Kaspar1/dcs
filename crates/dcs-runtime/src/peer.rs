@@ -141,6 +141,11 @@ pub struct Peer<'d> {
     /// the gate lifts — the fencing arbitration of the failover
     /// decision — when the driver surface can arbitrate single-writer.
     claim: Option<Claim<'d>>,
+    /// The claim's demotion counterpart — forgets the recorded
+    /// ownership token on the driver surface, so a peer that gave the
+    /// field up does not re-assert a stale claim when a re-attach finds
+    /// the field's arbitration reset.
+    release: Option<Release<'d>>,
     /// Whether this peer rolls a revised model into production — armed
     /// by [`with_revision`](Peer::with_revision): a pulled checkpoint
     /// whose fingerprint differs from this run's crosses the model
@@ -172,6 +177,18 @@ struct Claim<'d>(Box<dyn Fn() -> Result<(), String> + Send + Sync + 'd>);
 impl fmt::Debug for Claim<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("field claim")
+    }
+}
+
+/// The demotion counterpart of [`Claim`]: forgets this peer's recorded
+/// write-ownership on the driver surface. Infallible — the release is a
+/// local memory clear, not a field transaction; the field's standing
+/// claim is the field's to arbitrate.
+struct Release<'d>(Box<dyn Fn() + Send + Sync + 'd>);
+
+impl fmt::Debug for Release<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field release")
     }
 }
 
@@ -330,6 +347,7 @@ impl<'d> Peer<'d> {
             converged: false,
             failover: None,
             claim: None,
+            release: None,
             revision: false,
             pending_reinits: Vec::new(),
             fencing_lost: false,
@@ -349,6 +367,17 @@ impl<'d> Peer<'d> {
         claim: impl Fn() -> Result<(), String> + Send + Sync + 'd,
     ) -> Self {
         self.claim = Some(Claim(Box::new(claim)));
+        self
+    }
+
+    /// Arms the claim's demotion counterpart — run when the gate closes:
+    /// `release` forgets whatever ownership token this peer's attachments
+    /// recorded, so a re-attaching driver surface cannot re-assert a
+    /// stale claim and race the peer that legitimately took the field.
+    /// A peer built without it still quiesces at the gate; the release
+    /// matters only for driver surfaces that re-arm claims on reconnect.
+    pub fn with_field_release(mut self, release: impl Fn() + Send + Sync + 'd) -> Self {
+        self.release = Some(Release(Box::new(release)));
         self
     }
 
@@ -400,6 +429,7 @@ impl<'d> Peer<'d> {
             converged: false,
             failover: None,
             claim: None,
+            release: None,
             revision: false,
             pending_reinits: Vec::new(),
             fencing_lost: false,
@@ -559,8 +589,10 @@ impl<'d> Peer<'d> {
 
     /// Demotes the instance to a tracking peer: closes the write gate at
     /// the request's scan boundary — the next scan is already quiesced —
-    /// and reports `demoting`, settling to `standby` when that scan
-    /// completes.
+    /// runs the installed field-release hook so the demoted attachments
+    /// forget the ownership token they would otherwise re-assert on a
+    /// re-attach, and reports `demoting`, settling to `standby` when that
+    /// scan completes.
     ///
     /// Only a field-owning instance demotes; anything else is refused
     /// with [`SwitchError::NotActive`]. The demoted peer's reported
@@ -573,6 +605,9 @@ impl<'d> Peer<'d> {
         }
         if let Some(gate) = self.gate {
             gate.close();
+        }
+        if let Some(release) = &self.release {
+            release.0();
         }
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
@@ -876,10 +911,10 @@ impl<'d> Peer<'d> {
     ///
     /// A field-owning scan whose write the shared field fenced —
     /// [`IoError::Fenced`], meaning the claim this peer held was
-    /// preempted — still fails with its [`ScanError`], and queues one
-    /// [`FencingLoss`] for the journal: the loss of the field's
-    /// single-writer claim is a recorded run event, not only the exit
-    /// cause a caller may print.
+    /// preempted — completes degraded like any field fault, and queues
+    /// one [`FencingLoss`] for the journal: the loss of the field's
+    /// single-writer claim is a recorded run event, not only a counter
+    /// in `io_health`.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
         let tick = match self.executor.scan() {
             Ok(tick) => tick,
@@ -897,6 +932,13 @@ impl<'d> Peer<'d> {
                 return Err(error);
             }
         };
+        if self.owns_field()
+            && !self.fencing_lost
+            && let Some(point) = self.executor.fenced_write()
+        {
+            self.fencing_lost = true;
+            self.pending_fencing.push(FencingLoss { tick, point });
+        }
         match self.role {
             Role::Promoting => self.change(tick, Role::Active),
             Role::Demoting => self.change(tick, Role::Standby),
@@ -1027,7 +1069,7 @@ mod tests {
     use dcs_core::{
         CommandArgument, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor,
         Direction, Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention,
-        EventValue, IoDriver, IoError, PointId, Sample, StateMap, Value, ValueKind,
+        EventValue, IoDriver, IoError, IoFault, PointId, Sample, StateMap, Value, ValueKind,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1340,7 +1382,10 @@ mod tests {
         let point = PointId(1);
         let driver = StubDriver::new(point, Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
-        let mut peer = Peer::active(executor(&gate), Some(&gate));
+        let released = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate)).with_field_release(|| {
+            released.store(true, Ordering::Relaxed);
+        });
         peer.activate().unwrap();
         peer.scan().unwrap();
         assert!(gate.is_open());
@@ -1349,6 +1394,10 @@ mod tests {
         assert_eq!(peer.role(), Role::Demoting);
         assert!(!gate.is_open());
         assert!(!peer.owns_field());
+        // The release ran with the gate's close — the demoted
+        // attachment's recorded claim cannot ride a later re-attach back
+        // onto the field its new owner claimed.
+        assert!(released.load(Ordering::Relaxed));
 
         // The gate is already closed: writes stop before the settle.
         gate.write(point, Value::Float(9.0)).unwrap();
@@ -1446,8 +1495,19 @@ mod tests {
         assert!(peer.take_fencing_losses().is_empty());
 
         // Another attachment took the claim: the next write is fenced.
+        // The scan completes degraded — the boundary counted the fenced
+        // fault into `io_health` — and the claim loss queues once.
         fenced.armed.store(true, Ordering::Relaxed);
-        assert_eq!(peer.scan(), Err(ScanError::Io(IoError::Fenced(OUTPUT))));
+        peer.scan().unwrap();
+        assert_eq!(
+            peer.snapshot().io_health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: OUTPUT,
+                direction: Direction::Out,
+                error: IoError::Fenced(OUTPUT),
+            })
+        );
         assert_eq!(
             peer.take_fencing_losses(),
             vec![FencingLoss {
@@ -1458,7 +1518,7 @@ mod tests {
 
         // The loss is one event per held claim — repeated fenced scans
         // do not queue again.
-        assert!(peer.scan().is_err());
+        peer.scan().unwrap();
         assert!(peer.take_fencing_losses().is_empty());
     }
 

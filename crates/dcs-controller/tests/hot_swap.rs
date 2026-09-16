@@ -23,8 +23,8 @@
 //! identically.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, IoDriver, JournalEvent, PointId, Quality, QualityReason,
-    Role, StandbySync, SwitchError, Value, ValueKind,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Quality,
+    QualityReason, Role, StandbySync, SwitchError, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -321,9 +321,20 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
 
     // The field owner's next requested scan surfaces the dead plant as
     // the documented IoError — the output write fails `disconnected`,
-    // not a silently divergent run.
-    let error = active.advance(1).unwrap_err();
-    assert!(error.to_string().contains("disconnected"), "{error}");
+    // counted in io_health — while the scan itself completes and the
+    // monitor keeps serving: a field outage degrades the run, it does
+    // not end it.
+    let snapshot = active.advance(1).unwrap();
+    let health = &snapshot.io_health;
+    assert!(health.failed_reads > 0, "{health:?}");
+    assert!(health.failed_writes > 0, "{health:?}");
+    assert!(
+        matches!(
+            health.last_error.as_ref().map(|fault| &fault.error),
+            Some(IoError::Disconnected(_))
+        ),
+        "{health:?}"
+    );
 
     // The standby's checkpoint pull still works — the active's monitor
     // is alive — and its quiesced scan completes with the dead field's
@@ -342,13 +353,25 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
         "{level:?}"
     );
 
-    // A restarted plant is a fresh process at initial state; the dead
-    // remote drivers never reconnect, so both peers keep surfacing the
-    // named error rather than resuming against a reset field — the
-    // demoted one's reads stay Bad, the owner's write stays refused.
+    // A restarted plant is a fresh process at initial state — and on a
+    // fresh address: the remote drivers re-attach only to the address
+    // their model configured, so both peers keep surfacing the named
+    // error rather than resuming against a reset field — the demoted
+    // one's reads stay Bad, the owner's write stays refused.
     let restarted = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let error = active.advance(1).unwrap_err();
-    assert!(error.to_string().contains("disconnected"), "{error}");
+    let snapshot = active.advance(1).unwrap();
+    assert!(
+        matches!(
+            snapshot
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Disconnected(_))
+        ),
+        "{:?}",
+        snapshot.io_health
+    );
     let snapshot = standby.advance(1).unwrap();
     let level = snapshot
         .points

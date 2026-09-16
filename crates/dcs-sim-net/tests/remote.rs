@@ -270,7 +270,8 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
 
         server.shutdown();
         // Every access now fails with Disconnected — at the boundary, as
-        // named errors — and the dead driver does not silently recover.
+        // named errors — while the dead endpoint's refused re-attach
+        // attempts keep the driver down until the plant returns.
         assert_eq!(
             remote.read(PointId(10)),
             Err(IoError::Disconnected(PointId(10)))
@@ -327,8 +328,9 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
 
         server.shutdown();
         // The dead link fails the input read — degraded to a Bad sample
-        // — and the output write, which ends the scan in ScanError.
-        assert!(executor.scan().is_err());
+        // — and the output write; both degrade into io_health while the
+        // scan completes: a field outage does not stop the controller.
+        assert_eq!(executor.scan(), Ok(Tick(2)));
 
         let snapshot = executor.snapshot();
         let health = &snapshot.io_health;
@@ -363,7 +365,7 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
 }
 
 #[test]
-fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
+fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
     // A listener that never answers: the handshake completes out of the
     // backlog but no response ever arrives.
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -372,12 +374,17 @@ fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
 
     assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     // A late answer could pair with a later request, so the link is
-    // dropped: the next access fails fast as Disconnected.
+    // dropped — but the peer is still listening, so the lazy re-attach
+    // lands a fresh stream and the next access waits out its own
+    // timeout rather than failing fast.
+    assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
+    drop(listener);
+    // With the listener gone the re-attach itself is refused — the
+    // endpoint now reports not-answerable at connect time.
     assert_eq!(
         remote.read(PointId(1)),
         Err(IoError::Disconnected(PointId(1)))
     );
-    drop(listener);
 }
 
 #[test]
@@ -495,5 +502,141 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
             new_a.write(PointId(20), Value::Float(5.0)),
             Err(IoError::Fenced(PointId(20)))
         );
+    });
+}
+
+/// Polls `remote`'s link until the re-attach lands or `deadline`
+/// expires — the returned-plant half of every restart test.
+fn wait_for_reattach(remote: &RemoteDriver, deadline: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        if remote.read(PointId(10)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the remote driver did not re-attach within {deadline:?}");
+}
+
+#[test]
+fn a_restarted_server_is_re_served_by_the_same_attachment() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let remote = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(7).unwrap();
+        remote.write(PointId(20), Value::Float(1.0)).unwrap();
+        remote.step(0.1).unwrap();
+        // The field owner holds its claim; a claim-less attachment is
+        // already fenced out of mutations.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
+
+        server.shutdown();
+        assert_eq!(
+            remote.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        remote
+    });
+    // The accept thread is joined and the listener dropped, so the
+    // restarted plant rebinds the same port — the `docker stop`/`start`
+    // shape the QA reproduction produces.
+    let restarted = PlantServer::bind(addr, SimDriver::new(loopback_map()).unwrap()).unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+
+        wait_for_reattach(&remote, Duration::from_secs(10));
+        assert!(remote.connected());
+        // The recorded claim re-armed itself on the re-attach: the fresh
+        // plant's empty arbitration now names owner 7 again, and a
+        // claim-less attachment's mutation is fenced exactly as before
+        // the outage.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(
+            probe.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        // The owner's own mutations pass through on the re-armed claim.
+        remote.write(PointId(20), Value::Float(2.0)).unwrap();
+        remote.step(0.1).unwrap();
+        assert_eq!(remote.read(PointId(20)).unwrap().value, Value::Float(2.0));
+        // Diagnostics report the link live again while retaining the
+        // outage's failure record.
+        let diagnostics = remote.diagnostics().unwrap();
+        assert_eq!(diagnostics.link, LinkState::Connected);
+        assert!(diagnostics.last_error.is_some());
+    });
+}
+
+#[test]
+fn a_reconnecting_attachment_cannot_preempt_a_standing_claim() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let remote = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(7).unwrap();
+        remote.write(PointId(20), Value::Float(1.0)).unwrap();
+        server.shutdown();
+        remote
+    });
+    // The plant came back under a different owner — the peer that
+    // promoted during the outage claimed it unconditionally.
+    let restarted = PlantServer::bind(addr, SimDriver::new(loopback_map()).unwrap()).unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+        let new_owner = RemoteDriver::connect(addr).unwrap();
+        new_owner.claim_writer(9).unwrap();
+
+        // The superseded attachment re-attaches, but `ensure_writer`
+        // cannot preempt owner 9 — the recorded claim is dropped and
+        // the attachment's mutations stay fenced at the field.
+        wait_for_reattach(&remote, Duration::from_secs(10));
+        assert_eq!(
+            remote.write(PointId(20), Value::Float(3.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(remote.step(0.1), Err(RemoteError::Fenced));
+        // The standing owner is undisturbed.
+        new_owner.write(PointId(20), Value::Float(4.0)).unwrap();
+        assert_eq!(remote.read(PointId(20)).unwrap().value, Value::Float(4.0));
+    });
+}
+
+#[test]
+fn release_claim_keeps_a_demoted_attachment_from_re_arm() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let remote = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(7).unwrap();
+        // Demotion: the gate closes and the recorded claim is forgotten,
+        // so the restarted plant's empty arbitration is not this
+        // attachment's to re-arm.
+        remote.release_claim();
+        server.shutdown();
+        remote
+    });
+
+    let restarted = PlantServer::bind(addr, SimDriver::new(loopback_map()).unwrap()).unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+        wait_for_reattach(&remote, Duration::from_secs(10));
+        // Had the demoted attachment re-armed owner 7, a claim-less
+        // attachment's mutation would be fenced; the field answers open
+        // instead — free for whichever peer legitimately owns it.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        probe.step(0.1).unwrap();
+        probe.write(PointId(20), Value::Float(5.0)).unwrap();
     });
 }

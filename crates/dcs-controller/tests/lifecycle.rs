@@ -45,9 +45,9 @@
 //! the run returns proves repeated scripted runs identical.
 
 use dcs_core::{
-    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, JournalEvent,
-    ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, IoError,
+    JournalEvent, ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -814,12 +814,21 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     trace.push((carried, field.read(LEVEL).unwrap().value));
 
     // The superseded peer — still running, still scanning — is fenced:
-    // the field refused its write inside the requested scan, and the
+    // the field refused its write inside the requested scan, counted as
+    // the `fenced` fault while the scan completes degraded, and the
     // field keeps only the new owner's output.
-    let fenced = resumed.advance(1).unwrap_err();
+    let fenced = resumed.advance(1).unwrap();
     assert!(
-        fenced.to_string().contains("fenced"),
-        "the returning peer's write must fail fenced: {fenced}"
+        matches!(
+            fenced
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the returning peer's write must be refused fenced: {:?}",
+        fenced.io_health
     );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
 
@@ -829,10 +838,18 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     relay.partition(false);
     let superseded_role = resumed.role().unwrap().role;
     assert_eq!(superseded_role, Role::Active);
-    let fenced_again = resumed.advance(1).unwrap_err();
+    let fenced_again = resumed.advance(1).unwrap();
     assert!(
-        fenced_again.to_string().contains("fenced"),
-        "a healed but superseded peer stays fenced: {fenced_again}"
+        matches!(
+            fenced_again
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "a healed but superseded peer stays fenced: {:?}",
+        fenced_again.io_health
     );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
 
@@ -1055,7 +1072,10 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         "failover": {
             "partitioned_at": at_partition,
             "promoted_at": promotion_tick,
-            "fenced": [fenced.to_string(), fenced_again.to_string()],
+            "fenced": [
+                fenced.io_health.last_error.as_ref().map(|fault| fault.error.to_string()),
+                fenced_again.io_health.last_error.as_ref().map(|fault| fault.error.to_string()),
+            ],
             "superseded_role": superseded_role,
         },
         "revision": {

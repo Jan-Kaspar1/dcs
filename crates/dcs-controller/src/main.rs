@@ -163,13 +163,13 @@
 //! Load, validation, and assembly failures exit nonzero naming the
 //! offending model element.
 
-use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
+use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
-use dcs_sim_net::RemoteDriver;
+use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -202,19 +202,39 @@ impl Driver {
     /// backends — the shared field's clock belongs to the owner, so a
     /// remote-attached standby steps nothing and a fan-out standby
     /// leaves `sim-tcp` backends to the active.
+    ///
+    /// Field trouble is not a run failure: a dead or fenced attachment
+    /// degrades the cycle — the scan's io_health already counted its
+    /// boundary failures — and the run continues so the monitor keeps
+    /// serving the outage. Only a refused step — a malformed `dt` — is
+    /// a run defect and stays fatal.
     fn step(&self, dt: f64, owns_field: bool) -> Result<(), String> {
         match (self, owns_field) {
-            (Self::Local(fanout), true) => fanout
-                .step(dt)
-                .map_err(|error| format!("plant step failed: {error}")),
-            (Self::Local(fanout), false) => fanout
-                .step_local(dt)
-                .map_err(|error| format!("plant step failed: {error}")),
-            (Self::Remote(remote), true) => remote
-                .step(dt)
-                .map(|_| ())
-                .map_err(|error| format!("plant step failed: {error}")),
+            (Self::Local(fanout), true) => degrade_step(fanout.step(dt)),
+            (Self::Local(fanout), false) => degrade_step(fanout.step_local(dt)),
+            (Self::Remote(remote), true) => match remote.step(dt) {
+                Ok(_) => Ok(()),
+                Err(RemoteError::InvalidRequest(detail)) => {
+                    Err(format!("plant step failed: {detail}"))
+                }
+                Err(error) => {
+                    eprintln!("plant step degraded: {error}");
+                    Ok(())
+                }
+            },
             (Self::Remote(_), false) => Ok(()),
+        }
+    }
+
+    /// Forgets this instance's recorded field-ownership claim — the
+    /// demotion counterpart of [`claim_writer`](Self::claim_writer):
+    /// after it, a re-attaching field driver does not re-arm a claim
+    /// this peer gave up, so a restarted plant's empty arbitration stays
+    /// free for the peer that legitimately owns the field.
+    fn release_claim(&self) {
+        match self {
+            Self::Remote(remote) => remote.release_claim(),
+            Self::Local(fanout) => fanout.release_field_claims(),
         }
     }
 
@@ -256,6 +276,26 @@ impl Driver {
                 .map(|device| device.0.to_string())
                 .collect(),
         }
+    }
+}
+
+/// A local backend step result under the same rule [`Driver::step`]
+/// applies to the remote attachment: a field failure — the backend
+/// answered [`StepError::Backend`], or a cross-backend wire's I/O fault
+/// [`StepError::Route`] — degrades the cycle instead of failing the run;
+/// anything else is a refusal and stays fatal.
+fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
+    match stepped {
+        Err(StepError::Backend { backend, detail }) => {
+            eprintln!("plant step degraded on {backend}: {detail}");
+            Ok(())
+        }
+        Err(StepError::Route(error)) => {
+            eprintln!("plant step degraded on a cross-backend wire: {error}");
+            Ok(())
+        }
+        Err(error) => Err(format!("plant step failed: {error}")),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -775,7 +815,9 @@ fn main() -> ExitCode {
         Some(_) => Peer::standby(executor, gate.as_ref()),
         None => Peer::active(executor, gate.as_ref()),
     };
-    let peer = peer.with_field_claim(|| driver.claim_writer(owner));
+    let peer = peer
+        .with_field_claim(|| driver.claim_writer(owner))
+        .with_field_release(|| driver.release_claim());
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,

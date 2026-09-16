@@ -1101,6 +1101,14 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
     }
+    // A field write the plant fenced — the claim this owner held was
+    // preempted — degrades the completed scan rather than ending the
+    // run, so its loss journals here on the success path: the event
+    // belongs to the run's audit trail, beside the `io_health` fault
+    // the boundary already counted.
+    for loss in peer.take_fencing_losses() {
+        recorder.note_field_claim_lost(loss.tick, loss.point);
+    }
     store.publish(tick, snapshot, peer.receipts());
     Ok(tick)
 }

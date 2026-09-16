@@ -166,6 +166,24 @@ fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -
             *claimed = Some(owner);
             PlantResponse::Done
         }
+        PlantRequest::EnsureWriter { owner } => {
+            // The re-attach grant: the claim a reconnecting field owner
+            // re-arms after a server restart dropped it. It is refused
+            // while a *different* owner holds the field — a superseded
+            // peer re-attaching cannot preempt the attachment that
+            // claimed during the outage.
+            let mut writer = shared.writer.lock().unwrap();
+            if writer.is_some_and(|standing| standing != owner) {
+                return PlantResponse::Error {
+                    error: PlantError::Fenced {
+                        detail: "another attachment owns field writes".to_string(),
+                    },
+                };
+            }
+            *writer = Some(owner);
+            *claimed = Some(owner);
+            PlantResponse::Done
+        }
     }
 }
 
@@ -180,13 +198,22 @@ fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -
 /// an explicit [`PlantRequest::Step`], an attached standby that only reads
 /// sees the field exactly as the stepping client left it.
 ///
-/// [`serve`](Self::serve) runs the blocking accept loop on the caller's
-/// thread — run it on a dedicated thread — and [`shutdown`](Self::shutdown)
-/// stops it, force-closing live connections so blocked handler threads and
-/// remote clients see the server go away.
+/// [`serve`](Self::serve) runs the accept loop on the caller's thread —
+/// run it on a dedicated thread — and [`shutdown`](Self::shutdown) stops
+/// it, closing the listener so the address refuses new connections and a
+/// restarted plant may rebind the same port, and force-closing live
+/// connections so blocked handler threads and remote clients see the
+/// server go away.
 pub struct PlantServer {
     shared: Arc<Shared>,
-    listener: TcpListener,
+    /// `Some` while the server accepts; [`shutdown`](Self::shutdown)
+    /// takes and drops it, closing the port — the stopped-plant shape a
+    /// `docker stop` produces — rather than leaving a bound socket that
+    /// accepts into a backlog nothing serves.
+    listener: Mutex<Option<TcpListener>>,
+    /// The bound address, captured at [`bind`](Self::bind) — still
+    /// answerable after `shutdown` released the listener.
+    addr: SocketAddr,
 }
 
 impl PlantServer {
@@ -198,6 +225,12 @@ impl PlantServer {
     /// (dcs_sim::ChannelMap) — lets the caller serve a plant whose state
     /// was already stepped, faulted, or restored from a checkpoint.
     pub fn bind<A: ToSocketAddrs>(addr: A, driver: SimDriver) -> io::Result<Self> {
+        let listener = TcpListener::bind(addr)?;
+        let bound = listener.local_addr()?;
+        // The accept loop polls rather than blocking so `shutdown` can
+        // take the listener — the port closes and a rebound server gets
+        // it — without waking a parked accept.
+        listener.set_nonblocking(true)?;
         Ok(Self {
             shared: Arc::new(Shared {
                 driver,
@@ -206,13 +239,16 @@ impl PlantServer {
                 next_client: AtomicU64::new(0),
                 writer: Mutex::new(None),
             }),
-            listener: TcpListener::bind(addr)?,
+            listener: Mutex::new(Some(listener)),
+            addr: bound,
         })
     }
 
-    /// The address the listener is bound to.
+    /// The address the listener is bound to — still reported after
+    /// [`shutdown`](Self::shutdown) released it, so a restarted server
+    /// can rebind the same port.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        Ok(self.addr)
     }
 
     /// The simulated plant the server is sharing.
@@ -222,26 +258,38 @@ impl PlantServer {
 
     /// Serves connections until [`shutdown`](Self::shutdown).
     ///
-    /// Blocking: run this on a dedicated thread — a scoped thread suffices
-    /// since the server only borrows itself. Each accepted connection gets
-    /// its own handler thread speaking the line protocol; transient accept
-    /// failures are retried rather than killing the server.
+    /// Runs on a dedicated thread — a scoped thread suffices since the
+    /// server only borrows itself. Each accepted connection gets its own
+    /// handler thread speaking the line protocol; transient accept
+    /// failures are retried rather than killing the server. The listener
+    /// is polled nonblocking so [`shutdown`](Self::shutdown) can close
+    /// the port while this loop sits between accepts.
     pub fn serve(&self) {
         loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    if self.shared.stopped() {
-                        return;
-                    }
+            if self.shared.stopped() {
+                return;
+            }
+            let accepted = {
+                let listener = self.listener.lock().unwrap();
+                listener.as_ref().map(|listener| listener.accept())
+            };
+            match accepted {
+                None => return,
+                Some(Ok((stream, _))) => {
+                    // An accepted stream is a fresh socket — restore the
+                    // blocking mode the handler's read loop expects.
+                    let _ = stream.set_nonblocking(false);
                     self.shared.spawn_client(stream);
                 }
-                Err(_) => {
-                    if self.shared.stopped() {
-                        return;
+                Some(Err(error)) => {
+                    if error.kind() != io::ErrorKind::WouldBlock {
+                        // A persistent accept failure (e.g. descriptor
+                        // exhaustion) must not spin hot — and neither
+                        // may the WouldBlock poll.
+                        thread::sleep(std::time::Duration::from_millis(1));
+                    } else {
+                        thread::sleep(std::time::Duration::from_millis(2));
                     }
-                    // A persistent accept failure (e.g. descriptor
-                    // exhaustion) must not spin hot.
-                    thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
         }
@@ -250,17 +298,17 @@ impl PlantServer {
     /// Stops a [`serve`](Self::serve) loop running on another thread and
     /// closes every live client connection.
     ///
-    /// The flag is set first, then the accept loop is woken with a
-    /// throwaway self-connection, then each registered client stream is
-    /// shut down — so a client blocked in, or next issuing, a request sees
-    /// the connection fail rather than hang. The listener itself is
-    /// released when the `PlantServer` is dropped.
+    /// The flag is set first, then the listener is taken and dropped —
+    /// the port refuses new connections from there on, and a restarted
+    /// plant may rebind it — then each registered client stream is shut
+    /// down, so a client blocked in, or next issuing, a request sees the
+    /// connection fail rather than hang. Idempotent: a second call is a
+    /// no-op.
     pub fn shutdown(&self) {
-        self.shared.stopped.store(true, Ordering::Relaxed);
-        // Wake the blocking accept so the serve loop observes the flag.
-        if let Ok(addr) = self.listener.local_addr() {
-            let _ = TcpStream::connect(addr);
+        if self.shared.stopped.swap(true, Ordering::Relaxed) {
+            return;
         }
+        drop(self.listener.lock().unwrap().take());
         for (_, client) in self.shared.clients.lock().unwrap().drain() {
             let _ = client.shutdown(Shutdown::Both);
         }
