@@ -22,13 +22,14 @@
 //! reach the field.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, IoDriver, PointId, Quality, QualityReason, Role,
-    StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, PointId, Quality, QualityReason,
+    Role, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_bus::{BusDriver, BusRequest, BusResponse, ExchangeOutcome, PointRegister};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 mod support;
 
@@ -478,11 +479,28 @@ fn the_tracking_standby_latches_inputs_while_its_writes_never_stage() {
     let frozen = register(&ao, VALVE);
     active_process.child.kill().unwrap();
     active_process.child.wait().unwrap();
-    // The field moves under the orphaned pair — the observer's write is
-    // unfenced while no claim is held: the standby's next exchange must
-    // latch it, and its run's computed valve must move off the frozen
+    // The field moves under the orphaned pair — the dead owner's claim
+    // released with its connection, the observer's write is unfenced
+    // once the release lands: the standby's next exchange must latch
+    // it, and its run's computed valve must move off the frozen
     // register without the field following.
-    ai.write(LEVEL, Value::Float(19.0)).unwrap();
+    let mut released = false;
+    for _ in 0..100 {
+        match ai.write(LEVEL, Value::Float(19.0)) {
+            Ok(_) => {
+                released = true;
+                break;
+            }
+            Err(IoError::Fenced(_)) => std::thread::sleep(Duration::from_millis(20)),
+            other => {
+                other.unwrap();
+            }
+        }
+    }
+    assert!(
+        released,
+        "the dead owner's claim must release with its connection"
+    );
     for _ in 0..4 {
         standby.advance(1).unwrap();
     }

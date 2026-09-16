@@ -212,6 +212,14 @@ impl Recorder {
         self.push(report.resumed_at, JournalEvent::Reinitialized { report });
     }
 
+    /// Journals a field-claim loss — the shared field fenced a write of
+    /// this instance's, meaning another attachment preempted the
+    /// single-writer claim — attributed to the tick the fenced scan was
+    /// observed at.
+    pub(super) fn note_field_claim_lost(&mut self, tick: Tick, point: PointId) {
+        self.push(tick, JournalEvent::FieldClaimLost { point });
+    }
+
     /// Records one completed scan attributed to `scan_tick`; see the
     /// module docs for the event ordering. Returns the materialized
     /// snapshot — built exactly once here — for the monitor to publish

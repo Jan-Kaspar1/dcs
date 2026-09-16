@@ -1086,7 +1086,13 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
             // it — but its boundary already counted the I/O faults
             // into `io_health`: publish the faulted boundary's state
             // so the served read model reports the fault rather than
-            // sitting on the last healthy scan.
+            // sitting on the last healthy scan. A field write the plant
+            // fenced — the claim this owner held was preempted — also
+            // journals its loss here: the event belongs to the run's
+            // audit trail, not only the exit cause.
+            for loss in peer.take_fencing_losses() {
+                recorder.note_field_claim_lost(loss.tick, loss.point);
+            }
             store.publish(peer.tick(), peer.snapshot(), peer.receipts());
             return Err(error);
         }

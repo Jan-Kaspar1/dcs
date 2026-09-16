@@ -192,9 +192,9 @@ fn command_state(spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
 /// belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
-        JournalEvent::QualityChanged { point, .. } | JournalEvent::PointChanged { point, .. } => {
-            points.contains(point)
-        }
+        JournalEvent::QualityChanged { point, .. }
+        | JournalEvent::PointChanged { point, .. }
+        | JournalEvent::FieldClaimLost { point } => points.contains(point),
         JournalEvent::CommandSettled { receipt } => {
             receipt.command.component() == Some(name)
                 || receipt
