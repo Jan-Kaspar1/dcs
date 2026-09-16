@@ -29,7 +29,9 @@
 //!   so a `float` point's per-scan stream is rejected from it;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
-//!   additionally requires the `registers` map, `sim-scripted` requires
+//!   additionally requires the `registers` map, `sim-cyclic` requires the
+//!   `exchange_miss_threshold` and the `stations` map of per-channel
+//!   register declarations, `sim-scripted` requires
 //!   the `script` map, and `ethercat` requires the `hardware` marker plus
 //!   the `bus`, `identity`, `mapping`, `exchange_miss_threshold`, and
 //!   `startup` parameter shapes — the parts of each kind's contract JSON
@@ -293,6 +295,52 @@ const SCHEMA_SOURCE: &str = r##"{
                           }
                         }
                       ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "sim-cyclic" } }
+          },
+          "then": {
+            "required": ["parameters"],
+            "properties": {
+              "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["address", "exchange_miss_threshold", "stations"],
+                "properties": {
+                  "address": { "type": "string" },
+                  "timeout_ms": { "$ref": "#/$defs/nonneg-int" },
+                  "exchange_miss_threshold": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "stations": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "anyOf": [
+                          { "$ref": "#/$defs/register-index" },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["register"],
+                            "properties": {
+                              "register": { "$ref": "#/$defs/register-index" },
+                              "initial": { "$ref": "#/$defs/value" }
+                            }
+                          }
+                        ]
+                      }
                     }
                   }
                 }
