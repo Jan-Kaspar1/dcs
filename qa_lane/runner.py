@@ -804,21 +804,50 @@ def restart_controller(run_id, name, timeline):
     timeline('controller-restarted', container + ' running')
 
 
+def stop_plant(run_id, timeline):
+    """The scenario-callable plant stop: `docker stop` on the run's
+    shared-plant container — the field-loss half of the link-loss
+    scenario, severing both controllers' remote-driver connections at
+    the same boundary. Recorded on the run's action timeline like the
+    controller restart; a docker failure raises so the calling
+    scenario reports the stop never completed."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    timeline('plant-stop', 'docker stop ' + container)
+    docker('stop', '--time', '2', container, timeout=90)
+    timeline('plant-stopped', container + ' stopped')
+
+
+def start_plant(run_id, timeline):
+    """The recovery half: `docker start` relaunches the run's plant
+    container — a fresh plant-server lifetime, so the single-writer
+    claim the old process held is gone and the field owner must
+    re-claim it."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    timeline('plant-start', 'docker start ' + container)
+    docker('start', container, timeout=60)
+    timeline('plant-started', container + ' running')
+
+
 def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key, the run's evidence dir and deadline, the
-    runner-owned controller-restart action, and the host-side
-    per-controller state/journal files the restart scenario reads."""
+    runner-owned controller-restart and plant stop/start actions, the
+    plant server's published address for the link-loss scenario's
+    fencing probes, and the host-side per-controller state/journal
+    files the restart scenario reads."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+        'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'stop_plant': lambda: stop_plant(run_id, timeline),
+        'start_plant': lambda: start_plant(run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
