@@ -1094,7 +1094,7 @@ class StaleFreshnessTests(unittest.TestCase):
         # same evidence files.
         runs = []
         for index in range(2):
-            evidence = Path(self.tmp.name) / 'evidence-' + str(index)
+            evidence = Path(self.tmp.name) / ('evidence-' + str(index))
             evidence.mkdir()
             record = self.run_scenario(feed=FreshnessFeed(),
                                        evidence=evidence)
