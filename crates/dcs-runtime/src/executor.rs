@@ -23,6 +23,15 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 
+/// The refusal reason every well-formed [`Command::Invoke`] meets
+/// today: named-command dispatch is the named-command/event-runtime
+/// tranche, so a validated invocation is refused
+/// [`CommandError::CommandRefused`] naming the gap rather than accepted
+/// and left unsettled. The serving layer reports the same reason as a
+/// declared command's live refusal, so a consumer reads the refusal a
+/// submission would actually meet.
+pub const DECLARED_COMMAND_GAP: &str = "the runtime does not dispatch declared commands";
+
 /// How the controller may use one mapped point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointSpec {
@@ -1830,7 +1839,7 @@ impl<'d> Executor<'d> {
                 Err(CommandError::CommandRefused {
                     component: component.clone(),
                     command: name.clone(),
-                    reason: "the runtime does not dispatch declared commands".to_string(),
+                    reason: DECLARED_COMMAND_GAP.to_string(),
                 })
             }
         }

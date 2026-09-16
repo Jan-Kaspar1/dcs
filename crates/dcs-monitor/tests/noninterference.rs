@@ -372,14 +372,14 @@ struct ConsumerLog {
 }
 
 /// The read surfaces a polling consumer cycles — every read endpoint
-/// the contract serves. The schema/resource views the
-/// `served-block-schema-live-resources` slice will add join this list
-/// when they exist.
+/// the contract serves.
 const READ_SURFACES: &[&str] = &[
     "/snapshot",
     "/receipts",
     "/history?point=10&since=0",
     "/journal?since=0",
+    "/schema",
+    "/resources",
     "/checkpoint",
     "/role",
     "/signals",
