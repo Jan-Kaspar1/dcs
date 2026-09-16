@@ -807,14 +807,16 @@ def restart_controller(run_id, name, timeline):
 def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
-    per endpoint key, the run's evidence dir and deadline, the
-    runner-owned controller-restart action, and the host-side
-    per-controller state/journal files the restart scenario reads."""
+    per endpoint key, the published plant-protocol endpoint, the run's
+    evidence dir and deadline, the runner-owned controller-restart
+    action, and the host-side per-controller state/journal files the
+    restart scenario reads."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+        'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
