@@ -111,7 +111,10 @@ pub enum Command {
     /// `Out` point refuses at submission with the named reason — and the
     /// release lands at the same scan boundary every command uses: the
     /// applying scan's input phase already reads the driver again for a
-    /// field point, or resumes the held-value rule for an internal one.
+    /// field point, or resumes the held-value rule for an internal one —
+    /// its held sample, the force's last stamp, re-stamped
+    /// [`Quality::Good`](crate::Quality::Good) rather than left claiming
+    /// substituted data.
     /// Releasing a point that is not forced applies as a no-op — the
     /// release is idempotent so an operator never needs the current force
     /// set to issue one.

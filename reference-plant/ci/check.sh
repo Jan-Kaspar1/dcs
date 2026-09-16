@@ -246,7 +246,7 @@ ensure_tools "$DCS_REV" \
     || fail "tooling-rejected: dcs-model validate refused the checked-in model"
 LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
     || fail "tooling-rejected: dcs-model lint refused the checked-in model"
-echo "$LINT" | grep -q "no findings" \
+[[ "$LINT" == *"no findings"* ]] \
     || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
@@ -306,7 +306,7 @@ PY
 if out="$(schema_nondrift interface-schema "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
     fail "schema-drift-unchecked: a drifted record artifact passed the interface-schema non-drift leg"
 fi
-echo "$out" | grep -q "schema-drift" \
+[[ "$out" == *"schema-drift"* ]] \
     || fail "schema-drift-unchecked: a drifted record artifact did not report schema-drift: $out"
 echo "  a drifted record artifact refused: schema-drift"
 
@@ -356,12 +356,12 @@ assert_diff model/plant.json model/plant.json "no changes" || exit 1
 if out="$(assert_diff model/plant.json model/plant.json "description:" "signal 10010" 2>&1)"; then
     fail "diff-mismatch-unchecked: asserting differences on the identical document passed"
 fi
-echo "$out" | grep -q "diff-mismatch" \
+[[ "$out" == *"diff-mismatch"* ]] \
     || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
 if out="$(assert_diff model/plant.json "$DIFF_REVISED" "no changes" 2>&1)"; then
     fail "diff-mismatch-unchecked: asserting no changes on the doctored revision passed"
 fi
-echo "$out" | grep -q "diff-mismatch" \
+[[ "$out" == *"diff-mismatch"* ]] \
     || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
 DIFF_INVALID="$SCRATCH/model-incompatible.json"
 python3 - model/plant.json "$DIFF_INVALID" <<'PY'
@@ -373,7 +373,7 @@ PY
 if out="$(assert_diff model/plant.json "$DIFF_INVALID" "description:" "signal 10010" 2>&1)"; then
     fail "diff-mismatch-unchecked: diffing a document outside MODEL_VERSION passed"
 fi
-echo "$out" | grep -q "diff-mismatch" \
+[[ "$out" == *"diff-mismatch"* ]] \
     || fail "diff-mismatch-unchecked: the leg did not report diff-mismatch: $out"
 echo "  failed diff expectations refused: diff-mismatch"
 
@@ -486,7 +486,7 @@ PY
     fi
     [ "$1" = "persistence-omitted" ] \
         && fail "rig-mismatch-unchecked: omitting the persistence fields reported: $out"
-    echo "$out" | grep -q "rig-mismatch" \
+    [[ "$out" == *"rig-mismatch"* ]] \
         || fail "rig-mismatch-unchecked: the $1 divergence did not report rig-mismatch: $out"
     echo "  $1 refused: rig-mismatch"
 }
@@ -553,7 +553,7 @@ for tamper in missing-state-file corrupt-state-file; do
         missing-state-file) evidence="never reported a resume" ;;
         corrupt-state-file) evidence="does not hold a checkpoint" ;;
     esac
-    printf '%s\n' "$out" | grep -q "$evidence" \
+    [[ "$out" == *"$evidence"* ]] \
         || fail "restart-resume-unchecked: the $tamper case did not report its named diagnostic: $out"
     echo "  $tamper: reported, restart-resume-failed"
 done
@@ -602,7 +602,7 @@ PY
             --document "$doctored" 2>&1)"; then
         fail "schema-mismatch-unchecked: the $1 case passed the served-schema conformance check"
     fi
-    echo "$out" | grep -q "schema-mismatch" \
+    [[ "$out" == *"schema-mismatch"* ]] \
         || fail "schema-mismatch-unchecked: the $1 case did not report schema-mismatch: $out"
     echo "  $1 refused: schema-mismatch"
 }
