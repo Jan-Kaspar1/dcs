@@ -15,7 +15,9 @@
 //! `sim*` prefix (local simulated devices), [`SIM_TCP_KIND`]
 //! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`),
 //! [`SIM_BUS_KIND`] (`sim-bus`, the register-mapped simulated fieldbus
-//! device of `dcs-sim-bus`), [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
+//! device of `dcs-sim-bus`), [`SIM_CYCLIC_KIND`] (`sim-cyclic`, the
+//! same device server behind the cyclic process-image contract),
+//! [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
 //! the tick-indexed playback driver of `dcs-sim`), and
 //! [`ETHERCAT_KIND`] (`ethercat`, the hardware-bound field-bus contract
 //! of `dcs-ethercat`). New device
@@ -35,7 +37,10 @@ use dcs_sim::{
     ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
     SimDriver,
 };
-use dcs_sim_bus::{BusDriver, DeviceParameters, PointRegister};
+use dcs_sim_bus::{
+    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters,
+    PointRegister,
+};
 use dcs_sim_net::RemoteDriver;
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -113,6 +118,41 @@ pub const SIM_SCRIPTED_KIND: &str = "sim-scripted";
 /// same declaration when it serves the device's registers, so a rig's
 /// two ends cannot diverge.
 pub const SIM_BUS_KIND: &str = dcs_sim_bus::DEVICE_KIND;
+
+/// The cyclic-exchange simulated fieldbus kind: a
+/// [`BusServer`](dcs_sim_bus::BusServer) register image reached over
+/// TCP through [`CyclicBusDriver`], which implements the
+/// [`CyclicIoDriver`] contract — `read`/`write` operate on the held
+/// input and staged output images and never touch the wire, while one
+/// exchange per scan publishes the staged outputs and latches the
+/// answered register census.
+///
+/// The kind is registered exactly — it outranks the `sim` prefix,
+/// which would otherwise read it as a local simulated device. Its
+/// device `parameters` carry the addressing, the miss threshold, and
+/// the station layout the factory validates at assembly:
+///
+/// - `"address"` (required string): the device server's `host:port`;
+/// - `"timeout_ms"` (optional non-negative number): the per-request
+///   timeout in milliseconds, defaulting to
+///   [`CyclicBusDriver::DEFAULT_TIMEOUT`];
+/// - `"exchange_miss_threshold"` (required positive integer): the
+///   consecutive missed exchanges before the driver's reads escalate
+///   to `IoError::Disconnected`;
+/// - `"stations"` (required object): station name → channel name →
+///   register declaration — the `"registers"` entry grammar
+///   [`SIM_BUS_KIND`] uses — partitioning every declared channel into
+///   the stations a short exchange's working counter attributes.
+///
+/// Any other parameter is rejected. The factory connects eagerly and
+/// its connect-time census probes that the server holds every declared
+/// register with the declared kind — an unreachable endpoint or a
+/// mismatched register map is an assembly failure. The full contract
+/// is [`CyclicDeviceParameters`]'s; the `dcs-sim-bus-device` binary
+/// parses the same declaration — registers *and* station layout — when
+/// it serves the device, so a scripted `short-station` outcome
+/// withholds exactly the registers the driver attributes.
+pub const SIM_CYCLIC_KIND: &str = dcs_sim_bus::CYCLIC_DEVICE_KIND;
 
 /// The EtherCAT device kind: a hardware-bound cyclic field-bus device —
 /// an EtherCAT coupler or remote-I/O station — declared through
@@ -350,7 +390,9 @@ impl DriverRegistry {
     /// The built-in registry: the `sim*` prefix served by local
     /// simulated devices, [`SIM_TCP_KIND`] (`sim-tcp`) served by the
     /// remote simulated driver, [`SIM_BUS_KIND`] (`sim-bus`) served by
-    /// the register-mapped fieldbus driver, [`SIM_SCRIPTED_KIND`]
+    /// the register-mapped fieldbus driver, [`SIM_CYCLIC_KIND`]
+    /// (`sim-cyclic`) served by the cyclic register-image driver,
+    /// [`SIM_SCRIPTED_KIND`]
     /// (`sim-scripted`) served by the scripted playback driver, and
     /// [`ETHERCAT_KIND`] (`ethercat`) served by the hardware-bound
     /// field-bus contract.
@@ -358,6 +400,7 @@ impl DriverRegistry {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
             .with(SIM_BUS_KIND, sim_bus_device)
+            .with(SIM_CYCLIC_KIND, sim_cyclic_device)
             .with(SIM_SCRIPTED_KIND, scripted_device)
             .with(ETHERCAT_KIND, ethercat_device)
             .with_prefix(crate::SIM_DEVICE_PREFIX, sim_device)
@@ -636,6 +679,98 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             )));
         }
     }
+    let bus = Arc::new(bus);
+    let stepping = Arc::clone(&bus);
+    let claiming = Arc::clone(&bus);
+    let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
+    let device = spec.id.0;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: bus,
+        step: Some(Arc::new(move |dt| {
+            stepping.step(dt).map_err(|error| StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            })
+        })),
+        // The device server's single-writer claim — the fencing a
+        // promoted peer takes out on the old field owner.
+        claim: Some(Arc::new(move |owner| {
+            claiming
+                .claim_writer(owner)
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
+        inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+/// The [`SIM_CYCLIC_KIND`] factory: validates the addressing, miss
+/// threshold, and station layout against the declared channels, then
+/// connects to the device server — whose connect-time census already
+/// probes that every declared register exists with the declared kind —
+/// and returns the backend carrying the cyclic surface.
+///
+/// The backend is `field_facing` like `sim-bus`'s — the shared register
+/// image is the field every redundant peer attaches to — with the same
+/// step hook (the bank's logical tick still advances only on the
+/// explicit `step` request; the exchange moves values, not time) and
+/// the same writer claim, which a promoted peer takes out on the old
+/// field owner: a fenced attachment's staged outputs never publish,
+/// while its census-only exchanges — the tracking standby's — still
+/// latch fresh inputs.
+fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
+    let channels: BTreeMap<String, ValueKind> = spec
+        .channels
+        .iter()
+        .map(|(name, channel)| (name.clone(), channel.value_type))
+        .collect();
+    let parameters = CyclicDeviceParameters::parse(spec.parameters, &channels)
+        .map_err(DeviceError::parameters)?;
+    let address = parameters.address.as_str();
+    let addresses: Vec<_> = address
+        .to_socket_addrs()
+        .map_err(|error| {
+            DeviceError::parameters(format!("parameter \"address\": {address:?} does not resolve to a host:port address ({error})"))
+        })?
+        .collect();
+    if addresses.is_empty() {
+        return Err(DeviceError::parameters(format!(
+            "parameter \"address\": {address:?} resolved to no address"
+        )));
+    }
+    // Point → image slots: the parsed station layout places every
+    // declared channel, so each bound point resolves to its register.
+    let points: Vec<CyclicPoint> = spec
+        .points
+        .iter()
+        .map(|point| {
+            let (_, declaration) = parameters
+                .channel_register(point.channel.as_str())
+                .expect("the parsed station layout places every declared channel");
+            CyclicPoint {
+                point: point.point,
+                register: declaration.register,
+                direction: point.direction,
+                kind: point.kind,
+            }
+        })
+        .collect();
+    let bus = CyclicBusDriver::connect_with_timeout(
+        addresses.as_slice(),
+        parameters.timeout,
+        &points,
+        &parameters.station_registers(),
+        parameters.exchange_miss_threshold,
+    )
+    .map_err(|error| {
+        DeviceError::backend(format!(
+            "cannot connect to device server at {address:?}: {error}"
+        ))
+    })?;
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);

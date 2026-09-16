@@ -925,7 +925,8 @@ internal-point wiring.
 `Device.kind` resolves through the deployment's `DriverRegistry`;
 `DriverRegistry::standard()` (`crates/dcs-assembly/src/drivers.rs`)
 installs the built-in set: exact registrations for `sim-tcp`, `sim-bus`,
-`sim-scripted`, and `ethercat`, plus the `sim` prefix serving every other
+`sim-cyclic`, `sim-scripted`, and `ethercat`, plus the `sim` prefix
+serving every other
 `sim*` name (`sim` itself and role-flavored kinds like `sim-8ai`,
 `sim-4ao`, `sim-ai`, `sim-ao` — the convention `dcs-demo` established).
 Exact registrations always win over the prefix, which is how the other
@@ -1030,13 +1031,67 @@ registers, so a rig's two ends cannot diverge. Parameters:
 Any other parameter key is rejected. The factory connects eagerly and
 probes each mapped register — an unreachable endpoint, a register the
 server does not hold, or a kind disagreement is `DeviceBackend` at
-assembly. The backend is field-facing but declares no write-ownership
-claim: `FanoutDriver::unfenced_field_devices` names `sim-bus` devices,
-and `dcs-controller --auto-promote` refuses a model built on one —
-manual promotion only (decision 28).
+assembly. The backend is field-facing and installs the device server's
+single-writer claim: the fencing a promoted redundant peer takes out on
+the old field owner (decision 28).
 
 `crates/dcs-assembly/fixtures/mixed_bus.json` shows a `sim-bus` device
 beside a local `sim` one.
+
+### `sim-cyclic` — cyclic register-image simulated fieldbus
+
+A `dcs_sim_bus::CyclicBusDriver` reaching the same
+`dcs-sim-bus-device` server, but under the cyclic process-image
+contract (decision 78): `read` and `write` never touch the wire — they
+serve and stage the driver's two process images — and the executor's
+scan boundary calls `exchange` once per scan, one `Exchange` request
+publishing the staged output registers and latching the answered
+register census atomically. A command-staged write therefore publishes
+in the applying scan's exchange, a component's scan-*t* write in scan
+*t* + 1's — the contract's documented one-scan actuation delay — and
+the driver reports the `ExchangeDiagnostics` section on the snapshot's
+I/O-health surface. Parameters:
+
+- `"address"` — required string: the device server's `host:port`, and
+  the server binary's default `--listen`;
+- `"timeout_ms"` — optional non-negative integral number of
+  milliseconds, defaulting to `CyclicBusDriver::DEFAULT_TIMEOUT`
+  (5 s);
+- `"exchange_miss_threshold"` — required positive integer: consecutive
+  uncompleted exchanges that escalate every point's read to
+  `Disconnected`;
+- `"stations"` — required non-empty object mapping station name →
+  object mapping channel name → the `sim-bus` register declaration
+  form (a bare index or `{"register": <u16>, "initial": <tagged
+  Value>}`). The stations partition the declared channel set exactly —
+  each channel in exactly one station, no station empty, no two
+  channels sharing a register — and the station→register layout is
+  what a station-attributed short exchange withholds and what
+  `dcs-sim-bus-device --device` serves through
+  `BusServer::bind_stationed`.
+
+Any other parameter key is rejected. The factory connects eagerly; the
+connect-time census probes that the server holds every declared
+register with the declared kind — an unreachable endpoint, a missing
+register, or a kind disagreement is `DeviceBackend` at assembly.
+
+The failure semantics are the contract's: a missed exchange retains
+both images and counts once at the boundary; reads keep serving the
+held image — aging under each point's `stale_after_ticks` budget —
+until the miss count reaches `exchange_miss_threshold`, then escalate;
+a short exchange counts `working_counter_mismatches` and degrades the
+stations its withheld registers partition into — or the whole device
+when no station layout names them; a `late` answer counts
+`missed_deadlines`. The backend is field-facing and installs the same
+single-writer claim `sim-bus` does — with one asymmetry the contract
+needs: an exchange carrying staged outputs from a non-holder is
+fenced, while a census-only exchange — a tracking standby's, whose
+closed write gate drops its writes before they stage — stays open and
+keeps latching fresh inputs.
+
+`crates/dcs-assembly/fixtures/cyclic_bus.json` shows a `sim-cyclic`
+device beside a local `sim` one; `dcs-sim-bus-ctl script-exchange`
+scripts the outcomes a rig's next exchanges present.
 
 ### `ethercat` — hardware-bound cyclic field-bus
 
