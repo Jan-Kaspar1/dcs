@@ -32,16 +32,16 @@ use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{Executor, WriteGate};
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, controller_model, image_value, pump, spawn_controller, spawn_plant};
+
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out, an analog-input scaling
 /// and a PID parameterized for dt 0.1.
@@ -72,149 +72,6 @@ const M: u64 = 10;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
-
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared tank-loop model with every device's kind re-pointed at
-/// `sim-tcp` and `parameters.address` set — the remote-sim path through
-/// the assembly driver registry.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
-}
-
-/// Pumps one accepted connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the
-/// other side so the request/response pair completes and the sockets
-/// close cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
-}
 
 /// A controllable network path for the checkpoint-pull heartbeat: while
 /// `partitioned` is clear the relay forwards each connection to the
@@ -327,13 +184,14 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
 
     // The pair's shared plant and the reference run's own — identical
     // model, identical dynamics.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model =
+        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
 
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed.
-    let mut active_process = spawn_controller(&pair_model, &[]);
+    let mut active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,
         &[
@@ -342,6 +200,7 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -487,8 +346,9 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let active_process = spawn_controller(&pair_model, &[]);
+    let pair_model =
+        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
@@ -499,6 +359,7 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -562,7 +423,8 @@ fn an_unconverged_standby_reports_its_state_and_never_promotes() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+    let pair_model =
+        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
 
     // A standby whose tracking target never existed: every pull fails
     // from the start, so the peer never converges — and a process that
@@ -579,6 +441,7 @@ fn an_unconverged_standby_reports_its_state_and_never_promotes() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let standby = MonitorClient::new(standby_process.addr);
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
@@ -610,8 +473,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let active_process = spawn_controller(&pair_model, &[]);
+    let pair_model =
+        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
         &pair_model,
@@ -621,6 +485,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
