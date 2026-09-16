@@ -50,6 +50,7 @@
 mod driver;
 mod map;
 mod scripted;
+mod state;
 
 pub use driver::{Fault, PointInfo, SimDriver};
 pub use map::{
