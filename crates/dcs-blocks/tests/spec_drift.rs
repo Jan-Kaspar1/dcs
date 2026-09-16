@@ -7,12 +7,16 @@
 //! The same sweep is the decision-82 drift authority: each check also
 //! derives the kind's [`BlockInterface`] from its descriptor — the one
 //! adaptation every consumer uses — and asserts the five collections
-//! carry exactly the declared spec/descriptor surface, so the build-time
-//! spec, the registry-constructed `describe()`, the registered kind set,
-//! and the served schema cannot drift. `dcs-controller`'s registry test
-//! pins runtime registration to `dcs_blocks::KINDS`; the coverage
-//! assertion here pins every kind in that list to a checked spec,
-//! descriptor, and derived interface.
+//! carry exactly the declared spec/descriptor surface, then derives the
+//! served schema through `block_interfaces` — the function `GET
+//! /schema` runs — and pins its complete five-category wire shape, so
+//! the build-time spec, the registry-constructed `describe()`, the
+//! registered kind set, and the served schema cannot drift.
+//! `dcs-controller`'s registry test pins runtime registration to
+//! `dcs_blocks::KINDS`; the coverage assertion here pins every kind in
+//! that list to a checked spec, descriptor, derived interface, and
+//! served-schema document — a newly registered kind without one fails
+//! the sweep.
 //!
 //! `dcs-build` cannot depend on this crate, so the specs are data
 //! mirrors kept honest here. Coverage is recorded against a checked-in
@@ -114,6 +118,40 @@ fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
     let interface = BlockInterface::from_descriptor(descriptor);
     assert_eq!(interface.version, INTERFACE_VERSION);
     assert_eq!(interface.kind, spec.kind(), "interface kind drifted");
+
+    // The served-schema pin — this sweep's half of the
+    // `served-block-schema-live-resources` consequence: the serving
+    // layer derives each instance's document through `block_interfaces`
+    // over the snapshot's descriptors, and the wire shape must carry
+    // the complete five-category schema. Running the serving function
+    // here pins every kind the sweep covers — every registered kind,
+    // per the coverage assertion — to a served schema that can never
+    // silently lack a category.
+    let served = dcs_core::block_interfaces(std::slice::from_ref(descriptor));
+    assert_eq!(served.as_slice(), std::slice::from_ref(&interface));
+    let document = serde_json::to_value(&served[0]).unwrap();
+    let object = document.as_object().unwrap();
+    for key in [
+        "version",
+        "kind",
+        "measurements",
+        "configuration",
+        "state",
+        "commands",
+        "events",
+    ] {
+        assert!(
+            object.contains_key(key),
+            "kind {}'s served schema lacks {key:?}",
+            spec.kind()
+        );
+    }
+    assert_eq!(
+        serde_json::from_value::<BlockInterface>(document.clone()).unwrap(),
+        interface,
+        "kind {}'s served schema does not round-trip the contract",
+        spec.kind()
+    );
 
     // Every port lands in exactly one collection — `state` when it
     // hints `Status`, `measurements` otherwise — carrying the port's
