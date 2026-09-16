@@ -749,9 +749,8 @@ Repair context: {repair}
             self.log('QA findings lane failed: ' + str(exc)[:500])
 
     def ready_frontier(self, issues):
-        """Count ready work that can occupy distinct worker groups now."""
+        """Count ready work that can dispatch now."""
         closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
-        occupied = {j['concurrency_group'] for j in self.state.jobs(('working', 'pr-open'))}
         active_improvement = self.state.get('review:active_improvement')
         frontier = 0
         for issue in issues:
@@ -763,12 +762,11 @@ Repair context: {repair}
                 meta = planning.metadata(issue.get('body') or '')
             except (ValueError, KeyError):
                 continue
-            if not set(meta['dependencies']) <= closed or meta['group'] in occupied:
+            if not set(meta['dependencies']) <= closed:
                 continue
             improvement = meta.get('improvement')
             if improvement and active_improvement and active_improvement != improvement:
                 continue
-            occupied.add(meta['group'])
             frontier += 1
         return frontier
 
@@ -899,7 +897,7 @@ Repair context: {repair}
             if not self.state.get('retry:' + str(job['issue'])) or job['issue'] not in by_number:
                 continue
             active = self.state.jobs(('working', 'pr-open'))
-            if self.slots_used(active) >= self.state.capacity() or any(j['concurrency_group'] == job['concurrency_group'] for j in active):
+            if self.slots_used(active) >= self.state.capacity():
                 continue
             rec = self.state.get('recovery:' + str(job['issue']))
             if rec is None:

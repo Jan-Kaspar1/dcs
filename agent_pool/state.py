@@ -35,6 +35,10 @@ MIGRATIONS = [
       first_run TEXT NOT NULL, last_run TEXT NOT NULL, sha TEXT,
       payload TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
     """,
+    # 3: concurrency groups are descriptive only; dispatch no longer serializes on them
+    """
+    DROP INDEX IF EXISTS live_group;
+    """,
 ]
 
 
@@ -53,8 +57,6 @@ class State:
               process_start TEXT, session TEXT, started REAL, updated REAL NOT NULL,
               error TEXT, clone TEXT, prompt TEXT, log TEXT);
             CREATE UNIQUE INDEX IF NOT EXISTS live_worker ON jobs(worker)
-              WHERE status IN ('working','pr-open');
-            CREATE UNIQUE INDEX IF NOT EXISTS live_group ON jobs(concurrency_group)
               WHERE status IN ('working','pr-open');
         """)
         version = self.db.execute('PRAGMA user_version').fetchone()[0]
