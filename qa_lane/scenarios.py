@@ -7,7 +7,15 @@ endpoints documented in docs/packaging.md (GET /role, /signals,
 only — the Lenovo host needs nothing but Python and Docker. The
 restart scenario also triggers the runner-owned container lifecycle
 action ctx['restart_controller'] carries and reads the per-controller
---journal-file the rig bind-mounts into the run directory.
+--journal-file the rig bind-mounts into the run directory. The
+link-loss scenario drives the runner-owned plant stop/start actions
+ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
+server directly on ctx['plant'] — the field's own fencing evidence.
+
+The field-fault case additionally opens one plant-protocol connection
+to the run's published plant port — the newline-JSON request/response
+surface crates/dcs-sim-net/src/protocol.rs documents — to inject and
+clear per-point faults on the shared simulated field.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -760,6 +768,360 @@ def scenario_controller_restart(ctx):
         case.observe('roles settled: restarted peer active, '
                      + peer + ' standby'
                      + (' tracking' if peer == 'standby' else ''))
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The plant-link boundary (WW-OPS-003's communication confidence and
+# WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss
+# checks): the runner-owned plant stop/start action severs both
+# controllers' remote-driver connections mid-run — the non-cyclic
+# remote form of decision 78's exchange-loss shape, and unlike a
+# per-point fault a dead plant fails every field point at once at the
+# link boundary. The active's telemetry must degrade honestly — held
+# values re-marked past the read boundary, the driver link reporting
+# disconnected with counted per-direction failures and a last_error —
+# while scans keep running and the pair's roles hold: the standby's
+# checkpoint-pull heartbeat is peer-to-peer, not field traffic, so it
+# never promotes on field loss. A restarted plant is a new server
+# lifetime — its single-writer claim died with the old process — so
+# recovery means the field owner re-attaches and re-claims: reads Good
+# again, a third attachment's mutation fenced, and the outage's
+# failures still counted in io_health rather than silently reset.
+
+LINK_POLL = 1.0                # cadence watching the pair mid-outage
+LINK_DEGRADE_DEADLINE = 45     # bound on the telemetry degrading
+LINK_SETTLE = 6.0              # extra role watch once degradation shows
+LINK_RECOVERY_DEADLINE = 90    # bound on the plant's return + re-claim
+
+
+def _try_role(ctx, base):
+    """`/role` or None — for the outage watch a dropped read is one
+    lost poll, not the leg's verdict."""
+    try:
+        return _role(ctx, base)
+    except Exception:
+        return None
+
+
+def _plant_probe(ctx, request, timeout=5):
+    """One request/response against the run's plant server on a fresh
+    connection — the `dcs-sim-net` wire protocol on the published
+    endpoint ctx['plant'] carries. The link-loss scenario uses it for
+    the field's own evidence: `list_points` is the census of points the
+    boundary fails at once, and a `step` mutation is the fencing probe
+    — answered `fenced` while any attachment holds the plant's
+    single-writer claim, `stepped` while nobody does. Each probe takes
+    a new connection because the outage it watches is exactly a dead
+    listener; the probe never sends `claim_writer` — claiming from
+    here would preempt the field owner it is checking for."""
+    stream = _plant_connect(ctx, timeout=timeout)
+    try:
+        stream.settimeout(timeout)
+        return _plant_request(stream, request)
+    finally:
+        stream.close()
+
+
+def _try_plant(ctx, request):
+    """`_plant_probe` or None — a refused probe is one lost poll, not
+    the leg's verdict."""
+    try:
+        return _plant_probe(ctx, request)
+    except Exception:
+        return None
+
+
+def _fenced(response):
+    """Whether a fencing probe's answer says a writer claim stands —
+    the shared field refused a third attachment's mutation."""
+    return (response or {}).get('error', {}).get('kind') == 'fenced'
+
+
+def _sample_quality(snapshot, point):
+    """The point's latest served quality flattened for comparison —
+    'good', 'uncertain:stale', 'bad:communication_fault' — or None when
+    no sample exists."""
+    for entry in snapshot.get('points', []):
+        if entry.get('point') == point and entry.get('sample'):
+            quality = entry['sample'].get('quality')
+            if isinstance(quality, dict):
+                kind, reason = next(iter(quality.items()))
+                return kind + ':' + str(reason)
+            return quality
+    return None
+
+
+def scenario_plant_link_loss(ctx):
+    """Stop the run's plant container mid-run, prove the link-loss
+    degradation through the monitor surface, then restart it and prove
+    the field owner's re-claim and recovery."""
+    case = Case('plant-link-loss',
+                'Plant-link loss degrades honestly and recovers',
+                'stopping the run\'s plant container leaves the active '
+                'scanning with its field reads marked down at the link '
+                'boundary — io_health counting the per-direction '
+                'failures, the driver link reporting disconnected, a '
+                'last_error recorded — the standby never promoting, '
+                'and restarting the plant recovering Good reads under '
+                'a re-claimed writer claim with the outage\'s failures '
+                'still counted')
+
+    def role_violation(name, report, expected_roles, seen):
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-roles.json',
+                            {'expected': expected_roles,
+                             'offender': report, 'seen': seen})
+        case.evidence('file', ref)
+        return case.finish('failed', 'field loss moved ' + name
+                           + ' to role ' + str(report.get('role'))
+                           + ': ' + json.dumps(report)[:300])
+
+    try:
+        stop = ctx.get('stop_plant')
+        start = ctx.get('start_plant')
+        if stop is None or start is None or not ctx.get('plant'):
+            return case.finish('inconclusive', 'the run context '
+                               'carries no plant stop/start action or '
+                               'plant address')
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        expected = {active: 'active', peer: 'standby'}
+        case.observe('field owner: ' + active + ' (' + base + ')')
+
+        # The baseline: the field census names the points the link
+        # boundary fails at once, and the fencing probe proves the
+        # writer claim the outage must lose and recovery must re-take.
+        census = _try_plant(ctx, {'op': 'list_points'})
+        points = (census or {}).get('points', [])
+        field_in = sorted(entry.get('point') for entry in points
+                          if entry.get('direction') == 'in')
+        field_out = any(entry.get('direction') == 'out'
+                        for entry in points)
+        probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+        before = _try_snapshot(ctx, base)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-baseline.json',
+                            {'census': census, 'probe': probe,
+                             'qualities': {
+                                 point: _sample_quality(before or {},
+                                                        point)
+                                 for point in field_in}})
+        case.evidence('file', ref, 'the plant census, the pre-outage '
+                      'fencing probe, and the baseline qualities')
+        if census is None:
+            return case.finish('inconclusive', 'the plant did not '
+                               'answer its point census')
+        if not field_in:
+            return case.finish('inconclusive', 'the plant census '
+                               'lists no field input points')
+        if not _fenced(probe):
+            return case.finish('failed', 'the field held no writer '
+                               'claim before the outage — a third '
+                               'attachment\'s mutation probe answered '
+                               + json.dumps(probe)[:300])
+        fresh = {point: _sample_quality(before or {}, point)
+                 for point in field_in}
+        if before is None or any(q != 'good' for q in fresh.values()):
+            return case.finish('inconclusive', 'the rig never showed '
+                               'a healthy field baseline: '
+                               + json.dumps(fresh, sort_keys=True))
+        case.observe('field inputs ' + json.dumps(field_in)
+                     + ' reading good under the active\'s claim')
+
+        # The runner-owned lifecycle action: docker stop on the run's
+        # plant container, recorded on the run's action timeline.
+        try:
+            stop()
+        except Exception as exc:
+            return case.finish('inconclusive', 'the plant stop action '
+                               'never completed: ' + str(exc)[:300])
+        case.observe('plant container stopped; watching the pair '
+                     'through the outage')
+
+        outage = {'roles': {}, 'snapshots': 0, 'silent': 0,
+                  'tail_silent': 0, 'first_tick': None, 'tick': None,
+                  'qualities': {}, 'health': None}
+        degraded_at = None
+        deadline = time.monotonic() + LINK_DEGRADE_DEADLINE
+        while time.monotonic() < deadline:
+            for name, url in ((active, base), (peer, peer_base)):
+                report = _try_role(ctx, url)
+                if report is None:
+                    continue
+                outage['roles'][name] = report
+                if report.get('role') != expected[name]:
+                    return role_violation(name, report, expected,
+                                          outage['roles'])
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                outage['silent'] += 1
+                outage['tail_silent'] += 1
+            else:
+                outage['snapshots'] += 1
+                outage['tail_silent'] = 0
+                tick = snap.get('tick') or 0
+                if outage['first_tick'] is None:
+                    outage['first_tick'] = tick
+                outage['tick'] = tick
+                outage['qualities'] = {
+                    point: _sample_quality(snap, point)
+                    for point in field_in}
+                outage['health'] = snap.get('io_health')
+            if outage['snapshots'] == 0 and outage['silent'] >= 3:
+                break  # the monitor is gone — the run aborted
+            health = outage['health'] or {}
+            degraded = outage['snapshots'] > 0 \
+                and outage['tick'] > outage['first_tick'] \
+                and all(q not in (None, 'good')
+                        for q in outage['qualities'].values()) \
+                and health.get('failed_reads', 0) > 0 \
+                and (health.get('driver') or {}).get('link') \
+                == 'disconnected'
+            if degraded:
+                if degraded_at is None:
+                    degraded_at = time.monotonic()
+                elif time.monotonic() - degraded_at > LINK_SETTLE:
+                    break
+            time.sleep(LINK_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-outage.json', outage)
+        case.evidence('file', ref, 'the pair\'s served state through '
+                      'the outage')
+        health = outage['health'] or {}
+        if outage['snapshots'] == 0:
+            return case.finish('failed', 'the active\'s monitor never '
+                               'answered after the plant stop — field '
+                               'loss aborted the run rather than '
+                               'degrading its telemetry')
+        if outage['tail_silent']:
+            return case.finish('failed', 'the active\'s monitor '
+                               'stopped answering during the outage — '
+                               'the run aborted on field loss')
+        if not outage['tick'] > outage['first_tick']:
+            return case.finish('failed', 'the active\'s scans did not '
+                               'continue through the outage — the '
+                               'served tick held at '
+                               + str(outage['tick']))
+        still_fresh = [str(point) for point, q
+                       in outage['qualities'].items() if q == 'good']
+        if still_fresh:
+            return case.finish('failed', 'field inputs kept reading '
+                               'good through the outage: '
+                               + ','.join(still_fresh))
+        if health.get('failed_reads', 0) == 0 \
+                or (health.get('driver') or {}).get('link') \
+                != 'disconnected' \
+                or not health.get('last_error'):
+            return case.finish('failed', 'io_health lacks the counted '
+                               'link failure: '
+                               + json.dumps(health)[:400])
+        if field_out and health.get('failed_writes', 0) == 0:
+            return case.finish('failed', 'io_health counted the read '
+                               'failures but no write failures though '
+                               'the field serves output points: '
+                               + json.dumps(health)[:400])
+        outage_reads = health.get('failed_reads', 0)
+        outage_writes = health.get('failed_writes', 0)
+        case.observe('degradation confirmed by tick '
+                     + str(outage['tick']) + ': '
+                     + json.dumps(outage['qualities'], sort_keys=True)
+                     + ', io_health ' + json.dumps(health)[:300])
+
+        # The recovery half: the plant container comes back as a new
+        # server lifetime, so the single-writer claim is gone until the
+        # field owner re-attaches and re-claims it.
+        try:
+            start()
+        except Exception as exc:
+            return case.finish('inconclusive', 'the plant start '
+                               'action never completed: '
+                               + str(exc)[:300])
+        case.observe('plant container started; waiting for the '
+                     're-claim and Good reads')
+
+        recovery = {'plant': False, 'probe': None, 'snapshot': None,
+                    'roles': {}, 'first_tick': None, 'tick_grew': False}
+        deadline = time.monotonic() + LINK_RECOVERY_DEADLINE
+        while time.monotonic() < deadline:
+            for name, url in ((active, base), (peer, peer_base)):
+                report = _try_role(ctx, url)
+                if report is None:
+                    continue
+                recovery['roles'][name] = report
+                if report.get('role') != expected[name]:
+                    return role_violation(name, report, expected,
+                                          recovery['roles'])
+            if _try_plant(ctx, {'op': 'list_points'}) is not None:
+                recovery['plant'] = True
+            probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+            if probe is not None:
+                recovery['probe'] = probe
+            snap = _try_snapshot(ctx, base)
+            if snap is not None:
+                recovery['snapshot'] = snap
+                tick = snap.get('tick') or 0
+                if recovery['first_tick'] is None:
+                    recovery['first_tick'] = tick
+                elif tick > recovery['first_tick']:
+                    recovery['tick_grew'] = True
+            snap_health = (snap or {}).get('io_health') or {}
+            if recovery['plant'] and _fenced(probe) \
+                    and snap is not None and recovery['tick_grew'] \
+                    and all(_sample_quality(snap, point) == 'good'
+                            for point in field_in) \
+                    and (snap_health.get('driver') or {}).get('link') \
+                    == 'connected':
+                break
+            time.sleep(LINK_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'plant-link-loss-recovery.json', recovery)
+        case.evidence('file', ref, 'the plant\'s return, the fencing '
+                      'probe, and the recovered snapshot')
+        if not recovery['plant']:
+            return case.finish('inconclusive', 'the restarted plant '
+                               'container never served again')
+        if not _fenced(recovery['probe']):
+            return case.finish('failed', 'the restarted plant never '
+                               're-armed the single-writer claim — a '
+                               'third attachment\'s mutation answered '
+                               + json.dumps(recovery['probe'])[:300])
+        snap = recovery['snapshot'] or {}
+        recovered = {point: _sample_quality(snap, point)
+                     for point in field_in}
+        if any(q != 'good' for q in recovered.values()):
+            return case.finish('failed', 'reads never returned to '
+                               'Good after the plant\'s return: '
+                               + json.dumps(recovered,
+                                            sort_keys=True))
+        if not recovery['tick_grew']:
+            return case.finish('failed', 'the active\'s scans stalled '
+                               'across the plant\'s return — the '
+                               'served tick held at '
+                               + str(snap.get('tick')))
+        health = snap.get('io_health') or {}
+        if (health.get('driver') or {}).get('link') != 'connected':
+            return case.finish('failed', 'the driver link never '
+                               'reported connected after the plant\'s '
+                               'return: ' + json.dumps(health)[:400])
+        if health.get('failed_reads', 0) < outage_reads \
+                or health.get('failed_writes', 0) < outage_writes \
+                or not health.get('last_error'):
+            return case.finish('failed', 'io_health lost the '
+                               'outage\'s recorded failures — the '
+                               'counters reset across the recovery: '
+                               + json.dumps(health)[:400])
+        case.observe('recovered: reads Good, the writer claim '
+                     're-armed, io_health still records '
+                     + str(health.get('failed_reads')) + ' failed '
+                     'reads and ' + str(health.get('failed_writes'))
+                     + ' failed writes')
         return case.finish('passed')
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
@@ -2178,6 +2540,401 @@ def scenario_consumer_schedule(ctx):
 
 
 # --------------------------------------------------------------------
+# The field-fault schedule (WW-OPS-003's signal-confidence clause and
+# WW-FND-002's remote-I/O degradation path): the lane drives the same
+# per-point failure surface the hardware lane will grade for channel
+# faults — InjectFault/ClearFault over the plant's newline-JSON
+# protocol on the run's published plant port. A quality fault must
+# present the point degraded — the substituted quality stamped on the
+# stored field value, never a silently healthy last-known — and
+# clearing it must restore the field value at Good; an error fault must
+# surface through the driver's IoError path into io_health (the
+# per-direction counters, last_error with tick and direction) while the
+# scan continues and no role change follows — field faults are not
+# peer loss.
+
+FAULT_DEADLINE = 30   # bound on one injection surfacing or a clear
+FAULT_PROBE = 1.0     # plant-step window between stability probes
+PLANT_MAX_MESSAGE = 64 * 1024  # the protocol's documented line bound
+
+
+def _quality_key(quality):
+    """A served quality's comparable form: 'good', or
+    'bad:<reason>'/'uncertain:<reason>' for a degraded stamp."""
+    if quality == 'good':
+        return 'good'
+    if isinstance(quality, dict) and quality:
+        name = next(iter(quality))
+        return str(name) + ':' + str(quality[name])
+    return 'unknown'
+
+
+def _point_sample(snapshot, point):
+    """The served sample of one point in a /snapshot payload, or None."""
+    for entry in snapshot.get('points', []):
+        if entry.get('point') == point:
+            return entry.get('sample')
+    return None
+
+
+def _plant_connect(ctx, timeout=5):
+    """A TCP connection to the run's published plant-protocol endpoint —
+    ctx['plant'] carries the published 'host:port'."""
+    host, _, port = str(ctx['plant']).rpartition(':')
+    return socket.create_connection(
+        (host or '127.0.0.1', int(port or 0)), timeout=timeout)
+
+
+def _plant_request(stream, request):
+    """One plant-protocol round trip: write the request object plus the
+    newline delimiter, read back exactly one response line, enforcing
+    the protocol's message bound."""
+    stream.sendall(json.dumps(request).encode() + b'\n')
+    line = b''
+    while not line.endswith(b'\n'):
+        chunk = stream.recv(PLANT_MAX_MESSAGE)
+        if not chunk:
+            raise ConnectionError('the plant server closed the '
+                                  'connection mid-request')
+        line += chunk
+        if len(line) > PLANT_MAX_MESSAGE:
+            raise ConnectionError('a plant response exceeded the '
+                                  'protocol message bound')
+    return json.loads(line)
+
+
+def _plant_read(stream, point):
+    """The stored field sample for `point` — `{"op":"read"}` answered
+    as a `sample` result."""
+    response = _plant_request(stream, {'op': 'read', 'point': point})
+    if response.get('result') != 'sample':
+        raise ConnectionError('plant read on point ' + str(point)
+                              + ' answered '
+                              + json.dumps(response)[:300])
+    return response.get('sample') or {}
+
+
+def _field_inputs(stream):
+    """{point: PointInfo entry} for every 'in'-direction point the
+    plant serves — the list_points census, which is the field side's
+    own account of what the scenario may fault."""
+    response = _plant_request(stream, {'op': 'list_points'})
+    if response.get('result') != 'points':
+        raise ConnectionError('plant list_points answered '
+                              + json.dumps(response)[:300])
+    return {entry.get('point'): entry
+            for entry in response.get('points') or []
+            if entry.get('direction') == 'in'}
+
+
+def scenario_field_fault(ctx):
+    """Injected field-point faults degrade through the monitor and
+    clear — never masquerading as healthy, never costing the active
+    its role."""
+    case = Case('field-fault',
+                'Injected field faults degrade, recover, and keep role',
+                'a quality fault injected on a field In point serves '
+                'the point with the substituted quality stamped — '
+                'never a silently Good value — clearing it restores '
+                'the simulated field value at Good quality, and a '
+                'disconnected-class fault on a second field point '
+                'surfaces on io_health (failed_reads, last_error with '
+                'tick and direction) while the scan continues and no '
+                'role change follows')
+    stream = None
+    injected = []
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # whichever peer reports settled active is the observed surface.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        if ctx.get('plant') is None:
+            return case.finish('inconclusive',
+                               'the run publishes no plant endpoint')
+        stream = _plant_connect(ctx)
+        case.observe('plant protocol at ' + str(ctx['plant'])
+                     + '; observing ' + active + ' (' + base + ')')
+
+        # Fault targets must be points the field itself holds still:
+        # only a stable stored value can prove the clear restored the
+        # field value rather than a moved one. Two list_points probes
+        # straddling a few plant steps find them, and each must already
+        # read Good on the monitor — a forced or degraded point cannot
+        # evidence a fault it would mask.
+        first = _field_inputs(stream)
+        time.sleep(FAULT_PROBE)
+        second = _field_inputs(stream)
+        snap = _snapshot(ctx, base)
+        served_good = {
+            entry.get('point') for entry in snap.get('points', [])
+            if _quality_key((entry.get('sample') or {}).get('quality'))
+            == 'good'}
+        stable = sorted(
+            point for point, info in first.items()
+            if point in second and point in served_good
+            and _quality_key((info.get('sample') or {}).get('quality'))
+            == 'good'
+            and _quality_key((second[point].get('sample') or {})
+                             .get('quality')) == 'good'
+            and (info.get('sample') or {}).get('value')
+            == (second[point].get('sample') or {}).get('value'))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'field-fault-points.json',
+                            {'served': sorted(second), 'stable': stable})
+        case.evidence('file', ref, 'the list_points census and the '
+                      'stability probe')
+        if not stable:
+            return case.finish('inconclusive',
+                               'no stable healthy field In point to '
+                               'fault')
+        quality_point = stable[0]
+        alternates = [point for point in stable if point != quality_point]
+        if not alternates:
+            alternates = sorted(point for point in second
+                                if point != quality_point)
+        if not alternates:
+            return case.finish('inconclusive',
+                               'no second field In point to fault')
+        error_point = alternates[0]
+        case.observe('fault targets: quality point '
+                     + str(quality_point) + ', error point '
+                     + str(error_point))
+        last = {}
+
+        # Leg 1: a quality fault substitutes the served quality, leaving
+        # the stored field value — the bad-data-confidence clause's
+        # "degraded, never silently healthy" half.
+        field_value = _plant_read(stream, quality_point).get('value')
+        verdict = _plant_request(
+            stream, {'op': 'inject_fault', 'point': quality_point,
+                     'fault': {'quality': {'bad': 'device_fault'}}})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'inject_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.append(quality_point)
+
+        def degraded():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, quality_point)
+            if sample and _quality_key(sample.get('quality')) \
+                    == 'bad:device_fault':
+                return sample
+            return None
+
+        hit = wait_for(degraded, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-degraded.json',
+            {'point': quality_point,
+             'sample': hit or _point_sample(last.get('snap') or {},
+                                          quality_point)})
+        case.evidence('file', ref, 'the faulted point under injection')
+        if not hit:
+            return case.finish(
+                'failed', 'the quality fault on point '
+                + str(quality_point) + ' never surfaced: the served '
+                'sample stayed '
+                + json.dumps(_point_sample(last.get('snap') or {},
+                                           quality_point))[:300])
+        if hit.get('value') != field_value:
+            return case.finish(
+                'failed', 'the degraded sample replaced the field '
+                'value ' + json.dumps(field_value) + ' with '
+                + json.dumps(hit.get('value')))
+        case.observe('point ' + str(quality_point)
+                     + ' serves bad:device_fault over the stored field '
+                     'value ' + json.dumps(field_value))
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'a quality fault moved the '
+                               'active role — a field fault is not '
+                               'peer loss')
+
+        verdict = _plant_request(stream, {'op': 'clear_fault',
+                                          'point': quality_point})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'clear_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.remove(quality_point)
+
+        def recovered():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, quality_point)
+            if not sample or _quality_key(sample.get('quality')) \
+                    != 'good':
+                return None
+            try:
+                field = _plant_read(stream, quality_point)
+            except Exception:
+                return None
+            if sample.get('value') == field.get('value'):
+                return sample
+            return None
+
+        hit = wait_for(recovered, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-recovered.json',
+            {'point': quality_point,
+             'sample': hit or _point_sample(last.get('snap') or {},
+                                          quality_point)})
+        case.evidence('file', ref, 'the point after clearing')
+        if not hit:
+            return case.finish(
+                'failed', 'clearing the fault on point '
+                + str(quality_point) + ' never restored the field '
+                'value at Good quality; last served '
+                + json.dumps(_point_sample(last.get('snap') or {},
+                                           quality_point))[:300])
+        case.observe('point ' + str(quality_point)
+                     + ' recovered to the field value at Good')
+
+        # Leg 2: an error fault answers the driver's read with an
+        # IoError — the remote-I/O degradation path. It must surface on
+        # io_health attributed to the point and the in direction, the
+        # served sample must degrade rather than pose as healthy
+        # last-known, the link must stay up (a point fault is not link
+        # loss), the scan must not stall, and the role must not move.
+        def healthy_second():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            sample = _point_sample(snap, error_point)
+            if sample and _quality_key(sample.get('quality')) \
+                    == 'good':
+                return snap
+            return None
+
+        # The second leg's baseline: the target must read healthy ahead
+        # of its injection, so the counters it moves are attributable.
+        before = wait_for(healthy_second,
+                          time.monotonic() + FAULT_DEADLINE)
+        if not before:
+            return case.finish(
+                'inconclusive', 'the error-fault target point '
+                + str(error_point) + ' never read healthy ahead of '
+                'injection')
+        health0 = before.get('io_health') or {}
+        tick0 = before.get('tick') or 0
+        verdict = _plant_request(
+            stream, {'op': 'inject_fault', 'point': error_point,
+                     'fault': 'disconnected'})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'inject_fault refused: '
+                               + json.dumps(verdict)[:300])
+        injected.append(error_point)
+
+        def surfaced():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            health = snap.get('io_health') or {}
+            fault = health.get('last_error') or {}
+            if (health.get('failed_reads') or 0) \
+                    > (health0.get('failed_reads') or 0) \
+                    and fault.get('point') == error_point \
+                    and fault.get('direction') == 'in' \
+                    and fault.get('error') \
+                    == {'disconnected': error_point}:
+                return snap
+            return None
+
+        snap = wait_for(surfaced, time.monotonic() + FAULT_DEADLINE)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'field-fault-io-health.json',
+            {'point': error_point,
+             'io_health': (last.get('snap') or {}).get('io_health'),
+             'sample': _point_sample(last.get('snap') or {},
+                                     error_point)})
+        case.evidence('file', ref, 'io_health under the error fault')
+        if not snap:
+            return case.finish(
+                'failed', 'the error fault on point '
+                + str(error_point) + ' never surfaced on io_health: '
+                + json.dumps((last.get('snap') or {})
+                             .get('io_health'))[:400])
+        health = snap.get('io_health') or {}
+        fault = health.get('last_error') or {}
+        if (fault.get('tick') or 0) < tick0:
+            return case.finish('failed', 'last_error predates the '
+                               'injection: ' + json.dumps(fault)[:300])
+        if (health.get('failed_writes') or 0) \
+                != (health0.get('failed_writes') or 0):
+            return case.finish('failed', 'an in-point read fault '
+                               'moved the out-direction counter: '
+                               + json.dumps(health)[:400])
+        link = (health.get('driver') or {}).get('link')
+        if link != 'connected':
+            return case.finish('failed', 'a point fault presented as '
+                               'link loss: ' + str(link))
+        sample = _point_sample(snap, error_point)
+        if _quality_key((sample or {}).get('quality')) \
+                != 'bad:communication_fault':
+            return case.finish(
+                'failed', 'the error-faulted point did not serve '
+                'degraded: ' + json.dumps(sample)[:300])
+        if (snap.get('tick') or 0) <= tick0:
+            return case.finish('failed', 'the scan did not advance '
+                               'past the injection')
+        case.observe('io_health attributes point ' + str(error_point)
+                     + ': failed_reads '
+                     + str(health0.get('failed_reads') or 0) + ' -> '
+                     + str(health.get('failed_reads'))
+                     + ', last_error ' + json.dumps(fault)
+                     + ', link ' + str(link))
+        grown = wait_for(
+            lambda: (s.get('tick', 0) > snap.get('tick', 0) and s
+                     or None)
+            if (s := _try_snapshot(ctx, base)) else None,
+            time.monotonic() + FAULT_DEADLINE)
+        if not grown:
+            return case.finish('failed', 'the scan stalled while the '
+                               'error fault stood')
+        roles = {}
+        for name in ('active', 'standby'):
+            try:
+                roles[name] = _role(ctx, ctx[name])
+            except Exception as exc:
+                roles[name] = {'unreachable': str(exc)[:200]}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'field-fault-roles.json', roles)
+        case.evidence('file', ref, 'roles while the error fault stands')
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'an error fault moved the '
+                               'active role — a field fault is not '
+                               'peer loss: ' + json.dumps(roles)[:300])
+        case.observe('scan advancing (tick ' + str(snap.get('tick'))
+                     + ' -> ' + str(grown.get('tick'))
+                     + '), ' + active + ' still active under the '
+                     'error fault')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+    finally:
+        if stream is not None:
+            # The injected points are the run's shared field: a case
+            # that leaves them faulted poisons every later scenario.
+            for point in injected:
+                try:
+                    _plant_request(stream, {'op': 'clear_fault',
+                                            'point': point})
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+# --------------------------------------------------------------------
 # The bounded command-admission contract (decision 83's ingress half):
 # commands submitted faster than the scan boundary drains them must each
 # take a structured receipt — a settlement or the named queue_full
@@ -2698,14 +3455,20 @@ def scenario_dcs_ctl(ctx):
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
-# watches reconverge. The dcs-ctl case runs last: it observes the
-# post-failover role layout and perturbs nothing earlier cases
-# established.
+# watches reconverge. The plant-link-loss case follows: its plant
+# container cycling cannot contaminate an earlier case, and whichever
+# endpoint owns the field by then keeps it through the outage and
+# recovery the scenario drives. The field-fault case is self-contained
+# on either role layout — including the post-recovery rig — and leaves
+# the rig as it found it. The dcs-ctl case closes the schedule: it
+# observes the post-failover role layout and perturbs nothing earlier
+# cases established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_failover, scenario_evidence_capture,
              scenario_served_interface, scenario_force_release,
              scenario_consumer_schedule, scenario_command_admission,
+             scenario_plant_link_loss, scenario_field_fault,
              scenario_dcs_ctl)
 
 

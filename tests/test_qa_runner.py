@@ -194,6 +194,84 @@ class RestartActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-restart'])
 
 
+class PlantActionTests(unittest.TestCase):
+    """The scenario-callable plant stop/start: the run's shared-plant
+    container cycled mid-run, each half recorded on the run's action
+    timeline."""
+
+    def test_stop_and_start_recorded_on_timeline(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            timeline = lambda event, detail=None: events.append(
+                (event, detail))
+            runner.stop_plant('qa-1', timeline)
+            runner.start_plant('qa-1', timeline)
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
+                    ('start', 'dcs-hw-qa-1-plant')])
+        self.assertEqual([event for event, _ in events],
+                         ['plant-stop', 'plant-stopped',
+                          'plant-start', 'plant-started'])
+        self.assertIn('dcs-hw-qa-1-plant', events[0][1])
+
+    def test_failed_stop_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'stop' and check:
+                raise RuntimeError('docker stop failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-stop'])
+
+    def test_failed_start_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'start' and check:
+                raise RuntimeError('docker start failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-start'])
+
+    def test_scenario_ctx_carries_plant_actions_and_address(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                dict(runner.DEFAULT_CONFIG), record, Path('run'),
+                'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['stop_plant']()
+            ctx['start_plant']()
+        self.assertEqual(ctx['plant'], '127.0.0.1:19001')
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
+                    ('start', 'dcs-hw-qa-1-plant')])
+        self.assertEqual(events, ['plant-stop', 'plant-stopped',
+                                  'plant-start', 'plant-started'])
+
+
 class RigStateFileTests(unittest.TestCase):
     """The rig's per-controller --state-file/--journal-file paths live
     inside the bounded run directory on runner-owned mounts."""
