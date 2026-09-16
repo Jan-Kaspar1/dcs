@@ -13,10 +13,22 @@ class PlanningTests(unittest.TestCase):
     def test_reject_duplicates(self):
         with self.assertRaises(ValueError): validate({'issues':[self.item(),self.item()]})
 
+    def test_allows_dependencies_on_tasks_in_the_same_proposal(self):
+        contract=self.item()
+        consumer=self.item(); consumer['key']='model-consumer'; consumer['dependencies']=['model-contract']
+        proposal=validate({'issues':[consumer,contract]})
+        self.assertEqual(proposal['issues'][0]['dependencies'],['model-contract'])
+
     def test_reject_unknown_fields_and_dependencies(self):
         item=self.item(); item['dependencies']=['future']
         with self.assertRaises(ValueError): validate({'issues':[item]})
         with self.assertRaises(ValueError): validate({'issues':[],'execute':'anything'})
+
+    def test_rejects_cyclic_same_proposal_dependencies(self):
+        first=self.item(); first['dependencies']=['second']
+        second=self.item(); second['key']='second'; second['dependencies']=['model-contract']
+        with self.assertRaisesRegex(ValueError, 'cycle'):
+            validate({'issues':[first,second]})
 
     def test_limit(self):
         with self.assertRaises(ValueError): validate({'issues':[self.item()]*21})
