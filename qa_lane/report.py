@@ -5,10 +5,11 @@ The schema is deliberately close to agent_pool.review's report contract:
 stable keys, bounded fields, explicit outcomes, and validation that raises
 ValueError on any violation. Reports are untrusted data until validated.
 
-Schema version 2, top-level fields (v1 documents remain valid input; the
-only v2 addition is the optional verifications channel):
+Schema version 3, top-level fields (v1/v2 documents remain valid input;
+v2 added the optional verifications channel, v3 adds the optional mode
+field, the exploration channel, and explicit per-scenario finding fields):
 
-  schema_version           int, 1 or 2 (runners emit SCHEMA_VERSION)
+  schema_version           int, 1-3 (runners emit SCHEMA_VERSION)
   run_id                   stable run key: ^[a-z0-9][a-z0-9-]{0,79}$
   attempted_sha            40-hex main revision the run was launched against
   completed_sha            40-hex revision whose assessment completed, or
@@ -29,7 +30,18 @@ only v2 addition is the optional verifications channel):
   changed_range            {"first": sha, "last": sha} — the intervening
                            commit range this run's verdict covers when
                            queuing skipped intermediate revisions
-  scenarios                per-case results (see SCENARIO_FIELDS)
+  mode                     simulation | hardware-host | hardware-rig —
+                           the rig the run exercised (schema v3; absent
+                           means the legacy simulated-rig lane)
+  scenarios                per-case results (see SCENARIO_FIELDS); schema
+                           v3 allows the explicit finding fields in
+                           SCENARIO_FIELDS_V3 so an exploratory session
+                           can declare module, reproduction, severity,
+                           confidence, and the worker regression contract
+                           instead of the coordinator's generic defaults
+  exploration              optional channel for charter-driven runs
+                           (schema v3): charter, rationale, and the
+                           recommended next frontiers the agent recorded
   verifications            fix-verification results (schema v2 only; see
                            VERIFICATION_FIELDS) — a verification run
                            replays one finding's original reproduction
@@ -57,8 +69,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMAS = (1, 2)
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMAS = (1, 2, 3)
 MAX_FIELD = 12000
 MAX_SCENARIOS = 40
 MAX_VERIFICATIONS = 40
@@ -76,17 +88,27 @@ RUN_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive', 'interrupted')
 CASE_OUTCOMES = ('passed', 'failed', 'blocked', 'inconclusive')
 VERIFICATION_OUTCOMES = ('passed', 'failed', 'inconclusive')
 EVIDENCE_KINDS = ('file', 'endpoint', 'log', 'metric')
+RUN_MODES = ('simulation', 'hardware-host', 'hardware-rig')
+SEVERITIES = ('low', 'medium', 'high', 'critical')
+CONFIDENCES = ('low', 'medium', 'high')
 
 TOP_LEVEL = {'schema_version', 'run_id', 'attempted_sha', 'completed_sha',
              'image', 'started_at', 'finished_at', 'outcome', 'attempt',
-             'host', 'changed_range', 'scenarios', 'verifications',
+             'host', 'mode', 'changed_range', 'scenarios', 'verifications',
              'capability_limitations', 'infrastructure_failures', 'timeline',
-             'notes'}
-REQUIRED_TOP = TOP_LEVEL - {'attempt', 'host', 'changed_range',
-                            'verifications', 'notes'}
+             'notes', 'exploration'}
+REQUIRED_TOP = TOP_LEVEL - {'attempt', 'host', 'mode', 'changed_range',
+                            'verifications', 'notes', 'exploration'}
 
 SCENARIO_FIELDS = {'key', 'title', 'expected', 'outcome', 'observations',
                    'evidence', 'detail'}
+# Schema v3: an exploratory session declares the finding fields the
+# coordinator would otherwise default — the affected module, the
+# reproduction it actually ran, its own severity/confidence judgments,
+# the worker regression contract, and whether the evidence identifies a
+# product cause.
+SCENARIO_FIELDS_V3 = {'module', 'mode', 'reproduction', 'severity',
+                      'confidence', 'test_requirements', 'product_cause'}
 REQUIRED_SCENARIO = SCENARIO_FIELDS - {'evidence', 'detail'}
 
 VERIFICATION_FIELDS = {'finding_key', 'case', 'fix_sha', 'tested_sha',
@@ -94,6 +116,8 @@ VERIFICATION_FIELDS = {'finding_key', 'case', 'fix_sha', 'tested_sha',
 REQUIRED_VERIFICATION = {'finding_key', 'case', 'fix_sha', 'tested_sha',
                          'outcome'}
 ANCESTRY_FIELDS = {'checked', 'contained', 'method', 'detail'}
+
+EXPLORATION_FIELDS = {'charter', 'rationale', 'next_frontiers', 'agent'}
 
 
 def _bounded_text(value, field, limit=MAX_FIELD):
@@ -161,8 +185,11 @@ def _validate_evidence(item, scenario_key):
             _bounded_text(entry['detail'], 'evidence.detail', 2000)
 
 
-def validate_scenario(item):
-    if not isinstance(item, dict) or not set(item) <= SCENARIO_FIELDS:
+def validate_scenario(item, version=SCHEMA_VERSION):
+    allowed = set(SCENARIO_FIELDS)
+    if version >= 3:
+        allowed |= SCENARIO_FIELDS_V3
+    if not isinstance(item, dict) or not set(item) <= allowed:
         raise ValueError('Invalid scenario fields')
     missing = REQUIRED_SCENARIO - set(item)
     if missing:
@@ -179,6 +206,39 @@ def validate_scenario(item):
         _validate_evidence(item, item['key'])
     if 'detail' in item:
         _bounded_text(item['detail'], 'scenario.detail', 4000)
+    if 'module' in item:
+        _bounded_text(item['module'], 'scenario.module', 500)
+    if 'mode' in item and item['mode'] not in RUN_MODES:
+        raise ValueError('Invalid scenario mode')
+    if 'reproduction' in item:
+        _bounded_text(item['reproduction'], 'scenario.reproduction', 8000)
+    if 'severity' in item and item['severity'] not in SEVERITIES:
+        raise ValueError('Invalid scenario severity')
+    if 'confidence' in item and item['confidence'] not in CONFIDENCES:
+        raise ValueError('Invalid scenario confidence')
+    if 'test_requirements' in item:
+        _bounded_text(item['test_requirements'],
+                      'scenario.test_requirements', 4000)
+    if 'product_cause' in item and type(item['product_cause']) is not bool:
+        raise ValueError('scenario.product_cause must be boolean')
+    return item
+
+
+def validate_exploration(item):
+    """The exploration channel a charter-driven run records: which
+    charter it pursued, why it was novel, and which frontiers it
+    recommends next."""
+    if not isinstance(item, dict) or not set(item) <= EXPLORATION_FIELDS:
+        raise ValueError('Invalid exploration fields')
+    if 'charter' in item:
+        _bounded_text(item['charter'], 'exploration.charter', 500)
+    if 'rationale' in item:
+        _bounded_text(item['rationale'], 'exploration.rationale', 4000)
+    if 'next_frontiers' in item:
+        _bounded_list(item['next_frontiers'], 'exploration.next_frontiers',
+                      500, 10)
+    if 'agent' in item:
+        _bounded_text(item['agent'], 'exploration.agent', 200)
     return item
 
 
@@ -255,6 +315,13 @@ def validate_report(text, run_id=None, attempted_sha=None):
         raise ValueError('Unsupported report schema version')
     if data['schema_version'] < 2 and 'verifications' in data:
         raise ValueError('verifications require report schema version 2')
+    if data['schema_version'] < 3 \
+            and ('exploration' in data or 'mode' in data):
+        raise ValueError('mode and exploration require report schema version 3')
+    if 'mode' in data and data['mode'] not in RUN_MODES:
+        raise ValueError('Invalid run mode')
+    if 'exploration' in data:
+        validate_exploration(data['exploration'])
     if not isinstance(data['run_id'], str) or not KEY.match(data['run_id']):
         raise ValueError('Invalid run_id')
     if run_id is not None and data['run_id'] != run_id:
@@ -309,7 +376,7 @@ def validate_report(text, run_id=None, attempted_sha=None):
     seen = set()
     case_outcomes = []
     for item in scenarios:
-        validate_scenario(item)
+        validate_scenario(item, data['schema_version'])
         if item['key'] in seen:
             raise ValueError('Duplicate scenario key')
         seen.add(item['key'])

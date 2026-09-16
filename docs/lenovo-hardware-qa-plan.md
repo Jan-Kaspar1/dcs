@@ -29,8 +29,47 @@ Implementation order: second, after [daily architecture review](daily-architectu
   bookworm-slim + uid 10001 + entrypoint runtime contract. Documented
   as the interim path until CI-pinned images exist.
 - Report-only: no GitHub issue publication (finding ingestion is a
-  later task). Devin exploration phase not yet added; deterministic
-  scenarios gate it per the plan's ordering.
+  later task). Devin exploration phase gated behind the deterministic
+  scenarios per the plan's ordering.
+
+### Landed 2026-09-16 (charter-driven exploration, Task 3)
+
+- `qa_lane/explorer.py` + `qa_lane/explorer_prompt.md`: `qax-*`
+  exploration runs dispatch when no verification or assessment is due —
+  the same build/rig skeleton, then a time-bounded Devin session
+  (`swe-2-high`, dangerous permissions) on the host receives a rendered
+  charter prompt with the run id, exact revision, changed range, mode,
+  endpoints, UI URL, rig manifest, recent merges, open-backlog snapshot,
+  pending fix verifications, the exploration ledger, and the forbidden
+  actions list. The agent chooses its own charter under a novelty rule;
+  there is no scenario list.
+- Agent output contract: `results/agent-result.json` (charter, dynamic
+  scenario results with stable mechanism keys, capability limitations,
+  infrastructure failures, verification replays, coverage ledger,
+  timeline) plus `exploration-summary.md`, `evidence/`, `scripts/` —
+  validated and folded into the run report; malformed entries degrade to
+  named infrastructure failures instead of sinking the run.
+- `qa_lane/report.py` schema v3: optional top-level `mode` and
+  `exploration` channel; per-scenario explicit finding fields
+  (`module`, `mode`, `reproduction`, `severity`, `confidence`,
+  `test_requirements`, `product_cause`) so exploratory defects publish
+  real tickets instead of coordinator-default stubs. v1/v2 reports
+  remain valid input.
+- `agent_pool/findings.py`: `_scenario_finding` prefers the explicit
+  schema-v3 fields; the pending-verification queue marks cases with no
+  deterministic scenario as `replay: agent` — the exploration lane
+  re-runs those reproductions, `qav-*` skips them.
+- Run bookkeeping scopes to `qa-` prefixes so an exploration of an older
+  verdicted revision never regresses `last_attempted_sha`, triggers a
+  scenario retry, or lets a queued dedicated run be superseded.
+- Cadence: `exploration_interval_seconds` spacing plus
+  `max_explorations_per_day`, outside the assessment's daily budget;
+  budgets are config so cadence can tighten without a code change.
+- Session sandbox: host-level Devin process (not a container — it needs
+  host loopback for the rig's monitor ports and egress to the Devin
+  API), read-only worktree source, results dir under the run dir,
+  process-group kill at the time budget. An ephemeral agent container
+  remains future hardening work.
 
 ### Landed 2026-09-15 (fix verification, Task 2)
 

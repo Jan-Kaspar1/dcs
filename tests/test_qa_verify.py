@@ -154,6 +154,25 @@ class DispatchTests(Fixture):
         self.assertEqual(self.st.runs(('queued',))[0]['run_id'], 'qa-1')
         self.assertTrue(any('unverifiable' in m for m in logs))
 
+    def test_replay_marker_validated(self):
+        write_queue(self.cfg, [item('exploratory-case', replay='agent'),
+                               item('bad-replay', replay='bogus')])
+        items = verify.load_queue(self.cfg)
+        self.assertEqual([i['finding_key'] for i in items],
+                         ['exploratory-case'])
+
+    def test_agent_replay_items_skip_dispatch(self):
+        """An exploratory case identity has no deterministic scenario —
+        the qav-* lane must not spend a run on it; the exploration lane
+        replays it instead."""
+        write_queue(self.cfg, [item('exploratory-case', replay='agent')])
+        self.st.enqueue('qa-1', SHA_A, 1.0, DAY)
+        self.stage_src(SHA_A)
+        Path(self.cfg['git_dir']).mkdir(parents=True)
+        self.assertIsNone(verify.next_run(self.st, self.cfg, 1.0))
+        self.assertEqual([r['run_id'] for r in self.st.runs(('queued',))],
+                         ['qa-1'])
+
     def test_checkable_item_dispatches_dedicated_run(self):
         write_queue(self.cfg, [item()])
         self.st.enqueue('qa-1', SHA_A, 1.0, DAY)
@@ -218,7 +237,7 @@ class RunTests(Fixture):
         self.assertEqual((rec['status'], rec['outcome']),
                          ('finished', 'blocked'))
         doc = qa_report.validate_report(Path(rec['report']).read_text())
-        self.assertEqual(doc['schema_version'], 2)
+        self.assertEqual(doc['schema_version'], qa_report.SCHEMA_VERSION)
         entry = doc['verifications'][0]
         self.assertEqual(entry['outcome'], 'inconclusive')
         self.assertFalse(entry['fix_ancestry']['contained'])

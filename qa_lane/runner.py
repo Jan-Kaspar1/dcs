@@ -102,6 +102,22 @@ DEFAULT_CONFIG = {
                    'exercised through the dcs-sim-net remote simulation.',
          'blocking': False},
     ],
+    # Charter-based exploratory lane (qax-* run ids): when enabled, idle
+    # cycles dispatch a time-bounded Devin session against the newest
+    # gate-verdicted revision instead of rerunning scenarios. The session
+    # runs on the host as the lane user — its working directory lives
+    # inside the run dir and it reaches the rig through the loopback
+    # monitor ports. `exploration_devin` should be an absolute path: the
+    # oneshot unit's PATH lacks ~/.local/bin.
+    'exploration_enabled': False,
+    'exploration_devin': 'devin',
+    'exploration_model': 'swe-2-high',
+    'exploration_time_budget_seconds': 5400,
+    'exploration_interval_seconds': 7200,
+    'max_explorations_per_day': 8,
+    'exploration_ledger_keep': 20,
+    'exploration_prompt': None,
+    'git_dir': '/srv/dcs-hwtest/repo.git',
 }
 
 
@@ -549,14 +565,18 @@ def reclaim(st, cfg, log=print, docker_ok=True):
 
 
 def _maybe_retry(st, cfg, now, day):
-    """Queue one automatic retry for an inconclusive finished run."""
-    finished = st.runs(('finished',))
+    """Queue one automatic retry for an inconclusive assessment run.
+    Dedicated kinds never trigger sha-retries: an inconclusive qav
+    already bounds its own attempts and an inconclusive exploration is
+    a valid outcome, not a broken gate."""
+    finished = [r for r in st.runs(('finished',))
+                if r['run_id'].startswith('qa-')]
     if not finished:
         return
     last = finished[-1]
     if last['outcome'] != 'inconclusive':
         return
-    if st.next_queued() is not None:
+    if st.next_queued('qa') is not None:
         return
     attempts = st.attempts_for(last['attempted_sha'])
     if attempts >= cfg['max_attempts_per_sha']:
@@ -630,19 +650,25 @@ def cycle(cfg, log=print):
         _maybe_retry(st, cfg, now, day)
         if _set_blocked(st, *(block or (None, None)), log):
             return
-        if st.started_today(day) >= cfg['max_runs_per_day']:
-            log('cycle: daily run budget reached')
-            return
-        # Pending fix verifications dispatch ahead of the newest-SHA
-        # assessment: a merged fix is re-verified on a revision proven to
-        # contain it before the lane spends a run on fresh exploration.
+        # Dispatch order: pending fix verifications first, then the newest
+        # queued assessment, then — when enabled and nothing else is due —
+        # an exploratory session against the newest gate-verdicted
+        # revision. The daily budget bounds assessments only: dedicated
+        # kinds carry their own budgets (max_explorations_per_day) or are
+        # queue-bound (qav-), and must never starve or be starved by the
+        # deterministic gate.
         record = verify.next_run(st, cfg, now, log)
-        queued = record if record is not None else st.next_queued()
-        if queued is None:
+        queued = None
+        if st.started_today(day, 'qa') >= cfg['max_runs_per_day']:
+            log('cycle: daily assessment budget reached')
+        else:
+            queued = st.next_queued('qa')
+        if record is None and queued is None:
+            from . import explorer
+            record = explorer.next_run(st, cfg, now, log)
+        if record is None and queued is None:
             log('cycle: nothing queued')
             return
-        # The egress gate covers both run kinds: a verification run
-        # builds images and starts a rig exactly like an assessment.
         if cfg.get('egress_required'):
             missing = _ensure_egress_policy(log)
             if missing:
@@ -650,10 +676,13 @@ def cycle(cfg, log=print):
                              'host firewall rules absent: '
                              + '; '.join(missing[:5]), log)
                 return
-        if record is not None:
+        if record is not None and record['run_id'].startswith('qav-'):
             verify.run(st, record, cfg, log)
-        else:
+        elif queued is not None:
             run(st, queued, cfg, log)
+        else:
+            from . import explorer
+            explorer.run(st, record, cfg, log)
     finally:
         st.close()
         lock.close()
@@ -895,7 +924,8 @@ def _teardown_rig(run_id, timeline, st=None):
 
 
 def _persist_report(st, record, cfg, outcome, completed_sha, images,
-                    results, infra, events, log=print, verifications=None):
+                    results, infra, events, log=print, verifications=None,
+                    mode=None, exploration=None):
     """Validate, store, stage, and record a report for a run record.
 
     The durable cleanup ledger is merged into infrastructure_failures
@@ -934,6 +964,10 @@ def _persist_report(st, record, cfg, outcome, completed_sha, images,
             'first': record['range_first'], 'last': record['attempted_sha']}
     if verifications is not None:
         report_doc['verifications'] = verifications
+    if mode is not None:
+        report_doc['mode'] = mode
+    if exploration is not None:
+        report_doc['exploration'] = exploration
     qa_report.validate_report(json.dumps(report_doc),
                               run_id=record['run_id'],
                               attempted_sha=record['attempted_sha'])
@@ -1105,13 +1139,14 @@ def run(st, record, cfg, log=print):
 def status(cfg):
     st = qa_state.State(Path(cfg['state_dir']) / 'state.db')
     try:
-        from . import verify
+        from . import explorer, verify
         runs = st.runs()
         try:
             storage = qa_storage_usage(cfg)
             storage['bound'] = cfg['qa_storage_max_bytes']
         except Exception as exc:
             storage = {'error': str(exc)[:300]}
+        day = _utcnow().strftime('%Y-%m-%d')
         return {
             'last_attempted_sha': st.last_attempted_sha(),
             'queued': [r['attempted_sha'] for r in st.runs(('queued',))],
@@ -1128,6 +1163,12 @@ def status(cfg):
                         'attempt': r['attempt'], 'day': r['day']}
                        for r in runs[-10:]],
             'pending_verifications': len(verify.load_queue(cfg)),
+            'exploration': {
+                'enabled': bool(cfg.get('exploration_enabled')),
+                'devin': explorer.resolve_devin(cfg),
+                'today': st.started_today(day, explorer.RUN_PREFIX),
+                'ledger': len(explorer.ledger(st)),
+            },
         }
     finally:
         st.close()
