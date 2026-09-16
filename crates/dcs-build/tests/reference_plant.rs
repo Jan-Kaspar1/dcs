@@ -10,10 +10,13 @@
 //! released-tooling acceptance, the manifest fingerprint check, the
 //! deterministic scripted simulation, the served operator surface —
 //! the signal index, page, snapshot descriptors, and journal asserted
-//! against the emitted model's declaration — and the `upgrade` stage,
-//! which repins the materialized tree to the checkout's `HEAD` (seeded
-//! into the stand-in beside the recorded rev) and re-runs the full
-//! pipeline under the repin.
+//! against the emitted model's declaration — the `consumers` stage,
+//! which replays that driven run under each consumer schedule (no UI,
+//! polling, a stalled reader, churn, malformed/flooded traffic, a UI
+//! process restart) requiring identical digests, and the `upgrade`
+//! stage, which repins the materialized tree to the checkout's `HEAD`
+//! (seeded into the stand-in beside the recorded rev) and re-runs the
+//! full pipeline under the repin.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -255,11 +258,22 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     let tools = build_tools();
     let copy = Materialized::new();
     let output = copy.check(&tools);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "the template's ci/check.sh failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "the template's ci/check.sh failed:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The consumer-boundary stage ran and held: the same driven run's
+    // digest under every consumer schedule, identical across passes —
+    // the `file://` stand-in resolving the current revision's tooling.
+    assert!(
+        stdout.contains("== consumers =="),
+        "the consumers stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("identical across every schedule and both passes"),
+        "the consumer schedules did not produce identical digests:\n{stdout}",
     );
 }
 

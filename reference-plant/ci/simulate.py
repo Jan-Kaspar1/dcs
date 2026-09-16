@@ -56,6 +56,7 @@ the offending point or receipt on stderr and exits 1.
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import socket
@@ -343,6 +344,120 @@ def run_surface(monitor, model):
     return 0
 
 
+@contextlib.contextmanager
+def driven_rig(plant_server, controller, model, dynamics, dt):
+    """Spawns the simulated plant plus the driven controller against it
+    — `dcs-plant-server <model> --dynamics <doc>` and `dcs-controller
+    <model> --remote <addr> --driven --dt <t>` — and yields the pair's
+    addresses `(plant_addr, monitor_url)`, the monitor's `POST /scan`
+    pacing the run. Both processes are terminated on exit."""
+    plant = subprocess.Popen(
+        [
+            plant_server,
+            model,
+            "--dynamics",
+            dynamics,
+            "--listen",
+            "127.0.0.1:0",
+        ],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        plant_addr = listen_address(plant, "dcs-plant-server")
+        controller_process = subprocess.Popen(
+            [
+                controller,
+                model,
+                "--remote",
+                plant_addr,
+                "--driven",
+                "--listen",
+                "127.0.0.1:0",
+                "--dt",
+                str(dt),
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            monitor_addr = listen_address(controller_process, "dcs-controller")
+            yield plant_addr, f"http://{monitor_addr}"
+        finally:
+            controller_process.terminate()
+            controller_process.wait(timeout=10)
+    finally:
+        plant.terminate()
+        plant.wait(timeout=10)
+
+
+def run_legs(monitor, plant_client, legs, between_legs=None):
+    """Runs the scenario's legs against the driven monitor — plant
+    fault requests on the dedicated plant connection, receipted
+    commands through `POST /command`, scans through `POST /scan`, and
+    each leg's declared point expectations on the returned snapshot.
+    `between_legs` runs after each leg's assertions with that leg's
+    index — the seam a consumer schedule uses to place a mid-run event.
+
+    Returns `(digest_entries, failures)`: the per-leg outcome records
+    (name, tick, receipt outcomes, observed point values) a run's
+    digest covers, and the named mismatches found."""
+    digest_entries = []
+    failures = []
+    for index, leg in enumerate(legs):
+        name = leg["name"]
+        for request in leg.get("plant", []):
+            response = plant_client.request(request)
+            if response.get("result") == "error" or "error" in response:
+                failures.append(
+                    f"{name}: plant request {request} answered {response}"
+                )
+        commands = leg.get("commands", [])
+        receipts = leg.get("expect_receipts", [])
+        if len(commands) != len(receipts):
+            raise RuntimeError(f"{name}: commands/expect_receipts lengths differ")
+        outcomes = []
+        for body, expected in zip(commands, receipts):
+            receipt = http(f"{monitor}/command", body)
+            outcome = receipt_outcome(receipt)
+            outcomes.append(outcome)
+            if outcome != expected:
+                failures.append(
+                    f"{name}: command receipt is {outcome}, "
+                    f"expected {expected}"
+                )
+        if leg["scans"]:
+            snapshot = http(f"{monitor}/scan", {"scans": leg["scans"]})
+        else:
+            snapshot = http(f"{monitor}/snapshot")
+        for point_text, expectation in sorted(
+            leg.get("expect", {}).items(), key=lambda item: int(item[0])
+        ):
+            point = int(point_text)
+            try:
+                value = snapshot_point(snapshot, point)
+            except KeyError:
+                failures.append(f"{name}: point {point} is not served")
+                continue
+            mismatch = check_expectation(name, point, expectation, value)
+            if mismatch:
+                failures.append(mismatch)
+        digest_entries.append(
+            {
+                "leg": name,
+                "tick": snapshot["tick"],
+                "receipts": outcomes,
+                "observed": {
+                    point: snapshot_point(snapshot, int(point))
+                    for point in sorted(leg.get("expect", {}), key=int)
+                },
+            }
+        )
+        if between_legs:
+            between_legs(index)
+    return digest_entries, failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--plant-server", required=True)
@@ -361,115 +476,30 @@ def main():
     with open(args.scenario) as handle:
         scenario = json.load(handle)
 
-    plant = subprocess.Popen(
-        [
-            args.plant_server,
-            args.model,
-            "--dynamics",
-            args.dynamics,
-            "--listen",
-            "127.0.0.1:0",
-        ],
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        plant_addr = listen_address(plant, "dcs-plant-server")
-        controller = subprocess.Popen(
-            [
-                args.controller,
-                args.model,
-                "--remote",
-                plant_addr,
-                "--driven",
-                "--listen",
-                "127.0.0.1:0",
-                "--dt",
-                str(scenario["dt"]),
-            ],
-            stderr=subprocess.PIPE,
-            text=True,
+    with driven_rig(
+        args.plant_server,
+        args.controller,
+        args.model,
+        args.dynamics,
+        scenario["dt"],
+    ) as (plant_addr, monitor):
+        if args.surface:
+            with open(args.model) as handle:
+                model = json.load(handle)
+            return run_surface(monitor, model)
+        plant_client = PlantClient(plant_addr)
+        digest_entries, failures = run_legs(
+            monitor, plant_client, scenario["legs"]
         )
-        try:
-            monitor_addr = listen_address(controller, "dcs-controller")
-            monitor = f"http://{monitor_addr}"
-            if args.surface:
-                with open(args.model) as handle:
-                    model = json.load(handle)
-                return run_surface(monitor, model)
-            plant_client = PlantClient(plant_addr)
-            digest_entries = []
-            failures = []
-            for leg in scenario["legs"]:
-                name = leg["name"]
-                for request in leg.get("plant", []):
-                    response = plant_client.request(request)
-                    if response.get("result") == "error" or "error" in response:
-                        failures.append(
-                            f"{name}: plant request {request} answered {response}"
-                        )
-                commands = leg.get("commands", [])
-                receipts = leg.get("expect_receipts", [])
-                if len(commands) != len(receipts):
-                    raise RuntimeError(
-                        f"{name}: commands/expect_receipts lengths differ"
-                    )
-                outcomes = []
-                for body, expected in zip(commands, receipts):
-                    receipt = http(f"{monitor}/command", body)
-                    outcome = receipt_outcome(receipt)
-                    outcomes.append(outcome)
-                    if outcome != expected:
-                        failures.append(
-                            f"{name}: command receipt is {outcome}, "
-                            f"expected {expected}"
-                        )
-                if leg["scans"]:
-                    snapshot = http(f"{monitor}/scan", {"scans": leg["scans"]})
-                else:
-                    snapshot = http(f"{monitor}/snapshot")
-                for point_text, expectation in sorted(
-                    leg.get("expect", {}).items(), key=lambda item: int(item[0])
-                ):
-                    point = int(point_text)
-                    try:
-                        value = snapshot_point(snapshot, point)
-                    except KeyError:
-                        failures.append(
-                            f"{name}: point {point} is not served"
-                        )
-                        continue
-                    mismatch = check_expectation(name, point, expectation, value)
-                    if mismatch:
-                        failures.append(mismatch)
-                digest_entries.append(
-                    {
-                        "leg": name,
-                        "tick": snapshot["tick"],
-                        "receipts": outcomes,
-                        "observed": {
-                            point: snapshot_point(snapshot, int(point))
-                            for point in sorted(
-                                leg.get("expect", {}), key=int
-                            )
-                        },
-                    }
-                )
-            if failures:
-                for failure in failures:
-                    eprint(f"scenario: {failure}")
-                return 1
-            digest = hashlib.sha256(
-                json.dumps(digest_entries, sort_keys=True).encode()
-            ).hexdigest()
-            print(f"scenario-digest {digest}")
-            return 0
-        finally:
-            controller.terminate()
-            controller.wait(timeout=10)
-    finally:
-        plant.terminate()
-        plant.wait(timeout=10)
+        if failures:
+            for failure in failures:
+                eprint(f"scenario: {failure}")
+            return 1
+        digest = hashlib.sha256(
+            json.dumps(digest_entries, sort_keys=True).encode()
+        ).hexdigest()
+        print(f"scenario-digest {digest}")
+        return 0
 
 
 if __name__ == "__main__":

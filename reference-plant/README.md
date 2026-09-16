@@ -29,6 +29,8 @@ ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface
+ci/consumers.py        the consumer-boundary driver — replays the same
+                       driven run under each consumer schedule
 deploy/manifest.json   the deployment declaration
 ```
 
@@ -108,6 +110,42 @@ snapshot's `descriptors` must cover every composed component; and
 `GET /journal` must answer the run's recorded transitions. A
 divergence fails `surface-mismatch`.
 
+The check's `consumers` stage then proves the replaceable-consumer
+boundary end to end — `ci/consumers.py --schedule <name>` replays the
+identical driven run once per consumer schedule: `zero-clients` (no UI
+attached, the control run), `polling`, `stalled-reader` (a `GET
+/snapshot` response held unread across the whole run),
+`disconnect-reconnect` (connect/read/drop churn, sometimes dropped
+mid-response), `malformed-and-flood` (garbage bytes, half-sent
+requests, refused verbs, and malformed bodies within the declared
+limits, beside a read flood over every surface), and `ui-restart` (a
+separate consumer process killed mid-run and restarted). Every
+schedule must produce the identical `consumer-digest` over the run's
+leg outcomes and command receipts, and two full passes must produce
+identical digests — a divergence fails `consumer-interference`, a
+nondeterministic stage `consumer-nondeterministic`.
+
+The obligations this demonstrates for any monitoring or UI consumer:
+
+- **Tolerate sequence gaps and freshness metadata.** Reads are served
+  from bounded storage; a consumer that falls behind finds its `since`
+  cursor's successors evicted — visible as a numbering gap on
+  `GET /journal` and `GET /history` — and the served snapshot's
+  `publication` section reports how much was published and coalesced
+  while it was away. Coalesce onto the retained tail or the latest
+  snapshot; never assume continuity.
+- **Never treat UI or session loss as a plant-stopping event.** The
+  controller owns execution; a consumer that stalls, disconnects, or
+  restarts changes nothing — the `ui-restart` schedule's run produces
+  byte-identical outputs and receipts. A transport failure is consumer
+  health, not a plant condition.
+- **Submit mutations only through the bounded receipted path.**
+  `POST /command` is validated, bounded, and answered with a receipt —
+  accepted, or a named rejection — settling at the scan boundary.
+  Nothing else mutates the run: malformed bodies are refused at parse
+  (`400`), refused verbs get their named status, and a consumer can
+  never turn a read into a write.
+
 Run the whole check yourself:
 
 ```sh
@@ -152,6 +190,9 @@ a pin whose supported API no longer compiles your composition is
 is `tooling-rejected`; a model whose semantic content changed under a
 re-recorded fingerprint is `manifest-fingerprint-mismatch`; a served
 operator surface diverging from the emitted model's declaration is
-`surface-mismatch`. The names are recorded in the platform's
+`surface-mismatch`; a consumer schedule changing the driven run's
+outputs or receipts — or failing its own evidence — is
+`consumer-interference`; and two consumer-stage passes diverging is
+`consumer-nondeterministic`. The names are recorded in the platform's
 `docs/release-contract.md` — the same vocabulary the platform's own
 consumer-boundary checks report.
