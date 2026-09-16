@@ -55,6 +55,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+mod support;
+
+use support::image_value;
+
 const TANK_LOOP: &str = include_str!("../../dcs-assembly/fixtures/tank_loop.json");
 
 /// The process time the shared plant advances per scan — the fixture's
@@ -233,17 +237,6 @@ fn served_document(client: &MonitorClient) -> serde_json::Value {
     let (status, body) = client.request("GET", "/checkpoint", None).unwrap();
     assert_eq!(status, 200, "{body}");
     serde_json::from_str(&body).unwrap()
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
 }
 
 /// What one scripted run observed — the acceptance criteria in

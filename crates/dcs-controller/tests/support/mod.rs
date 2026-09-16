@@ -184,11 +184,7 @@ pub fn spawn_controller(model: &Path, extra: &[String], dt: &str) -> Spawned {
 
 /// The state-file restart's spawn: the resume report is a stderr line
 /// before `listening on`, so the preamble comes back with the process.
-pub fn spawn_controller_logged(
-    model: &Path,
-    extra: &[String],
-    dt: &str,
-) -> (Spawned, Vec<String>) {
+pub fn spawn_controller_logged(model: &Path, extra: &[String], dt: &str) -> (Spawned, Vec<String>) {
     let mut args = vec![model.to_str().unwrap().to_string()];
     args.extend(extra.iter().cloned());
     for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", dt] {
@@ -216,11 +212,7 @@ pub enum SimTcp {
 /// `devices` — the remote-sim path through the assembly driver
 /// registry. Tests layering further edits on the document apply them
 /// to the returned value and persist it through [`write_model`].
-pub fn sim_tcp_document(
-    source: &str,
-    plant: SocketAddr,
-    devices: SimTcp,
-) -> serde_json::Value {
+pub fn sim_tcp_document(source: &str, plant: SocketAddr, devices: SimTcp) -> serde_json::Value {
     let mut document: serde_json::Value = serde_json::from_str(source).unwrap();
     match devices {
         SimTcp::PerDevice => {
@@ -254,11 +246,7 @@ pub fn sim_tcp_document(
 
 /// Writes `document` — a model JSON — under `dir` and loads it once so
 /// the caller can compare fingerprints.
-pub fn write_model(
-    dir: &Path,
-    name: &str,
-    document: &serde_json::Value,
-) -> (PathBuf, PlantModel) {
+pub fn write_model(dir: &Path, name: &str, document: &serde_json::Value) -> (PathBuf, PlantModel) {
     let path = dir.join(name);
     std::fs::write(&path, serde_json::to_string_pretty(document).unwrap()).unwrap();
     let model = PlantModel::load(&serde_json::to_string(document).unwrap()).unwrap();

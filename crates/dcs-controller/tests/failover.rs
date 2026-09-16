@@ -186,8 +186,14 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
     // model, identical dynamics.
     let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let pair_model =
-        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
 
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed.
@@ -346,8 +352,14 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let pair_model =
-        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
     let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
@@ -423,8 +435,14 @@ fn an_unconverged_standby_reports_its_state_and_never_promotes() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let pair_model =
-        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
 
     // A standby whose tracking target never existed: every pull fails
     // from the start, so the peer never converges — and a process that
@@ -473,8 +491,14 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let pair_model =
-        controller_model(&dir, "pair.json", MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice).0;
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
     let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(

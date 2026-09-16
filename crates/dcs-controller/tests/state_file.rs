@@ -7,10 +7,12 @@
 use dcs_core::{TelemetrySnapshot, Tick};
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, Checkpoint};
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::process::Command as Process;
+
+mod support;
+
+use support::{Spawned, kill, listening_on, spawn};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: a PID integrating a setpoint error against a
@@ -285,47 +287,10 @@ fn a_missing_state_file_is_a_cold_start_and_without_the_flag_nothing_changes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A spawned `--driven` controller: scans run only when `POST /scan`
-/// requests them — a restart mid-run leaves the process dead until the
-/// test spawns its replacement, exactly the restart the state file
-/// exists for. Killed on drop so a panicking test leaves nothing behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// Spawns the controller and reads stderr until its `listening on`
 /// line — a resumed process reports the resume first.
 fn spawn_driven(args: &[String]) -> Spawned {
-    let mut child = Process::new(BINARY)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("controller exited before reporting its address");
-        }
-        if let Some(addr) = line.trim().strip_prefix("listening on ") {
-            break addr.parse().unwrap();
-        }
-    };
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
+    spawn(Path::new(BINARY), args, listening_on)
 }
 
 #[test]
@@ -357,8 +322,7 @@ fn a_driven_run_resumes_from_its_state_file() {
     // remaining HALF — the externally paced half of the same boundary.
     let mut first = spawn_driven(&args(true));
     MonitorClient::new(first.addr).advance(HALF).unwrap();
-    first.child.kill().unwrap();
-    first.child.wait().unwrap();
+    kill(&mut first);
     assert_eq!(persisted(&state).tick, Tick(HALF));
 
     let resumed = spawn_driven(&args(true));

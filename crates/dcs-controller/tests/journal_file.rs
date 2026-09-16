@@ -9,10 +9,12 @@
 
 use dcs_core::{Command, JournalEntry, PointId, Tick, Value, ValueKind};
 use dcs_monitor::MonitorClient;
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::process::Command as Process;
+
+mod support;
+
+use support::{Spawned, kill, listening_on, spawn};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: point 10 is a model-declared writable `In`
@@ -70,47 +72,10 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// A spawned `--driven` controller: scans run only when `POST /scan`
-/// requests them — a restart mid-run leaves the process dead until the
-/// test spawns its replacement, exactly the restart the journal file
-/// exists for. Killed on drop so a panicking test leaves nothing behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// Spawns the controller and reads stderr until its `listening on`
 /// line — a resumed process reports the resume first.
 fn spawn_driven(args: &[String]) -> Spawned {
-    let mut child = Process::new(BINARY)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("controller exited before reporting its address");
-        }
-        if let Some(addr) = line.trim().strip_prefix("listening on ") {
-            break addr.parse().unwrap();
-        }
-    };
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
+    spawn(Path::new(BINARY), args, listening_on)
 }
 
 /// The journaled-points rig: point 10 is a writable journaled `In`
@@ -157,11 +122,6 @@ fn setpoint_write() -> Command {
         kind: ValueKind::Float,
         value: Value::Float(2.5),
     }
-}
-
-fn kill(spawned: &mut Spawned) {
-    spawned.child.kill().unwrap();
-    spawned.child.wait().unwrap();
 }
 
 #[test]

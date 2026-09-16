@@ -26,18 +26,18 @@
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, EmittedEvent, IoDriver, JournalEvent, PointId, Role,
-    TelemetrySnapshot, Tick, Value,
+    Tick, Value,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -64,108 +64,15 @@ const VALVE: PointId = PointId(20);
 /// The sequencer's reported step index — an internal `Out` point.
 const STEP: PointId = PointId(33);
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
 /// Writes the controller-side model for a plant server at `plant`: the
-/// shared tank-loop model with every device's kind re-pointed at
-/// `sim-tcp`, extended by the proving `sequencer` — a four-step table
-/// of two-tick steps whose `run`/`reset` inputs and `out`/`step`/`done`
-/// outputs are internal points, so the component's declared commands
-/// and emitted events exercise the pair without field I/O.
+/// shared tank-loop model re-pointed at `sim-tcp` per
+/// [`sim_tcp_document`], extended by the proving `sequencer` — a
+/// four-step table of two-tick steps whose `run`/`reset` inputs and
+/// `out`/`step`/`done` outputs are internal points, so the component's
+/// declared commands and emitted events exercise the pair without
+/// field I/O.
 fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
+    let mut document = sim_tcp_document(MODEL_SOURCE, plant, SimTcp::PerDevice);
     document["io_points"].as_array_mut().unwrap().extend([
         // `run` held true steps the table; `reset` held false lets the
         // declared `reset` command own the restart.
@@ -208,9 +115,7 @@ fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
         serde_json::json!({"id": 104, "name": "sequence-step", "source": 33}),
         serde_json::json!({"id": 105, "name": "sequence-done", "source": 34}),
     ]);
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
+    write_model(dir, name, &document).0
 }
 
 /// The `sequencer` declared-command invocation — `advance` takes the
@@ -223,17 +128,6 @@ fn invoke(command: &str, count: Option<i64>) -> Command {
             .map(|count| BTreeMap::from([("count".to_string(), Value::Int(count))]))
             .unwrap_or_default(),
     }
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
 }
 
 /// The journal's emitted-event stream — `(tick, event)` per
@@ -275,17 +169,18 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 
     // Two shared plants: the pair's and the reference run's — identical
     // model and dynamics, identical request sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
     let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
 
-    let active_process = spawn_controller(&pair_model, &[]);
+    let active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
-    let reference_process = spawn_controller(&reference_model, &[]);
+    let reference_process = spawn_controller(&reference_model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let reference = MonitorClient::new(reference_process.addr);

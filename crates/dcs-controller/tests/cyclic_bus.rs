@@ -209,7 +209,7 @@ fn the_driven_controller_steps_the_field_through_the_boundary_exchange() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let active_process = spawn_controller(&model, &[]);
+    let active_process = spawn_controller(&model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
 
     // Two converged scans: each boundary's exchange latched the census
@@ -328,7 +328,7 @@ fn short_exchanges_degrade_their_station_end_to_end() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let active_process = spawn_controller(&model, &[]);
+    let active_process = spawn_controller(&model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
     active.advance(1).unwrap();
 
@@ -411,10 +411,11 @@ fn the_tracking_standby_latches_inputs_while_its_writes_never_stage() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let mut active_process = spawn_controller(&model, &[]);
+    let mut active_process = spawn_controller(&model, &[], DT);
     let standby_process = spawn_controller(
         &model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);

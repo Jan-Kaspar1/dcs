@@ -293,7 +293,14 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mut plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
-    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant.addr, SimTcp::PerDevice).0;
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
     let active_process = spawn_controller(&model, &[], DT);
     let standby_process = spawn_controller(
         &model,

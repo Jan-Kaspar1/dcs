@@ -25,7 +25,7 @@
 
 use dcs_core::{
     CarryoverReport, Command, DroppedElement, IoDriver, JournalEvent, PointId, Role, StandbySync,
-    SwitchError, TelemetrySnapshot, Value, ValueKind,
+    SwitchError, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -35,9 +35,8 @@ use std::path::{Path, PathBuf};
 
 mod support;
 
-use support::{
-    SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model,
-};
+use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -159,12 +158,9 @@ fn broken_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
             connection["from"]["point"] = 14.into();
         }
     }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     // The broken revision is still a valid model — it must fail at the
     // carryover rule, not at load.
-    PlantModel::load(&serde_json::to_string(&document).unwrap()).unwrap();
-    path
+    write_model(dir, name, &document).0
 }
 
 /// The report the peer's sync state carries, or a panic naming what it
@@ -187,7 +183,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("dcs-revision-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, v1) = v1_model(&dir, "v1.json", plant.addr);
     let (v2_path, v2) = v2_model(&dir, "v2.json", plant.addr);
     assert_ne!(
@@ -196,7 +192,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
         "the revision must fingerprint differently by design"
     );
 
-    let active_process = spawn_controller(&v1_path, &[]);
+    let active_process = spawn_controller(&v1_path, &[], DT);
     let standby_process = spawn_controller(
         &v2_path,
         &[
@@ -204,6 +200,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
             active_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -395,11 +392,11 @@ fn breaking_revision_is_rejected_before_promotion() {
     let dir = std::env::temp_dir().join(format!("dcs-revision-broken-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, _v1) = v1_model(&dir, "v1.json", plant.addr);
     let broken_path = broken_model(&dir, "broken.json", plant.addr);
 
-    let active_process = spawn_controller(&v1_path, &[]);
+    let active_process = spawn_controller(&v1_path, &[], DT);
     let standby_process = spawn_controller(
         &broken_path,
         &[
@@ -407,6 +404,7 @@ fn breaking_revision_is_rejected_before_promotion() {
             active_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
