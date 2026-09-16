@@ -54,6 +54,17 @@
 #                UI process restart — producing identical output and
 #                receipt digests across every schedule and across two
 #                passes (consumer-interference, consumer-nondeterministic)
+#   ctl          the shipped operator CLI against the same driven run:
+#                dcs-ctl's reads answer the served contract — signals,
+#                schema, snapshot, events, resources — its invoke
+#                submits the sequencer's kind-declared advance/reset
+#                through the bounded receipted path with actor
+#                attribution, settling applied receipts visible through
+#                receipts and the journal, and the refusal modes —
+#                undeclared command, malformed argument, unreachable
+#                monitor — exit nonzero naming the failure; two passes
+#                produce identical digests (ctl-failed,
+#                ctl-nondeterministic)
 #   upgrade      the documented repin upgrade (README §7): this tree's
 #                composition is materialized pinned at the recorded
 #                release rev, repinned to a later compatible revision,
@@ -81,10 +92,10 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, and `dcs-plant-server` binaries. When
-#                unset, the check installs them from $DCS_REMOTE at
-#                $DCS_REV — the contract's `cargo install --git`
-#                mechanism — into a scratch root.
+#                `dcs-controller`, `dcs-plant-server`, and `dcs-ctl`
+#                binaries. When unset, the check installs them from
+#                $DCS_REMOTE at $DCS_REV — the contract's `cargo
+#                install --git` mechanism — into a scratch root.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -124,7 +135,7 @@ ensure_tools() {
     local dir
     dir="$(mktemp -d)"
     if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
-            dcs-model dcs-controller dcs-plant --root "$dir"; then
+            dcs-model dcs-controller dcs-plant dcs-monitor --root "$dir"; then
         rm -rf "$dir"
         return 1
     fi
@@ -352,7 +363,7 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/deploy_rig.py ci/simulate.py README.md; do
+for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
@@ -392,6 +403,28 @@ SECOND="$(run_consumer_schedules)" || exit 1
 [ "$FIRST" = "$SECOND" ] \
     || fail "consumer-nondeterministic: two consumer-stage passes produced different digests"
 echo "  consumer-digest $FIRST identical across every schedule and both passes"
+
+echo "== ctl =="
+# The shipped operator CLI over the simulate stage's driven run: the
+# leg drives scans through `dcs-ctl scan`, exercises the sequencer's
+# kind-declared commands through `dcs-ctl invoke` and reads the served
+# contract through the remaining subcommands — the release set's
+# documented operator surface proven from the released binary alone.
+run_ctl() {
+    python3 ci/ctl.py \
+        --ctl "$TOOLS/dcs-ctl" \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        || fail "ctl-failed: the dcs-ctl leg did not hold — its evidence lines are above"
+}
+FIRST="$(run_ctl)" || exit 1
+SECOND="$(run_ctl)" || exit 1
+[ "$FIRST" = "$SECOND" ] \
+    || fail "ctl-nondeterministic: two ctl-stage passes produced different digests"
+echo "  $FIRST identical across both passes"
 
 if [ "${DCS_UPGRADE:-1}" != "0" ]; then
 
