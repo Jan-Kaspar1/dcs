@@ -25,7 +25,10 @@
 //! redundancy contract: which instance of a controller pair owns field
 //! writes, the transition states between, and the named switchover
 //! refusals — so a monitoring UI treats the pair as one logical
-//! controller.
+//! controller. The interface contract (`BlockInterface`) is the
+//! schema-driven surface: one versioned declaration per component
+//! `kind`, derived from its descriptor, covering measurements,
+//! configuration, runtime state, commands, and events.
 
 #![warn(missing_docs)]
 
@@ -34,6 +37,7 @@ mod command;
 mod descriptor;
 mod fingerprint;
 mod history;
+mod interface;
 mod io;
 mod journal;
 mod role;
@@ -48,6 +52,12 @@ pub use descriptor::{
 };
 pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
+pub use interface::{
+    AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
+    CommandSpec, ConfigCapability, ConfigProperty, EventEmission, EventField, EventFieldKind,
+    EventRetention, EventSpec, INTERFACE_VERSION, Measurement, StatePersistence, StateProperty,
+    block_interfaces,
+};
 pub use io::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
     LinkState, Output, PointType, TypedSample,
