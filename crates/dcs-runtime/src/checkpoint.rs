@@ -17,7 +17,9 @@
 //! they are controller-side state: `outputs` carries the image's `Out`
 //! samples and `internal` the image-carried `In` samples. So does the
 //! `receipts` log — the run's command audit, so `GET /receipts` answers
-//! identically on a peer that adopted the checkpoint. The `driver`
+//! identically on a peer that adopted the checkpoint — along with the
+//! `command_admission` counters measuring that audit, so the pair's
+//! command-ingress telemetry agrees too. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -59,6 +61,31 @@ pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 /// `outputs` and `internal` sections all still apply after the version
 /// is accepted.
 pub const SUPPORTED_FORMAT_VERSIONS: &[u32] = &[0, CHECKPOINT_FORMAT_VERSION];
+
+/// The pending-command queue's admission counters — the bounded
+/// command-ingress metrics the snapshot's `command_queue` section
+/// reports.
+///
+/// The executor counts into this set on every
+/// [`Executor::submit_command`](crate::Executor::submit_command), and the
+/// checkpoint carries it beside the `receipts` log it measures: a peer
+/// adopting the checkpoint converges to the same admission history, so
+/// the pair's command-ingress telemetry answers identically across a
+/// switchover. The snapshot section's `capacity` and `depth` are not
+/// here — the bound is construction configuration, and the depth is the
+/// adopted pending set itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandAdmissionCounts {
+    /// Commands presented for admission — every submission the
+    /// executor's command path received, whether it settled accepted,
+    /// was refused by validation, or was refused by a full queue.
+    pub attempts: u64,
+    /// Validated submissions refused because the pending queue was at
+    /// capacity — each answered with a `queue_full` rejection receipt.
+    pub full_rejections: u64,
+    /// The deepest the pending queue has run — the high-water mark.
+    pub high_water: usize,
+}
 
 /// A serializable snapshot of a run's transferable state.
 ///
@@ -130,12 +157,22 @@ pub struct Checkpoint {
     /// as `GET /receipts`. Restoring it converges the tracking peer's
     /// log to the active's, so the pair presents one continuous audit
     /// trail across a switchover; entries still `Accepted` at capture
-    /// re-queue on the restoring run, so a command taken over between
-    /// its submission boundary and its applying scan is not lost.
+    /// re-queue on the restoring run — verbatim, past the pending
+    /// queue's admission bound: carried run state is not new admission,
+    /// so a command taken over between its submission boundary and its
+    /// applying scan is not lost, and a queue restored at or over the
+    /// bound admits nothing new until a scan drains it.
     /// Absent from checkpoints written before the section existed;
     /// defaults to empty.
     #[serde(default)]
     pub receipts: Vec<CommandReceipt>,
+    /// The pending-command queue's admission counters at capture,
+    /// converging beside the `receipts` log they measure — the pair's
+    /// `command_queue` telemetry section answers identically on either
+    /// peer. Absent from checkpoints written before the section existed;
+    /// defaults to zeroed.
+    #[serde(default)]
+    pub command_admission: CommandAdmissionCounts,
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.

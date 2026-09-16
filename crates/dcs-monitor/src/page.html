@@ -906,7 +906,7 @@ async function refresh() {
         }
       }
     }
-    renderIoHealth(snapshot.io_health);
+    renderIoHealth(snapshot.io_health, snapshot.command_queue);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     // The snapshot's force set marks the page's forced points;
     // ForcedPoint serializes as {point, value} — the map keys the badge
@@ -981,7 +981,7 @@ function healthRow(label, value) {
   return "<tr><th>" + esc(label) + "</th><td>" + esc(value) + "</td></tr>";
 }
 
-function renderIoHealth(health) {
+function renderIoHealth(health, commandQueue) {
   const pane = document.getElementById("io-health");
   if (!health) { pane.hidden = true; return; }
   const rows = [];
@@ -1042,6 +1042,24 @@ function renderIoHealth(health) {
   if (health.scan_overruns) {
     rows.push(healthRow("scan overruns", health.scan_overruns));
     troubled = true;
+  }
+  // The bounded command ingress's admission metrics ride the snapshot's
+  // command_queue section — absent on a peer predating it, which
+  // renders nothing new (the absent-field convention above).
+  if (commandQueue) {
+    rows.push(healthRow("command queue depth/capacity",
+      commandQueue.depth + "/" + commandQueue.capacity));
+    rows.push(healthRow("command admissions", commandQueue.attempts));
+    if (commandQueue.high_water) {
+      rows.push(healthRow("command queue high-water",
+        commandQueue.high_water));
+    }
+    // A refused command is operator-visible degradation, not a fault.
+    if (commandQueue.full_rejections) {
+      rows.push(healthRow("full-queue command rejections",
+        commandQueue.full_rejections));
+      troubled = true;
+    }
   }
   document.getElementById("io-health-rows").innerHTML = rows.join("");
   const summary = document.getElementById("io-health-summary");
@@ -2144,7 +2162,8 @@ function describeOutcome(outcome) {
 // {"not_writable": {point}} |
 // {"type_mismatch": {point, expected, found}} |
 // {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
-// the parameter-command reasons
+// {"queue_full": {point, capacity}} — the bounded ingress's admission
+// refusal — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component.
@@ -2169,6 +2188,10 @@ function describeReason(reason) {
   if ("not_active" in reason) {
     return "refused: peer reports role " + reason.not_active.role +
       "; commands apply only on the active peer";
+  }
+  if ("queue_full" in reason) {
+    return "command queue full (" + reason.queue_full.capacity +
+      " pending) — resubmit once a scan drains it";
   }
   if ("unknown_component" in reason) {
     return "unknown component " + reason.unknown_component.component;

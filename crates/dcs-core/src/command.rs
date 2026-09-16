@@ -26,7 +26,8 @@
 //! reason — unknown point, not model-declared writable, type mismatch, or
 //! driver rejection for point commands; unknown component, unknown or
 //! unsupported parameter, type mismatch, or out-of-range for parameter
-//! commands — and carrying the offending point or component.
+//! commands; a full pending-command queue refusing admission for either —
+//! and carrying the offending point or component.
 
 use crate::descriptor::ParameterRange;
 use crate::io::IoError;
@@ -133,9 +134,10 @@ impl Command {
 
 /// Why a [`Command`] was rejected. Point-command variants carry the
 /// offending [`PointId`]; parameter-command variants carry the offending
-/// component name; [`CommandError::NotActive`] carries the command's
-/// target point when it has one. [`CommandError::point`] and
-/// [`CommandError::component`] retrieve each uniformly.
+/// component name; [`CommandError::NotActive`] and
+/// [`CommandError::QueueFull`] carry the command's target point when it
+/// has one. [`CommandError::point`] and [`CommandError::component`]
+/// retrieve each uniformly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandError {
@@ -235,6 +237,19 @@ pub enum CommandError {
         /// The role the instance reported.
         role: Role,
     },
+    /// The pending-command queue was already at its declared capacity
+    /// when the command was submitted — the admission refusal of the
+    /// bounded command-ingress decision. The command had passed
+    /// submission validation, but nothing was queued; it may be
+    /// resubmitted once a scan boundary drains pending entries below the
+    /// bound. `point` is the command's target, not a point at fault; a
+    /// command targeting a component rather than a point carries `None`.
+    QueueFull {
+        /// The point the command targeted, when it targeted a point.
+        point: Option<PointId>,
+        /// The pending-command queue's declared capacity.
+        capacity: usize,
+    },
 }
 
 impl CommandError {
@@ -246,7 +261,7 @@ impl CommandError {
             | CommandError::NotWritable { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. } => Some(*point),
-            CommandError::NotActive { point, .. } => *point,
+            CommandError::NotActive { point, .. } | CommandError::QueueFull { point, .. } => *point,
             _ => None,
         }
     }
@@ -339,6 +354,18 @@ impl fmt::Display for CommandError {
                     f,
                     "command refused: instance reports role {role}; \
                      commands apply only on the active peer"
+                ),
+            },
+            CommandError::QueueFull { point, capacity } => match point {
+                Some(point) => write!(
+                    f,
+                    "command on I/O point {point:?} refused: the pending-command queue is full \
+                     (capacity {capacity}); resubmit once a scan drains it"
+                ),
+                None => write!(
+                    f,
+                    "command refused: the pending-command queue is full \
+                     (capacity {capacity}); resubmit once a scan drains it"
                 ),
             },
         }
@@ -568,6 +595,18 @@ mod tests {
                     detail: "output limits require out_min < out_max".to_string(),
                 },
             },
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: Some(PointId(7)),
+                    capacity: 64,
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: None,
+                    capacity: 64,
+                },
+            },
         ] {
             let receipt = CommandReceipt {
                 command: set_parameter(),
@@ -625,6 +664,10 @@ mod tests {
             CommandError::DriverRejected {
                 point,
                 error: IoError::Disconnected(point),
+            },
+            CommandError::QueueFull {
+                point: Some(point),
+                capacity: 4,
             },
         ] {
             assert_eq!(error.point(), Some(point));
