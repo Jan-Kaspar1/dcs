@@ -36,7 +36,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import netpolicy, report as qa_report
+from . import netpolicy, report as qa_report, revision
 from . import scenarios, state as qa_state
 
 MANAGED_LABEL = 'dcs-hwtest.managed'
@@ -83,6 +83,9 @@ DEFAULT_CONFIG = {
     'rig_ifname': netpolicy.RIG_IFACE,
     'active_port': 18080,
     'standby_port': 18081,
+    # The rolling model-revision case's third controller publishes its
+    # monitor here; its sim-net side shares the run's labeled bridge.
+    'revised_port': 18082,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -873,18 +876,83 @@ def start_plant(run_id, timeline):
     timeline('plant-started', container + ' running')
 
 
-def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
+def start_revised_controller(cfg, record, run_dir, model, active,
+                             timeline):
+    """The scenario-callable rolling model-revision action
+    (WW-LCM-001's deployment-update clause, the rolling
+    model-revision decision): derive the revised model document from
+    the run's mounted model through the checked-in recipe
+    (qa_lane/revision.py), then launch the run's third controller
+    container on it as `--standby <active> --revised`.
+
+    `active` is the scenario ctx key of the peer currently writing the
+    field ('active' is ctrl-a, 'standby' ctrl-b) — the revised peer
+    pulls that peer's checkpoints until the carryover rule applies
+    them to the revised model. The container carries the run's managed
+    and run labels so teardown reconciles it with the rest of the rig,
+    mounts the revised document read-only at /model/revised.json, and
+    gets its own runner-owned state/journal directory: the carryover
+    arrives through the standby pull, never through a copied
+    checkpoint that the fingerprint gate would reject. Both halves —
+    the derivation and the launch — are recorded on the run's action
+    timeline; a derivation or docker failure raises so the calling
+    scenario reports the action never completed.
+
+    Returns the derivation summary (revised document path and the
+    recipe's added point/signal ids) plus the container name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_revised expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    revised_doc = Path(run_dir) / 'model-revised.json'
+    info = revision.derive_revised_model(model, revised_doc)
+    directory = _controller_dir(run_dir, 'c')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-c'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    timeline('model-revision-start',
+             'derive ' + revised_doc.name + ' (+points '
+             + str(info['added_points']) + ', +signals '
+             + str(info['added_signals']) + '); launch ' + container
+             + ' --standby ' + standby + ' --revised')
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':8082',
+           '-v', str(revised_doc) + ':/model/revised.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/revised.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--standby', standby,
+           '--revised',
+           '--scan-ms', '100', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
+    timeline('model-revision-up', container
+             + ' running the revised model')
+    return dict(info, container=container)
+
+
+def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
-    per endpoint key, the published plant-protocol endpoint, the run's
-    evidence dir and deadline, the runner-owned controller-restart and
-    plant stop/start actions, and the host-side per-controller
-    state/journal files the restart scenario reads."""
+    per endpoint key (the model-revision case's third controller
+    answers on 'revised' once launched), the published plant-protocol
+    endpoint, the run's evidence dir and deadline, the runner-owned
+    controller-restart, plant stop/start, and model-revision actions,
+    and the host-side per-controller state/journal files the restart
+    and model-revision scenarios read."""
     run_id = record['run_id']
-    names = {'active': 'a', 'standby': 'b'}
+    names = {'active': 'a', 'standby': 'b', 'revised': 'c'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
+        'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
@@ -892,6 +960,9 @@ def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
+        'start_revised': lambda name: start_revised_controller(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
@@ -1223,8 +1294,8 @@ def run(st, record, cfg, log=print):
         try:
             if not _wait_monitor(cfg, timeline):
                 raise RuntimeError('monitors did not come up')
-            ctx = _scenario_ctx(cfg, record, run_dir, evidence_dir,
-                                deadline, timeline)
+            ctx = _scenario_ctx(cfg, record, src, run_dir,
+                                evidence_dir, deadline, timeline)
             results = scenarios.run_all(ctx, timeline)
         finally:
             infra += _teardown_rig(run_id, timeline, st)
