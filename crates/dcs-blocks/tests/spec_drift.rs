@@ -4,6 +4,16 @@
 //! in `io_requirements` order, and the same parameters (name, kind,
 //! declared range) in `describe` order.
 //!
+//! The same sweep is the decision-82 drift authority: each check also
+//! derives the kind's [`BlockInterface`] from its descriptor — the one
+//! adaptation every consumer uses — and asserts the five collections
+//! carry exactly the declared spec/descriptor surface, so the build-time
+//! spec, the registry-constructed `describe()`, the registered kind set,
+//! and the served schema cannot drift. `dcs-controller`'s registry test
+//! pins runtime registration to `dcs_blocks::KINDS`; the coverage
+//! assertion here pins every kind in that list to a checked spec,
+//! descriptor, and derived interface.
+//!
 //! `dcs-build` cannot depend on this crate, so the specs are data
 //! mirrors kept honest here. Coverage is recorded against a checked-in
 //! kind list: [`dcs_blocks::KINDS`] names every kind the standard
@@ -44,7 +54,11 @@ use dcs_build::specs::{
     RateLimiterSpec, RateOfRiseSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, SurgeGuardSpec,
     ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
-use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
+use dcs_core::{
+    AdaptedCommand, AdaptedEvent, BlockInterface, CommandAvailability, ComponentDescriptor,
+    ConfigCapability, Direction, EventEmission, EventField, EventFieldKind, EventRetention,
+    INTERFACE_VERSION, ParameterRange, PointId, PortRole, StatePersistence, Value, ValueKind,
+};
 use dcs_runtime::Component;
 
 /// Asserts `spec` declares the same kind string and ports `descriptor`
@@ -66,7 +80,215 @@ fn check_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) -> Strin
         .collect();
     assert_eq!(spec_ports, descriptor_ports, "port vocabulary drifted");
 
+    check_block_interface(spec, descriptor);
+
     spec.kind().to_string()
+}
+
+/// The decision-82 half of the sweep: the [`BlockInterface`] derived
+/// from `descriptor` must carry exactly the surface `spec` and
+/// `descriptor` declare — every port in `measurements` or `state`, the
+/// parameters as tunable `configuration`, the adapted generic command
+/// surface, and the adapted journaled transitions.
+fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
+    let interface = BlockInterface::from_descriptor(descriptor);
+    assert_eq!(interface.version, INTERFACE_VERSION);
+    assert_eq!(interface.kind, spec.kind(), "interface kind drifted");
+
+    // Every port lands in exactly one collection — `state` when it
+    // hints `Status`, `measurements` otherwise — carrying the port's
+    // name, direction, value kind, and role.
+    for port in &descriptor.ports {
+        if port.role == Some(PortRole::Status) {
+            let entry = interface
+                .state
+                .iter()
+                .find(|entry| entry.name == port.name)
+                .unwrap_or_else(|| panic!("state port {:?} missing from interface", port.name));
+            assert_eq!(entry.direction, port.direction);
+            assert_eq!(entry.kind, port.kind);
+            assert_eq!(entry.role, port.role);
+            assert_eq!(entry.persistence, StatePersistence::BoundPoint);
+        } else {
+            let entry = interface
+                .measurements
+                .iter()
+                .find(|entry| entry.name == port.name)
+                .unwrap_or_else(|| {
+                    panic!("measurement port {:?} missing from interface", port.name)
+                });
+            assert_eq!(entry.direction, port.direction);
+            assert_eq!(entry.kind, port.kind);
+            assert_eq!(entry.role, port.role);
+        }
+    }
+    assert_eq!(
+        interface.measurements.len() + interface.state.len(),
+        descriptor.ports.len(),
+        "interface carried resources no port declared"
+    );
+
+    // Configuration is the descriptor's parameter surface — tunable,
+    // range-carrying — matching the spec's declared parameter set where
+    // the spec enumerates one.
+    let configuration: Vec<(_, _, _, _)> = interface
+        .configuration
+        .iter()
+        .map(|property| {
+            (
+                property.name.as_str(),
+                property.kind,
+                property.range,
+                property.capability,
+            )
+        })
+        .collect();
+    let declared: Vec<(_, _, _, _)> = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.as_str(),
+                parameter.kind,
+                parameter.range,
+                ConfigCapability::Tunable,
+            )
+        })
+        .collect();
+    assert_eq!(configuration, declared, "configuration drifted");
+    if let Some(spec_parameters) = spec.declared_parameters() {
+        let spec_parameters: Vec<(_, _, _, _)> = spec_parameters
+            .iter()
+            .map(|decl| (decl.name, decl.kind, decl.range, ConfigCapability::Tunable))
+            .collect();
+        assert_eq!(
+            configuration, spec_parameters,
+            "configuration drifted from the spec's declared parameters"
+        );
+    }
+
+    // Commands adapt the generic surface: the point-command triple on
+    // every `In` port plus `set_parameter` per configuration entry —
+    // and nothing else.
+    let in_ports: Vec<_> = descriptor
+        .ports
+        .iter()
+        .filter(|port| port.direction == Direction::In)
+        .collect();
+    assert_eq!(
+        interface.commands.len(),
+        in_ports.len() * 3 + descriptor.parameters.len(),
+        "command surface drifted"
+    );
+    for port in &in_ports {
+        for (verb, adapted, arguments) in [
+            ("write_value", AdaptedCommand::WriteValue, true),
+            ("force_point", AdaptedCommand::ForcePoint, true),
+            ("unforce_point", AdaptedCommand::UnforcePoint, false),
+        ] {
+            let name = format!("{verb}:{}", port.name);
+            let command = interface
+                .commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("command {name:?} missing from interface"));
+            assert_eq!(command.adapted, adapted);
+            assert_eq!(
+                command.availability,
+                CommandAvailability::BoundPointWritable
+            );
+            if arguments {
+                assert_eq!(command.request.len(), 1);
+                assert_eq!(command.request[0].name, "value");
+                assert_eq!(command.request[0].kind, port.kind);
+            } else {
+                assert!(command.request.is_empty());
+            }
+        }
+    }
+    for parameter in &descriptor.parameters {
+        let name = format!("set_parameter:{}", parameter.name);
+        let command = interface
+            .commands
+            .iter()
+            .find(|command| command.name == name)
+            .unwrap_or_else(|| panic!("command {name:?} missing from interface"));
+        assert_eq!(command.adapted, AdaptedCommand::SetParameter);
+        assert_eq!(command.availability, CommandAvailability::Always);
+        assert_eq!(command.request.len(), 1);
+        assert_eq!(command.request[0].name, "value");
+        assert_eq!(command.request[0].kind, parameter.kind);
+    }
+
+    // Events adapt the journaled transitions: `point_changed` on the
+    // `Bool`/`Int` ports the model may mark `journaled`,
+    // `quality_changed` on every port, `command_settled`, and
+    // `step_failed` — all durable-journal retention.
+    let journaled_ports = descriptor
+        .ports
+        .iter()
+        .filter(|port| matches!(port.kind, ValueKind::Bool | ValueKind::Int))
+        .count();
+    assert_eq!(
+        interface.events.len(),
+        descriptor.ports.len() + journaled_ports + 2,
+        "event surface drifted"
+    );
+    for port in &descriptor.ports {
+        let quality_changed = interface
+            .events
+            .iter()
+            .find(|event| event.name == format!("quality_changed:{}", port.name))
+            .unwrap_or_else(|| panic!("quality_changed for {:?} missing", port.name));
+        assert_eq!(quality_changed.adapted, AdaptedEvent::QualityChanged);
+        assert_eq!(quality_changed.emission, EventEmission::OnObservedChange);
+        assert_eq!(quality_changed.retention, EventRetention::Journal);
+        if matches!(port.kind, ValueKind::Bool | ValueKind::Int) {
+            let point_changed = interface
+                .events
+                .iter()
+                .find(|event| event.name == format!("point_changed:{}", port.name))
+                .unwrap_or_else(|| panic!("point_changed for {:?} missing", port.name));
+            assert_eq!(point_changed.adapted, AdaptedEvent::PointChanged);
+            assert_eq!(point_changed.emission, EventEmission::WhenJournaled);
+            assert_eq!(
+                point_changed.payload,
+                [
+                    EventField {
+                        name: "from".to_string(),
+                        kind: EventFieldKind::Value(port.kind),
+                        optional: true,
+                    },
+                    EventField {
+                        name: "to".to_string(),
+                        kind: EventFieldKind::Value(port.kind),
+                        optional: false,
+                    },
+                ]
+            );
+        }
+    }
+    for (name, adapted, emission) in [
+        (
+            "command_settled",
+            AdaptedEvent::CommandSettled,
+            EventEmission::OnCommandSettled,
+        ),
+        (
+            "step_failed",
+            AdaptedEvent::StepFailed,
+            EventEmission::OnStepFailure,
+        ),
+    ] {
+        let event = interface
+            .events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("event {name:?} missing from interface"));
+        assert_eq!(event.adapted, adapted);
+        assert_eq!(event.emission, emission);
+        assert_eq!(event.retention, EventRetention::Journal);
+    }
 }
 
 /// Asserts `spec` declares the same interface `descriptor` reports:
