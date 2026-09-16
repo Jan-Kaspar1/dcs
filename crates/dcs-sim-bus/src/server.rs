@@ -4,8 +4,8 @@
 
 use crate::bank::RegisterBank;
 use crate::protocol::{
-    BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, decode_request,
-    encode_response, read_frame,
+    BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, decode_request, encode_response,
+    read_frame,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader, Write};
@@ -298,7 +298,7 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
                 .as_ref()
                 .is_some_and(|claim| !claim.holders.contains(&connection))
             {
-                return fenced_out();
+                return Some(fenced_out());
             }
             match shared.bank.write(register, value) {
                 Ok(tick) => BusResponse::Written { tick },
@@ -311,18 +311,18 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             // named refusal — the same rule the plant protocol's step
             // applies.
             if !dt.is_finite() || dt < 0.0 {
-                return BusResponse::Error {
+                return Some(BusResponse::Error {
                     error: BusError::InvalidRequest {
                         detail: format!("step dt must be finite and non-negative, got {dt}"),
                     },
-                };
+                });
             }
             let writer = shared.writer.lock().unwrap();
             if writer
                 .as_ref()
                 .is_some_and(|claim| !claim.holders.contains(&connection))
             {
-                return fenced_out();
+                return Some(fenced_out());
             }
             BusResponse::Stepped {
                 tick: shared.bank.step(dt),

@@ -123,7 +123,7 @@ impl BusError {
 /// Collapses a server-reported refusal on a non-point request into the
 /// link vocabulary: the fencing verdict is its own named variant;
 /// anything else is a request the server could not serve.
-fn refused(error: BusError) -> LinkError {
+pub(crate) fn refused(error: BusError) -> LinkError {
     match error {
         BusError::Fenced { .. } => LinkError::Fenced,
         other => LinkError::InvalidRequest(format!("{other:?}")),

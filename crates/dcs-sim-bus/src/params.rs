@@ -20,8 +20,8 @@
 //!   absent — and whose variant must match the channel's declared
 //!   `value_type`.
 
-use crate::client::BusDriver;
 use crate::RegisterDecl;
+use crate::client::BusDriver;
 use crate::cyclic::CyclicBusDriver;
 use dcs_core::{Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -255,9 +255,7 @@ impl CyclicDeviceParameters {
             ));
         };
         if stations.is_empty() {
-            return Err(
-                "parameter \"stations\" must declare at least one station".to_string(),
-            );
+            return Err("parameter \"stations\" must declare at least one station".to_string());
         }
         let mut parsed: BTreeMap<String, BTreeMap<String, ChannelRegister>> = BTreeMap::new();
         let mut placed: HashMap<&str, &str> = HashMap::new();
@@ -340,9 +338,10 @@ impl CyclicDeviceParameters {
     /// The register-bank declarations a `dcs-sim-bus-device` server
     /// opens for this device: one [`RegisterDecl`] per station channel,
     /// seeded by its declared `initial` or the channel kind's neutral
-    /// value.
+    /// value, sorted by register address.
     pub fn register_decls(&self, channels: &BTreeMap<String, ValueKind>) -> Vec<RegisterDecl> {
-        self.stations
+        let mut decls: Vec<RegisterDecl> = self
+            .stations
             .values()
             .flat_map(|bank| bank.iter())
             .map(|(channel, declaration)| RegisterDecl {
@@ -351,7 +350,9 @@ impl CyclicDeviceParameters {
                     .initial
                     .unwrap_or_else(|| neutral(channels[channel])),
             })
-            .collect()
+            .collect();
+        decls.sort_by_key(|decl| decl.register);
+        decls
     }
 }
 

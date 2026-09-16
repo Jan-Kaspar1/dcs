@@ -823,7 +823,7 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
         RESP_EXCHANGED => {
             let late = match reader.u8().ok_or_else(short)? {
                 flags if flags & !FLAG_LATE != 0 => {
-                    return Err(format!("unknown exchanged flags {flags:#04x}"))
+                    return Err(format!("unknown exchanged flags {flags:#04x}"));
                 }
                 flags => flags & FLAG_LATE != 0,
             };
@@ -1036,7 +1036,7 @@ mod tests {
                 ],
             }),
             [
-                &[0, 20, 0x09, 0, 2, 0, 4, 0x03][..],
+                &[0, 18, 0x09, 0, 2, 0, 4, 0x03][..],
                 &1.0f64.to_be_bytes()[..],
                 &[0, 7, 0x01, 1][..],
             ]
@@ -1058,7 +1058,7 @@ mod tests {
                 }],
             })
             .unwrap(),
-            r#"{"op":"exchange","outputs":[{"register":4,"value":{"Float":1.0}}]}"#
+            r#"{"op":"exchange","outputs":[{"register":4,"value":{"float":1.0}}]}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::ScriptExchange {
@@ -1229,7 +1229,7 @@ mod tests {
                 late: true,
             }),
             vec![
-                0, 15, 0x07, 0x01, 0, 1, 0, 4, 0x01, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0x01
+                0, 17, 0x07, 0x01, 0, 1, 0, 4, 0x01, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0x01
             ]
         );
         assert_eq!(
@@ -1241,7 +1241,7 @@ mod tests {
                 late: true,
             })
             .unwrap(),
-            r#"{"result":"exchanged","registers":[{"register":4,"sample":{"value":{"Bool":true},"quality":{"good":null},"tick":2}}],"late":true}"#
+            r#"{"result":"exchanged","registers":[{"register":4,"sample":{"value":{"bool":true},"quality":"good","tick":2}}],"late":true}"#
         );
     }
 
