@@ -15,3 +15,4 @@ serde_json = "1.0.151"
 # default resolver/TLS features stay off.
 jsonschema = { version = "=0.55.0", default-features = false }
 serde_json = "1.0.151"
+sha2 = "=0.10.9"
