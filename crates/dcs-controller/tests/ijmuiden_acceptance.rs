@@ -117,16 +117,19 @@ use dcs_runtime::Checkpoint;
 use dcs_sim::Fault;
 use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, controller_model, image_sample, image_value, kill, pump, settled_receipts,
+    spawn_controller, spawn_controller_logged, spawn_plant,
+};
+
 /// The plant-side dynamics — the checked-in decision-75 declaration
 /// merged over the served model: the gate's admitted flow, the
 /// independent layer's draw, the tide, and the level integrator.
@@ -147,113 +150,6 @@ const OPERATOR: &str = "ops-lead";
 /// the re-trip itself is found dynamically since the extra plant-side
 /// step shifts it a scan or two.
 const SCRIPTED_SCANS: u64 = 78;
-
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads stderr until its `listening on <addr>` line,
-/// and returns the running process plus the lines that preceded it —
-/// the state-file resume report lives there.
-fn spawn_logged(binary: &Path, args: &[String]) -> (Spawned, Vec<String>) {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut preamble = Vec::new();
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
-        }
-        match line.trim().strip_prefix("listening on ") {
-            Some(addr) => break addr.parse().unwrap(),
-            None => preamble.push(line.trim().to_string()),
-        }
-    };
-    (
-        Spawned {
-            child,
-            addr,
-            _stderr: stderr,
-        },
-        preamble,
-    )
-}
-
-/// Spawns `binary` and returns the running process — the plain shape
-/// for processes that report nothing before their address.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    spawn_logged(binary, args).0
-}
-
-/// A plant-server process serving the plant-side model document with
-/// the checked-in dynamics merged in, on an ephemeral port.
-fn spawn_plant(model: &Path) -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            model.to_str().unwrap().to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    spawn_controller_logged(model, extra).0
-}
-
-/// The state-file restart's spawn: the resume report is a stderr line
-/// before `listening on`, so the preamble comes back with the process.
-fn spawn_controller_logged(model: &Path, extra: &[String]) -> (Spawned, Vec<String>) {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn_logged(Path::new(CONTROLLER), &args)
-}
-
-fn kill(spawned: &mut Spawned) {
-    spawned.child.kill().unwrap();
-    spawned.child.wait().unwrap();
-}
 
 /// Writes the plant-side document: the checked-in model with the two
 /// `sim-scripted` devices re-declared as plain simulated devices. The
@@ -277,37 +173,6 @@ fn plant_model(dir: &Path) -> PathBuf {
     let path = dir.join("ijmuiden-plant.json");
     std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     path
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// checked-in document with every device's channels merged onto one
-/// `sim-tcp` device carrying the plant's address. One remote backend
-/// means one plant step per owner scan — the pacing the dynamics
-/// declaration assumes. Returns the written path plus the loaded model
-/// for its fingerprint and declared-`journaled` set.
-fn controller_model(dir: &Path, plant: SocketAddr) -> (PathBuf, PlantModel) {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    let mut channels = serde_json::Map::new();
-    for device in document["devices"].as_array().unwrap() {
-        for (name, channel) in device["channels"].as_object().unwrap() {
-            channels.insert(name.clone(), channel.clone());
-        }
-    }
-    document["devices"] = serde_json::json!([{
-        "id": 1,
-        "kind": "sim-tcp",
-        "parameters": { "address": plant.to_string() },
-        "channels": channels,
-    }]);
-    for point in document["io_points"].as_array_mut().unwrap() {
-        if let Some(channel) = point["channel"].as_object_mut() {
-            channel["device"] = 1.into();
-        }
-    }
-    let path = dir.join("ijmuiden-controller.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    let model = PlantModel::load(&serde_json::to_string(&document).unwrap()).unwrap();
-    (path, model)
 }
 
 /// The schedule the checked-in document declares: every scripted
@@ -362,33 +227,6 @@ fn apply_script(field: &RemoteDriver, schedule: &BTreeMap<u64, Vec<(PointId, Val
             field.write(*point, *value).unwrap();
         }
     }
-}
-
-/// Pumps one accepted relay connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the other
-/// side so the request/response pair completes and the sockets close
-/// cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
 }
 
 /// The standby's checkpoint-pull path: a TCP forwarder whose upstream
@@ -446,21 +284,6 @@ impl Drop for PeerRelay {
             let _ = accept.join();
         }
     }
-}
-
-/// The sample `snapshot`'s image reports for `point`.
-fn image_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap_or_else(|| panic!("no sample for {point:?}"))
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    image_sample(snapshot, point).value
 }
 
 fn float(sample: Sample) -> f64 {
@@ -759,17 +582,6 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// The settled-command journal entries of a served journal, in order.
-fn settled_receipts(journal: &[JournalEntry]) -> Vec<CommandReceipt> {
-    journal
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The role transitions a journal stream recorded.
 fn role_changes_in(journal: &[JournalEntry]) -> Vec<(Role, Role)> {
     journal
@@ -904,8 +716,14 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "the declared schedule must carry the incident's scripted beats"
     );
 
-    let plant = spawn_plant(&plant_model(&dir));
-    let (model_path, model) = controller_model(&dir, plant.addr);
+    let plant = spawn_plant(&plant_model(&dir), Path::new(PLANT_DYNAMICS));
+    let (model_path, model) = controller_model(
+        &dir,
+        "ijmuiden-controller.json",
+        MODEL_SOURCE,
+        plant.addr,
+        SimTcp::Merged,
+    );
 
     // The plant serves exactly the scenario's channel-bound field points.
     let field = RemoteDriver::connect(plant.addr).unwrap();
@@ -943,7 +761,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "--journal-file".to_string(),
         journal_active.to_str().unwrap().to_string(),
     ];
-    let mut active_process = spawn_controller_logged(&model_path, &active_args).0;
+    let mut active_process = spawn_controller_logged(&model_path, &active_args, DT).0;
     let relay = PeerRelay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
         &model_path,
@@ -953,6 +771,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             "--journal-file".to_string(),
             journal_standby.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let mut active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -1624,7 +1443,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "owner": "dead",
     }));
 
-    let (resumed_process, preamble) = spawn_controller_logged(&model_path, &active_args);
+    let (resumed_process, preamble) = spawn_controller_logged(&model_path, &active_args, DT);
     active_process = resumed_process;
     active = MonitorClient::new(active_process.addr);
     assert!(

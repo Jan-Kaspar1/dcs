@@ -52,17 +52,20 @@ use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, image_value, kill, pump, sim_tcp_document, spawn_controller, spawn_controller_logged,
+    spawn_plant, write_model,
+};
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -109,133 +112,13 @@ const UNSUPPORTED_FORMAT_VERSION: u32 = 99;
 /// compare cannot mistake it for the staged output.
 const SKEWED_FIELD: f64 = -42.5;
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads stderr until its `listening on <addr>` line,
-/// and returns the running process plus the lines that preceded it —
-/// the state-file resume report lives there.
-fn spawn_logged(binary: &Path, args: &[String]) -> (Spawned, Vec<String>) {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut preamble = Vec::new();
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
-        }
-        match line.trim().strip_prefix("listening on ") {
-            Some(addr) => break addr.parse().unwrap(),
-            None => preamble.push(line.trim().to_string()),
-        }
-    };
-    (
-        Spawned {
-            child,
-            addr,
-            _stderr: stderr,
-        },
-        preamble,
-    )
-}
-
-/// Spawns `binary` and returns the running process — the plain shape
-/// for processes that report nothing before their address.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    spawn_logged(binary, args).0
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// The state-file restart's spawn: the resume report is a stderr line
-/// before `listening on`, so the preamble comes back with the process.
-fn spawn_controller_logged(model: &Path, extra: &[String]) -> (Spawned, Vec<String>) {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn_logged(Path::new(CONTROLLER), &args)
-}
-
-/// Writes `document` — a model JSON — under `dir` and loads it once so
-/// the caller can compare fingerprints.
-fn write_model(dir: &Path, name: &str, document: &serde_json::Value) -> (PathBuf, PlantModel) {
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(document).unwrap()).unwrap();
-    let model = PlantModel::load(&serde_json::to_string(document).unwrap()).unwrap();
-    (path, model)
-}
-
 /// The base controller-side document: the tank loop with its devices
 /// re-pointed at `sim-tcp` carrying the plant's address, the setpoint
 /// point 11 moved image-side — an internal writable `In` point, the
 /// operator value the carryover rule is about — and a second held
 /// operator value at point 31.
 fn base_model(plant: SocketAddr) -> serde_json::Value {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
+    let mut document = sim_tcp_document(MODEL_SOURCE, plant, SimTcp::PerDevice);
     let points = document["io_points"].as_array_mut().unwrap();
     let setpoint = points
         .iter_mut()
@@ -290,17 +173,6 @@ fn v2_model(dir: &Path, name: &str, plant: SocketAddr) -> (PathBuf, PlantModel) 
         }
     }
     write_model(dir, name, &document)
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
 }
 
 /// Asserts the field carries exactly `owner`'s last write and records
@@ -472,33 +344,6 @@ fn served_document(client: &MonitorClient) -> serde_json::Value {
     serde_json::from_str(&body).unwrap()
 }
 
-/// Pumps one accepted connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the
-/// other side so the request/response pair completes and the sockets
-/// close cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
-}
-
 /// A controllable network path for the checkpoint-pull heartbeat: while
 /// `partitioned` is clear the relay forwards each connection to the
 /// fixture; while set it accepts and immediately drops them — the
@@ -599,7 +444,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("dcs-lifecycle-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, v1) = v1_model(&dir, "v1.json", plant.addr);
     let (v2_path, v2) = v2_model(&dir, "v2.json", plant.addr);
     assert_ne!(
@@ -618,6 +463,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let fixture = CheckpointFixture::bind(active_process.addr);
     let relay = Relay::forwarding(fixture.addr);
@@ -629,6 +475,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -858,8 +705,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     // held operator value — and the pair cadence continues without a
     // missed transfer.
     let interrupted = active.snapshot().unwrap().tick;
-    active_process.child.kill().unwrap();
-    active_process.child.wait().unwrap();
+    kill(&mut active_process);
     let persisted: Checkpoint =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(persisted.tick, interrupted);
@@ -877,6 +723,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let resumed = MonitorClient::new(resumed_process.addr);
     assert!(
@@ -980,8 +827,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         field_carry(&field, &owner, &mut trace);
     }
     // The fenced peer is retired — the run it superseded is over.
-    resumed_process.child.kill().unwrap();
-    resumed_process.child.wait().unwrap();
+    kill(&mut resumed_process);
 
     // -- Leg 5: rolling model revision ----------------------------------
     // A `--revised` standby on model v2 joins the promoted peer: its
@@ -996,6 +842,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             standby_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let revised = MonitorClient::new(revised_process.addr);
     let crossing_tick = standby.snapshot().unwrap().tick;
