@@ -271,6 +271,51 @@ pub trait Component: Send {
         ))
     }
 
+    /// Answers the *standing* refusal reason for the declared command
+    /// `command` — the availability probe behind the snapshot's
+    /// `command_verdicts` section.
+    ///
+    /// The executor calls this once per declared
+    /// [`CommandAvailability::KindDeclared`](dcs_core::CommandAvailability)
+    /// command after each completed scan — inside the scan boundary,
+    /// where component state lives — and publishes the verdicts on the
+    /// [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot): `None`
+    /// reports the command invocable now, `Some(reason)` reports the
+    /// kind's standing refusal — the same text a refused invocation's
+    /// settled [`CommandError::CommandRefused`] receipt carries
+    /// verbatim. The probe is argument-free: it answers whether the
+    /// command is invocable *at all* now — the `KindDeclared`
+    /// availability predicate — while argument-dependent refusals (a
+    /// `count` below its domain) stay with
+    /// [`invoke_command`](Component::invoke_command) alone.
+    ///
+    /// The published verdict is advisory, never a second authority:
+    /// a submission still validates, queues, and settles through the
+    /// receipted path, and a verdict dispatch disagrees with settles
+    /// honestly on the receipt rather than failing the scan. A probe
+    /// answer therefore never refuses, applies, or alters a command.
+    ///
+    /// Implementations share one code path with
+    /// [`invoke_command`](Component::invoke_command): factor the
+    /// standing predicate so the probe's answer and the dispatch's
+    /// first refusal check are the same expression — a probe/dispatch
+    /// disagreement is a kind bug the receipt settles, not a scan
+    /// failure.
+    ///
+    /// **Checkpoint obligation:** none beyond what
+    /// [`invoke_command`](Component::invoke_command) already owes — the
+    /// probe reads the same checkpointed run state the dispatch
+    /// mutates, so a tracking standby's scans derive identical
+    /// verdicts from the adopted state.
+    ///
+    /// The default reports every declared command invocable — `None` —
+    /// preserving the unconditional `available` the read model
+    /// published before the section existed; a kind whose descriptor
+    /// declares a `KindDeclared` predicate overrides it.
+    fn command_refusal(&self, _command: &str) -> Option<String> {
+        None
+    }
+
     /// Drains the events the component emitted — the component half of
     /// the [`EventDecl`](dcs_core::EventDecl) vocabulary
     /// [`describe`](Component::describe) declares.
