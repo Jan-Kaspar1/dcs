@@ -1,0 +1,6 @@
+# The toolchain the pinned release declares — the same channel the
+# platform's `rust-toolchain.toml` records for this release.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

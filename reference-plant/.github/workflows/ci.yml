@@ -1,0 +1,21 @@
+# The consumer repository's own CI: a fresh checkout runs the tree's
+# clean-CI script — resolve, build, deterministic emit, released-tooling
+# acceptance, manifest fingerprint, and the scripted simulation — with
+# no platform checkout present. `ci/check.sh` installs the released
+# tooling from the pinned git remote itself.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: consumer clean-CI check
+        run: ci/check.sh

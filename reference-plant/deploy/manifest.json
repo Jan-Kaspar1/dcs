@@ -1,0 +1,28 @@
+{
+  "dcs_release": "v0.1.0",
+  "images": {
+    "controller": "dcs-controller:v0.1.0",
+    "plant_server": "dcs-plant-server:v0.1.0"
+  },
+  "model": {
+    "path": "model/plant.json",
+    "fingerprint": "68b94d7a876ecc3d"
+  },
+  "dynamics": {
+    "path": "model/dynamics.json"
+  },
+  "plant": {
+    "listen": "0.0.0.0:9001"
+  },
+  "controllers": [
+    {
+      "name": "ctrl-a",
+      "listen": "0.0.0.0:8080"
+    },
+    {
+      "name": "ctrl-b",
+      "listen": "0.0.0.0:8081",
+      "standby": "ctrl-a:8080"
+    }
+  ]
+}
