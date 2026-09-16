@@ -807,7 +807,7 @@ def restart_controller(run_id, name, timeline):
 def _scenario_ctx(cfg, record, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
-    per endpoint key, the published plant-protocol address, the run's
+    per endpoint key, the published plant-protocol endpoint, the run's
     evidence dir and deadline, the runner-owned controller-restart
     action, and the host-side per-controller state/journal files the
     restart scenario reads."""
