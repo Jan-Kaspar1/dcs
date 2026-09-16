@@ -1028,6 +1028,312 @@ def scenario_served_interface(ctx):
 
 
 # --------------------------------------------------------------------
+# Receipted point forcing and release (WW-OPS-003's substituted
+# quality, WW-FND-004's settled receipts): `force_point` pins a
+# writable `In` point at Uncertain(Substituted) across scans and badges
+# it in the snapshot's `forces` list; `unforce_point` lifts it at a
+# scan boundary. The rig's target is its writable internal `In` point
+# p101-oos — the executor's force path accepts writable internal
+# points, the operator-setpoint surface, so the model declares no
+# writable loopback field point (a channel-bound `writable` mark is
+# exactly what the model lint names). Releasing an internal point
+# resumes the held-value rule — the last-stamped (forced) sample
+# persists — so the recovery leg restamps the held value through the
+# receipted write path: a force still standing would re-substitute on
+# the next scan, so the held value read at Good with an empty `forces`
+# list proves the release took.
+
+FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
+
+
+def _point_sample(snapshot, point):
+    for entry in (snapshot or {}).get('points', []):
+        if entry.get('point') == point:
+            return entry.get('sample') or {}
+    return {}
+
+
+def _point_quality(snapshot, point):
+    return _point_sample(snapshot, point).get('quality')
+
+
+def _forced_entry(snapshot, point):
+    """The snapshot's `forces` badge for `point`, or None."""
+    for entry in (snapshot or {}).get('forces', []):
+        if entry.get('point') == point:
+            return entry
+    return None
+
+
+def _settled_receipts(journal):
+    """The receipts the journal settled — `command_settled` payloads."""
+    return [entry.get('event', {}).get('command_settled', {})
+            .get('receipt') or {}
+            for entry in _journal_list(journal)]
+
+
+def scenario_force_release(ctx):
+    """A receipted force pins p101-oos at Substituted quality with the
+    control image following it; its release plus the restore write
+    return the held value at Good — every command journaled as a
+    settled, attributed receipt."""
+    case = Case('force-release',
+                'Receipted forcing and release on a writable point',
+                'force_point on the writable p101-oos point serves the '
+                'forced value at Uncertain(Substituted), lists the '
+                'point under snapshot.forces, and the inverted '
+                'p101-oos-ok carrier follows the forced value; '
+                'unforce_point clears the badge and the restored held '
+                'value reads at Good quality; both commands journal as '
+                'settled receipts attributed to qa-lane')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # replayed alone the rig is fresh (ctrl-a active), while the
+        # full suite reaches this case after the failover.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('forcing against ' + active + ' (' + base + ')')
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the force target')
+        target = follower = None
+        for entry in signals.get('points', []):
+            if entry.get('name') == 'p101-oos' and entry.get('writable') \
+                    and entry.get('direction') == 'in':
+                target = entry.get('point')
+            elif entry.get('name') == 'p101-oos-ok':
+                follower = entry.get('point')
+        if target is None or follower is None:
+            return case.finish(
+                'inconclusive',
+                'the rig model lacks the writable p101-oos point or '
+                'its p101-oos-ok in-service carrier')
+
+        # The held value the release leg restores — whatever the run's
+        # earlier commands left the operator point holding.
+        baseline = _snapshot(ctx, base)
+        held = _point_value(baseline, target)
+        if not isinstance(held, bool):
+            return case.finish(
+                'inconclusive',
+                'the force target holds no bool baseline: '
+                + json.dumps(_point_sample(baseline, target))[:300])
+        forced_value = not held
+        case.observe('force target: p101-oos point ' + str(target)
+                     + ' held ' + str(held) + '; control probe '
+                     'p101-oos-ok point ' + str(follower)
+                     + ' (the inverted in-service carrier)')
+
+        force_body = {'point': target, 'kind': 'bool',
+                      'value': {'bool': forced_value}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'force_point': force_body}, 'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-force-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the force submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'force refused: ' + str(status)
+                               + ' ' + json.dumps(receipt)[:400])
+        case.observe('force admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        observed = {}
+
+        def forced_state():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['forced'] = snap
+            badge = _forced_entry(snap, target)
+            if _point_value(snap, target) == forced_value \
+                    and _point_quality(snap, target) \
+                    == {'uncertain': 'substituted'} \
+                    and (badge or {}).get('value') \
+                    == {'bool': forced_value} \
+                    and _point_value(snap, follower) == held:
+                return snap
+            return None
+
+        forced = wait_for(forced_state, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-forced.json',
+                            observed.get('forced') or {})
+        case.evidence('file', ref, 'snapshot while the force stands')
+        if forced is None:
+            snap = observed.get('forced') or {}
+            unmet = []
+            if _point_value(snap, target) != forced_value:
+                unmet.append('the forced value ' + str(forced_value))
+            if _point_quality(snap, target) \
+                    != {'uncertain': 'substituted'}:
+                unmet.append('Uncertain(Substituted) quality')
+            if (_forced_entry(snap, target) or {}).get('value') \
+                    != {'bool': forced_value}:
+                unmet.append('a snapshot.forces entry')
+            if _point_value(snap, follower) != held:
+                unmet.append('control following the force '
+                             '(p101-oos-ok reading ' + str(held) + ')')
+            return case.finish('failed', 'forced telemetry never '
+                               'showed ' + ' + '.join(unmet))
+        case.observe('forced: point ' + str(target) + ' reads '
+                     + str(forced_value)
+                     + ' at Uncertain(Substituted), badged under '
+                     'snapshot.forces; p101-oos-ok follows at '
+                     + str(held))
+
+        unforce_body = {'point': target}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'unforce_point': unforce_body},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-release-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the release submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'release refused: '
+                               + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+        case.observe('release admitted: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        def released():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['released'] = snap
+            return _forced_entry(snap, target) is None and snap
+
+        cleared = wait_for(released, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-released.json',
+                            observed.get('released') or {})
+        case.evidence('file', ref, 'snapshot after the release settled')
+        if not cleared:
+            return case.finish('failed',
+                               'the forces badge never cleared after '
+                               'unforce_point')
+
+        # The held-value rule resumed on release; restamping the held
+        # value through the receipted write path produces the Good read
+        # the case requires — a force still standing would re-substitute
+        # on the next scan, so this read persisting alongside an empty
+        # forces list is what proves the release took.
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': {
+                'point': target, 'kind': 'bool',
+                'value': {'bool': held}}},
+             'actor': 'qa-lane'})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-restore-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the restore-write submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'the restore write was '
+                               'refused: ' + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+
+        def recovered():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['recovered'] = snap
+            if _point_value(snap, target) == held \
+                    and _point_quality(snap, target) == 'good' \
+                    and _forced_entry(snap, target) is None \
+                    and _point_value(snap, follower) == forced_value:
+                return snap
+            return None
+
+        if not wait_for(recovered, time.monotonic() + FORCE_DEADLINE):
+            snap = observed.get('recovered') or {}
+            unmet = []
+            if _point_value(snap, target) != held:
+                unmet.append('the held value ' + str(held))
+            if _point_quality(snap, target) != 'good':
+                unmet.append('Good quality')
+            if _forced_entry(snap, target) is not None:
+                unmet.append('an empty forces list')
+            if _point_value(snap, follower) != forced_value:
+                unmet.append('control recovering (p101-oos-ok reading '
+                             + str(forced_value) + ')')
+            return case.finish('failed', 'telemetry did not recover '
+                               'after release: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-recovered.json',
+                            observed.get('recovered') or {})
+        case.evidence('file', ref, 'snapshot after the restore write')
+        case.observe('released and restored: point ' + str(target)
+                     + ' reads ' + str(held) + ' at Good, forces '
+                     'cleared, p101-oos-ok back at '
+                     + str(forced_value))
+
+        # Both commands must journal as settled receipts carrying the
+        # run's actor — the audit half of the receipted-command
+        # contract.
+        found = {'force': None, 'release': None}
+
+        def settled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since=0')
+            except Exception:
+                return None
+            observed['journal'] = journal
+            for entry in _settled_receipts(journal):
+                command = entry.get('command') or {}
+                if command.get('force_point') == force_body:
+                    found['force'] = entry
+                elif command.get('unforce_point') == unforce_body:
+                    found['release'] = entry
+            return (found['force'] is not None
+                    and found['release'] is not None) or None
+
+        wait_for(settled, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-journal.json',
+                            observed.get('journal') or [])
+        case.evidence('file', ref, 'journal tail with the settled '
+                      'receipts')
+        unmet = []
+        for name, entry in (('force', found['force']),
+                            ('release', found['release'])):
+            if entry is None:
+                unmet.append('no settled ' + name
+                             + ' receipt journaled')
+                continue
+            if entry.get('actor') != 'qa-lane':
+                unmet.append('the ' + name + ' receipt is unattributed '
+                             '(actor='
+                             + json.dumps(entry.get('actor')) + ')')
+            if 'applied' not in (entry.get('outcome') or {}):
+                unmet.append('the ' + name + ' receipt did not settle '
+                             'applied: '
+                             + json.dumps(entry.get('outcome'))[:200])
+        if unmet:
+            return case.finish('failed', 'journal audit: '
+                               + '; '.join(unmet))
+        case.observe('journal: force and release settled as applied '
+                     'receipts attributed to qa-lane')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
 # The consumer-failure schedule (WW-FND-004, decision 83): the lane's
 # per-revision proof that a slow, disconnected, malformed, or restarted
 # consumer can never reach the control loop. Every leg measures the
@@ -2017,8 +2323,8 @@ def scenario_command_admission(ctx):
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_failover, scenario_evidence_capture,
-             scenario_served_interface, scenario_consumer_schedule,
-             scenario_command_admission)
+             scenario_served_interface, scenario_force_release,
+             scenario_consumer_schedule, scenario_command_admission)
 
 
 def run_all(ctx, timeline):
