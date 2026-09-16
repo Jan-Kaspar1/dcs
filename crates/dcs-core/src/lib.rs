@@ -28,7 +28,11 @@
 //! controller. The interface contract (`BlockInterface`) is the
 //! schema-driven surface: one versioned declaration per component
 //! `kind`, derived from its descriptor, covering measurements,
-//! configuration, runtime state, commands, and events.
+//! configuration, runtime state, commands, and events. The served-view
+//! contract (`SchemaView`, `ResourceView`) is the live half a monitor
+//! derives from its published read model: each instance's interface
+//! plus its measurement/state samples, configuration values, command
+//! availability, and recently emitted events.
 
 #![warn(missing_docs)]
 
@@ -40,6 +44,7 @@ mod history;
 mod interface;
 mod io;
 mod journal;
+mod resources;
 mod role;
 mod signal;
 mod state;
@@ -64,6 +69,10 @@ pub use io::{
     LinkState, Output, PointType, TypedSample,
 };
 pub use journal::{EmittedEvent, EventValue, JournalEntry, JournalEvent};
+pub use resources::{
+    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceSample,
+    ResourceView, SchemaView,
+};
 pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
