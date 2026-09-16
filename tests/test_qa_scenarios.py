@@ -985,15 +985,17 @@ class StaleFreshnessTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_scenario(self, ctx=None):
+    def run_scenario(self, ctx=None, feed=None, evidence=None):
+        feed = feed if feed is not None else self.feed
+        evidence = evidence if evidence is not None else self.evidence
         base = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
-                'evidence_dir': str(self.evidence),
-                'stop_controller': self.feed.stop,
-                'start_controller': self.feed.start,
+                'evidence_dir': str(evidence),
+                'stop_controller': feed.stop,
+                'start_controller': feed.start,
                 'failover_misses': 120}
         if ctx is not None:
             base.update(ctx)
-        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+        with patch.object(scenarios, 'http_json', feed.http_json), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'STALE_FRESHNESS_POLL', 0.001), \
                 patch.object(scenarios, 'STALE_WALL_DEADLINE', 5.0), \
@@ -1085,6 +1087,20 @@ class StaleFreshnessTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('no documented', record.get('detail', ''))
         report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs of the scenario
+        # against the same rig state record the same report and the
+        # same evidence files.
+        runs = []
+        for index in range(2):
+            evidence = Path(self.tmp.name) / 'evidence-' + str(index)
+            evidence.mkdir()
+            record = self.run_scenario(feed=FreshnessFeed(),
+                                       evidence=evidence)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
 
 
 if __name__ == '__main__':
