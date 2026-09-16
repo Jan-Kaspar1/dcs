@@ -452,30 +452,22 @@ pub fn registry() -> ComponentRegistry {
         .with(BackwashCoordinator::KIND, |spec| {
             // The filters are declared `request_1` … `request_N`,
             // `grant_1` … `grant_N`, `position_1` … `position_N`
-            // following the interlock's `trip_N` convention. The
-            // filter count is the highest bound index across the
-            // three families, and every index below it must bind all
-            // three — a partial family or a gap fails `UnboundPort`
-            // naming the missing member. `reorder` is the optional
-            // operator instruction — bound only where the model wires
-            // it (`ComponentSpec::get`); an unwired instance exposes
-            // no reorder surface.
-            let mut indices = std::collections::BTreeSet::new();
-            for prefix in ["request_", "grant_", "position_"] {
-                indices.extend(spec.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                }));
-            }
-            let count = indices.iter().next_back().copied().unwrap_or(0);
-            let mut filters = Vec::with_capacity(count);
-            for index in 1..=count {
-                filters.push(FilterIo {
-                    request: spec.require(&format!("request_{index}"))?,
-                    grant: spec.require(&format!("grant_{index}"))?,
-                    position: spec.require(&format!("position_{index}"))?,
-                });
-            }
+            // following the interlock's `trip_N` convention; the
+            // shared multi-family accessor counts and requires them —
+            // a partial family or a gap fails `UnboundPort` naming the
+            // missing member. `reorder` is the optional operator
+            // instruction — bound only where the model wires it
+            // (`ComponentSpec::get`); an unwired instance exposes no
+            // reorder surface.
+            let filters = spec
+                .indexed_families(["request_", "grant_", "position_"])?
+                .into_iter()
+                .map(|[request, grant, position]| FilterIo {
+                    request,
+                    grant,
+                    position,
+                })
+                .collect();
             boxed(BackwashCoordinator::from_parameters(
                 spec.name.as_str(),
                 PermissiveInputs {
