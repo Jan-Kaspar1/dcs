@@ -2,9 +2,9 @@
 
 Each scenario drives the redundant controller pair through the monitor
 endpoints documented in docs/packaging.md (GET /role, /signals,
-/snapshot, /receipts, /journal; POST /command, /demote, /promote) and
-returns one report-schema scenario case. Stdlib only — the Lenovo host
-needs nothing but Python and Docker.
+/snapshot, /receipts, /journal, /schema, /resources; POST /command,
+/demote, /promote) and returns one report-schema scenario case. Stdlib
+only — the Lenovo host needs nothing but Python and Docker.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -463,6 +463,270 @@ def scenario_evidence_capture(ctx):
             return case.finish('failed',
                                'journal does not cover the run')
         return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The served block-interface contract (WW-FND-003, decision 82): every
+# assessed run proves the schema-driven surface the tranche ships —
+# GET /schema's registry covering every kind the rig model declares
+# with all five collections, a declared command settling through the
+# receipted command path, and GET /resources' emitted-events view
+# reflecting a produced event.
+
+INTERFACE_COLLECTIONS = ('measurements', 'configuration', 'state',
+                         'commands', 'events')
+CONTRACT_DEADLINE = 30  # bound on the receipt and emitted-event waits
+
+
+def _command_for_spec(component, spec):
+    """The receipted-path command a served `commands` entry denotes,
+    rebuilt from the entry's declared provenance: `declared` entries
+    submit as `invoke` with the declared request schema's arguments,
+    `write_value` entries as the point write against the entry's bound
+    point, and `set_parameter` entries as the parameter tune. Returns
+    None for an entry this driver cannot translate."""
+    defaults = {'bool': {'bool': True}, 'int': {'int': 1},
+                'float': {'float': 1.0}}
+    request = spec.get('request') or []
+    adapted = spec.get('adapted')
+    if adapted == 'declared':
+        arguments = {}
+        for argument in request:
+            value = defaults.get(argument.get('kind'))
+            if value is None:
+                return None
+            arguments[argument['name']] = value
+        return {'invoke': {'component': component,
+                           'command': spec.get('name'),
+                           'arguments': arguments}}
+    if adapted == 'set_parameter' and ':' in str(spec.get('name')):
+        kind = request[0].get('kind') if request else None
+        value = defaults.get(kind)
+        if value is None:
+            return None
+        return {'set_parameter': {'component': component,
+                                  'name': str(spec['name']).split(':', 1)[1],
+                                  'value': value}}
+    if adapted == 'write_value' and spec.get('point') is not None:
+        kind = request[0].get('kind') if request else None
+        value = defaults.get(kind)
+        if value is None:
+            return None
+        return {'write_value': {'point': spec['point'], 'kind': kind,
+                                'value': value}}
+    return None
+
+
+def _pick_declared_command(interfaces, signals):
+    """The scenario's probe command out of the served `commands`
+    collections, in preference order: a kind-declared (`declared`-
+    provenance) entry a kind offers natively; then the `write_value`
+    adapted entry bound to the run's preferred writable bool point —
+    'p101-oos', the target the other command scenarios use; then any
+    writable bool point's entry; then any remaining translated entry
+    (a `set_parameter` tune, or a refused point write — a rejection is
+    still a receipted, journaled answer). Returns
+    (component, spec, submission) or None."""
+    writable = {entry.get('point')
+                for entry in signals.get('points', [])
+                if entry.get('writable')
+                and entry.get('direction') == 'in'
+                and entry.get('value_type') == 'bool'}
+    preferred = {entry.get('point')
+                 for entry in signals.get('points', [])
+                 if entry.get('name') == 'p101-oos'} & writable
+    best = None
+    for entry in interfaces:
+        component = entry.get('name')
+        for spec in (entry.get('interface') or {}).get('commands') or []:
+            submission = _command_for_spec(component, spec)
+            if submission is None:
+                continue
+            adapted = spec.get('adapted')
+            if adapted == 'declared':
+                rank = 0
+            elif adapted == 'write_value' \
+                    and spec.get('point') in preferred:
+                rank = 1
+            elif adapted == 'write_value' \
+                    and spec.get('point') in writable:
+                rank = 2
+            else:
+                rank = 3
+            if best is None or rank < best[0]:
+                best = (rank, component, spec, submission)
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def scenario_served_interface(ctx):
+    """The served block-interface contract against the rig: registry
+    coverage, a receipted declared command, and the emitted-events
+    view reflecting the produced event."""
+    case = Case('served-interface',
+                'Served block-interface contract covers the model',
+                'GET /schema covers every component kind the rig model '
+                'declares with all five collections, a declared command '
+                'submitted through POST /command returns a structured '
+                'receipt, and GET /resources attributes a produced '
+                'event to the issuing instance')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # replayed alone the rig is fresh (ctrl-a active), while the
+        # full suite reaches this case after the failover.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('served contract against ' + active
+                     + ' (' + base + ')')
+
+        # Each documented endpoint is part of the served contract: an
+        # answered error means the surface itself is missing — a
+        # failed check, where a monitor that cannot be reached at all
+        # stays inconclusive.
+        bodies = {}
+        for path in ('/signals', '/schema', '/resources'):
+            try:
+                _, bodies[path] = http_json('GET', base + path)
+            except urllib.error.HTTPError as exc:
+                return case.finish('failed', 'GET ' + path
+                                   + ' answered ' + str(exc.code))
+        signals, schema = bodies['/signals'], bodies['/schema']
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-signals.json', signals)
+        case.evidence('file', ref, 'declared component records')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-schema.json', schema)
+        case.evidence('file', ref, 'the served interface registry')
+
+        declared = signals.get('components') or []
+        if not declared:
+            return case.finish('inconclusive',
+                               'the signal index serves no component '
+                               'records to check coverage against')
+        served = {}
+        for entry in schema.get('interfaces') or []:
+            if isinstance(entry, dict):
+                served[entry.get('name')] = entry.get('interface') or {}
+        missing = [record for record in declared
+                   if (served.get(record.get('name')) or {}).get('kind')
+                   != record.get('kind')]
+        if missing:
+            return case.finish(
+                'failed', 'the served registry misses declared kinds '
+                + ', '.join(sorted({str(r.get('kind'))
+                                    for r in missing}))
+                + ' (instances: '
+                + ', '.join(str(r.get('name')) for r in missing[:8])
+                + ')')
+        short = {}
+        for entry in schema.get('interfaces') or []:
+            interface = (entry or {}).get('interface') or {}
+            absent = [name for name in INTERFACE_COLLECTIONS
+                      if not isinstance(interface.get(name), list)]
+            if absent:
+                short[str(entry.get('name'))] = absent
+        if short:
+            return case.finish(
+                'failed', 'served interfaces miss collections: '
+                + json.dumps(short, sort_keys=True)[:600])
+        kinds = sorted({str(record.get('kind')) for record in declared})
+        case.observe('registry covers ' + str(len(declared))
+                     + ' declared instances across '
+                     + str(len(kinds)) + ' kinds ('
+                     + ', '.join(kinds) + ') at publication '
+                     + str(schema.get('publication'))
+                     + ' tick ' + str(schema.get('tick')))
+
+        picked = _pick_declared_command(
+            schema.get('interfaces') or [], signals)
+        if picked is None:
+            return case.finish('inconclusive',
+                               'no served command translates to the '
+                               'receipted path')
+        component, spec, command = picked
+        case.observe('declared command: ' + str(component) + ' '
+                     + str(spec.get('name')) + ' -> '
+                     + json.dumps(command, sort_keys=True))
+        try:
+            status, receipt = http_json(
+                'POST', base + '/command',
+                {'command': command, 'actor': 'qa-lane'})
+        except urllib.error.HTTPError as exc:
+            return case.finish('failed', 'the declared command '
+                               'returned no receipt: HTTP '
+                               + str(exc.code))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'served-interface-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the declared command\'s receipt')
+        outcome = receipt.get('outcome') \
+            if isinstance(receipt, dict) else None
+        if status != 200 or not isinstance(receipt, dict) \
+                or not isinstance(receipt.get('command'), dict) \
+                or not isinstance(outcome, dict) or not outcome:
+            return case.finish(
+                'failed', 'the declared command returned no '
+                'structured receipt: ' + str(status) + ' '
+                + json.dumps(receipt)[:400])
+        case.observe('receipt outcome: '
+                     + json.dumps(outcome, sort_keys=True))
+
+        # The emitted-events view is the instance's attributed journal
+        # tail: the produced event is the submission's settled receipt
+        # — journaled whether it applied or refused — or a kind-
+        # emitted event the run produced.
+        observed = {'events': None, 'match': None}
+
+        def events_cover():
+            try:
+                _, view = http_json('GET', base + '/resources')
+            except urllib.error.HTTPError:
+                raise
+            except Exception:
+                return None
+            for entry in view.get('components') or []:
+                if entry.get('name') != component:
+                    continue
+                observed['events'] = entry.get('events') or []
+                for candidate in observed['events']:
+                    event = (candidate or {}).get('event') or {}
+                    settled = (event.get('command_settled') or {}) \
+                        .get('receipt') or {}
+                    if settled.get('command') == command \
+                            or event.get('event_emitted'):
+                        observed['match'] = candidate
+                        return True
+            return None
+
+        covered = wait_for(events_cover,
+                           time.monotonic() + CONTRACT_DEADLINE,
+                           interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'served-interface-events.json',
+            {'component': component, 'match': observed['match'],
+             'events': observed['events'] or []})
+        case.evidence('file', ref, 'emitted events attributed to '
+                      + str(component))
+        if not covered:
+            return case.finish(
+                'failed', 'the emitted-events view never reflected a '
+                'produced event for ' + str(component))
+        match = (observed['match'] or {}).get('event') or {}
+        case.observe('emitted-events view covers '
+                     + next(iter(match), '?') + ' for '
+                     + str(component) + ' ('
+                     + str(len(observed['events'] or []))
+                     + ' entries)')
+        return case.finish('passed')
+    except urllib.error.HTTPError as exc:
+        return case.finish('failed', 'the emitted-events view answered '
+                           + str(exc.code))
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
 
@@ -1109,7 +1373,8 @@ def scenario_consumer_schedule(ctx):
 
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_failover,
-             scenario_evidence_capture, scenario_consumer_schedule)
+             scenario_evidence_capture, scenario_served_interface,
+             scenario_consumer_schedule)
 
 
 def run_all(ctx, timeline):
