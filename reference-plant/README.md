@@ -10,9 +10,12 @@ it as the starting point for your own plant repository.
 The station: a wet well with a failover-selected level measurement
 (primary and backup instruments), a threshold chain turning level into
 pump demand, a two-pump duty/standby `pump-group`, per-pump manual
-takeover and out-of-service declarations, and the managed alarm set —
+takeover and out-of-service declarations, the managed alarm set —
 a never-shelvable high-level alarm, a shelvable low-level alarm, and
-the equipment alarms the site policy declares.
+the equipment alarms the site policy declares — and a small exercise
+program (`sequencer`) whose kind-declared `advance`/`reset` commands
+and kind-emitted `step_completed` event carry the declared
+command/event surface the clean check proves.
 
 ## Layout
 
@@ -28,10 +31,15 @@ model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
 ci/simulate.py         the deterministic scripted-simulation runner;
-                       --surface asserts the served operator surface
+                       --surface asserts the served operator surface —
+                       signal index, interface registry, declared
+                       commands, emitted events
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
+ci/deploy_rig.py       the rig-definition consistency check —
+                       deploy/compose.yaml against the manifest
 deploy/manifest.json   the deployment declaration
+deploy/compose.yaml    the checked-in rig definition instantiating it
 ```
 
 ## The customer path
@@ -47,8 +55,8 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by immutable revision:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "a2b1b13…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
 ```
 
 `tag = "v0.1.0"` names the identical commit once the release tag
@@ -83,7 +91,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev a2b1b13… \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev b85eaa4… \
     dcs-model dcs-controller dcs-plant
 ```
 
@@ -103,12 +111,25 @@ operator surface against the emitted model's declaration: `GET
 /signals` must serve exactly the declared signal index, so every
 writable command point the composition declares (the alarm
 `ack`/`shelve`/`oos` points, the per-pump `mode`/`hand`/`oos` takeover
-points) appears `writable: true` while the never-shelvable high-level
-alarm's `shelve` point stays read-only, and every named signal carries
-its declared group; `GET /` must serve the monitoring page; the
-snapshot's `descriptors` must cover every composed component; and
-`GET /journal` must answer the run's recorded transitions. A
-divergence fails `surface-mismatch`.
+points, the exercise program's `run` request) appears `writable: true`
+while the never-shelvable high-level alarm's `shelve` point stays
+read-only, and every named signal carries its declared group; `GET /`
+must serve the monitoring page; `GET /schema` must serve the
+block-interface registry — one versioned interface per declared
+component covering its declared ports as measurement/state resources
+with their resolved bound points, its declared parameters as
+configuration with their `set_parameter` commands, and the adapted
+point-command verbs on every `In` port; every kind-declared command a
+served interface carries — the exercise `sequencer`'s `advance` and
+`reset` — must answer a structured receipt through `POST /command`'s
+`invoke` variant and settle `applied` through the journaled
+`command_settled` record; every kind-emitted event — the sequencer's
+`step_completed` — must reach the consumer-visible record once the run
+drives its declaring component to emission, appearing in `GET
+/journal`'s `event_emitted` entries and the instance-attributed
+`events` of `GET /resources`; the snapshot's `descriptors` must cover
+every composed component; and `GET /journal` must answer the run's
+recorded transitions. A divergence fails `surface-mismatch`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
@@ -171,6 +192,51 @@ The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
 and `dcs-controller <model> --remote <addr> [--standby <peer>]
 --listen <addr>`.
+
+`deploy/compose.yaml` instantiates the manifest as a checked-in rig
+definition — the same declaration the platform's `docs/packaging.md`
+records as run commands: one `dcs-plant-server` container serving the
+mounted model and dynamics documents read-only, and the `ctrl-a` /
+`ctrl-b` pair attaching to its listener through `--remote`, the standby
+following the duty's monitor through `--standby`, both monitor ports
+published. Each controller invocation carries the manifest's
+fingerprint in its `DCS_MODEL_FINGERPRINT` environment — the identity
+checkpoint negotiation verifies on the wire. The check's `deploy`
+stage parses the file through `docker compose config` (or an
+equivalent YAML parser) and asserts it agrees with the manifest on
+every field — release, images, mounts, fingerprint, listen addresses,
+and pair wiring; a divergence fails `rig-mismatch`, an unparsable file
+`rig-invalid`, a host with neither parser `rig-unverifiable`.
+
+Running the rig is the customer action: with the release's images
+available — pulled by their recorded digests or built at the release
+tag per the platform's `docs/packaging.md` —
+
+```sh
+docker compose -f deploy/compose.yaml up -d
+```
+
+starts the three containers. `docker compose -f deploy/compose.yaml
+ps` shows them; the monitoring page presents the pair as one logical
+controller — open either peer's published monitor port and pass the
+other as `?peer=`:
+
+```
+http://localhost:8080/?peer=localhost:8081
+```
+
+The documented switchover is `POST /demote` on the field-owning peer's
+published port followed by `POST /promote` on the converged standby's;
+`docker compose -f deploy/compose.yaml down` removes the containers
+and the rig network.
+
+The two-machine shape is the same declaration spread across hosts with
+published addresses in place of network names — the cross-host form
+the platform's `docs/packaging.md` records: the plant publishes its
+`9001` listener on its host, each controller runs on its own machine
+with `--remote <plant-host>:9001`, and the standby's `--standby` names
+the duty's reachable monitor address, `<active-host>:8080` in place of
+`ctrl-a:8080`.
 
 ### 7. Upgrade by repinning
 

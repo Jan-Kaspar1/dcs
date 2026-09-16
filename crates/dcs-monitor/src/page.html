@@ -15,6 +15,8 @@
   .bad { color: #b00; font-weight: bold; }
   .nosample { color: #888; font-style: italic; }
   #status { color: #666; }
+  #feed-state.gap, #feed-state.stale { display: inline-block; padding: 0.1rem 0.6rem;
+    border: 1px solid #36a; border-radius: 3px; color: #36a; font-weight: 600; }
   #receipt { background: #f6f6f6; padding: 0.5rem; white-space: pre-wrap; }
   #trends { display: flex; flex-wrap: wrap; gap: 1rem; }
   .trend { margin: 0; }
@@ -99,6 +101,7 @@
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
+<p id="feed-state" hidden></p>
 
 <section id="overview" hidden>
 <h2>Controller pairs</h2>
@@ -321,6 +324,20 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // shell's scan-overrun count — so operator-facing health reads as one
 // surface.
 //
+// Feed state (the disposable-consumer decision's page-side honesty):
+// the page is a seq-cursor consumer of the monitor's bounded served
+// streams, and it reports its own delivery state rather than letting
+// last-known values pass for current ones. A /history or /journal
+// since-poll answering past the cursor's successor — the stretch the
+// bounded store evicted before the page read it — marks the feed
+// "publication gap"; a /snapshot re-serving the same publication's
+// seq and tick — a stall — marks it "stale publication". Both render
+// on the #feed-state line beside the view, distinct from the pair
+// section's unreachable-peer fault (a peer's reachability, not the
+// feed's delivery) and from a row's non-Good quality (process data,
+// not delivery), and each clears on the next in-sequence, fresh
+// publication.
+//
 // Command audit identity (the command-path audit-identity decision):
 // ?operator=<name> configures the actor identity every command
 // submission declares — postCommand wraps the command in the
@@ -426,6 +443,15 @@ const journalEntries = [];
 // re-fetch from the new source after a switch adds each transition once.
 const journalSeen = new Set();
 let journalSince = 0;
+// The feed's delivery state — see the feed-state note above. The
+// current source's last rendered publication identity
+// ({published, tick}) plus the named degradations the latest poll
+// observed: gap = {stream, from, through}, the served seq stretch a
+// since-poll stepped over; stale = the re-served publication's
+// identity when a poll found nothing new. null marks are a fresh,
+// in-sequence feed; a source switch resets the identity — each peer
+// numbers its own publications.
+const feed = { publication: null, gap: null, stale: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -549,6 +575,12 @@ function switchSource(next) {
   source = next;
   for (const state of trends.values()) state.lastSeq = 0;
   journalSince = 0;
+  // The new peer numbers its own publications: the feed's freshness
+  // and gap bookkeeping starts over — a mark observed against the old
+  // source's numbering says nothing about this stream.
+  feed.publication = null;
+  feed.gap = null;
+  feed.stale = null;
 }
 
 // The index of a peer reporting settled "active" — the only legitimate
@@ -645,6 +677,71 @@ function renderPair() {
   summary.textContent = pairSummary();
   summary.className = activePeer() >= 0 &&
     peerState.every(state => state.error === null) ? "good" : "bad";
+}
+
+// ---- Feed state ----
+//
+// The page-side honesty the bounded-publication decision requires of a
+// consumer: a polling reader observes coalescing or an explicit
+// sequence gap/freshness state rather than silently stale data. The
+// page reads only the served seq/freshness fields — the publication
+// section's `published` seq and the snapshot's tick, and the served
+// streams' entry seqs — so no endpoint or wire type is added.
+
+// Records the publication a landed snapshot serves — its `publication`
+// section's `published` seq beside the snapshot tick — and marks the
+// feed stale when that identity repeats: the source answered with the
+// same read model it last served, so the values about to re-render are
+// last-known rather than current. A new identity clears the mark. A
+// peer serving snapshots without the section compares on tick alone.
+function notePublication(snapshot) {
+  const health = snapshot.publication || null;
+  const current = {
+    published: health ? health.published : null,
+    tick: snapshot.tick,
+  };
+  const last = feed.publication;
+  feed.stale = last !== null &&
+    current.published === last.published && current.tick <= last.tick
+    ? current
+    : null;
+  feed.publication = current;
+}
+
+// Notes a served seq stretch the page's since-cursor stepped over:
+// `stream` answered entries numbered `through` while the cursor stood
+// before `from` — the stretch between evicted from the bounded store
+// before the page read it. Kept as the widest gap observed this poll;
+// renderFeed names it.
+function noteFeedGap(stream, from, through) {
+  if (feed.gap === null || through > feed.gap.through) {
+    feed.gap = { stream: stream, from: from, through: through };
+  }
+}
+
+// Renders the feed's named degraded states on the #feed-state line —
+// or hides it when the poll landed fresh and in sequence. The marks
+// name the page's own consumption: distinct from the pair section's
+// unreachable-peer fault and from a row's non-Good quality.
+function renderFeed() {
+  const line = document.getElementById("feed-state");
+  const notices = [];
+  if (feed.gap !== null) {
+    notices.push("publication gap: " + feed.gap.stream + " seqs " +
+      feed.gap.from + "–" + feed.gap.through +
+      " evicted before this page read them — showing the retained tail");
+  }
+  if (feed.stale !== null) {
+    notices.push("stale publication: " +
+      (feed.stale.published === null
+        ? "tick " + feed.stale.tick
+        : "seq " + feed.stale.published + " at tick " + feed.stale.tick) +
+      " re-served — values shown are last-known, not current");
+  }
+  line.hidden = notices.length === 0;
+  line.className =
+    feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
+  line.textContent = notices.join("; ");
 }
 
 // ---- Plant overview ----
@@ -885,6 +982,12 @@ async function refresh() {
     renderPair();
     const base = peers[source].base;
     const snapshot = await (await fetch(base + "/snapshot")).json();
+    // Freshness bookkeeping before the view re-renders: the served
+    // publication's seq/tick identity decides whether this poll found
+    // anything new, and the since-polls below note any evicted stretch
+    // they step over.
+    notePublication(snapshot);
+    feed.gap = null;
     const peerNote = peers.length > 1 ? " — active peer " + peers[source].name : "";
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
@@ -936,6 +1039,7 @@ async function refresh() {
       if (input.dataset.point === focusedPoint) input.focus();
     }
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
+    renderFeed();
     // The alarm pane draws last: its standing list reads this snapshot's
     // telemetry, the last-changed tick walks the history refreshTrends
     // just grew, and its journal slice reads the entries refreshJournal
@@ -1721,8 +1825,10 @@ function alarmJournalEntry(entry, join) {
     const command = event.command_settled.receipt.command;
     const point = commandPoint(command);
     if (point !== null) return join.related.has(point);
-    return "set_parameter" in command &&
-      join.components.has(command.set_parameter.component);
+    return ("set_parameter" in command &&
+      join.components.has(command.set_parameter.component)) ||
+      ("invoke" in command &&
+        join.components.has(command.invoke.component));
   }
   if ("step_failed" in event) {
     return join.components.has(event.step_failed.component);
@@ -1965,6 +2071,13 @@ async function refreshTrends(base) {
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    // A since-read answering past the cursor's successor is the served
+    // form of the named publication gap: the stretch between evicted
+    // from the bounded ring while the page wasn't polling.
+    const first = history.samples.find(entry => entry.seq > state.lastSeq);
+    if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {
+      noteFeedGap("history", state.lastSeq + 1, first.seq - 1);
+    }
     for (const entry of history.samples) {
       if (entry.seq <= state.lastSeq) continue;
       state.lastSeq = entry.seq;
@@ -2034,6 +2147,11 @@ function drawTrend(meta) {
 // the same run's events, and each journals its own role changes.
 async function refreshJournal(base) {
   const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
+  // The journal stream's served form of the same gap.
+  if (journalSince > 0 && entries.length > 0 &&
+      entries[0].seq > journalSince + 1) {
+    noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);
+  }
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
     const key = entry.tick + " " + JSON.stringify(entry.event);
@@ -2068,7 +2186,8 @@ async function refreshJournal(base) {
 
 // Journal events serialize as {"point_changed": ...} |
 // {"quality_changed": ...} | {"command_settled": ...} |
-// {"step_failed": ...} | {"role_changed": {from, to}} |
+// {"step_failed": ...} | {"event_emitted": {event}} |
+// {"role_changed": {from, to}} |
 // {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
 function describeEvent(event) {
   if ("point_changed" in event) {
@@ -2096,6 +2215,13 @@ function describeEvent(event) {
     const failure = event.step_failed;
     return "component " + failure.component + " step failed: " + failure.error;
   }
+  if ("event_emitted" in event) {
+    const emitted = event.event_emitted.event;
+    const fields = Object.keys(emitted.fields).sort().map(name =>
+      name + "=" + formatEventValue(emitted.fields[name])).join(", ");
+    return "component " + emitted.component + " emitted " + emitted.event +
+      (fields ? " (" + fields + ")" : "");
+  }
   if ("role_changed" in event) {
     const change = event.role_changed;
     return "reported role " + change.from + " → " + change.to;
@@ -2122,9 +2248,22 @@ function describeEvent(event) {
   return JSON.stringify(event);
 }
 
+// An emitted event's typed payload field serializes as
+// {"value": <Value>} | {"quality": <Quality>} |
+// {"receipt": <CommandReceipt>} | {"text": "..."} — the variant
+// matching the field's declared EventFieldKind.
+function formatEventValue(field) {
+  if ("value" in field) return formatValue(field.value);
+  if ("quality" in field) return formatQuality(field.quality);
+  if ("receipt" in field) return describeOutcome(field.receipt.outcome);
+  if ("text" in field) return field.text;
+  return JSON.stringify(field);
+}
+
 // A command serializes as {"write_value": {point, kind, value}} |
 // {"force_point": {point, kind, value}} | {"unforce_point": {point}} |
-// {"set_parameter": {component, name, value}}.
+// {"set_parameter": {component, name, value}} |
+// {"invoke": {component, command, arguments}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
@@ -2141,6 +2280,13 @@ function describeCommand(command) {
     const tuning = command.set_parameter;
     return "tune " + tuning.component + "." + tuning.name + " := " +
       formatValue(tuning.value);
+  }
+  if ("invoke" in command) {
+    const call = command.invoke;
+    const args = Object.keys(call.arguments).sort().map(name =>
+      name + "=" + formatValue(call.arguments[name])).join(", ");
+    return "invoke " + call.component + "." + call.command +
+      "(" + args + ")";
   }
   return JSON.stringify(command);
 }
@@ -2166,7 +2312,8 @@ function describeOutcome(outcome) {
 // refusal — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
-// each carrying the offending component.
+// each carrying the offending component — and the invoke-path reasons
+// {"unknown_command"|"argument_type_mismatch"|"command_refused": {...}}.
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
@@ -2220,6 +2367,21 @@ function describeReason(reason) {
     const rejection = reason.invalid_parameter;
     return rejection.component + " rejected parameter " + rejection.parameter +
       ": " + rejection.detail;
+  }
+  if ("unknown_command" in reason) {
+    const rejection = reason.unknown_command;
+    return rejection.component + " declares no command " + rejection.command;
+  }
+  if ("argument_type_mismatch" in reason) {
+    const rejection = reason.argument_type_mismatch;
+    return "command " + rejection.component + "." + rejection.command +
+      " argument " + rejection.argument + " expects " +
+      pascal(rejection.expected) + ", found " + pascal(rejection.found);
+  }
+  if ("command_refused" in reason) {
+    const rejection = reason.command_refused;
+    return rejection.component + " refused " + rejection.command + ": " +
+      rejection.reason;
   }
   return JSON.stringify(reason);
 }

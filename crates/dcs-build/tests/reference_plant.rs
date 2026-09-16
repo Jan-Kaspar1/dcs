@@ -8,9 +8,15 @@
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance, the manifest fingerprint check, the
-//! deterministic scripted simulation, the served operator surface —
+//! rig-definition consistency check asserting `deploy/compose.yaml`
+//! instantiates `deploy/manifest.json`, the deterministic scripted
+//! simulation, the served operator surface —
 //! the signal index, page, snapshot descriptors, and journal asserted
-//! against the emitted model's declaration — the `consumers` stage,
+//! against the emitted model's declaration, plus the `GET /schema`
+//! block-interface registry's coverage of every declared component, a
+//! kind-declared command's structured receipt through `POST /command`,
+//! and a kind-emitted event's arrival in the consumer-visible record —
+//! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
 //! process restart) requiring identical digests, and the `upgrade`
@@ -27,8 +33,10 @@
 //! Every failure the template's check can land is a named diagnostic
 //! from `docs/release-contract.md` — this test surfaces them verbatim —
 //! and the negative cases prove the new stage names the template
-//! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`, and
-//! `scenario-failed`.
+//! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
+//! `scenario-failed`, `rig-mismatch`, and the `surface-mismatch` paths
+//! a drifting interface registry, a receiptless declared command, or an
+//! unobserved emitted event each produce.
 
 mod common;
 
@@ -264,9 +272,29 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "the template's ci/check.sh failed:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The consumer-boundary stage ran and held: the same driven run's
-    // digest under every consumer schedule, identical across passes —
-    // the `file://` stand-in resolving the current revision's tooling.
+    // The surface stage ran and held: the served block-interface
+    // registry covered every declared component, the kind-declared
+    // commands answered structured receipts, and the kind-emitted event
+    // reached the consumer-visible record. The digest line reports the
+    // counts — each must be nonzero for the proof to mean anything.
+    let surface_line = stdout
+        .lines()
+        .find(|line| line.starts_with("surface-digest"))
+        .unwrap_or_else(|| panic!("the surface stage reported no digest:\n{stdout}"));
+    for phrase in ["declared commands receipted", "emitted events"] {
+        let index = surface_line.find(phrase).unwrap_or_else(|| {
+            panic!("the surface digest names no '{phrase}' count: {surface_line}")
+        });
+        let count: usize = surface_line[..index]
+            .split_whitespace()
+            .next_back()
+            .and_then(|token| token.parse().ok())
+            .unwrap_or_else(|| panic!("the '{phrase}' count is not a number: {surface_line}"));
+        assert!(
+            count > 0,
+            "the surface stage proved no {phrase}: {surface_line}"
+        );
+    }
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -345,12 +373,58 @@ fn a_wrong_manifest_fingerprint_reports_the_named_diagnostic() {
     let copy = Materialized::new();
     let manifest = copy.dir.join("deploy/manifest.json");
     let source = std::fs::read_to_string(&manifest).unwrap();
-    std::fs::write(&manifest, source.replacen("68b", "fff", 1)).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let recorded = parsed["model"]["fingerprint"].as_str().unwrap();
+    let field = format!("\"fingerprint\": \"{recorded}\"");
+    assert!(
+        source.contains(&field),
+        "the manifest's fingerprint field moved"
+    );
+    std::fs::write(
+        &manifest,
+        source.replacen(&field, "\"fingerprint\": \"ffffffffffffffff\"", 1),
+    )
+    .unwrap();
     let output = copy.check(&tools);
     assert!(!output.status.success(), "a wrong fingerprint passed");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
         "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A rig definition diverging from the deployment manifest is the
+/// `rig-mismatch` diagnostic — exercised against a doctored copy at
+/// script level, so neither the remote stand-in nor the tooling builds
+/// are needed.
+#[test]
+fn a_divergent_rig_definition_reports_rig_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-rig-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let compose = dir.join("deploy/compose.yaml");
+    let source = std::fs::read_to_string(&compose).unwrap();
+    std::fs::write(&compose, source.replacen("ctrl-a:8080", "ctrl-a:9090", 1)).unwrap();
+    let output = Command::new("python3")
+        .arg("ci/deploy_rig.py")
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the rig-definition check");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a divergent rig definition passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("rig-mismatch"),
+        "expected the rig-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -441,6 +515,153 @@ print("tamper cases report named mismatches")
     assert!(
         output.status.success(),
         "the surface comparison did not flag the tampered index:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The `surface` stage's registry, declared-command, and emitted-event
+/// tamper cases — the same script-level seam the index tamper test
+/// uses, since every tree edit desynchronizing the served surface from
+/// the declared one is caught by the earlier emit and fingerprint
+/// stages. A served registry missing a declared component, drifting a
+/// kind, or dropping a declared resource; a declared command answering
+/// no receipt, a refused one, or never settling `applied`; and a
+/// kind-emitted event absent from the journal or the per-instance
+/// resource view each report the named mismatches `ci/check.sh` turns
+/// into `surface-mismatch`.
+#[test]
+fn a_tampered_served_interface_reports_named_mismatches() {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("simulate", "ci/simulate.py")
+simulate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(simulate)
+
+model = json.load(open("model/plant.json"))
+
+# A served-shaped registry document built from the stage's own
+# model-derived expectations — the untampered shape reports no
+# mismatches.
+def served_schema():
+    interfaces = []
+    for name, want in simulate.registry_expectations(model).items():
+        interfaces.append({
+            "name": name,
+            "interface": {
+                "kind": want["kind"],
+                "version": 1,
+                "measurements": [
+                    {"name": port, **fields}
+                    for port, fields in want["ports"].items()
+                ],
+                "state": [],
+                "configuration": [
+                    {"name": param, "kind": kind}
+                    for param, kind in want["configuration"].items()
+                ],
+                "commands": [
+                    {"name": command, **fields}
+                    for command, fields in want["commands"].items()
+                ],
+                "events": [
+                    {"name": event} for event in sorted(want["events"])
+                ],
+            },
+        })
+    return {"interfaces": interfaces}
+
+assert simulate.schema_mismatches(model, served_schema()) == []
+
+# A declared component the registry misses is named.
+schema = served_schema()
+missing = schema["interfaces"].pop()["name"]
+failures = simulate.schema_mismatches(model, schema)
+assert any(missing in f for f in failures), failures
+
+# A served kind drifting from the declared kind is named.
+schema = served_schema()
+entry = schema["interfaces"][0]
+entry["interface"]["kind"] = "no-such-kind"
+failures = simulate.schema_mismatches(model, schema)
+assert any(entry["name"] in f and "no-such-kind" in f for f in failures), failures
+
+# A declared port serving no resource is named.
+schema = served_schema()
+entry = next(e for e in schema["interfaces"] if e["interface"]["measurements"])
+port = entry["interface"]["measurements"].pop(0)["name"]
+failures = simulate.schema_mismatches(model, schema)
+assert any(entry["name"] in f and port in f for f in failures), failures
+
+# A declared adapted command missing from the registry is named.
+schema = served_schema()
+entry = next(e for e in schema["interfaces"] if e["interface"]["commands"])
+command = entry["interface"]["commands"].pop(0)["name"]
+failures = simulate.schema_mismatches(model, schema)
+assert any(entry["name"] in f and command in f for f in failures), failures
+
+# A declared adapted event missing from the registry is named.
+schema = served_schema()
+entry = schema["interfaces"][0]
+event = entry["interface"]["events"].pop(0)["name"]
+failures = simulate.schema_mismatches(model, schema)
+assert any(entry["name"] in f and event in f for f in failures), failures
+
+# A declared command producing no receipt is named.
+command = {"name": "advance", "request": [], "adapted": "declared"}
+failures = simulate.receipt_mismatches("sequencer:39", command, None)
+assert any("no receipt" in f for f in failures), failures
+
+# A declared command's refused receipt is named.
+failures = simulate.receipt_mismatches(
+    "sequencer:39",
+    command,
+    {
+        "command": {
+            "invoke": {"component": "sequencer:39", "command": "advance"}
+        },
+        "outcome": {"rejected": {"reason": {"command_refused": {}}}},
+    },
+)
+assert any("command_refused" in f for f in failures), failures
+
+# A declared command that never settles `applied` is named.
+failures = simulate.settlement_misses([("sequencer:39", "advance")], [])
+assert any("no settled receipt" in f for f in failures), failures
+
+# A kind-emitted event absent from the journal is named.
+event = {
+    "name": "step_completed",
+    "payload": [{"name": "step", "kind": "int"}],
+    "adapted": "declared",
+}
+failures = simulate.emitted_event_misses([("sequencer:39", event)], [])
+assert any("step_completed" in f for f in failures), failures
+
+# A kind-emitted event missing from the instance's resource view is
+# named.
+failures = simulate.resource_event_misses(
+    [("sequencer:39", event)],
+    {"components": [{"name": "sequencer:39", "events": []}]},
+)
+assert any(
+    "step_completed" in f and "sequencer:39" in f for f in failures
+), failures
+
+print("registry, receipt, and event tamper cases report named mismatches")
+"#,
+        )
+        .current_dir(root().join("reference-plant"))
+        .output()
+        .expect("python3 runs the surface comparison");
+    assert!(
+        output.status.success(),
+        "the surface comparison did not flag the tampered registry:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

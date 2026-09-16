@@ -1,0 +1,42 @@
+{
+  "publication": 7,
+  "tick": 40,
+  "interfaces": [
+    {
+      "name": "mtr-1",
+      "interface": {
+        "version": 1,
+        "kind": "motor",
+        "measurements": [
+          {
+            "name": "run",
+            "direction": "in",
+            "kind": "bool",
+            "role": "process_value",
+            "point": 30
+          }
+        ],
+        "configuration": [],
+        "state": [],
+        "commands": {
+          "write_value:cmd": {
+            "request": [{ "name": "value", "kind": "bool" }],
+            "availability": "bound_point_writable",
+            "adapted": "write_value",
+            "point": 20
+          }
+        },
+        "events": [
+          {
+            "name": "point_changed:run",
+            "payload": [{ "name": "to", "kind": { "value": "bool" } }],
+            "retention": "archived",
+            "emission": "when_journaled",
+            "adapted": "point_changed",
+            "point": 30
+          }
+        ]
+      }
+    }
+  ]
+}

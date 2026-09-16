@@ -13,4 +13,7 @@ dcs-runtime = { path = "../dcs-runtime" }
 dcs-build = { path = "../dcs-build" }
 dcs-model = { path = "../dcs-model" }
 dcs-sim = { path = "../dcs-sim" }
+# The registry-schema sweep's validator; remote-ref resolution is unused, so
+# the default resolver/TLS features stay off.
+jsonschema = { version = "=0.55.0", default-features = false }
 serde_json = "1.0.151"
