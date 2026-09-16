@@ -26,8 +26,16 @@
   {
     "flow_sum": {
       "inputs": [34, 35],
-      "output": 13,
+      "output": 16,
       "bias": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "dead_time": {
+      "input": 16,
+      "output": 13,
+      "delay": 3.0,
       "initial": 0.0
     }
   },
