@@ -35,6 +35,13 @@
 //! | `0x06` | release writer | none |
 //! | `0x07` | inject quality | `u16 register`, quality bytes |
 //! | `0x08` | clear quality | `u16 register` |
+//! | `0x09` | exchange | `u16 count`, then per staged output `u16 register`, `u8 kind`, value bytes |
+//! | `0x0a` | script exchange | `u16 count`, then outcome entries |
+//!
+//! A scripted exchange outcome's first byte is `0x01` complete, `0x02`
+//! miss, `0x03` late, `0x04` short-station (`u16` name length, UTF-8
+//! name), or `0x05` short-registers (`u16` count, then `u16` per
+//! withheld register).
 //!
 //! A value's `kind` byte is `0x01` bool, `0x02` int, `0x03` float,
 //! followed by its payload: one byte (`0x00`/`0x01`) for bool, eight
@@ -96,7 +103,43 @@
 //! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x04` | stepped | `u64 tick` — the bank's new tick |
 //! | `0x05` | error | `u8 code`, code body |
-//! | `0x06` | done | none — a claim, release, inject, or clear applied |
+//! | `0x06` | done | none — a claim, release, inject, clear, or script applied |
+//! | `0x07` | exchanged | `u8 flags`, `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
+//!
+//! The `exchanged` flags byte's bit 0 marks a late answer — the
+//! deadline miss the driver's `missed_deadlines` counter reads.
+//!
+//! ## The `sim-cyclic` kind
+//!
+//! Beside `sim-bus`'s point-wise driver, the `sim-cyclic` device kind
+//! pairs the same server with [`CyclicBusDriver`]: a driver
+//! implementing the cyclic process-image contract
+//! ([`CyclicIoDriver`](dcs_core::CyclicIoDriver)) — `read`/`write`
+//! operate on the held input and staged output images and never touch
+//! the wire, while one `exchange` request per scan publishes the staged
+//! registers and latches the answered census. A `sim-cyclic` device's
+//! `parameters` carry the same `"address"`/`"timeout_ms"` addressing,
+//! the `"exchange_miss_threshold"` its reads escalate at, and a
+//! `"stations"` map — station name → channel name → register
+//! declaration — partitioning the register image into the stations a
+//! short exchange's working counter attributes.
+//!
+//! `exchange` publishes the registers staged since the last completed
+//! exchange and answers the register census — atomically: every staged
+//! output is validated, applied, and only then counted into the
+//! census. A request carrying outputs from an attachment not holding
+//! the write-ownership claim is refused `fenced` without touching the
+//! bank, while a census-only exchange — a tracking standby's, which
+//! stages nothing — is open to every attachment. `script exchange`
+//! appends scripted outcomes the next exchanges consume one at a time:
+//! `complete` answers the full census, `miss` drops the connection
+//! unanswered (the link failure a dead device presents), `late`
+//! answers complete with the late flag, and the short outcomes
+//! withhold a named station's or an explicit list's registers — the
+//! withheld staged outputs unpublished, their input samples unlatched.
+//! Scripting is development tooling like quality injection: unfenced,
+//! and refused whole when it names a station the device does not
+//! declare or a register it does not serve.
 //!
 //! Error codes: `0x01` unknown register (`u16 register`), `0x02` kind
 //! mismatch (`u16 register`, `u8 expected kind`, found value bytes),
@@ -153,14 +196,20 @@
 
 mod bank;
 mod client;
+mod cyclic;
 mod params;
 mod protocol;
 mod server;
 
 pub use bank::{BankError, DynamicsError, RegisterBank, RegisterDecl};
 pub use client::{BusDriver, LinkError, PointRegister};
-pub use params::{ChannelRegister, DEVICE_KIND, DeviceParameters};
-pub use protocol::{BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo};
+pub use cyclic::{CyclicBusDriver, CyclicPoint};
+pub use params::{
+    CYCLIC_DEVICE_KIND, ChannelRegister, CyclicDeviceParameters, DEVICE_KIND, DeviceParameters,
+};
+pub use protocol::{
+    BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, RegisterInfo, RegisterWrite,
+};
 pub use server::BusServer;
 // The declared-dynamics vocabulary a `--dynamics` document carries,
 // re-exported so the device binary and test rigs need no `dcs-sim`
