@@ -169,11 +169,12 @@ class SupervisorTests(unittest.TestCase):
         s.reconcile_workers(self.github.items)
         self.assertEqual(s.state.job(1)['repairs'],2)
 
-    def test_priority_and_group_serialization(self):
+    def test_same_group_issues_dispatch_in_parallel_by_priority(self):
         self.github.items=[issue(1,3),issue(2,0)]
         self.supervisor.dispatch(self.github.items)
-        self.assertIsNone(self.supervisor.state.job(1))
+        self.assertIsNotNone(self.supervisor.state.job(1))
         self.assertIsNotNone(self.supervisor.state.job(2))
+        self.assertIn('Task 2', self.runtime.spawn.call_args_list[0].args[2])
 
     def test_failed_ci_repairs_with_session(self):
         s=self.supervisor

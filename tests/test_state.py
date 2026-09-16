@@ -25,10 +25,10 @@ class StateTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             self.assertEqual(sum(pool.map(claim, range(8))), 1)
 
-    def test_dependencies_and_groups(self):
+    def test_dependencies_gate_but_groups_do_not_serialize(self):
         self.assertIsNone(self.state.reserve(2, 'two', 'b', [1]))
         self.assertIsNotNone(self.state.reserve(1, 'one', 'a'))
-        self.assertIsNone(self.state.reserve(3, 'three', 'a'))
+        self.assertIsNotNone(self.state.reserve(3, 'three', 'a'))
         self.state.complete(1)
         self.assertIsNotNone(self.state.reserve(2, 'two', 'a', [1]))
 
