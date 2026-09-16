@@ -816,6 +816,10 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                // The promotion boundary runs one final pull against the
+                // tracking source, so a command the active admitted up
+                // to the promote request is carried.
+                let monitor = monitor.with_standby_source(active_addr);
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 run_monitored(

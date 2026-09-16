@@ -395,6 +395,13 @@ pub struct Monitor<'d> {
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
+    /// The tracking source a standby pulls checkpoints from — the
+    /// `--standby` target on a paced standby's monitor, or `Driven`'s
+    /// `track` on a driven one. `POST /promote` runs one final pull
+    /// against it before the gate lifts ([`Peer::final_sync`]), so a
+    /// command the active admitted up to the promote request is carried
+    /// into the promoted run.
+    standby_source: Option<SocketAddr>,
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
@@ -505,14 +512,27 @@ impl<'d> Monitor<'d> {
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
             driven: Driven::default(),
+            standby_source: None,
         })
     }
 
     /// Arms `POST /scan` with `driven` wiring and returns the monitor —
     /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
-    /// one refuses `POST /scan`, so the wiring never runs.
+    /// one refuses `POST /scan`, so the wiring never runs. The `track`
+    /// address also becomes the promotion-boundary pull's source.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
+        self.standby_source = driven.track;
         self.driven = driven;
+        self
+    }
+
+    /// Records the address a tracking standby pulls checkpoints from —
+    /// a paced `--standby` run's target, which the pacing loop owns and
+    /// `Driven` never sees. `POST /promote` runs one final pull against
+    /// it so the promoted run carries every command the active admitted
+    /// up to the promote request.
+    pub fn with_standby_source(mut self, source: SocketAddr) -> Self {
+        self.standby_source = Some(source);
         self
     }
 
@@ -862,10 +882,32 @@ impl<'d> Monitor<'d> {
     /// [`SwitchError`](dcs_core::SwitchError) on refusal. The reported
     /// transition — the request is itself a boundary event — is
     /// journaled at the tick the peer attributes it to.
+    ///
+    /// Promotion runs one best-effort final synchronization against the
+    /// tracking source first ([`Peer::final_sync`]): a command the
+    /// active admitted after the standby's last tracking pull — still
+    /// `Accepted`, riding the checkpoint's receipt log — carries into
+    /// the promoted run and settles at its next boundary. A failed or
+    /// stale pull leaves the standing convergence to decide, exactly as
+    /// an unpulled promote would.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;
         let result = if promote {
+            if let Some(source) = self.standby_source {
+                peer.final_sync(|| {
+                    MonitorClient::new(source)
+                        .checkpoint()
+                        .map_err(|error| format!("fetch from {source}: {error}"))
+                });
+                for divergence in peer.take_divergences() {
+                    recorder.note_divergence(divergence.tick, divergence.mismatches);
+                }
+                for report in peer.take_reinitializations() {
+                    recorder.note_reinitialized(report);
+                }
+                self.store.sync_receipts(peer.receipts());
+            }
             peer.promote()
         } else {
             peer.demote()
