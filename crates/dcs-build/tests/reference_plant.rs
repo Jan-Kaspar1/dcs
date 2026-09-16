@@ -7,7 +7,13 @@
 //! exactly that commit — and runs the tree's own `ci/check.sh`
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
-//! released-tooling acceptance, the manifest fingerprint check, the
+//! released-tooling acceptance — plus the contract's remaining
+//! `dcs-model` surfaces: `schema` and `interface-schema` emissions
+//! byte-pinned to the release record's artifacts fetched through the
+//! stand-in remote at the pinned rev, `diff` legs over a doctored
+//! compatible revision and the identical document, and
+//! `summary`/`signal-index` recorded as run evidence — the manifest
+//! fingerprint check, the
 //! rig-definition consistency check asserting `deploy/compose.yaml`
 //! instantiates `deploy/manifest.json`, the deterministic scripted
 //! simulation, the served operator surface —
@@ -15,7 +21,9 @@
 //! against the emitted model's declaration, plus the `GET /schema`
 //! block-interface registry's coverage of every declared component, a
 //! kind-declared command's structured receipt through `POST /command`,
-//! and a kind-emitted event's arrival in the consumer-visible record —
+//! a kind-emitted event's arrival in the consumer-visible record, and
+//! the served registry document's structural conformance to the
+//! fetched record artifact —
 //! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
@@ -37,7 +45,8 @@
 //! from `docs/release-contract.md` — this test surfaces them verbatim —
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
-//! `scenario-failed`, `rig-mismatch`, and the `surface-mismatch` paths
+//! `scenario-failed`, `rig-mismatch`, `schema-drift`,
+//! `schema-mismatch`, `diff-mismatch`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -300,6 +309,32 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the surface stage proved no {phrase}: {surface_line}"
         );
     }
+    // The extended tooling and surface legs ran and held: the recorded
+    // schema artifacts were fetched and emitted byte-identically, the
+    // diff legs named the doctored revision's change and none on the
+    // identical document, summary and signal-index landed in the run's
+    // evidence, the served registry document conformed to the record's
+    // declared structure, and each leg's own doctored case reported its
+    // named diagnostic.
+    for line in [
+        "emit the v0.2.0 record's artifacts byte-identically",
+        "a drifted record artifact refused: schema-drift",
+        "diff over the doctored compatible revision",
+        "changed signal 10010",
+        "diff over the identical document",
+        "no changes",
+        "failed diff expectations refused: diff-mismatch",
+        "dcs-model summary (sha256",
+        "dcs-model signal-index (sha256",
+        "conforms to the recorded schema artifact",
+        "missing-required refused: schema-mismatch",
+        "mistyped-required refused: schema-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the check transcript lacks '{line}':\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains("== restart =="),
         "the restart stage did not run:\n{stdout}"
@@ -464,6 +499,106 @@ fn a_divergent_rig_definition_reports_rig_mismatch() {
         "expected the rig-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A served registry document diverging from the recorded artifact's
+/// declared structure is the `schema-mismatch` diagnostic — exercised
+/// at script level against the consumer-side conformance check, the
+/// same seam the rig-definition test uses. The artifact is the release
+/// record's checked-in `block-interfaces.schema.json`; a structurally
+/// conforming document passes, a missing required field fails, and a
+/// mistyped required field fails.
+#[test]
+fn a_structurally_divergent_served_document_reports_schema_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-schema-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let schema = root().join("docs/releases/v0.2.0/block-interfaces.schema.json");
+    let script = root().join("reference-plant/ci/schema_conformance.py");
+    let conforming = serde_json::json!({
+        "publication": 0,
+        "tick": 0,
+        "interfaces": [{
+            "name": "kind:1",
+            "interface": {
+                "version": 1,
+                "kind": "kind",
+                "measurements": [],
+                "configuration": [],
+                "state": [],
+                "commands": [],
+                "events": [],
+            },
+        }],
+    });
+    let conform = |document: &serde_json::Value| {
+        let path = dir.join("document.json");
+        std::fs::write(&path, serde_json::to_string(document).unwrap()).unwrap();
+        Command::new("python3")
+            .arg(&script)
+            .arg("--schema")
+            .arg(&schema)
+            .arg("--document")
+            .arg(&path)
+            .output()
+            .expect("python3 runs the schema-conformance check")
+    };
+    let output = conform(&conforming);
+    assert!(
+        output.status.success(),
+        "a conforming document failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A required top-level field dropped.
+    let mut missing = conforming.clone();
+    missing.as_object_mut().unwrap().remove("tick");
+    let output = conform(&missing);
+    assert!(
+        !output.status.success(),
+        "a document missing a required field passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("schema-mismatch") && stderr.contains("tick"),
+        "expected the schema-mismatch diagnostic naming the field, got:\n{stderr}"
+    );
+    // A required field mistyped — a string where the schema declares
+    // an integer.
+    let mut mistyped = conforming.clone();
+    mistyped["tick"] = serde_json::json!("not-a-tick");
+    let output = conform(&mistyped);
+    assert!(
+        !output.status.success(),
+        "a document mistyping a required field passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("schema-mismatch") && stderr.contains("tick"),
+        "expected the schema-mismatch diagnostic naming the field, got:\n{stderr}"
+    );
+    // A nested required field dropped inside a served interface.
+    let mut nested = conforming.clone();
+    nested["interfaces"][0]["interface"]
+        .as_object_mut()
+        .unwrap()
+        .remove("events");
+    let output = conform(&nested);
+    assert!(
+        !output.status.success(),
+        "a document missing a nested required field passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("schema-mismatch"),
+        "expected the schema-mismatch diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold
