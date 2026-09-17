@@ -616,10 +616,14 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             })
         })),
         // The plant server's single-writer claim — the fencing a
-        // promoted peer takes out on the old field owner.
+        // promoted peer takes out on the old field owner. A grant
+        // flagged `Shared` still holds: one owner's several sim-tcp
+        // devices on one plant claim the same token by design, so the
+        // flag is the claimer's to heed, not the hook's to refuse.
         claim: Some(Arc::new(move |owner| {
             claiming
                 .claim_writer(owner)
+                .map(|_| ())
                 .map_err(|error| StepError::Backend {
                     backend: format!("device {device}"),
                     detail: error.to_string(),

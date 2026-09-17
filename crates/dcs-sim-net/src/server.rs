@@ -4,7 +4,7 @@ use crate::protocol::encode_message;
 use crate::protocol::{MAX_MESSAGE, PlantError, PlantRequest, PlantResponse, read_message};
 use dcs_core::{IoDriver, IoError};
 use dcs_sim::SimDriver;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,13 +24,40 @@ struct Shared {
     /// otherwise notice the server stopping.
     clients: Mutex<HashMap<u64, TcpStream>>,
     next_client: AtomicU64,
-    /// The field's write-ownership claim — the owner token the last
-    /// [`PlantRequest::ClaimWriter`] asserted, or `None` while the plant
-    /// has never been claimed and stays open to every attachment. Once
-    /// set it is never cleared: a dead owner's silence is exactly the
+    /// The field's write-ownership claim, or `None` while the plant has
+    /// never been claimed and stays open to every attachment. Once set
+    /// it is never cleared: a dead owner's silence is exactly the
     /// failure the claim exists to fence, so only a fresh claim moves
     /// the ownership.
-    writer: Mutex<Option<u64>>,
+    writer: Mutex<Option<WriterClaim>>,
+}
+
+/// A held write-ownership claim: the owner token the last preempting
+/// [`PlantRequest::ClaimWriter`] asserted plus the live connections
+/// holding it — one field owner's several attachments claim the same
+/// token so all of them write.
+///
+/// The holder set is what lets the server flag a duplicate owner: a
+/// claim joining a token another live attachment already holds answers
+/// [`PlantResponse::ClaimedShared`]. A connection's end drops only its
+/// own hold — the claim stands even with no holders left, so a dead
+/// owner keeps the field fenced for its token until a fresh claim
+/// preempts.
+struct WriterClaim {
+    owner: u64,
+    /// The connection ids holding `owner`. An attachment not in this
+    /// set is fenced: its `write` and `step` requests are refused while
+    /// the claim stands.
+    holders: HashSet<u64>,
+}
+
+impl WriterClaim {
+    /// Whether this claim names `owner` and a live attachment besides
+    /// `connection` already holds it — the duplicate-owner signal a
+    /// claim grant flags `ClaimedShared`.
+    fn shared_with(&self, owner: u64, connection: u64) -> bool {
+        self.owner == owner && self.holders.iter().any(|holder| *holder != connection)
+    }
 }
 
 impl Shared {
@@ -46,21 +73,33 @@ impl Shared {
         }
         let shared = Arc::clone(self);
         thread::spawn(move || {
-            serve_connection(&shared, stream);
+            serve_connection(&shared, stream, id);
+            // The connection's end releases its hold on the writer
+            // claim — never the claim itself, which keeps the field
+            // fenced for the dead owner's token — so a later claim of
+            // that token is not flagged shared with a corpse.
+            release_hold(&shared.writer, id);
             shared.clients.lock().unwrap().remove(&id);
         });
+    }
+}
+
+/// Drops `connection`'s hold on the writer claim. Unlike `dcs-sim-bus`'s
+/// register claim — which a holder's disconnect frees — the plant claim
+/// outlives its holders: an empty holder set still fences the field for
+/// the claimed token, per the never-released rule.
+fn release_hold(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
+    if let Some(claim) = writer.lock().unwrap().as_mut() {
+        claim.holders.remove(&connection);
     }
 }
 
 /// One client connection's request loop: read a line, dispatch it, write
 /// the response. Ends when the peer goes away, the link fails, the peer
 /// violates the message bound, or the server stops.
-fn serve_connection(shared: &Shared, stream: TcpStream) {
+fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
     let _ = stream.set_nodelay(true);
     let mut reader = BufReader::new(stream);
-    // The owner token this connection's last `claim_writer` asserted —
-    // the identity the field's single-writer arbitration fences by.
-    let mut claimed = None;
     loop {
         if shared.stopped() {
             return;
@@ -72,7 +111,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
             Ok(None) | Err(_) => return,
         };
         let response = match serde_json::from_slice::<PlantRequest>(&line) {
-            Ok(request) => dispatch(shared, &mut claimed, request),
+            Ok(request) => dispatch(shared, id, request),
             Err(error) => PlantResponse::Error {
                 error: PlantError::InvalidRequest {
                     detail: error.to_string(),
@@ -90,18 +129,18 @@ fn serve_connection(shared: &Shared, stream: TcpStream) {
 }
 
 /// Applies one parsed request to the shared driver, fencing
-/// field-mutating requests by the caller's claimed owner.
+/// field-mutating requests by the caller's claim hold.
 ///
 /// Every request produces exactly one response; a request the driver
 /// refuses comes back as [`PlantError::Io`] carrying the driver's
 /// [`IoError`](dcs_core::IoError) verbatim so the remote client surfaces
 /// the same failure a local one would. `Write` and `Step` are the
 /// field-mutating operations: while an owner is claimed, a connection
-/// that has not claimed the current owner sees its `write` refused with
-/// the point's [`IoError::Fenced`] and its `step` with
+/// not holding the current claim sees its `write` refused with the
+/// point's [`IoError::Fenced`] and its `step` with
 /// [`PlantError::Fenced`] — the old owner's writes stop at the field,
 /// not merely at its own gate.
-fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -> PlantResponse {
+fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantResponse {
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
         Err(error) => PlantResponse::Error {
@@ -121,7 +160,10 @@ fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -
         // write already in flight on another connection.
         PlantRequest::Write { point, value } => {
             let writer = shared.writer.lock().unwrap();
-            if writer.is_some_and(|owner| *claimed != Some(owner)) {
+            if writer
+                .as_ref()
+                .is_some_and(|claim| !claim.holders.contains(&connection))
+            {
                 return PlantResponse::Error {
                     error: PlantError::Io {
                         error: IoError::Fenced(point),
@@ -141,7 +183,10 @@ fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -
                 };
             }
             let writer = shared.writer.lock().unwrap();
-            if writer.is_some_and(|owner| *claimed != Some(owner)) {
+            if writer
+                .as_ref()
+                .is_some_and(|claim| !claim.holders.contains(&connection))
+            {
                 return PlantResponse::Error {
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
@@ -162,27 +207,65 @@ fn dispatch(shared: &Shared, claimed: &mut Option<u64>, request: PlantRequest) -
         PlantRequest::ClaimWriter { owner } => {
             // The grant preempts unconditionally: the promoted standby's
             // claim must beat the old owner's, wherever it still lives.
-            *shared.writer.lock().unwrap() = Some(owner);
-            *claimed = Some(owner);
-            PlantResponse::Done
+            // Claiming the standing owner joins this attachment to the
+            // claim's holders — flagged `ClaimedShared` when another
+            // live attachment already holds the token: the token cannot
+            // tell one owner's second attachment from a second process
+            // reusing it, and the second case silently defeats the
+            // single-writer fencing a promotion relies on, so the grant
+            // reports the sharing rather than hiding it.
+            let mut writer = shared.writer.lock().unwrap();
+            let shared_claim = writer
+                .as_ref()
+                .is_some_and(|claim| claim.shared_with(owner, connection));
+            match writer.as_mut() {
+                Some(claim) if claim.owner == owner => {
+                    claim.holders.insert(connection);
+                }
+                _ => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                }
+            }
+            if shared_claim {
+                PlantResponse::ClaimedShared { owner }
+            } else {
+                PlantResponse::Done
+            }
         }
         PlantRequest::EnsureWriter { owner } => {
             // The re-attach grant: the claim a reconnecting field owner
             // re-arms after a server restart dropped it. It is refused
             // while a *different* owner holds the field — a superseded
             // peer re-attaching cannot preempt the attachment that
-            // claimed during the outage.
+            // claimed during the outage. Joining the standing owner is
+            // flagged `ClaimedShared` exactly as `claim_writer` is.
             let mut writer = shared.writer.lock().unwrap();
-            if writer.is_some_and(|standing| standing != owner) {
-                return PlantResponse::Error {
+            match writer.as_mut() {
+                Some(claim) if claim.owner != owner => PlantResponse::Error {
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
                     },
-                };
+                },
+                Some(claim) => {
+                    let shared_claim = claim.shared_with(owner, connection);
+                    claim.holders.insert(connection);
+                    if shared_claim {
+                        PlantResponse::ClaimedShared { owner }
+                    } else {
+                        PlantResponse::Done
+                    }
+                }
+                None => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                    PlantResponse::Done
+                }
             }
-            *writer = Some(owner);
-            *claimed = Some(owner);
-            PlantResponse::Done
         }
     }
 }

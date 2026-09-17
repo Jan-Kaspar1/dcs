@@ -118,6 +118,7 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
     .with_field_claim(|| {
         active_driver
             .claim_writer(1)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     });
     active.activate().unwrap();
@@ -137,6 +138,7 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
     .with_field_claim(|| {
         standby_driver
             .claim_writer(2)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     });
     let standby_monitor =
