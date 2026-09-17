@@ -102,7 +102,12 @@
 //!   arriving while the queue is full is refused with a
 //!   [`CommandError::QueueFull`] rejection receipt — admission is
 //!   receipted, never fire-and-forget — and the queue's admission
-//!   metrics ride the snapshot's `command_queue` section
+//!   metrics ride the snapshot's `command_queue` section. With a
+//!   [`CommandPersist`] installed ([`Monitor::with_command_persist`],
+//!   the controller's `--state-file` wiring), an accepted admission is
+//!   persisted before the `200` answers, so a restart between admission
+//!   and the applying scan re-queues the carried receipt rather than
+//!   losing the command unaudited
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
 //!   refused with `409` on a paced monitor (see below)
@@ -440,6 +445,23 @@ const SERVE_WORKERS: usize = 4;
 /// failure.
 pub type AfterScan<'d> = Box<dyn Fn(&Peer<'d>) -> Result<(), String> + Send + Sync + 'd>;
 
+/// Runs at a command's admission boundary — inside `POST /command`,
+/// after the accepted receipt lands in the executor's log and before
+/// the request answers — receiving the run's just-captured
+/// [`Checkpoint`]. A `--state-file` run installs its persist here so an
+/// accepted command is durable before its `200` receipt is promised:
+/// the checkpoint's receipt log carries the admission and a resume
+/// re-queues it, so a restart between admission and the applying scan
+/// re-applies the command instead of losing it unaudited — the same
+/// takeover guarantee the checkpoint contract gives a promoted standby.
+/// The call runs under the shared lock, serializing with the cycle-end
+/// persist a paced or driven run performs through
+/// [`persist_state`](Monitor::persist_state), so the two writes can
+/// never interleave into a stale overwrite. A failure is fatal — the
+/// run dies naming it rather than answering a receipt it cannot
+/// recover, the same rule the journal-file sink applies.
+pub type CommandPersist = Box<dyn Fn(&Checkpoint) -> Result<(), String> + Send + Sync>;
+
 /// The wiring an unpaced [`Monitor`]'s `POST /scan` runs around each
 /// requested scan — see [`Monitor::driven`].
 ///
@@ -486,6 +508,9 @@ pub struct Monitor<'d> {
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
+    /// The persist a `--state-file` run performs at a command's
+    /// admission boundary — see [`with_command_persist`](Self::with_command_persist).
+    command_persist: Option<CommandPersist>,
     /// The tracking source a standby pulls checkpoints from — the
     /// `--standby` target on a paced standby's monitor, `--peer` on a
     /// launched active's, or `Driven`'s `track` on a driven one.
@@ -611,6 +636,7 @@ impl<'d> Monitor<'d> {
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
             driven: Driven::default(),
+            command_persist: None,
             standby_source: None,
             announced: Mutex::new(None),
         })
@@ -623,6 +649,20 @@ impl<'d> Monitor<'d> {
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track;
         self.driven = driven;
+        self
+    }
+
+    /// Installs the persist a `--state-file` run performs at a command's
+    /// admission boundary: `POST /command` invokes it with the
+    /// just-captured checkpoint after an accepted receipt lands in the
+    /// executor's log and before the request answers — the admission is
+    /// durable before its `200` receipt is promised, so a restart before
+    /// the applying scan re-queues the carried `Accepted` receipt
+    /// instead of losing the command with no audit trace. Only an
+    /// `Accepted` admission invokes it — a refused command settles at
+    /// submission and is already journaled. See [`CommandPersist`].
+    pub fn with_command_persist(mut self, persist: CommandPersist) -> Self {
+        self.command_persist = Some(persist);
         self
     }
 
@@ -765,10 +805,24 @@ impl<'d> Monitor<'d> {
 
     /// The executor's current transferable state, taken under the lock —
     /// the same between-scans [`Checkpoint`] `GET /checkpoint` serves.
-    /// A paced loop uses it to persist the run's state file at its
-    /// documented per-cycle boundary.
     pub fn checkpoint(&self) -> Checkpoint {
         self.shared.lock().unwrap().peer.checkpoint()
+    }
+
+    /// Captures the run's checkpoint under the shared lock and hands it
+    /// to `persist` still held — the serialization point every
+    /// `--state-file` write goes through: a pacing loop's end-of-cycle
+    /// write and a command's admission-boundary write
+    /// ([`with_command_persist`](Self::with_command_persist)) order
+    /// against each other at a scan boundary, so a persist slow on its
+    /// own I/O can never overwrite a newer admission's file with an
+    /// older capture.
+    pub fn persist_state(
+        &self,
+        persist: impl FnOnce(&Checkpoint) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let shared = self.shared.lock().unwrap();
+        persist(&shared.peer.checkpoint())
     }
 
     /// The executor's current virtual tick.
@@ -969,6 +1023,20 @@ impl<'d> Monitor<'d> {
                         let index = peer.receipts().len() - 1;
                         let tick = peer.tick();
                         recorder.note_command(index, receipt.clone(), tick);
+                        // An accepted admission is owed durability
+                        // before its receipt answers: a `--state-file`
+                        // run persists the just-captured checkpoint —
+                        // receipt log included — at this boundary, so a
+                        // restart before the applying scan re-queues the
+                        // carried receipt rather than losing the command
+                        // unaudited. The write rides the shared lock
+                        // like the cycle-end persist, so the two never
+                        // interleave into a stale overwrite.
+                        if matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+                            && let Some(persist) = &self.command_persist
+                        {
+                            persist(&peer.checkpoint()).unwrap_or_else(|error| panic!("{error}"));
+                        }
                         // Refresh the store's mirror so `GET /receipts`
                         // answers the just-submitted receipt before its
                         // scan boundary settles it.

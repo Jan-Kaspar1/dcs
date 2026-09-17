@@ -54,8 +54,15 @@
 //! `GET /checkpoint` serves — versioned and fingerprinted per the
 //! checkpoint-versioning decision — is written to `PATH` at the end of
 //! every completed scan cycle, after the scan and the plant step, by
-//! write-then-rename so a crash mid-write cannot leave a torn file. When
-//! `PATH` exists at startup the run resumes from it: the checkpoint is
+//! write-then-rename so a crash mid-write cannot leave a torn file.
+//! A second write boundary keeps the command path honest: `POST
+//! /command`'s accepted admission persists the just-captured
+//! checkpoint — receipt log included — before the `200` answers, so a
+//! restart between admission and the applying scan re-queues the
+//! carried `Accepted` receipt instead of losing the command with no
+//! audit trace, the same guarantee the checkpoint contract gives a
+//! promoted standby.
+//! When `PATH` exists at startup the run resumes from it: the checkpoint is
 //! applied to the freshly assembled executor before pacing begins, so
 //! the next scan continues the interrupted run tick-for-tick. Resume is
 //! all-or-nothing, the checkpoint-restore rule — an unreadable or
@@ -196,7 +203,7 @@ use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_dr
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
-use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorConfig};
+use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
@@ -399,7 +406,8 @@ struct Options {
     /// degrading on the mismatch.
     revised: bool,
     /// Persist the run's checkpoint to this file at the end of every
-    /// scan cycle, and resume from it at startup when it exists — the
+    /// scan cycle and at each accepted command's admission boundary,
+    /// and resume from it at startup when it exists — the
     /// restart-recovery path for a controller with no redundant peer.
     state_file: Option<PathBuf>,
     /// Persist the transition journal to this append-only file and
@@ -485,7 +493,8 @@ controller scan.
                   this instance warns on a shared grant
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
-                  every scan cycle — atomically, by write-then-rename —
+                  every scan cycle and at each accepted command's
+                  admission boundary — atomically, by write-then-rename —
                   and resume from it at startup when it exists: a file
                   that cannot be resumed (unreadable, unparseable, an
                   unsupported format version, or a fingerprint/structural
@@ -747,6 +756,21 @@ fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, S
     Ok(true)
 }
 
+/// The `--state-file` persist hooked onto command admission: an
+/// accepted command is durable run state before its `200` receipt
+/// answers — the checkpoint's receipt log carries the admission, so a
+/// restart between admission and the applying scan re-queues it rather
+/// than losing it unaudited. This is the same write the cycle end
+/// performs, fired at the admission boundary; every write rides the
+/// monitor's shared lock so the two can never interleave into a stale
+/// overwrite.
+fn command_persist(options: &Options) -> Option<CommandPersist> {
+    let path = options.state_file.clone()?;
+    Some(Box::new(move |checkpoint| {
+        write_state_file(&path, checkpoint)
+    }))
+}
+
 /// Persists `checkpoint` as `path`'s new contents: write to a sibling
 /// temporary file, then rename over `path` — atomic on one filesystem,
 /// so a crash mid-write never leaves a torn file the next resume would
@@ -964,6 +988,10 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
+        let monitor = match command_persist(&options) {
+            Some(persist) => monitor.with_command_persist(persist),
+            None => monitor,
+        };
         let monitor = monitor.driven(Driven {
             track,
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
@@ -1003,6 +1031,10 @@ fn main() -> ExitCode {
                     Err(error) => {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
+                };
+                let monitor = match command_persist(&options) {
+                    Some(persist) => monitor.with_command_persist(persist),
+                    None => monitor,
                 };
                 // The promotion boundary runs one final pull against the
                 // tracking source, so a command the active admitted up
@@ -1077,7 +1109,7 @@ fn main() -> ExitCode {
                         scanned
                     },
                     || peer.borrow().snapshot(),
-                    || peer.borrow().checkpoint(),
+                    |path| write_state_file(path, &peer.borrow().checkpoint()),
                     step,
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
@@ -1098,6 +1130,10 @@ fn main() -> ExitCode {
                     Err(error) => {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
+                };
+                let monitor = match command_persist(&options) {
+                    Some(persist) => monitor.with_command_persist(persist),
+                    None => monitor,
                 };
                 // A --peer launched active names its tracking source up
                 // front — where this instance pulls checkpoints if it is
@@ -1158,7 +1194,7 @@ fn main() -> ExitCode {
                         scanned
                     },
                     || peer.borrow().snapshot(),
-                    || peer.borrow().checkpoint(),
+                    |path| write_state_file(path, &peer.borrow().checkpoint()),
                     || driver.step(dt, peer.borrow().owns_field()),
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
@@ -1244,7 +1280,7 @@ fn run_monitored(
         let result = scan_loop(
             scan,
             || monitor.snapshot(),
-            || monitor.checkpoint(),
+            |path| monitor.persist_state(|checkpoint| write_state_file(path, checkpoint)),
             step,
             || monitor.record_scan_overrun(),
             options,
@@ -1262,12 +1298,16 @@ fn run_monitored(
 /// `--ticks` bound, the snapshot reporting, and the wall-clock pacing
 /// are identical either way.
 ///
-/// `checkpoint` feeds `--state-file`: the run's transferable state is
+/// `persist` feeds `--state-file`: the run's transferable state is
 /// persisted at the end of every completed scan cycle — after the scan
 /// and the plant step, so a resumed run re-enters the loop at exactly
 /// this point — and a write failure fails the run like a scan or step
 /// failure does: a controller that cannot persist its recovery state
-/// exits naming the file rather than running on without it.
+/// exits naming the file rather than running on without it. On a
+/// monitored run the closure routes through
+/// [`Monitor::persist_state`], so the cycle-end write and a command's
+/// admission-boundary write serialize on the same lock and can never
+/// interleave into a stale overwrite.
 ///
 /// `overrun` is the paced loop's feed for the snapshot's
 /// `io_health.scan_overruns`: a cycle whose wall-clock elapsed reaches
@@ -1279,7 +1319,7 @@ fn run_monitored(
 fn scan_loop(
     mut scan: impl FnMut() -> Result<Tick, ScanError>,
     snapshot: impl Fn() -> TelemetrySnapshot,
-    checkpoint: impl Fn() -> Checkpoint,
+    persist: impl Fn(&Path) -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
     mut overrun: impl FnMut(),
     options: &Options,
@@ -1295,7 +1335,7 @@ fn scan_loop(
             return fail(error);
         }
         if let Some(path) = &options.state_file
-            && let Err(error) = write_state_file(path, &checkpoint())
+            && let Err(error) = persist(path)
         {
             return fail(error);
         }
