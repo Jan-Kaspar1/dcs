@@ -85,7 +85,20 @@
 #                switches the roles, and the run continues bumplessly
 #                with the adopted receipts and the durable journal
 #                files' transition records intact; two passes produce
-#                identical digests (pair-failed, pair-nondeterministic)
+#                identical digests (pair-failed, pair-nondeterministic).
+#                The stage's refusal half, ci/refusal.py on the same
+#                declared deployment: a POST /promote on the freshly
+#                launched standby — before its first transfer — answers
+#                the named not_converged refusal with no field
+#                hand-off, a receipted write against a declared
+#                writable point submitted to the tracking standby's
+#                monitor answers the named not_active rejection with
+#                the point unchanged in the active's served snapshot
+#                and no command-side journal entry on either peer, and
+#                once tracking the same promote succeeds — the active's
+#                field writes, receipts, and journal undisturbed
+#                throughout; two passes produce identical digests
+#                (refusal-failed, refusal-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -665,13 +678,53 @@ fi
     || fail "pair-unchecked: the broken-peer-flag case did not report its named diagnostic: $out"
 echo "  broken-peer-flag: reported, pair-failed"
 
+# The pair contract's refusal half, on the same manifest-declared
+# deployment: ci/refusal.py catches the freshly launched standby before
+# its first transfer — the documented induction — where POST /promote
+# must answer the named not_converged refusal with no field hand-off;
+# submits a receipted write against a declared writable point to the
+# tracking standby's monitor, which must answer the named not_active
+# rejection with the point unchanged in the active's served snapshot,
+# the write absent from both peers' adopted receipt logs, and no
+# command-side journal entry on either peer recording it as anything
+# but the refusal; and promotes once tracking, where the same request
+# succeeds — the active's field writes, receipts, and journal
+# undisturbed throughout. Two passes must produce identical digests.
+run_refusal() {
+    python3 ci/refusal.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_refusal)" \
+    || fail "refusal-failed: the role-gated refusal leg did not hold — its evidence lines are above"
+SECOND="$(run_refusal)" \
+    || fail "refusal-failed: the role-gated refusal leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "refusal-nondeterministic: two refusal-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg asserting the standby-directed write settles
+# applied must surface the named diagnostic — never a silently
+# unrefused pass.
+if out="$(run_refusal --tamper expect-applied 2>&1)"; then
+    fail "refusal-unchecked: a doctored write expectation passed the refusal leg"
+fi
+[[ "$out" == *"expected an applied receipt"* ]] \
+    || fail "refusal-unchecked: the expect-applied case did not report its named diagnostic: $out"
+echo "  expect-applied: reported, refusal-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
 for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/pair.py \
-        ci/restart.py ci/schema_conformance.py ci/simulate.py README.md; do
+        ci/refusal.py ci/restart.py ci/schema_conformance.py \
+        ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

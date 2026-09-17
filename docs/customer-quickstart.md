@@ -50,7 +50,14 @@ and persistence fields out of `deploy/manifest.json` and spawns the two
 declared controllers on released tooling, converging the standby to
 `tracking`, issuing the receipted `demote`/`promote` switchover, and
 asserting the run continues bumplessly with the adopted receipts and
-the durable journal files' transition records intact.
+the durable journal files' transition records intact. The stage's
+refusal half (`ci/refusal.py`) proves the deployed pair refuses
+honestly at its role boundaries: `POST /promote` before the standby's
+first transfer answers the named `not_converged` refusal with no field
+hand-off, a receipted write to the tracking standby answers the named
+`not_active` rejection with no field effect or phantom audit, and the
+same promote succeeds once the standby tracks — the active undisturbed
+throughout.
 
 The served operator surface a monitoring or UI consumer can rely on —
 proved by the check's `surface` stage against the emitted model — is:
