@@ -819,7 +819,9 @@ def scenario_model_revision(ctx):
                      + str(len(carried)) + ' carried, '
                      + str(len(initialized)) + ' initialized, '
                      + str(len(report.get('reinitialized') or []))
-                     + ' components reinitialized')
+                     + ' components reinitialized, '
+                     + str(len(report.get('reverted_tuning') or []))
+                     + ' tuned parameters reverted')
 
         # The documented order: demote the field's owner first — its
         # write gate closes at the request's scan boundary — then
