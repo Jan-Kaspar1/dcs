@@ -3570,11 +3570,14 @@ def scenario_served_interface(ctx):
 # points, the operator-setpoint surface, so the model declares no
 # writable loopback field point (a channel-bound `writable` mark is
 # exactly what the model lint names). Releasing an internal point
-# resumes the held-value rule — the last-stamped (forced) sample
-# persists — so the recovery leg restamps the held value through the
-# receipted write path: a force still standing would re-substitute on
-# the next scan, so the held value read at Good with an empty `forces`
-# list proves the release took.
+# resumes the held-value rule — and the release boundary itself
+# re-stamps the held image Good (finding #498's merged fix): no
+# channel rewrites a held internal point, so without that re-stamp
+# the force's last Substituted mark would stand forever, tainting the
+# downstream p101-oos-ok cone and the tracking standby's adopted
+# snapshot. The recovery legs therefore observe the release before
+# any restamp write — the held-value write afterward is the suite's
+# restore step, not what proves the release took.
 
 FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
 
@@ -3605,20 +3608,48 @@ def _settled_receipts(journal):
             for entry in _journal_list(journal)]
 
 
+def _release_recovery_unmet(snap, target, follower, value, cone_value):
+    """The unmet clauses of the post-release recovery contract on one
+    served snapshot — the badge gone, the released point holding the
+    force's last stamp at Good, the inverted cone untainted at the
+    unforced read. Empty when the observation shows the recovered
+    state."""
+    unmet = []
+    if _forced_entry(snap, target) is not None:
+        unmet.append('an empty forces list')
+    if _point_value(snap, target) != value:
+        unmet.append('the held image at ' + str(value))
+    if _point_quality(snap, target) != 'good':
+        unmet.append('Good quality — the point reads '
+                     + json.dumps(_point_quality(snap, target)))
+    if _point_value(snap, follower) != cone_value:
+        unmet.append('p101-oos-ok reading ' + str(cone_value))
+    if _point_quality(snap, follower) != 'good':
+        unmet.append('the p101-oos-ok cone untainted')
+    return unmet
+
+
 def scenario_force_release(ctx):
     """A receipted force pins p101-oos at Substituted quality with the
-    control image following it; its release plus the restore write
-    return the held value at Good — every command journaled as a
-    settled, attributed receipt."""
+    control image following it; its release re-stamps the held image
+    Good on the active and on the tracking standby's adopted
+    snapshot, then the restore write returns the pre-force held
+    value — every command journaled as a settled, attributed
+    receipt."""
     case = Case('force-release',
                 'Receipted forcing and release on a writable point',
                 'force_point on the writable p101-oos point serves the '
                 'forced value at Uncertain(Substituted), lists the '
                 'point under snapshot.forces, and the inverted '
                 'p101-oos-ok carrier follows the forced value; '
-                'unforce_point clears the badge and the restored held '
-                'value reads at Good quality; both commands journal as '
-                'settled receipts attributed to qa-lane')
+                'unforce_point clears the badge and re-stamps the '
+                'held image Good on the same observation — the '
+                'released sample reads the persisted stamp and the '
+                'p101-oos-ok cone untaints, and the tracking '
+                'standby\'s adopted snapshot shows the same '
+                'post-release state — before the restore write '
+                'returns the pre-force held value; both commands '
+                'journal as settled receipts attributed to qa-lane')
     try:
         # Self-contained on either role layout, like evidence-capture:
         # replayed alone the rig is fresh (ctrl-a active), while the
@@ -3627,8 +3658,31 @@ def scenario_force_release(ctx):
                           time.monotonic() + 30)
         if active is None:
             return case.finish('failed', 'no peer reports role=active')
-        base = ctx[active]
-        case.observe('forcing against ' + active + ' (' + base + ')')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        case.observe('forcing against ' + active + ' (' + base
+                     + '); tracking peer ' + peer + ' (' + peer_base
+                     + ')')
+
+        # The standby-parity leg needs a settled pair: without a
+        # tracking peer the adopted-state check cannot be exercised.
+        def converged():
+            try:
+                report = _role(ctx, peer_base)
+            except Exception:
+                return None
+            sync = report.get('sync') or {}
+            return report if 'tracking' in sync else None
+
+        tracking = wait_for(converged, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-peer-role.json',
+                            {'peer': peer, 'report': tracking})
+        case.evidence('file', ref, 'the tracking peer\'s role report')
+        if not tracking:
+            return case.finish('inconclusive', 'the peer never '
+                               'reported tracking convergence — the '
+                               'standby parity leg cannot be exercised')
 
         _, signals = http_json('GET', base + '/signals')
         ref = save_evidence(ctx['evidence_dir'],
@@ -3758,11 +3812,72 @@ def scenario_force_release(ctx):
                                'the forces badge never cleared after '
                                'unforce_point')
 
-        # The held-value rule resumed on release; restamping the held
-        # value through the receipted write path produces the Good read
-        # the case requires — a force still standing would re-substitute
-        # on the next scan, so this read persisting alongside an empty
-        # forces list is what proves the release took.
+        # Finding #498's pinned regression: the release boundary
+        # re-stamps the held image Good — the force's last stamp
+        # persists as the held sample — and the inverted p101-oos-ok
+        # cone untaints on the same observation. A released point
+        # still stamped Substituted here is the stuck image the
+        # finding reported; the restore write below must not be what
+        # papers it over.
+        def release_recovered():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['release_recovered'] = snap
+            return not _release_recovery_unmet(
+                snap, target, follower, forced_value, held) and snap
+
+        if not wait_for(release_recovered,
+                        time.monotonic() + FORCE_DEADLINE):
+            unmet = _release_recovery_unmet(
+                observed.get('release_recovered') or {},
+                target, follower, forced_value, held)
+            return case.finish('failed', 'the released point did not '
+                               'recover: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-release-recovered.json',
+                            observed.get('release_recovered') or {})
+        case.evidence('file', ref, 'the released snapshot before the '
+                      'restore write — held image at Good, cone '
+                      'untainted')
+        case.observe('released: point ' + str(target) + ' reads '
+                     + str(forced_value) + ' at Good with the '
+                     'p101-oos-ok cone untainted at ' + str(held)
+                     + ' — no restamp write needed')
+
+        # The finding tainted the tracking standby too: its adopted
+        # snapshot must carry the same post-release state — never a
+        # permanently Substituted cone on either peer.
+        def peer_recovered():
+            try:
+                snap = _snapshot(ctx, peer_base)
+            except Exception:
+                return None
+            observed['peer_recovered'] = snap
+            return not _release_recovery_unmet(
+                snap, target, follower, forced_value, held) and snap
+
+        if not wait_for(peer_recovered,
+                        time.monotonic() + FORCE_DEADLINE):
+            unmet = _release_recovery_unmet(
+                observed.get('peer_recovered') or {},
+                target, follower, forced_value, held)
+            return case.finish('failed', 'the tracking standby\'s '
+                               'adopted snapshot never showed the '
+                               'released state: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-peer-recovered.json',
+                            observed.get('peer_recovered') or {})
+        case.evidence('file', ref, 'the tracking standby\'s adopted '
+                      'snapshot carrying the same recovered state')
+        case.observe('the tracking standby\'s adopted snapshot '
+                     'matches: point ' + str(target) + ' at Good, '
+                     'the cone untainted')
+
+        # The restore step: the release is proven above, so this
+        # receipted write only restamps the pre-force held value —
+        # later scenarios find the rig in its prior state.
         status, receipt = http_json(
             'POST', base + '/command',
             {'command': {'write_value': {
