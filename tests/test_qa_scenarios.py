@@ -11,17 +11,19 @@ collection, a declared command returning no receipt, an
 emitted-events view that never reflects the produced event, forced
 telemetry missing its Substituted stamp or forces badge, control that
 ignores the force, unattributed or never-journaled settlements, a
-badge that never clears, recovery that never returns to Good, a
-command flood whose submissions meet dropped receipts, HTTP-layer
-faults, unsettled admissions, or a bound that never fills, a restarted
-controller that resumes cold, a plant outage whose telemetry stays
-fresh, whose standby promotes, whose writer claim never re-arms, or
-whose io_health forgets the failures it counted, an injected quality
-fault the served snapshot keeps reporting Good, an error fault that
-never surfaces on io_health, a role that moves under a field fault,
-a clear that never restores the field value, a model revision
-whose revised peer never converges, converges to the wrong sync
-state, loses receipts across the boundary, regresses the field, or
+badge that never clears, a released point that never returns to Good
+or whose cone stays tainted, a tracking standby whose adopted
+snapshot never shows the recovered state, a pair that never
+converges, a command flood whose submissions meet dropped receipts,
+HTTP-layer faults, unsettled admissions, or a bound that never fills,
+a restarted controller that resumes cold, a plant outage whose
+telemetry stays fresh, whose standby promotes, whose writer claim
+never re-arms, or whose io_health forgets the failures it counted, an
+injected quality fault the served snapshot keeps reporting Good, an
+error fault that never surfaces on io_health, a role that moves under
+a field fault, a clear that never restores the field value, a model
+revision whose revised peer never converges, converges to the wrong
+sync state, loses receipts across the boundary, regresses the field, or
 ends on the wrong fingerprint, a foreign-fingerprint standby
 that never reports the named negotiation refusal, converges anyway,
 accepts promotion, or leaves the active peer disturbed, and an
@@ -1147,23 +1149,81 @@ class FieldFaultTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class ForcePeer:
+    """The tracking half of the force-release pair: ctrl-b's monitor.
+    Each of its scans adopts the checkpoint line — the active's force
+    set and held image — so its own snapshot serves the same
+    substituted stamp while a force stands and the same recovered
+    state once the release crosses. Fault flags stage the
+    standby-side named failures the issue calls out."""
+
+    def __init__(self, line):
+        self.line = line          # the active's published state
+        self.tick = 0
+        self.force = None
+        self.oos = {'value': {'bool': False}, 'quality': 'good',
+                    'tick': 0}
+        # Fault injection for the standby-side named failures.
+        self.never_tracks = False      # sync never reports tracking
+        self.unreachable = False       # the endpoint never answers
+        self.adopted_tainted = False   # the adopted image stays Substituted
+
+    def http_json(self, method, url, body=None, timeout=10):
+        if self.unreachable:
+            raise urllib.error.URLError('connection refused')
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self.tick += 1
+        if not self.never_tracks:
+            # The adopted checkpoint: the force set and the held image
+            # cross together — stamp included.
+            self.force = self.line.force
+            self.oos = dict(self.line._oos_sample())
+            if self.adopted_tainted and self.line.released_once:
+                self.oos['quality'] = {'uncertain': 'substituted'}
+        if (method, route) == ('GET', '/role'):
+            sync = {'unsynchronized': {}} if self.never_tracks \
+                else {'tracking': {'aligned': self.tick}}
+            return 200, {'role': 'standby', 'tick': self.tick,
+                         'sync': sync}
+        if (method, route) == ('GET', '/snapshot'):
+            forces = [] if self.force is None \
+                else [{'point': 302, 'value': {'bool': self.force}}]
+            oos = self.oos
+            ok = {'value': {'bool': not oos['value']['bool']},
+                  'quality': oos['quality'], 'tick': self.tick}
+            return 200, {'tick': self.tick, 'forces': forces,
+                         'points': [
+                             {'point': 302, 'direction': 'in',
+                              'sample': oos},
+                             {'point': 308, 'direction': 'out',
+                              'sample': ok}]}
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
 class ForceFeed:
-    """A stubbed monitor pair for the force-release scenario: a tiny
-    internal-point executor over the rig's writable p101-oos point and
-    its inverted p101-oos-ok carrier. Every call on the measurement
-    channel is one completed scan — reads observe, commands queue for
-    the next scan boundary and journal as they settle — mirroring the
-    held-value/force substitution semantics the executor documents for
-    an internal `In` point. Fault flags stage each named failure the
-    issue calls out."""
+    """A stubbed monitor pair for the force-release scenario: ctrl-a
+    owns the field and ctrl-b tracks it over one checkpoint line, a
+    tiny internal-point executor on the rig's writable p101-oos point
+    and its inverted p101-oos-ok carrier. Every call on the
+    measurement channel is one completed scan — reads observe,
+    commands queue for the next scan boundary and journal as they
+    settle — mirroring the held-value/force substitution semantics
+    the executor documents for an internal `In` point: the release
+    boundary keeps the force's last stamp as the held image,
+    re-stamped Good. Fault flags stage each named failure the issue
+    calls out."""
 
     def __init__(self):
         self.tick = 0
         self.held = False       # p101-oos's held operator value
         self.force = None       # the forced value while a force stands
+        self.released_once = False  # an unforce applied at a boundary
         self.receipts = []
         self.journal = []
         self.next_seq = 1
+        self.peer = ForcePeer(self)
         # Fault injection for the named-failure cases.
         self.force_unseen = False     # telemetry never shows the force
         self.forces_omitted = False   # the forces list stays empty
@@ -1173,6 +1233,7 @@ class ForceFeed:
         self.release_sticks = False   # unforce never clears the force
         self.release_refused = False  # unforce is rejected at submission
         self.no_recovery = False      # the point never reads Good again
+        self.cone_tainted = False     # oos-ok keeps the Substituted stamp
         self.no_oos = False           # the signal index lacks the target
 
     # The plant half: one completed scan per measurement call, applying
@@ -1190,7 +1251,13 @@ class ForceFeed:
                 self.force = command['force_point']['value']['bool']
             elif 'unforce_point' in command:
                 if not self.release_sticks:
+                    # The release boundary: the held-value rule resumes
+                    # on the force's last stamp — the held image keeps
+                    # the forced value, re-stamped Good.
+                    if self.force is not None:
+                        self.held = self.force
                     self.force = None
+                    self.released_once = True
             elif 'write_value' in command:
                 self.held = command['write_value']['value']['bool']
             if self.never_settled:
@@ -1220,14 +1287,22 @@ class ForceFeed:
 
     # digital-input:12's inverted carrier: p101-oos-ok = NOT the
     # observed oos sample, propagating its quality — the control image
-    # the scenario watches follow the force.
+    # the scenario watches follow the force. The cone_tainted flag
+    # holds the propagated Substituted stamp past the release — the
+    # cone that never untaints.
     def _oos_ok_sample(self, oos):
         observed = oos['value']['bool']
         driven = not self.held if self.control_ignores else not observed
-        return {'value': {'bool': driven}, 'quality': oos['quality'],
+        quality = {'uncertain': 'substituted'} \
+            if self.cone_tainted and self.released_once \
+            else oos['quality']
+        return {'value': {'bool': driven}, 'quality': quality,
                 'tick': self.tick}
 
     def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('://', 1)[1].split(':')[0]
+        if host == 'ctrl-b':
+            return self.peer.http_json(method, url, body, timeout)
         path = '/' + url.split('/', 3)[3]
         route, _, query = path.partition('?')
         self._advance()
@@ -1368,12 +1443,63 @@ class ForceReleaseTests(unittest.TestCase):
         report.validate_scenario(record)
 
     def test_recovery_that_never_reads_good_fails(self):
+        # Finding #498's regression shape: the badge clears but the
+        # released sample keeps its Substituted stamp — the leg must
+        # catch it before the restore write could paper it over.
         self.feed.no_recovery = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('did not recover', record.get('detail', ''))
         self.assertIn('Good quality', record.get('detail', ''))
+        self.assertIn('substituted', record.get('detail', ''))
+        # The restamp write never ran — the failure was observed on the
+        # release itself.
+        self.assertFalse(any('write_value' in receipt['command']
+                             for receipt in self.feed.receipts))
         report.validate_scenario(record)
+
+    def test_released_cone_staying_tainted_fails(self):
+        # The point re-stamps Good but the inverted carrier keeps the
+        # propagated Substituted mark — the cone-untaint half of the
+        # same observation fails.
+        self.feed.cone_tainted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('cone untainted', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_standby_snapshot_staying_substituted_fails(self):
+        # The active recovers but the tracking standby's adopted
+        # snapshot keeps the Substituted stamp — the parity leg names
+        # the tainted peer.
+        self.feed.peer.adopted_tainted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('tracking standby', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_standby_never_tracking_is_inconclusive(self):
+        self.feed.peer.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('tracking convergence',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_standby_unreachable_is_inconclusive(self):
+        self.feed.peer.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_records(self):
+        first = self.run_scenario()
+        feed, self.feed = self.feed, ForceFeed()
+        try:
+            second = self.run_scenario()
+        finally:
+            self.feed = feed
+        self.assertEqual(first, second)
 
     def test_missing_force_target_is_inconclusive(self):
         self.feed.no_oos = True
