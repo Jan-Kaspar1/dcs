@@ -1,21 +1,25 @@
 //! End-to-end tests for the declared named-command and emitted-event
 //! surface: `Command::Invoke` rides the bounded scan-boundary path and
 //! settles through ordinary receipts and `command_settled` journal
-//! entries, and the events a kind emits during `step` journal at the
-//! producing tick in emission order — the durable `--journal-file`
-//! carries them.
+//! entries, and the events a kind emits during `step` route by their
+//! declared `EventRetention` — `Journal`-retained and undeclared
+//! emissions journal at the producing tick in emission order (the
+//! durable `--journal-file` carries them) while `History`/`Latest`
+//! emissions land in the read model's routed stores, served beside the
+//! journal tail in the resource view's per-instance `events`.
 
 use dcs_blocks::{Sequencer, SequencerStep};
 use dcs_core::{
     Command, CommandError, CommandOutcome, ComponentDescriptor, Direction, EmittedEvent, EventDecl,
     EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEntry,
-    JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+    JournalEvent, PointId, ResourceEvent, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
 use dcs_runtime::{Component, ComponentIo, Executor, IoRequirement, PointMap, StepError};
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::{Command as Process, Output};
 use std::sync::Mutex;
 use std::thread;
 
@@ -64,8 +68,9 @@ impl IoDriver for StubDriver {
 }
 
 /// A component emitting declared events during `step`: `fired` —
-/// `Journal`-retained — then `beat` — `Latest`-retained — each scan,
-/// the payload's `n` counting emissions. `fail` reports the step error
+/// `Journal`-retained — then `shift` — `History`-retained — then
+/// `beat` — `Latest`-retained — each scan, the payload's `n` counting
+/// emissions. `fail` reports the step error
 /// after emitting, so a failing step's events still drain.
 struct Emitter {
     name: &'static str,
@@ -121,15 +126,59 @@ impl Component for Emitter {
             commands: Vec::new(),
             events: vec![
                 event("fired", EventRetention::Journal),
+                event("shift", EventRetention::History),
                 event("beat", EventRetention::Latest),
             ],
         }
     }
 
     fn drain_events(&mut self) -> Vec<EmittedEvent> {
-        vec![Self::event("fired", self.n), Self::event("beat", self.n)]
+        vec![
+            Self::event("fired", self.n),
+            Self::event("shift", self.n),
+            Self::event("beat", self.n),
+        ]
     }
 }
+
+/// A component emitting an event its descriptor never declares — the
+/// undeclared-emission routing case: the audit journal still carries
+/// the emission, exactly once, under the durable class.
+struct Undeclared;
+
+impl Component for Undeclared {
+    fn name(&self) -> &str {
+        "rogue"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        Vec::new()
+    }
+
+    fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        Ok(())
+    }
+
+    fn describe(&self) -> ComponentDescriptor {
+        ComponentDescriptor {
+            name: "rogue".to_string(),
+            kind: "rogue".to_string(),
+            label: "rogue".to_string(),
+            ports: Vec::new(),
+            parameters: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    fn drain_events(&mut self) -> Vec<EmittedEvent> {
+        vec![Emitter::event("mystery", 1)]
+    }
+}
+
+/// The `dcs-ctl` binary — the `events` subcommand's serving-side proof
+/// shares this file's emitter rig.
+const CTL: &str = env!("CARGO_BIN_EXE_dcs-ctl");
 
 /// The model fixture behind the monitor.
 const MODEL: &str = include_str!("../fixtures/monitor.json");
@@ -210,6 +259,74 @@ fn with_sequencer<T>(
         result
     });
     result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// Builds an executor over `components` — the emitters need no I/O
+/// surface — and runs `body` against a serving monitor under `config`,
+/// handing it the bound address for subprocess tooling; the server is
+/// shut down before the driver's borrow ends.
+fn with_components<T>(
+    components: Vec<Box<dyn Component>>,
+    config: MonitorConfig,
+    body: impl FnOnce(&MonitorClient, std::net::SocketAddr) -> T,
+) -> T {
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let map: PointMap = [(PointId(10), Direction::In, ValueKind::Float)]
+        .into_iter()
+        .collect();
+    let executor = Executor::new(&driver, map, components).unwrap();
+    let monitor = Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config).unwrap();
+    let addr = monitor.local_addr();
+    let client = MonitorClient::new(addr);
+    let result = thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&client, addr)));
+        monitor.shutdown();
+        result
+    });
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// Runs `dcs-ctl <addr> <args>` — the `events` read-side proof over the
+/// emitter rig.
+fn ctl(addr: std::net::SocketAddr, args: &[&str]) -> Output {
+    Process::new(CTL)
+        .arg(addr.to_string())
+        .args(args)
+        .output()
+        .expect("failed to run dcs-ctl")
+}
+
+/// The served component's `events` — the resource view's per-instance
+/// collection the retention classes share.
+fn resource_events(client: &MonitorClient, name: &str) -> Vec<ResourceEvent> {
+    client
+        .resources()
+        .unwrap()
+        .components
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("no served component named {name}"))
+        .events
+}
+
+/// Whether the entry is a kind-emitted record of `name`.
+fn emitted_named(entry: &ResourceEvent, name: &str) -> bool {
+    matches!(
+        &entry.event,
+        JournalEvent::EventEmitted { event } if event.event == name
+    )
+}
+
+/// The `n` payload an emitted-record entry carries.
+fn emitted_n(entry: &ResourceEvent) -> i64 {
+    let JournalEvent::EventEmitted { event } = &entry.event else {
+        unreachable!("the fixture's entries are all emitted records")
+    };
+    match event.fields["n"] {
+        EventValue::Value(Value::Int(n)) => n,
+        _ => panic!("the n field must be Int"),
+    }
 }
 
 /// The journal's `event_emitted` entries since `since`, in seq order.
@@ -514,4 +631,205 @@ fn the_durable_journal_file_carries_emitted_events() {
         })
         .collect();
     assert_eq!(events, vec![(Tick(2), 1), (Tick(3), 2)]);
+}
+
+/// The routed classes' served half: `GET /resources`'s per-instance
+/// `events` joins the retained journal tail beside the bounded
+/// event-history ring's records and the latest-emission view's
+/// standing record — each entry's `retention` mark telling the
+/// diagnostic streams from the durable record — attributed per
+/// producing component with payload and producing tick. `dcs-ctl
+/// events` prints the same attributed lists.
+#[test]
+fn routed_emissions_serve_through_the_resource_view() {
+    with_components(
+        vec![
+            Box::new(Emitter {
+                name: "first",
+                n: 0,
+                fail: false,
+            }),
+            Box::new(Emitter {
+                name: "last",
+                n: 0,
+                fail: false,
+            }),
+        ],
+        MonitorConfig::default(),
+        |client, addr| {
+            client.advance(2).unwrap();
+
+            let events = resource_events(client, "first");
+            // `fired` — the durable record, once per scan, marked
+            // `journal` like every journal-attributed entry.
+            let fired: Vec<&ResourceEvent> = events
+                .iter()
+                .filter(|entry| emitted_named(entry, "fired"))
+                .collect();
+            assert_eq!(fired.len(), 2);
+            assert!(
+                fired
+                    .iter()
+                    .all(|entry| entry.retention == EventRetention::Journal)
+            );
+            assert_eq!(
+                fired
+                    .iter()
+                    .map(|entry| (entry.tick, emitted_n(entry)))
+                    .collect::<Vec<_>>(),
+                vec![(Tick(1), 1), (Tick(2), 2)]
+            );
+            // `shift` — the event-history ring's records, payload and
+            // producing tick intact, marked `history`.
+            let shift: Vec<&ResourceEvent> = events
+                .iter()
+                .filter(|entry| emitted_named(entry, "shift"))
+                .collect();
+            assert_eq!(shift.len(), 2);
+            assert!(
+                shift
+                    .iter()
+                    .all(|entry| entry.retention == EventRetention::History)
+            );
+            assert_eq!(
+                shift
+                    .iter()
+                    .map(|entry| (entry.tick, emitted_n(entry)))
+                    .collect::<Vec<_>>(),
+                vec![(Tick(1), 1), (Tick(2), 2)]
+            );
+            // `beat` — the latest-emission view's one standing record:
+            // the newest emission, marked `latest`.
+            let beat: Vec<&ResourceEvent> = events
+                .iter()
+                .filter(|entry| emitted_named(entry, "beat"))
+                .collect();
+            assert_eq!(beat.len(), 1);
+            assert_eq!(beat[0].retention, EventRetention::Latest);
+            assert_eq!((beat[0].tick, emitted_n(beat[0])), (Tick(2), 2));
+
+            // The attribution rule is the producing component's: every
+            // emitted record in `first`'s list is `first`'s, and
+            // `last`'s list carries its own identical emissions.
+            assert!(events.iter().all(|entry| matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event } if event.component == "first"
+            )));
+            let last = resource_events(client, "last");
+            assert_eq!(last.len(), events.len());
+            assert!(last.iter().all(|entry| matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event } if event.component == "last"
+            )));
+
+            // No emission is double-recorded: the journal tail carries
+            // `fired` alone — each emitter's two — never `shift`/`beat`.
+            let journal = emitted(client, 0);
+            assert_eq!(journal.len(), 4);
+            assert!(journal.iter().all(|entry| matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event } if event.event == "fired"
+            )));
+
+            // `dcs-ctl events` prints the same attributed list — the
+            // routed entries' `retention` marks included.
+            let output = ctl(addr, &["events", "first"]);
+            assert!(output.status.success(), "{output:?}");
+            let printed: Vec<ResourceEvent> = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(printed, events);
+        },
+    );
+}
+
+/// The ring's bound is honest: past `event_history_capacity` the
+/// event-history records evict oldest-first, the evicted stretch
+/// reading as a numbering gap on the routed stream's never-reused
+/// `seq`s — while `beat`'s standing record supersedes to the newest
+/// emission and the durable journal is untouched.
+#[test]
+fn the_event_history_ring_evicts_oldest_first_at_the_bound() {
+    with_components(
+        vec![Box::new(Emitter {
+            name: "em",
+            n: 0,
+            fail: false,
+        })],
+        MonitorConfig {
+            event_history_capacity: 2,
+            ..MonitorConfig::default()
+        },
+        |client, _addr| {
+            client.advance(4).unwrap();
+            let events = resource_events(client, "em");
+
+            // Two retained `shift` records — the newest. The routed
+            // stream numbers both classes in append order, so the
+            // retained seqs 5 and 7 report the evicted 1–4 stretch as
+            // a numbering gap, never silent loss.
+            let shift: Vec<&ResourceEvent> = events
+                .iter()
+                .filter(|entry| emitted_named(entry, "shift"))
+                .collect();
+            assert_eq!(
+                shift
+                    .iter()
+                    .map(|entry| (entry.seq, entry.tick, emitted_n(entry)))
+                    .collect::<Vec<_>>(),
+                vec![(5, Tick(3), 3), (7, Tick(4), 4)]
+            );
+
+            // `beat` stands as the newest emission only — superseded
+            // three times over, it reports scan 4's record.
+            let beat: Vec<&ResourceEvent> = events
+                .iter()
+                .filter(|entry| emitted_named(entry, "beat"))
+                .collect();
+            assert_eq!(beat.len(), 1);
+            assert_eq!(beat[0].retention, EventRetention::Latest);
+            assert_eq!(
+                (beat[0].seq, beat[0].tick, emitted_n(beat[0])),
+                (8, Tick(4), 4)
+            );
+
+            // The durable journal is a separate bound: all four
+            // `fired` emissions still stand.
+            assert_eq!(emitted(client, 0).len(), 4);
+        },
+    );
+}
+
+/// An emission the descriptor never declares still reaches the audit
+/// record — journaled `event_emitted` exactly once under the durable
+/// class, routed to no diagnostic store.
+#[test]
+fn an_undeclared_emission_journals_once_and_routes_nowhere_else() {
+    with_components(
+        vec![Box::new(Undeclared)],
+        MonitorConfig::default(),
+        |client, _addr| {
+            client.advance(1).unwrap();
+
+            let journal = emitted(client, 0);
+            assert_eq!(journal.len(), 1);
+            assert_eq!(
+                journal[0].event,
+                JournalEvent::EventEmitted {
+                    event: EmittedEvent {
+                        event: "mystery".to_string(),
+                        component: "rogue".to_string(),
+                        fields: [("n".to_string(), EventValue::Value(Value::Int(1)))]
+                            .into_iter()
+                            .collect(),
+                    }
+                }
+            );
+
+            // Attributed in the resource view as a durable entry — the
+            // journal tail's `retention` mark.
+            let events = resource_events(client, "rogue");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].retention, EventRetention::Journal);
+            assert_eq!(events[0].tick, Tick(1));
+        },
+    );
 }

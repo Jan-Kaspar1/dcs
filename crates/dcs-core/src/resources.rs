@@ -15,7 +15,10 @@
 //! - [`ResourceView`] is the matching live state: per instance, the
 //!   measurement and state values with quality, the current
 //!   configuration values, each command's availability or refusal
-//!   reason, and the recently emitted events attributed to it.
+//!   reason, and the recent events attributed to it — the retained
+//!   journal tail beside the routed `History`/`Latest` emission
+//!   records, each entry's `retention` telling the durable record
+//!   from the diagnostic streams.
 //!
 //! Both views stamp the publication sequence and tick they were derived
 //! from, so a consumer can check a fetched view against a concurrently
@@ -25,8 +28,8 @@
 //! not know still deserializes, and a document predating a category
 //! reads it empty.
 
-use crate::interface::BlockInterface;
-use crate::journal::JournalEntry;
+use crate::interface::{BlockInterface, EventRetention};
+use crate::journal::JournalEvent;
 use crate::signal::{PointId, Sample, Tick, Value};
 use serde::{Deserialize, Serialize};
 
@@ -73,8 +76,8 @@ pub struct ComponentInterface {
 /// each collection parallel to the instance's [`BlockInterface`]
 /// collection — `measurements[i]` is the live reading of the schema's
 /// `measurements[i]`, so a consumer zips the two rather than
-/// re-deriving identities. `events` is the serving store's retained
-/// journal tail attributed to the instance — bounded like every read
+/// re-deriving identities. `events` is the serving store's event
+/// streams attributed to the instance — bounded like every read
 /// side — which between-scans control-plane entries (a refused
 /// command, say) can reach ahead of the stamped publication.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,12 +115,60 @@ pub struct ComponentResources {
     /// same order.
     #[serde(default)]
     pub commands: Vec<CommandState>,
-    /// Recently emitted events attributed to the instance — the
-    /// retained journal tail in `seq` order: point transitions on its
-    /// bound points, its commands' settled receipts, its step failures,
-    /// and its kind-emitted events.
+    /// Recent events attributed to the instance, in attributed-tick
+    /// order: the retained journal tail — point transitions on its
+    /// bound points, its commands' settled receipts, its step
+    /// failures, its `Journal`-retained and undeclared emissions —
+    /// beside its `History`-retained emissions' retained
+    /// event-history records and its `Latest`-retained emissions'
+    /// standing records. Each entry's `retention` names the store it
+    /// came from, so a consumer tells the durable record from the
+    /// diagnostic streams.
     #[serde(default)]
-    pub events: Vec<JournalEntry>,
+    pub events: Vec<ResourceEvent>,
+}
+
+/// One entry of a [`ComponentResources`] `events` collection: a
+/// retained journal entry or a routed emission record under the
+/// entry's declared retention class.
+///
+/// The element serializes the [`JournalEntry`](crate::JournalEntry)
+/// shape plus the
+/// `retention` marker — `seq`, `tick`, and the `event` — so a
+/// document predating the marker reads each entry as the durable
+/// record it is, and a consumer of the routed emissions reads
+/// `retention` to tell the diagnostic streams (`History`, `Latest`)
+/// from the durable journal. Routed emissions carry their
+/// [`EmittedEvent`](crate::EmittedEvent) under
+/// [`JournalEvent::EventEmitted`], keeping the `event` vocabulary
+/// the journal's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceEvent {
+    /// The entry's position in the stream that recorded it — the
+    /// journal's `seq` for `Journal` entries, the routed-event
+    /// stream's for `History`/`Latest`. Never reused within its
+    /// stream, so a bounded store's eviction reads as a numbering
+    /// gap.
+    pub seq: u64,
+    /// The tick the event is attributed to — the producing scan's.
+    pub tick: Tick,
+    /// The store the entry was recorded under — the declared
+    /// [`EventRetention`] class of a kind-declared emission, or
+    /// `Journal` for every durable journal entry. Absent in a
+    /// document predating the marker, where every entry is a journal
+    /// entry.
+    #[serde(default = "durable_retention")]
+    pub retention: EventRetention,
+    /// What happened — routed `History`/`Latest` emissions carry
+    /// their [`EmittedEvent`](crate::EmittedEvent) under
+    /// [`JournalEvent::EventEmitted`].
+    pub event: JournalEvent,
+}
+
+/// The `events` marker a document predating `retention` implies:
+/// every entry it could carry is a durable journal entry.
+fn durable_retention() -> EventRetention {
+    EventRetention::Journal
 }
 
 /// A measurement's or state property's live reading — value and

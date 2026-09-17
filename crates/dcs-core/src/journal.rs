@@ -14,6 +14,7 @@
 
 use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
+use crate::interface::EventRetention;
 use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
@@ -178,12 +179,17 @@ pub enum JournalEvent {
     },
     /// A component emitted a kind-declared event — the durable record
     /// of a [`Declared`](crate::AdaptedEvent::Declared)-provenance
-    /// [`EventSpec`](crate::EventSpec). The entry's `tick` is the
-    /// producing scan's tick; `event` carries the stable event-kind
-    /// identity, the producing component, and the typed payload over
-    /// the spec's declared [`EventField`](crate::EventField) schema.
-    /// Durable-retention emissions flow through this journal rather
-    /// than a parallel channel.
+    /// [`EventSpec`](crate::EventSpec) whose retention is
+    /// [`Journal`](crate::EventRetention::Journal) — and of an
+    /// emission the descriptor never declares, which the audit record
+    /// still carries. The entry's `tick` is the producing scan's
+    /// tick; `event` carries the stable event-kind identity, the
+    /// producing component, and the typed payload over the spec's
+    /// declared [`EventField`](crate::EventField) schema. Emissions
+    /// declared `History`/`Latest` route to the read model's bounded
+    /// event-history ring and latest-emission view instead — served
+    /// beside this journal in the resource view's `events`
+    /// collection, never journaled twice.
     EventEmitted {
         /// The emitted event record.
         event: EmittedEvent,
@@ -214,6 +220,36 @@ pub enum JournalEvent {
         /// Which lifetime begins — the file counts runs from 1.
         run: u64,
     },
+}
+
+/// One routed emission record — the element the read model's bounded
+/// event-history ring and latest-emission view serve for emissions
+/// declared [`History`](crate::EventRetention::History) or
+/// [`Latest`](crate::EventRetention::Latest).
+///
+/// Where [`JournalEntry`] is the durable record's element, the
+/// `EventRecord` is the diagnostic stream's: `seq` numbers the
+/// routed-event stream in append order and is never reused, so the
+/// ring's bounded eviction is visible to consumers as a numbering
+/// gap — the same honest-gap convention the journal and the
+/// per-point history rings follow. `tick` is the producing scan's
+/// tick; `retention` names the declared class the emission routed
+/// under; `event` carries the [`EmittedEvent`] itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRecord {
+    /// The record's position in the routed-event stream — assigned in
+    /// append order starting at 1 and increasing by one per routed
+    /// emission, never reused.
+    pub seq: u64,
+    /// The producing scan's tick.
+    pub tick: Tick,
+    /// The declared retention class the emission routed under —
+    /// `History` for the bounded ring's records, `Latest` for the
+    /// latest-emission view's.
+    pub retention: EventRetention,
+    /// The emitted event: stable event-kind identity, producing
+    /// component, and typed payload.
+    pub event: EmittedEvent,
 }
 
 /// One journaled event: its stream position, the tick it is attributed
