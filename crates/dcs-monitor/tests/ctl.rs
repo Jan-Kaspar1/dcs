@@ -13,7 +13,7 @@ use dcs_core::{
     StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -1253,6 +1253,69 @@ fn an_unattributed_submission_journals_unattributed() {
 }
 
 #[test]
+fn pair_health_prints_healthy_json_for_all_resolved_peers() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start(Role::Standby);
+    let other_standby = PeerRig::start(Role::Standby);
+    active.client.advance(1).unwrap();
+    let checkpoint = active.client.checkpoint().unwrap();
+    standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+    other_standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+
+    for (first, second) in [(active.addr, standby.addr), (standby.addr, active.addr)] {
+        let output = ctl(
+            first,
+            &[
+                "pair-health",
+                &second.to_string(),
+                &other_standby.addr.to_string(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(stderr(&output).is_empty());
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(health["active"], active.addr.to_string());
+        assert_eq!(health["faults"], serde_json::json!([]));
+        assert!(health.get("fault_kinds").is_none());
+        let decoded: dcs_monitor::PairHealth = serde_json::from_value(health.clone()).unwrap();
+        assert!(decoded.fault_kinds.is_empty());
+        assert!(health["fault_kinds_version"].is_u64());
+    }
+}
+
+#[test]
+fn pair_health_faults_exit_nonzero_with_serialized_named_kinds() {
+    for (role, kind) in [
+        (Role::Active, PairFaultKind::DualActive),
+        (Role::Standby, PairFaultKind::NoActivePeer),
+    ] {
+        let first = PeerRig::start(role);
+        let second = PeerRig::start(role);
+        let output = ctl(first.addr, &["pair-health", &second.addr.to_string()]);
+        assert!(!output.status.success(), "{output:?}");
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let kinds = vec![kind];
+        assert_eq!(health["active"], serde_json::Value::Null);
+        assert_eq!(health["fault_kinds"], serde_json::to_value(&kinds).unwrap());
+        assert_eq!(health["faults"].as_array().unwrap().len(), kinds.len());
+        assert!(health["fault_kinds_version"].is_u64());
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "dcs-ctl: {}: pair-health faults: {}\n",
+                first.addr,
+                serde_json::to_string_pretty(&kinds).unwrap()
+            )
+        );
+        for peer in [&first, &second] {
+            let report: RoleReport = serde_json::from_value(ctl_ok(peer.addr, &["role"])).unwrap();
+            assert_eq!(report, peer.client.role().unwrap());
+            assert_eq!(report.role, role);
+        }
+    }
+}
+
+#[test]
 fn promote_and_demote_print_role_reports_and_named_refusals() {
     let active = PeerRig::start(Role::Active);
     // The standby names its tracking source — the configured peer its
@@ -1378,6 +1441,12 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead],
         vec![dead, "bogus"],
         vec![dead, "snapshot", "extra"],
+        vec![dead, "role", "extra"],
+        vec![dead, "pair-health"],
+        vec![dead, "pair-health", "--actor", "op"],
+        vec![dead, "pair-health", dead, "--bogus"],
+        vec![dead, "pair-health", "not-an-address"],
+        vec![dead, "pair-health", dead, "not-an-address"],
         vec![dead, "journal", "--since"],
         vec![dead, "journal", "--since", "abc"],
         vec![dead, "journal", "--bogus", "1"],

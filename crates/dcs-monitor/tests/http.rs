@@ -8,7 +8,7 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PAGE};
+use dcs_monitor::{Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
@@ -860,6 +860,43 @@ fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
                     "page still matches the legacy spelling: {operand}"
                 );
             }
+        }
+    });
+}
+
+#[test]
+fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
+    let mut spellings: Vec<_> = PairFaultKind::ALL.iter().map(emitted_spelling).collect();
+    spellings.sort();
+    assert_eq!(
+        spellings,
+        [
+            "dual_active",
+            "no_active_peer",
+            "peer_unreachable",
+            "standby_degraded",
+            "standby_diverged",
+            "standby_unsynchronized_past_grace",
+        ]
+    );
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 1);
+
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=1;"),
+            "page lacks the version constant"
+        );
+        assert!(
+            compact.contains("fault_kinds_version:PAIR_FAULT_KINDS_VERSION"),
+            "page lacks the versioned fault_kinds field"
+        );
+        for spelling in spellings {
+            assert!(
+                page.contains(&format!("\"{spelling}\"")),
+                "page lacks the emitted pair fault spelling {spelling}"
+            );
         }
     });
 }

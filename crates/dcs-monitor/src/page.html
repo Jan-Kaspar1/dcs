@@ -609,6 +609,16 @@ function pointName(point) {
 // and the pair has no failover coverage to call healthy.
 const CONVERGENCE_GRACE_MS = 5000;
 
+const PAIR_FAULT_KINDS_VERSION = 1;
+const PAIR_FAULT_KINDS = [
+  "peer_unreachable",
+  "standby_unsynchronized_past_grace",
+  "no_active_peer",
+  "dual_active",
+  "standby_degraded",
+  "standby_diverged",
+];
+
 // The convergence-grace clock pairHealth reads: a report of
 // "unsynchronized" starts or continues the peer's run; any converged
 // sync state — and the unreachable fault, which pairHealth already
@@ -700,8 +710,9 @@ function activePeer() {
 // legitimate target: no settled-active peer mid-transition, or the
 // dual-active fault leaving no unique one.
 function noActiveVerdict() {
-  const actives = activePeers().length;
-  return actives > 1
+  const health = pairHealth(peers, peerState);
+  const actives = health.actives.length;
+  return health.fault_kinds.includes("dual_active")
     ? "not sent: " + actives + " peers report role active — the " +
       "dual-active fault leaves no unique command target"
     : "not sent: no peer reports role active — the pair is mid-transition";
@@ -740,12 +751,14 @@ function describeSync(sync) {
 // These are pair health, never plant faults.
 function pairHealth(pairPeers, states) {
   const faults = [];
+  const fault_kinds = [];
   const actives = [];
   pairPeers.forEach((peer, i) => {
     const state = states[i];
     if (state.error !== null) {
       const was = state.report ? state.report.role + " " : "";
       faults.push(was + peer.name + " unreachable");
+      fault_kinds.push("peer_unreachable");
       return;
     }
     if (state.report === null) return;
@@ -755,28 +768,47 @@ function pairHealth(pairPeers, states) {
         Date.now() - state.unsyncedSince >= CONVERGENCE_GRACE_MS) {
       faults.push(peer.name + " has not converged: unsynchronized " +
         "past the convergence grace");
+      fault_kinds.push("standby_unsynchronized_past_grace");
     }
     if (state.report.sync && typeof state.report.sync === "object") {
       if ("degraded" in state.report.sync) {
         faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+        fault_kinds.push("standby_degraded");
       }
       if ("diverged" in state.report.sync) {
         faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
           state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
+        fault_kinds.push("standby_diverged");
       }
     }
   });
-  if (actives.length === 0) faults.push("no peer reports role active");
+  if (actives.length === 0) {
+    faults.push("no peer reports role active");
+    fault_kinds.push("no_active_peer");
+  }
   if (actives.length > 1) {
     faults.push("dual-active: " + actives.join(", ") +
       " report role active — split-brain leaves no unique controller");
+    fault_kinds.push("dual_active");
   }
-  return { activeName: actives.length === 1 ? actives[0] : null, actives, faults };
+  return {
+    activeName: actives.length === 1 ? actives[0] : null,
+    actives,
+    faults,
+    fault_kinds_version: PAIR_FAULT_KINDS_VERSION,
+    fault_kinds,
+  };
 }
 
 // The pair's redundancy summary line, from pairHealth's verdict.
+function pairFaulted(health) {
+  const kinds = health.fault_kinds || [];
+  if (health.fault_kinds_version !== PAIR_FAULT_KINDS_VERSION) return true;
+  return PAIR_FAULT_KINDS.some(kind => kinds.includes(kind)) || kinds.length > 0;
+}
+
 function pairSummary(health) {
-  return health.faults.length === 0
+  return !pairFaulted(health)
     ? "redundant pair healthy — active on " + health.activeName
     : "redundancy fault: " + health.faults.join("; ");
 }
@@ -805,7 +837,7 @@ function renderPair() {
   const summary = document.getElementById("pair-summary");
   const health = pairHealth(peers, peerState);
   summary.textContent = pairSummary(health);
-  summary.className = health.faults.length === 0 ? "good" : "bad";
+  summary.className = !pairFaulted(health) ? "good" : "bad";
 }
 
 // ---- Feed state ----
@@ -1057,7 +1089,7 @@ function ioHealthLine(pair) {
 function pairCardMarkup(pair) {
   const health = pairHealth(pair.peers, pair.state);
   const io = ioHealthLine(pair);
-  const faulted = health.faults.length > 0 || io.bad;
+  const faulted = pairFaulted(health) || io.bad;
   const rows = pair.peers.map((peer, i) => {
     const state = pair.state[i];
     const report = state.report;
@@ -1076,8 +1108,8 @@ function pairCardMarkup(pair) {
       "</span></p>" +
     "<table><thead><tr><th>Peer</th><th>Role</th><th>Standby sync</th>" +
       "<th>Tick</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>" +
-    "<p class=\"" + (health.faults.length === 0 ? "good" : "bad") + "\">" +
-      esc(health.faults.length === 0
+    "<p class=\"" + (!pairFaulted(health) ? "good" : "bad") + "\">" +
+      esc(!pairFaulted(health)
         ? "redundant pair healthy — active on " + health.activeName
         : "redundancy fault: " + health.faults.join("; ")) + "</p>" +
     "<p class=\"" + (io.bad ? "bad" : "good") + "\">" + esc(io.text) + "</p>" +
