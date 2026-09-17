@@ -5222,13 +5222,25 @@ def scenario_dcs_ctl(ctx):
                         'receipt: exit ' + str(rc) + ' '
                         + json.dumps(receipt)[:300] + ' '
                         + str(err)[:200])
+        if receipt.get('actor') != CTL_ACTOR:
+            return done('failed', 'the printed receipt dropped the '
+                        'declared --actor: actor='
+                        + json.dumps(receipt.get('actor')))
         case.observe('receipt outcome: '
                      + json.dumps(outcome, sort_keys=True))
 
         # The attributed CommandSettled in the served journal, read
         # through `dcs-ctl journal` — GET /journal through the shipped
-        # consumer — above the pre-submission cursor, so a prior leg's
-        # identical settled command cannot stand in for this one.
+        # consumer — above the pre-submission cursor. The cursor alone
+        # cannot name this leg's settlement: a checkpoint-adopted
+        # receipt re-journals on the observing peer — the pair's one
+        # command audit trail — so an earlier leg's identical command
+        # under its own actor can land above the floor, as the lenovo
+        # run's actor="qa-lane" carryover did. The receipt identity is
+        # the match: only this leg declares CTL_ACTOR, so a settled
+        # entry carrying it for this command is this submission's
+        # echo — while a same-command entry under a foreign actor is
+        # recorded for the failure detail, not matched.
         observed = {}
 
         def journaled():
@@ -5238,12 +5250,19 @@ def scenario_dcs_ctl(ctx):
                 return None
             observed['journal_len'] = len(journal)
             for entry in journal:
-                settled = ((entry or {}).get('event') or {}) \
-                    .get('command_settled') or {}
-                if (settled.get('receipt') or {}).get('command') \
-                        == command:
+                settled = (((entry or {}).get('event') or {})
+                           .get('command_settled') or {}) \
+                           .get('receipt') or {}
+                if settled.get('command') != command:
+                    continue
+                settled_outcome = settled.get('outcome') or {}
+                if 'applied' not in settled_outcome \
+                        and 'rejected' not in settled_outcome:
+                    continue
+                if settled.get('actor') == CTL_ACTOR:
                     observed['entry'] = entry
                     return True
+                observed.setdefault('foreign', entry)
             return None
 
         covered = wait_for(journaled,
@@ -5251,10 +5270,19 @@ def scenario_dcs_ctl(ctx):
         ref = save_evidence(
             ctx['evidence_dir'], 'dcs-ctl-journal.json',
             {'entry': observed.get('entry'),
+             'foreign': observed.get('foreign'),
              'journal_len': observed.get('journal_len')})
         case.evidence('file', ref, 'the CLI-read journal covering the '
                       'command\'s settlement')
         if not covered:
+            foreign = (((observed.get('foreign') or {})
+                        .get('event') or {})
+                       .get('command_settled') or {}) \
+                       .get('receipt') or {}
+            if foreign:
+                return done('failed', 'the journaled receipt is '
+                            'unattributed: actor='
+                            + json.dumps(foreign.get('actor')))
             return done('failed', 'the served journal never recorded '
                         'the command\'s CommandSettled')
         settled = (observed['entry'].get('event') or {}) \
