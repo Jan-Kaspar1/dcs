@@ -118,8 +118,8 @@ fn a_doomed_startup_never_preempts_the_incumbents_field_claim() {
     // bind must fail *before* the preemptive claim runs.
     let journal = dir.join("journal.jsonl");
     std::fs::write(&journal, "GARBAGE\n").unwrap();
-    let stderr = assert_doomed(
-        &[
+    for remote in [false, true] {
+        let mut args = vec![
             pair_model.to_str().unwrap().to_string(),
             "--owner-token".to_string(),
             STARTER.to_string(),
@@ -128,10 +128,17 @@ fn a_doomed_startup_never_preempts_the_incumbents_field_claim() {
             "--driven".to_string(),
             "--journal-file".to_string(),
             journal.to_str().unwrap().to_string(),
-        ],
-        "cannot bind monitor",
-    );
-    assert!(stderr.contains(journal.to_str().unwrap()), "{stderr}");
+        ];
+        if remote {
+            args.extend(["--remote".to_string(), plant.addr.to_string()]);
+        }
+        let stderr = assert_doomed(&args, "cannot bind monitor");
+        assert!(stderr.contains(journal.to_str().unwrap()), "{stderr}");
+        assert!(stderr.contains("cannot be replayed: line 1"), "{stderr}");
+        assert_claim_held_by_incumbent(plant.addr);
+        client.advance(1).unwrap();
+        assert_eq!(client.role().unwrap().role, Role::Active);
+    }
 
     // The incumbent's claim still stands under its own token, and it
     // keeps owning the field through its next scans — a landed stale
@@ -193,6 +200,26 @@ fn every_post_validation_startup_abort_leaves_the_claim_untouched() {
         "not-an-addr".to_string(),
     ]);
     assert_doomed(&bad_peer, "cannot resolve");
+
+    let mut paced_bad_peer = base();
+    paced_bad_peer.extend([
+        "--scan-ms".to_string(),
+        "50".to_string(),
+        "--peer".to_string(),
+        "not-an-addr".to_string(),
+    ]);
+    assert_doomed(&paced_bad_peer, "cannot resolve");
+
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    for mode in [vec!["--driven"], vec!["--scan-ms", "50"]] {
+        let mut args = base();
+        *args.last_mut().unwrap() = occupied.local_addr().unwrap().to_string();
+        args.extend(mode.into_iter().map(String::from));
+        assert_doomed(&args, "cannot bind monitor");
+        assert_claim_held_by_incumbent(plant.addr);
+        client.advance(1).unwrap();
+        assert_eq!(client.role().unwrap().role, Role::Active);
+    }
 
     assert_claim_held_by_incumbent(plant.addr);
     for _ in 0..3 {
