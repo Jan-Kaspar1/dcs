@@ -267,7 +267,13 @@ declaration, and the `GET /schema` document's structural conformance
 to the fetched block-interfaces artifact (a required-keys/field-shape
 check in stdlib-only python — full draft-2020-12 validation of the
 served document stays workspace-side, where the `jsonschema`
-dependency exists) — the `consumers` stage, which replays that driven run
+dependency exists) — the `pair` stage, which runs the
+manifest-declared standby pair on the released tooling: the second
+controller converging to `tracking` through `GET /role`, scans driven
+through `POST /scan` keeping the peers' images identical, a receipted
+`demote`/`promote` switching the roles, and the run continuing
+bumplessly with the adopted receipts and the durable journal files'
+transition records intact — the `consumers` stage, which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -334,6 +340,8 @@ The checks' failures are named diagnostics:
 | `restart-resume-nondeterministic` | Two passes of the restart-recovery leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `ctl-failed` | The released `dcs-ctl` leg did not hold against the driven run: an `invoke` did not settle its applied receipt through `receipts` and the journal, `resources` did not report a command's availability or its named refusal, a refusal mode exited zero or unnamed, or a read subcommand did not answer the served contract. Reported by the reference plant's `ci/check.sh`, with the leg's evidence lines on stderr. |
 | `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `pair-failed` | The redundant-pair leg did not hold: the manifest-declared standby did not converge to `tracking`, the peers' images or adopted receipt logs diverged, the receipted `demote`/`promote` switch did not answer its named reports or refusals, the run did not continue bumplessly, or a declared `--state-file`/`--journal-file` path was not honored — the durable records missing the run's transitions or `seq` order. Reported by the reference plant's `ci/check.sh`. |
+| `pair-nondeterministic` | Two passes of the redundant-pair leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
