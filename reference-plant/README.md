@@ -44,6 +44,12 @@ ci/refusal.py          the pair contract's refusal half — the
                        pre-transfer promote answering not_converged,
                        the standby-directed write answering not_active,
                        the same promote succeeding once tracking
+ci/handover.py         the pair contract's failure-handover leg — a
+                       proven duty-pump failure handing duty to the
+                       standby pump inside the declared bound, the
+                       all-out none_available/all_faulted annunciation,
+                       and the declared recovery with the pair's
+                       controller roles unmoved
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -246,6 +252,32 @@ active's field writes, receipts, and journal undisturbed throughout.
 A violated contract fails `refusal-failed`; two passes must produce
 the identical `refusal-digest`, a divergence failing
 `refusal-nondeterministic`.
+
+The stage's failure-handover leg — `ci/handover.py` on the same
+declared deployment — then proves decision 41's central behavior on
+the consumer pair: with the pair settled and the group holding a duty
+demand, the leg faults the `p101-run` field channel through the plant
+protocol's declared `inject_fault` — the honest failure lever, bad
+quality on the channel — and asserts through the active's monitor that
+`duty` moves to the standby pump inside the declared bound (the
+motor's `fault_ticks` proof plus the carrier hop the group's `fault_i`
+read crosses), `staged` reports the surviving pump against the
+standing demand, `p101-fault` reports the proven exclusion while
+`p101-avail` keeps reporting the permissive aggregate it wires, and
+the managed `p101-fault` alarm annunciates with journaled
+`point_changed` evidence on the fault flag, the alarm, and the
+unacknowledged latch. Faulting the remaining pump's channel then
+annunciates the all-out conditions — `none_available`, `all_faulted`,
+and both managed alarms — and clearing each injected fault restores
+the declared recovery: the fault flags clear once command and
+feedback agree, the annunciation returns, the duty designation
+reassigns under the declared rotation, and the unacknowledged latches
+hold awaiting an acknowledgment the leg never sends. The pair's
+controller roles never move — a field fault is a plant event, not a
+failover — and the peers' images stay identical through every driven
+scan. A violated contract fails `handover-failed`; two passes must
+produce the identical `handover-digest`, a divergence failing
+`handover-nondeterministic`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the

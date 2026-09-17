@@ -98,7 +98,22 @@
 #                once tracking the same promote succeeds — the active's
 #                field writes, receipts, and journal undisturbed
 #                throughout; two passes produce identical digests
-#                (refusal-failed, refusal-nondeterministic)
+#                (refusal-failed, refusal-nondeterministic).
+#                The stage's failure-handover leg, ci/handover.py on
+#                the same declared deployment: with the pair settled
+#                and the group holding a duty demand, a proven
+#                duty-pump failure — the p101-run field channel faulted
+#                through the plant protocol's declared inject_fault —
+#                hands duty to the standby pump inside the declared
+#                bound with staged reporting the survivor, the faulted
+#                pump's fault/avail reporting the exclusion, and the
+#                managed p101-fault alarm annunciating with journaled
+#                point_changed evidence; the remaining pump's channel
+#                then faults for the none_available/all_faulted
+#                annunciation, each input restores its declared
+#                recovery, and the pair's roles never move; two passes
+#                produce identical digests (handover-failed,
+#                handover-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -717,13 +732,63 @@ fi
     || fail "refusal-unchecked: the expect-applied case did not report its named diagnostic: $out"
 echo "  expect-applied: reported, refusal-failed"
 
+# The pair contract's failure-handover leg, on the same
+# manifest-declared deployment: ci/handover.py settles the pair, waits
+# for the group to hold a duty demand with pump 1 proven running,
+# faults the duty pump's run-feedback field channel through the plant
+# protocol's declared inject_fault, and asserts through the active's
+# monitor that duty moves to the standby pump inside the declared
+# bound, staged reports the survivor against the standing demand, the
+# faulted pump's fault/avail report the exclusion, and the managed
+# p101-fault alarm annunciates with journaled point_changed evidence;
+# faults the remaining pump's channel asserting none_available and
+# all_faulted annunciate with their managed alarms; and clears each
+# injected fault asserting the declared recovery — fault flags clear,
+# annunciation returns, the duty designation reassigns under the
+# declared rotation, the unacknowledged latches hold — with the pair's
+# controller roles unmoved throughout. Two passes must produce
+# identical digests.
+run_handover() {
+    python3 ci/handover.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_handover)" \
+    || fail "handover-failed: the duty-pump failure-handover leg did not hold — its evidence lines are above"
+SECOND="$(run_handover)" \
+    || fail "handover-failed: the duty-pump failure-handover leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "handover-nondeterministic: two handover-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg expecting the failed pump to keep duty, or
+# expecting none_available never to report, must surface the named
+# diagnostic — never a silently wrong pass.
+if out="$(run_handover --tamper keeps-duty 2>&1)"; then
+    fail "handover-unchecked: a doctored duty expectation passed the handover leg"
+fi
+[[ "$out" == *"keep duty"* ]] \
+    || fail "handover-unchecked: the keeps-duty case did not report its named diagnostic: $out"
+echo "  keeps-duty: reported, handover-failed"
+
+if out="$(run_handover --tamper none-available-silent 2>&1)"; then
+    fail "handover-unchecked: a doctored none_available expectation passed the handover leg"
+fi
+[[ "$out" == *"never to report"* ]] \
+    || fail "handover-unchecked: the none-available-silent case did not report its named diagnostic: $out"
+echo "  none-available-silent: reported, handover-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/pair.py \
-        ci/refusal.py ci/restart.py ci/schema_conformance.py \
+for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/handover.py \
+        ci/pair.py ci/refusal.py ci/restart.py ci/schema_conformance.py \
         ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
