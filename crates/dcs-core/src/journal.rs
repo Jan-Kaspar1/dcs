@@ -130,6 +130,18 @@ pub enum JournalEvent {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
+    /// A diverged tracking peer's staged field `Out` image compared
+    /// cleanly against the field at the tick this entry is attributed
+    /// to — the transition out of
+    /// [`StandbySync::Diverged`](crate::StandbySync) back to `tracking`,
+    /// the only evidence the promotion gate reopens on: a same-tick
+    /// comparison whose field reads all succeeded and matched.
+    /// `points` names the staged `Out` points the comparison verified —
+    /// the positive evidence the clear stands on, in point order.
+    DivergenceResolved {
+        /// The field `Out` points the comparison verified matching.
+        points: Vec<PointId>,
+    },
     /// A revision-armed peer consumed a checkpoint captured under a
     /// different model — the transition into
     /// [`StandbySync::Reinitialized`](crate::StandbySync) of the rolling
@@ -307,6 +319,13 @@ mod tests {
                 },
             },
             JournalEntry {
+                seq: 15,
+                tick: Tick(21),
+                event: JournalEvent::DivergenceResolved {
+                    points: vec![PointId(20)],
+                },
+            },
+            JournalEntry {
                 seq: 9,
                 tick: Tick(12),
                 event: JournalEvent::Reinitialized {
@@ -384,6 +403,7 @@ mod tests {
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");
         assert!(json.contains("\"divergence_detected\""), "{json}");
+        assert!(json.contains("\"divergence_resolved\""), "{json}");
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");

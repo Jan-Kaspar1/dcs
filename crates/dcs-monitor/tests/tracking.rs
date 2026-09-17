@@ -7,7 +7,7 @@
 
 use dcs_core::{
     Direction, Divergence, IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync,
-    Tick, Value, ValueKind,
+    SwitchError, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -346,6 +346,77 @@ fn driven_track_cycle_journals_the_divergence_transition() {
         )),
         "the driven cycle journaled the divergence at the compared tick: {journal:?}"
     );
+}
+
+/// The QA finding `diverged-clears-without-valid-field-comparison` on
+/// the driven path: a diverged standby whose tracking source stalls
+/// keeps pulling the same stale checkpoint — an apply that matches no
+/// staged image's tick runs zero field reads and must leave the verdict
+/// standing, `POST /promote` staying refused — until a fresh same-tick
+/// comparison reads the field and matches, clearing the verdict and
+/// journaling the named `divergence_resolved` event.
+#[test]
+fn driven_stale_apply_leaves_the_standby_diverged() {
+    let (standby, active) = DrivenStandby::start(None);
+
+    active.client.advance(3).unwrap();
+    // Converge on ckpt@3; the scan stages the tick-4 `Out` image.
+    standby.standby.client.advance(1).unwrap();
+
+    // Diverge: the private field's Out point no longer carries what the
+    // staged image describes — the next same-tick compare reports it.
+    standby
+        .standby_driver
+        .write(PointId(20), Value::Float(99.0))
+        .unwrap();
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    let Some(diverged @ StandbySync::Diverged { .. }) = &report.sync else {
+        panic!("the same-tick compare must report diverged: {report:?}");
+    };
+    let diverged = diverged.clone();
+
+    // The frozen source keeps serving its tick-4 checkpoint: the
+    // re-apply matches no staged image's tick and performs zero field
+    // reads — the verdict stands and promotion stays refused.
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(report.sync.as_ref(), Some(&diverged));
+    let (status, body) = standby
+        .standby
+        .client
+        .request("POST", "/promote", None)
+        .unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        serde_json::from_str::<SwitchError>(&body).unwrap(),
+        SwitchError::NotConverged {
+            sync: diverged.clone()
+        }
+    );
+
+    // A fresh same-tick comparison that read the field and matched is
+    // the resync: the verdict clears, the journal carries the named
+    // resolution at the compared tick, and the promote gate reopens.
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(
+        report.sync,
+        Some(StandbySync::Tracking { aligned: Tick(5) })
+    );
+    let journal = standby.standby.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::DivergenceResolved { points }
+                if *points == vec![PointId(20)] && entry.tick == Tick(5)
+        )),
+        "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
+    );
+    let promoted = standby.standby.client.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
 }
 
 /// The paced-standby reproduction of the QA finding

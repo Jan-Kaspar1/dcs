@@ -234,6 +234,14 @@ impl Recorder {
         self.push(tick, JournalEvent::DivergenceDetected { mismatches });
     }
 
+    /// Journals a divergence clear at `tick` — the tick the compared
+    /// staged image belonged to — naming the field `Out` points the
+    /// fully-read same-tick comparison verified matching: the positive
+    /// evidence the peer's return to `tracking` stands on.
+    pub(super) fn note_divergence_resolved(&mut self, tick: Tick, points: Vec<PointId>) {
+        self.push(tick, JournalEvent::DivergenceResolved { points });
+    }
+
     /// Journals a model-boundary crossing — a revision-armed peer's
     /// transition into `reinitialized` — carrying its
     /// [`CarryoverReport`]; the entry is attributed to the tick the run

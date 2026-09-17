@@ -150,6 +150,9 @@ struct Outcome {
     diverged_sync: StandbySync,
     /// The journal's `divergence_detected` entries, in order.
     journal: Vec<JournalEntry>,
+    /// The journal's `divergence_resolved` entries, in order — the
+    /// named event a verdict-clearing compare owes the record.
+    resolutions: Vec<JournalEntry>,
     /// The named error `POST /promote` answered while diverged.
     promote_error: SwitchError,
     /// The field's valve while diverged — proof the staged write stayed
@@ -342,6 +345,18 @@ fn run_scenario() -> Outcome {
         );
         let resynced_sync = resynced.sync.unwrap();
 
+        // The clear is journaled as its own named event: a same-tick
+        // comparison that read the field and matched — attributed to
+        // the compared tick and naming the verified points.
+        let resolutions: Vec<JournalEntry> = standby_client
+            .journal(0)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::DivergenceResolved { .. }))
+            .collect();
+        assert_eq!(resolutions.len(), 1, "the clear is journaled once");
+        assert_eq!(resolutions[0].tick, Tick(N + K + 2));
+
         let promoted = standby_client.promote().unwrap();
         assert_eq!(promoted.role, Role::Promoting);
         assert!(standby_gate.is_open());
@@ -349,6 +364,7 @@ fn run_scenario() -> Outcome {
         Outcome {
             diverged_sync,
             journal,
+            resolutions,
             promote_error,
             field_valve,
             staged_valve,
@@ -386,6 +402,12 @@ fn skewed_standby_diverges_blocks_promotion_and_resyncs() {
         panic!("journal entry must be divergence_detected");
     };
     assert_eq!(journaled, mismatches);
+    // The clear journaled as `divergence_resolved` naming the point the
+    // fully-read same-tick compare verified.
+    let JournalEvent::DivergenceResolved { points } = &outcome.resolutions[0].event else {
+        panic!("journal entry must be divergence_resolved");
+    };
+    assert_eq!(points, &[VALVE]);
     assert_eq!(
         outcome.resynced_sync,
         StandbySync::Tracking {
@@ -400,6 +422,7 @@ fn identical_scripted_runs_report_identical_divergence() {
     let first = run_scenario();
     let second = run_scenario();
     assert_eq!(first.journal, second.journal);
+    assert_eq!(first.resolutions, second.resolutions);
     assert_eq!(first.diverged_sync, second.diverged_sync);
     assert_eq!(first.promote_error, second.promote_error);
     assert_eq!(first.staged_valve, second.staged_valve);

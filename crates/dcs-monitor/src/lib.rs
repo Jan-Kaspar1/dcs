@@ -875,6 +875,9 @@ impl<'d> Monitor<'d> {
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
         }
+        for resolution in peer.take_divergence_resolutions() {
+            recorder.note_divergence_resolved(resolution.tick, resolution.points);
+        }
         for restart in peer.take_source_restarts() {
             recorder.note_source_restart(restart);
         }
@@ -900,6 +903,9 @@ impl<'d> Monitor<'d> {
         let result = peer.transfer(checkpoint);
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
+        }
+        for resolution in peer.take_divergence_resolutions() {
+            recorder.note_divergence_resolved(resolution.tick, resolution.points);
         }
         for report in peer.take_reinitializations() {
             recorder.note_reinitialized(report);
@@ -1195,6 +1201,9 @@ impl<'d> Monitor<'d> {
                 for divergence in peer.take_divergences() {
                     recorder.note_divergence(divergence.tick, divergence.mismatches);
                 }
+                for resolution in peer.take_divergence_resolutions() {
+                    recorder.note_divergence_resolved(resolution.tick, resolution.points);
+                }
                 for report in peer.take_reinitializations() {
                     recorder.note_reinitialized(report);
                 }
@@ -1247,6 +1256,9 @@ fn track_and_record(
     let report = peer.track_once(pull);
     for divergence in peer.take_divergences() {
         recorder.note_divergence(divergence.tick, divergence.mismatches);
+    }
+    for resolution in peer.take_divergence_resolutions() {
+        recorder.note_divergence_resolved(resolution.tick, resolution.points);
     }
     for report in peer.take_reinitializations() {
         recorder.note_reinitialized(report);
