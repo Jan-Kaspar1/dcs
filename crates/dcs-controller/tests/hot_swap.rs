@@ -221,7 +221,11 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
     assert_eq!(report.sync, None);
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby);
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted launched active follows its successor's announced \
+         address and reconverges: {report:?}"
+    );
     let (status, body) = standby.request("POST", "/promote", None).unwrap();
     assert_eq!(status, 409, "{body}");
     assert_eq!(
@@ -287,6 +291,155 @@ fn hot_swap_over_the_shared_plant_is_deterministic_across_runs() {
     let second = run_swap("b");
     assert_eq!(first.len() as u64, N + M);
     assert_eq!(first, second);
+}
+
+/// The QA finding's reproduction: a launched active carries no
+/// `--standby` — no option names "active now, but here is my peer for
+/// later" — so a `POST /demote` used to maroon it `unsynchronized`
+/// forever, promotable again only through a restart. The tracking peer
+/// announces its own monitor address on every checkpoint pull
+/// (`GET /checkpoint?peer=`), so the demoted run follows its successor,
+/// reconverges to `tracking`, and a later `POST /promote` fails back —
+/// no process restart, exactly one field writer throughout.
+#[test]
+fn a_demoted_launched_active_follows_its_successor_and_fails_back() {
+    let dir = std::env::temp_dir().join(format!("dcs-hot-swap-failback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    // The observer's setpoint lands before the controllers spawn: the
+    // launched active's startup claim fences this attachment from boot.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+
+    // The reproduction's launch shape: the active names no peer; the
+    // standby tracks it by `--standby`.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Converge the standby — every pull also announces the pulling
+    // monitor's address to the active.
+    for _ in 0..5 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+
+    // The reproduction's bodyless `POST /demote` on the peer that was
+    // never told its peer: it must succeed — the announced source is
+    // already known — and the documented order still holds.
+    let demoted = active.demote().unwrap();
+    assert_eq!(demoted.role, Role::Demoting);
+    let promoted = standby.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+
+    // The demoted run's first tracking cycle pulls its successor's
+    // checkpoint — the announced source — and reconverges: `standby`
+    // and `tracking`, never the permanently `unsynchronized` state the
+    // finding reported.
+    active.advance(1).unwrap();
+    standby.advance(1).unwrap();
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted launched active must reconverge on its successor: {report:?}"
+    );
+
+    // Fail-back without a restart: demote the owner — its configured
+    // `--standby` target is its tracking source — then promote the
+    // reconverged original peer. The gate moves back at the same
+    // request boundaries and exactly one peer keeps writing.
+    let demoted = standby.demote().unwrap();
+    assert_eq!(demoted.role, Role::Demoting);
+    let promoted = active.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+
+    for _ in 0..3 {
+        let owner = active.advance(1).unwrap();
+        let carried = field.read(VALVE).unwrap().value;
+        assert_eq!(
+            carried,
+            image_value(&owner, VALVE),
+            "the field must carry the failed-back owner's write"
+        );
+        standby.advance(1).unwrap();
+    }
+    assert_eq!(active.role().unwrap().role, Role::Active);
+    let report = standby.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the twice-demoted peer must reconverge again: {report:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The refusal half of the same contract: a field owner with no
+/// checkpoint source at all — no configured peer and no peer that ever
+/// announced itself — answers `POST /demote` with `no_tracking_source`
+/// rather than silently marooning the run.
+#[test]
+fn demote_refuses_a_field_owner_with_no_checkpoint_source() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    // A lone active: no `--standby` peer was ever launched, so nothing
+    // ever announced a checkpoint source to it.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let active = MonitorClient::new(active_process.addr);
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    active.advance(2).unwrap();
+
+    let (status, body) = active.request("POST", "/demote", None).unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        serde_json::from_str::<SwitchError>(&body).unwrap(),
+        SwitchError::NoTrackingSource
+    );
+    // The refusal changed nothing: still the field owner, gate open —
+    // its next scan's write still lands.
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    let snapshot = active.advance(1).unwrap();
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        image_value(&snapshot, VALVE)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

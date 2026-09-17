@@ -328,15 +328,20 @@ fn run_roll(tag: &str) -> serde_json::Value {
     }
 
     // Roles settled on both surfaces: the revised model owns the field;
-    // the old peer is a quiesced standby — it was never a tracking peer
-    // of the new active (it started without `--standby`), so it reports
-    // unsynchronized rather than converging onto foreign checkpoints.
+    // the old peer is a quiesced standby that follows the new active —
+    // the announced-source tracking a demotion falls back to — and its
+    // pulls of foreign-fingerprint checkpoints are refused by the
+    // fingerprint gate it never opted out of, so it reports `degraded`
+    // naming the mismatch rather than converging onto them.
     let role = standby.role().unwrap();
     assert_eq!(role.role, Role::Active);
     assert_eq!(role.sync, None);
     let role = active.role().unwrap();
     assert_eq!(role.role, Role::Standby);
-    assert_eq!(role.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(role.sync, Some(StandbySync::Degraded { .. })),
+        "foreign-fingerprint pulls must degrade, not silently converge: {role:?}"
+    );
     // The carried operator value is still the revised run's setpoint.
     let snapshot = standby.snapshot().unwrap();
     assert_eq!(

@@ -105,27 +105,6 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
         move || plant.serve()
     });
 
-    // The active: a remote driver behind a gate `activate` lifts only
-    // after taking the plant's write-ownership claim — the startup
-    // claim a launched active runs — serving the monitor the standby
-    // pulls checkpoints from.
-    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
-    let active_gate = WriteGate::closed(&active_driver);
-    let mut active = Peer::active(
-        assemble(&model, &registry, &active_gate).unwrap(),
-        Some(&active_gate),
-    )
-    .with_field_claim(|| {
-        active_driver
-            .claim_writer(1)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    });
-    active.activate().unwrap();
-    let active_monitor =
-        Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
-    let active_client = MonitorClient::new(active_monitor.local_addr());
-
     // The standby: a second remote attachment behind a closed gate, its
     // own monitor serving `/role` and `/promote` — its promotion takes
     // the same claim under its own token.
@@ -144,6 +123,30 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
     let standby_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
+
+    // The active: a remote driver behind a gate `activate` lifts only
+    // after taking the plant's write-ownership claim — the startup
+    // claim a launched active runs — serving the monitor the standby
+    // pulls checkpoints from. The monitor names the standby as the
+    // tracking source — the configured `--peer` half of the follow-peer
+    // contract — so the demotion below has somewhere to track.
+    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let active_gate = WriteGate::closed(&active_driver);
+    let mut active = Peer::active(
+        assemble(&model, &registry, &active_gate).unwrap(),
+        Some(&active_gate),
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
+    let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
+        .unwrap()
+        .with_standby_source(standby_monitor.local_addr());
+    let active_client = MonitorClient::new(active_monitor.local_addr());
 
     thread::scope(|scope| {
         scope.spawn(|| active_monitor.serve());
