@@ -17,8 +17,8 @@
 use dcs_assembly::AssemblyError;
 use dcs_controller::check;
 use dcs_core::{
-    CommandOutcome, DriverDiagnostics, JournalEvent, LinkState, PointId, Quality, QualityReason,
-    Sample, Tick, Value,
+    CommandOutcome, Direction, DriverDiagnostics, IoDriver, JournalEvent, LinkState, PointId,
+    Quality, QualityReason, Sample, Tick, Value,
 };
 use dcs_demo::station_kinds::{
     self, BUS_ADDRESS_PLACEHOLDER, BUS_DOCUMENT, BUS_DYNAMICS, LOCAL_DOCUMENT, LOCAL_DYNAMICS,
@@ -513,4 +513,205 @@ fn repeated_runs_are_identical() {
         assert_eq!(first.journal, second.journal);
         assert_eq!(first.receipts, second.receipts);
     }
+}
+
+/// The backup level leg reads the shared physical quantity, never the
+/// primary instrument's sample: the checked-in dynamics drive point 11
+/// from a second integrator on the flow-sum point 13 — the
+/// already-decoupled `reference-plant/model/dynamics.json` pattern (a
+/// second integrator on 13 with its own slightly-offset initial, 3.45
+/// against the primary's 3.5) — so no element consumes point 10.
+/// `reference-plant/model/dynamics.json` already uses that form and
+/// needs no change.
+fn assert_backup_decoupled(elements: &[dcs_sim::ProcessElement]) {
+    let backup = elements
+        .iter()
+        .find(|element| element.output() == points::LEVEL_BACKUP)
+        .expect("the dynamics drive the backup level point");
+    let dcs_sim::ProcessElement::Integrator(integrator) = backup else {
+        panic!("the backup leg must be a decoupled integrator, got {backup:?}");
+    };
+    assert_eq!(
+        integrator.input, points::FLOW_SUM,
+        "the backup integrator must read the flow sum, not the primary instrument"
+    );
+    assert!(
+        elements
+            .iter()
+            .flat_map(|element| element.inputs())
+            .all(|input| *input != points::LEVEL_PRIMARY),
+        "no dynamics element may consume the primary instrument's sample"
+    );
+}
+
+/// The standalone sim behind the point-addressed dynamics document —
+/// the same `with_element` merge `dcs-plant-server --dynamics`
+/// performs — over the points the document names.
+fn dynamics_test_driver(source: &str) -> dcs_sim::SimDriver {
+    use dcs_sim::{ChannelId, ChannelMap, PointBinding, ProcessElement, SimDriver};
+    let elements: Vec<ProcessElement> =
+        serde_json::from_str(source).expect("the dynamics document parses");
+    assert_backup_decoupled(&elements);
+    let float_in = |point: PointId| PointBinding {
+        point,
+        channel: ChannelId {
+            device: 1,
+            name: format!("p{}", point.0),
+        },
+        direction: Direction::In,
+        initial: Value::Float(0.0),
+    };
+    let mut map = ChannelMap::new()
+        .with_point(float_in(points::LEVEL_PRIMARY))
+        .with_point(float_in(points::LEVEL_BACKUP))
+        .with_point(float_in(points::INFLOW))
+        .with_point(float_in(points::FLOW_SUM))
+        .with_point(float_in(points::draw(0)))
+        .with_point(float_in(points::draw(1)));
+    for gate in [points::cmd(0), points::cmd(1)] {
+        map = map.with_point(PointBinding {
+            point: gate,
+            channel: ChannelId {
+                device: 3,
+                name: format!("p{}", gate.0),
+            },
+            direction: Direction::Out,
+            initial: Value::Bool(false),
+        });
+    }
+    for element in elements {
+        map = map.with_element(element);
+    }
+    SimDriver::new(map).expect("the checked-in dynamics validate")
+}
+
+/// The shared register bank behind the register-addressed dynamics
+/// document — the same `RegisterBank::with_dynamics` construction
+/// `dcs-sim-bus-device --dynamics` performs.
+fn dynamics_test_bank(source: &str) -> dcs_sim_bus::RegisterBank {
+    use dcs_sim::ProcessElement;
+    use dcs_sim_bus::{RegisterBank, RegisterDecl};
+    let elements: Vec<ProcessElement> =
+        serde_json::from_str(source).expect("the dynamics document parses");
+    assert_backup_decoupled(&elements);
+    let decls = [
+        points::LEVEL_PRIMARY.0,
+        points::LEVEL_BACKUP.0,
+        points::INFLOW.0,
+        13,
+        points::draw(0).0,
+        points::draw(1).0,
+    ]
+    .map(|register| RegisterDecl {
+        register: register as u16,
+        initial: Value::Float(0.0),
+    });
+    let gates = [points::cmd(0).0, points::cmd(1).0].map(|register| RegisterDecl {
+        register: register as u16,
+        initial: Value::Bool(false),
+    });
+    RegisterBank::with_dynamics(decls.into_iter().chain(gates), elements)
+        .expect("the checked-in bus dynamics validate")
+}
+
+/// The float value a served sample carries.
+fn served_float(sample: Sample) -> f64 {
+    match sample.value {
+        Value::Float(value) => value,
+        other => panic!("the level sample must be Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn local_backup_level_is_decoupled_from_primary_quality() {
+    use dcs_sim::Fault;
+    let sim = dynamics_test_driver(LOCAL_DYNAMICS);
+    let bad = Quality::Bad(QualityReason::CommunicationFault);
+
+    // The declared inflow; the backup tracks the well level through
+    // its own integrator — a constant 0.01 below the primary, the
+    // slightly-offset initial (0.79 against 0.8).
+    sim.write(points::INFLOW, Value::Float(0.6)).unwrap();
+    sim.step(station_kinds::SCAN_PERIOD);
+    sim.step(station_kinds::SCAN_PERIOD);
+    let primary = served_float(sim.read(points::LEVEL_PRIMARY).unwrap());
+    let backup = served_float(sim.read(points::LEVEL_BACKUP).unwrap());
+    assert!((primary - 2.0).abs() < 1e-9, "primary tracks 0.8 + 2·0.6");
+    assert!((backup - 1.99).abs() < 1e-9, "backup tracks 0.79 + 2·0.6");
+    assert!((primary - backup - 0.01).abs() < 1e-9);
+
+    // A quality fault on the primary leaves the backup Good and still
+    // tracking: the producible primary-faulted/backup-healthy state.
+    sim.inject_fault(points::LEVEL_PRIMARY, Fault::Quality(bad))
+        .unwrap();
+    sim.step(station_kinds::SCAN_PERIOD);
+    assert_eq!(sim.read(points::LEVEL_PRIMARY).unwrap().quality, bad);
+    let served = sim.read(points::LEVEL_BACKUP).unwrap();
+    assert!(served.quality.is_good(), "backup must stay Good: {served:?}");
+    assert!(
+        served_float(served) > backup,
+        "the backup keeps integrating the flow sum while the primary stands Bad"
+    );
+    sim.clear_fault(points::LEVEL_PRIMARY).unwrap();
+
+    // And the reverse: a fault on the backup leaves the primary Good —
+    // the backup-faulted/primary-healthy state.
+    sim.inject_fault(points::LEVEL_BACKUP, Fault::Quality(bad))
+        .unwrap();
+    sim.step(station_kinds::SCAN_PERIOD);
+    assert_eq!(sim.read(points::LEVEL_BACKUP).unwrap().quality, bad);
+    assert!(
+        sim.read(points::LEVEL_PRIMARY).unwrap().quality.is_good(),
+        "the primary must stay Good under a backup fault"
+    );
+}
+
+#[test]
+fn bus_backup_level_is_decoupled_from_primary_quality() {
+    let bank = dynamics_test_bank(BUS_DYNAMICS);
+    let bad = Quality::Bad(QualityReason::CommunicationFault);
+
+    bank.write(points::INFLOW.0 as u16, Value::Float(0.6))
+        .unwrap();
+    bank.step(station_kinds::SCAN_PERIOD);
+    bank.step(station_kinds::SCAN_PERIOD);
+    let primary = served_float(bank.read(points::LEVEL_PRIMARY.0 as u16).unwrap());
+    let backup = served_float(bank.read(points::LEVEL_BACKUP.0 as u16).unwrap());
+    assert!((primary - 2.0).abs() < 1e-9, "primary tracks 0.8 + 2·0.6");
+    assert!((backup - 1.99).abs() < 1e-9, "backup tracks 0.79 + 2·0.6");
+    assert!((primary - backup - 0.01).abs() < 1e-9);
+
+    // A quality fault on the primary leaves the backup Good and still
+    // tracking: the producible primary-faulted/backup-healthy state.
+    bank.inject_quality(points::LEVEL_PRIMARY.0 as u16, bad)
+        .unwrap();
+    bank.step(station_kinds::SCAN_PERIOD);
+    assert_eq!(
+        bank.read(points::LEVEL_PRIMARY.0 as u16).unwrap().quality,
+        bad
+    );
+    let served = bank.read(points::LEVEL_BACKUP.0 as u16).unwrap();
+    assert!(served.quality.is_good(), "backup must stay Good: {served:?}");
+    assert!(
+        served_float(served) > backup,
+        "the backup keeps integrating the flow sum while the primary stands Bad"
+    );
+    bank.clear_quality(points::LEVEL_PRIMARY.0 as u16).unwrap();
+
+    // And the reverse: a fault on the backup leaves the primary Good —
+    // the backup-faulted/primary-healthy state.
+    bank.inject_quality(points::LEVEL_BACKUP.0 as u16, bad)
+        .unwrap();
+    bank.step(station_kinds::SCAN_PERIOD);
+    assert_eq!(
+        bank.read(points::LEVEL_BACKUP.0 as u16).unwrap().quality,
+        bad
+    );
+    assert!(
+        bank.read(points::LEVEL_PRIMARY.0 as u16)
+            .unwrap()
+            .quality
+            .is_good(),
+        "the primary must stay Good under a backup fault"
+    );
 }

@@ -5,8 +5,8 @@
 //! `pump_station.json` is the emitted PlantModel,
 //! `pump_station_dynamics.json` the decision-44 dynamics declaration —
 //! a declared inflow plus two `bool_flow` pump draws summed into the
-//! level integrator, with a first-order lag producing the backup
-//! measurement. These tests assert the helper re-emits the checked-in
+//! level integrator, with a second, decoupled integrator on the same
+//! flow sum producing the backup measurement. These tests assert the helper re-emits the checked-in
 //! document exactly, that the document validates and lints clean,
 //! assembles through the standard registries, serde-roundtrips, and
 //! that a scripted run over the merged dynamics shows the closed
@@ -1792,4 +1792,15 @@ fn the_consumer_plants_emitted_model_serves_the_same_generic_surface() {
 #[test]
 fn repeated_managed_lifecycle_runs_are_deterministic() {
     assert_eq!(managed_run(), managed_run());
+}
+
+#[test]
+fn tmp_debug_traj() {
+    let r = run();
+    for (i, s) in r.scans.iter().enumerate() {
+        let scan = i as u64 + 1;
+        if (25..=60).contains(&scan) {
+            eprintln!("scan {scan}: level={:.4} selected={:.4} backup_active={} backup_unhealthy={} lah={} lah_unack={} demand={} staged={} duty={}", s.level, s.selected, s.backup_active, s.backup_unhealthy, s.lah_alarm, s.lah_unack, s.demand, s.staged, s.duty);
+        }
+    }
 }

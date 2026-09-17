@@ -384,8 +384,9 @@ pub use recorder::MonitorConfig;
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
+    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError,
+    TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
@@ -930,6 +931,22 @@ impl<'d> Monitor<'d> {
             .unwrap()
             .peer
             .note_transfer_failed(detail);
+    }
+
+    /// Journals a `--state-file` resume that crossed the model boundary
+    /// under `--revised` — the lone-controller roll's durable record.
+    /// The crossing already applied to the executor before the monitor
+    /// bound; this records its [`CarryoverReport`] once as
+    /// `JournalEvent::Reinitialized` at the resumed tick, so a
+    /// `--journal-file` run carries the report across the restart like
+    /// the pair path's per-transition entry, and `GET /journal` serves
+    /// it beside the run-boundary marker.
+    pub fn note_restored_revision(&self, report: CarryoverReport) {
+        self.shared
+            .lock()
+            .unwrap()
+            .recorder
+            .note_reinitialized(report);
     }
 
     /// Runs the standby's per-scan tracking cycle — the paced loop's

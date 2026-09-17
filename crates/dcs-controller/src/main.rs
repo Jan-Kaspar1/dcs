@@ -175,6 +175,21 @@
 //! `POST /demote`-then-`POST /promote` order then moves the field writer
 //! to the revised model at a scan boundary.
 //!
+//! A lone controller without a standby rolls the same revision through
+//! the `--state-file` resume seam instead: restart with `--revised
+//! --state-file PATH` against the revised model document. A
+//! fingerprint-mismatched checkpoint then crosses through
+//! `Executor::reinitialize` under the same classify-then-apply
+//! carryover rule — a matching fingerprint still resumes ordinarily
+//! through `Executor::apply` — the crossing's `CarryoverReport` prints
+//! at startup and, on a `--listen`/`--journal-file` run, journals once
+//! as `Reinitialized` into the durable record. A checkpoint breaking
+//! the rule fails startup nonzero naming the `CarryoverError` and
+//! leaves the state file untouched; without `--revised` the mismatch
+//! still refuses. The lone roll is a scheduled outage — the process
+//! stops while the controller restarts — where the pair roll above is
+//! the no-interruption path.
+//!
 //! Automatic failover, per the failover decision: a standby armed with
 //! `--auto-promote N` treats the checkpoint pull as the heartbeat —
 //! `N` consecutive failed pulls is active loss, and the peer
@@ -458,15 +473,21 @@ controller scan.
                   — so a demoted active reconverges and stays
                   promotable. Mutually exclusive with --standby;
                   requires --listen
-  --revised       declare this standby's model a deliberate revision of
-                  the active's: a pulled checkpoint whose model
+  --revised       declare this run's model a deliberate revision of
+                  the checkpoint's: a pulled checkpoint whose model
                   fingerprint differs crosses the boundary under the
                   documented carryover rule — operator-writable internal
                   points matched by declared identity carry their last
                   values, component state reinitializes — and the peer
                   reports reinitialized, promotable in place of tracking;
                   a checkpoint breaking the rule is rejected with a named
-                  error before promotion. Requires --standby
+                  error before promotion. On a tracking standby
+                  (--standby) the crossing runs per pulled checkpoint;
+                  on a lone --state-file resume without --standby it
+                  runs once at startup against the state file — a
+                  scheduled outage, where the pair roll is the
+                  no-interruption path. Requires --standby or
+                  --state-file
   --remote ADDR   attach to the shared simulated plant at ADDR instead
                   of a local simulation
   --driven        serve the monitor without pacing: scans run only when
@@ -644,9 +665,10 @@ impl Options {
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
         }
-        if revised && standby.is_none() {
+        if revised && standby.is_none() && state_file.is_none() {
             return Err(
-                "--revised requires --standby: only a tracking peer rolls a revised model"
+                "--revised requires --standby or --state-file: only a tracking peer or a \
+                 state-file resume rolls a revised model"
                     .to_string(),
             );
         }
@@ -728,15 +750,34 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
 /// must hold a [`Checkpoint`] this run can take over — applied in place
 /// to the freshly assembled `executor` before the first scan, so the run
 /// continues at the checkpointed tick. A missing file is a cold start
-/// (`Ok(false)`); anything else that cannot resume — an unreadable file,
+/// (`Ok((false, None))`); anything else that cannot resume — an unreadable file,
 /// contents that are not a checkpoint, or a [`RestoreError`] naming the
 /// version, fingerprint, or structural mismatch — fails the start, per
 /// the checkpoint-restore decision's all-or-nothing rule: never
 /// silently fresh over a state file that exists but cannot be resumed.
-fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, String> {
+///
+/// When `revised` is armed and the checkpoint's model fingerprint differs
+/// from this run's, the crossing routes through
+/// [`Executor::reinitialize`](dcs_runtime::Executor::reinitialize) — the
+/// same classify-then-apply carryover rule the `--revised` standby runs
+/// per pulled checkpoint — instead of [`Executor::apply`]: writable
+/// internal `In` points by declared identity and kind, `Out` image
+/// samples, the all-or-nothing force set, component and driver state
+/// reinitialized, the tick resumed. A matching fingerprint still resumes
+/// ordinarily through `apply`; a checkpoint breaking the carryover rule
+/// fails with its named [`CarryoverError`](dcs_runtime::CarryoverError).
+/// Either way a refusal changes nothing and leaves the state file
+/// untouched. Success through the boundary returns the crossing's
+/// [`CarryoverReport`](dcs_core::CarryoverReport) for the startup print
+/// and — on a `--listen` run — the durable journal record.
+fn resume_state_file(
+    path: &Path,
+    executor: &mut Executor<'_>,
+    revised: bool,
+) -> Result<(bool, Option<dcs_core::CarryoverReport>), String> {
     let body = match std::fs::read(path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, None)),
         Err(error) => {
             return Err(format!(
                 "cannot read state file {}: {error}",
@@ -750,10 +791,19 @@ fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, S
             path.display()
         )
     })?;
+    if revised && checkpoint.model_fingerprint != executor.model_fingerprint() {
+        let report = executor.reinitialize(&checkpoint).map_err(|error| {
+            format!(
+                "cannot resume from state file {}: CarryoverError: {error}",
+                path.display()
+            )
+        })?;
+        return Ok((true, Some(report)));
+    }
     executor
         .apply(&checkpoint)
         .map_err(|error| format!("cannot resume from state file {}: {error}", path.display()))?;
-    Ok(true)
+    Ok((true, None))
 }
 
 /// The `--state-file` persist hooked onto command admission: an
@@ -894,15 +944,26 @@ fn main() -> ExitCode {
     // The --state-file resume half: an existing file holds the run's
     // last persisted checkpoint, applied to the fresh executor before
     // the first scan — the restarted process then continues the
-    // interrupted run at the checkpointed tick.
+    // interrupted run at the checkpointed tick. With --revised armed a
+    // fingerprint-mismatched checkpoint crosses through
+    // `Executor::reinitialize` under the carryover rule instead of
+    // `Executor::apply`; the crossing's report prints here and, on a
+    // --listen run, journals into the durable record below.
+    let mut restored_report: Option<dcs_core::CarryoverReport> = None;
     if let Some(path) = &options.state_file {
-        match resume_state_file(path, &mut executor) {
-            Ok(true) => eprintln!(
-                "resumed from state file {} at tick {}",
-                path.display(),
-                executor.tick().0
-            ),
-            Ok(false) => {}
+        match resume_state_file(path, &mut executor, options.revised) {
+            Ok((true, report)) => {
+                eprintln!(
+                    "resumed from state file {} at tick {}",
+                    path.display(),
+                    executor.tick().0
+                );
+                if let Some(report) = report {
+                    eprintln!("revised state-file resume: {report}");
+                    restored_report = Some(report);
+                }
+            }
+            Ok((false, _)) => {}
             Err(error) => return fail(error),
         }
     }
@@ -988,6 +1049,9 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
+        if let Some(report) = &restored_report {
+            monitor.note_restored_revision(report.clone());
+        }
         let monitor = match command_persist(&options) {
             Some(persist) => monitor.with_command_persist(persist),
             None => monitor,
@@ -1032,6 +1096,9 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                if let Some(report) = &restored_report {
+                    monitor.note_restored_revision(report.clone());
+                }
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,
@@ -1145,6 +1212,9 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                if let Some(report) = &restored_report {
+                    monitor.note_restored_revision(report.clone());
+                }
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,

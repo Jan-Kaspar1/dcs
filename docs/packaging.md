@@ -54,6 +54,29 @@ container while the active keeps scanning; peer management and takeover
 semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 11–15) and are not part of this image.
 
+### Rolling a revised model: pair and lone paths
+
+A revised plant model rolls through the same container image by mounting
+the revised document as the container's model path — the deployment
+supplies the document, never a peer (decision 46). Two paths exist:
+
+- The pair roll is the no-interruption path: start (or restart) the
+  standby container against the revised document with `--revised`,
+  let its pulled checkpoints cross through the carryover rule, then
+  `POST /demote` the old active and `POST /promote` the revised peer
+  at a scan boundary (decision 25).
+- The lone roll is the scheduled-outage path for an unattended station
+  with no standby: stop the controller, then restart the single
+  container against the revised document with `--revised --state-file
+  PATH` mounting the same state file. A fingerprint-mismatched
+  checkpoint crosses through the same carryover rule at startup — a
+  matching fingerprint still resumes ordinarily, a rule-breaking
+  revision fails startup naming the `CarryoverError` with the state
+  file untouched, and an unarmed mismatch still refuses. The crossing's
+  report prints at startup and, on a `--listen`/`--journal-file` run,
+  lands in the durable journal. The process is stopped while it
+  restarts, so the outage is scheduled, not bumpless.
+
 ## Plant container image
 
 `Dockerfile.plant` packages the `dcs-plant-server` binary — the shared

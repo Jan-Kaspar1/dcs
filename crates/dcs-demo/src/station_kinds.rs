@@ -149,10 +149,17 @@ pub mod points {
 
     /// The primary wet-well level measurement — the integrator's output.
     pub const LEVEL_PRIMARY: PointId = PointId(10);
-    /// The backup level measurement — the first-order lag's output.
+    /// The backup level measurement — the decoupled second
+    /// integrator's output: it reads the same flow-sum point as the
+    /// primary integrator, so a quality fault on either instrument
+    /// stays local to that leg.
     pub const LEVEL_BACKUP: PointId = PointId(11);
     /// The declared station inflow — a `flow_sum` input.
     pub const INFLOW: PointId = PointId(12);
+    /// The summed net flow — the `flow_sum` output both level
+    /// integrators read, the shared physical quantity the decoupled
+    /// backup tracks.
+    pub const FLOW_SUM: PointId = PointId(13);
     /// The failover-selected level the chain and alarms control on.
     pub const LEVEL_SELECTED: PointId = PointId(200);
     /// The chain's stage-count demand carrier.

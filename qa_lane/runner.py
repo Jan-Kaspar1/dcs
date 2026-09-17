@@ -26,6 +26,7 @@ contract. CI image pinning does not exist yet; this is the documented
 build choice until it does.
 """
 import fcntl
+import hashlib
 import json
 import os
 import platform
@@ -1132,6 +1133,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # The pinned --owner-token per controller _start_rig launched
+        # with, keyed like the monitor endpoints ('active' is ctrl-a's
+        # container, 'standby' ctrl-b's): the divergence-resolution
+        # scenario shares the field owner's claim through its own
+        # plant-protocol attachment under the settled active's token.
+        'owner_tokens': _owner_tokens(run_id),
+        'rig_config': str(Path(run_dir) / 'rig-config.json'),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
@@ -1160,6 +1168,32 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                           for key, peer in names.items()},
         'dcs_ctl': str(_dcs_ctl_path(cfg)),
     }
+
+
+def _owner_tokens(run_id):
+    """The run's pinned field-ownership tokens, one per controller.
+
+    Each controller launches with `--owner-token` pinned to its entry so
+    a scenario attachment can share the field owner's claim: the
+    attachment's `ensure_writer(active_token)` then answers
+    `claimed_shared` — granted under the shared claim — instead of
+    fencing or preempting the active. Tokens derive deterministically
+    from the run id (never zero), so the launch is reproducible and the
+    two controllers never share one token with each other: pinning two
+    controllers to the same token would defeat single-writer fencing.
+    Keys match the scenario ctx endpoint names ('active' is ctrl-a's
+    container, 'standby' ctrl-b's, whichever role each reports).
+    """
+    digest = hashlib.sha256(
+        ('dcs-owner-token:' + run_id).encode()).digest()
+    tokens = {}
+    for key, chunk in (('active', digest[:8]), ('standby', digest[8:16])):
+        token = int.from_bytes(chunk, 'big') or 1
+        tokens[key] = token
+    if tokens['standby'] == tokens['active']:
+        tokens['standby'] = (tokens['standby']
+                             ^ 0x9E3779B97F4A7C15) & (2 ** 64 - 1) or 2
+    return tokens
 
 
 def _start_rig(cfg, record, src, run_dir, timeline):
@@ -1213,6 +1247,24 @@ def _start_rig(cfg, record, src, run_dir, timeline):
             time.sleep(1)
     else:
         raise RuntimeError('plant listener never bound')
+    # Each controller pins its field-ownership token at launch (the
+    # --owner-token the divergence-resolution scenario's shared-claim
+    # attachment answers claimed_shared under), recorded in the run
+    # config beside the published ports so the scenario can share the
+    # field owner's claim without fencing or preempting it.
+    tokens = _owner_tokens(run_id)
+    rig_config = {
+        'run_id': run_id,
+        'owner_tokens': tokens,
+        'ports': {'active': cfg['active_port'],
+                  'standby': cfg['standby_port'],
+                  'plant': cfg['plant_host_port']},
+        'model_fixture': cfg['model_fixture'],
+        'dynamics_fixture': cfg['dynamics_fixture'],
+    }
+    Path(run_dir, 'rig-config.json').write_text(
+        json.dumps(rig_config, indent=1, sort_keys=True) + '\n')
+    timeline('rig-tokens', 'pinned --owner-token per controller')
     docker(*_docker_run_args(cfg, run_id, prefix + '-a'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['active_port']) + ':8080',
@@ -1222,6 +1274,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(tokens['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1236,6 +1289,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
+           '--owner-token', str(tokens['standby']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
