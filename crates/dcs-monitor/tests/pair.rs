@@ -22,6 +22,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 /// The same minimal in-memory driver the other monitor tests use.
 struct StubDriver {
@@ -532,6 +533,74 @@ fn dual_active_is_a_named_redundancy_fault_and_commands_have_no_target() {
 
     fenced.stop();
     promoted.stop();
+}
+
+#[test]
+fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start(Role::Standby);
+
+    // Inside the grace the report is the legitimate transient: a fresh
+    // standby whose first tracking pulls have not landed yet is not a
+    // redundancy fault — the pair view must not flap "redundancy fault"
+    // over every launch or demotion.
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+
+    // Past the grace — here a zero grace, so the first observed report
+    // already exceeds it — a peer still reporting unsynchronized cannot
+    // demonstrate convergence: the permanent state of a demoted peer
+    // with no checkpoint source, which no promotion can recover
+    // (not_converged) and no pull can reach. The pair has zero failover
+    // coverage, so the verdict names it rather than rendering a
+    // healthy pair.
+    let mut lapsed =
+        PairClient::new([active.addr, standby.addr]).with_convergence_grace(Duration::ZERO);
+    lapsed.poll_roles();
+    let health = lapsed.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("unsynchronized")),
+        "expected the unconverged standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // The verdict is not sticky: a checkpoint apply converges the
+    // standby to tracking and the fault clears — the pair is healthy
+    // again even under the zero grace.
+    active.client.advance(1).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+    lapsed.poll_roles();
+    let health = lapsed.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+
+    // The page carries the same verdict: its pairHealth faults a peer
+    // still reporting "unsynchronized" past the same grace — over the
+    // reproduction's permanently dead standby the page can no longer
+    // return zero faults.
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "CONVERGENCE_GRACE_MS",
+        "noteSyncAge",
+        "past the convergence grace",
+        "\"unsynchronized\"",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+
+    active.stop();
+    standby.stop();
 }
 
 #[test]

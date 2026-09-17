@@ -355,7 +355,7 @@ mod store;
 
 use crate::store::Store;
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
-pub use pair::{PairClient, PairError, PairHealth, PeerStatus, PeerView};
+pub use pair::{CONVERGENCE_GRACE, PairClient, PairError, PairHealth, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
 pub use store::{Publication, PublicationGap, PublicationPage};
 

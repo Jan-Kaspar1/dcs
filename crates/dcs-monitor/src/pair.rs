@@ -28,6 +28,14 @@
 //! once against the peer now reporting `active`, exactly as the decision
 //! prescribes.
 //!
+//! A standby that cannot demonstrate convergence is likewise named:
+//! `unsynchronized` is the legitimate transient a fresh or newly
+//! demoted peer occupies while its first tracking pulls land, so
+//! [`PairClient::health`] gives it [`CONVERGENCE_GRACE`] — but past the
+//! grace the pair has no converged failover peer (the state is
+//! permanent for a demoted peer with no checkpoint source), and the
+//! verdict says so rather than reporting a healthy pair.
+//!
 //! Tick continuity across a switchover is a property of the contract,
 //! not of this type: checkpoints align the standby's tick with the
 //! active's, so the promoted peer's history and journal continue the same
@@ -43,6 +51,7 @@ use dcs_model::SignalIndex;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 /// What the last role poll observed of one peer.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +76,13 @@ pub struct PeerView {
     addr: SocketAddr,
     client: MonitorClient,
     status: PeerStatus,
+    /// The instant the peer's current run of `unsynchronized` reports
+    /// began — the start of the convergence grace [`health`] reads.
+    /// `None` while the peer reports any converged sync state or is not
+    /// reporting at all.
+    ///
+    /// [`health`]: PairClient::health
+    unsynced_since: Option<Instant>,
 }
 
 impl PeerView {
@@ -144,6 +160,18 @@ impl From<io::Error> for PairError {
     }
 }
 
+/// The wall-clock grace a peer reporting `unsynchronized` gets before
+/// [`PairClient::health`] names it a redundancy fault — the transient a
+/// fresh or newly demoted standby legitimately occupies while its
+/// first tracking pulls land at the documented pull-per-scan cadence
+/// (a handful of scan periods at the controller's default 100 ms pace,
+/// plus a pull bound). Past it, a peer that still cannot demonstrate
+/// convergence — above all a demoted peer with no checkpoint source,
+/// which stays `unsynchronized` forever and can never be promoted back
+/// — leaves the pair with zero failover coverage, and the verdict
+/// says so rather than rendering "redundant pair healthy".
+pub const CONVERGENCE_GRACE: Duration = Duration::from_secs(5);
+
 /// The pair's redundancy health as the view summarizes it — the unique
 /// settled-`active` peer plus the named faults of the last role poll;
 /// the page's `pairHealth` verdict for in-process consumers. See
@@ -154,8 +182,9 @@ pub struct PairHealth {
     /// `None` while no peer reports it or the dual-active fault stands.
     pub active: Option<SocketAddr>,
     /// The named redundancy faults the last poll observed: an
-    /// unreachable peer, a degraded or diverged standby convergence,
-    /// no peer reporting `active`, or more than one — the dual-active
+    /// unreachable peer, a degraded or diverged standby convergence, a
+    /// peer still `unsynchronized` past [`CONVERGENCE_GRACE`], no peer
+    /// reporting `active`, or more than one — the dual-active
     /// split-brain. Empty is the healthy pair.
     pub faults: Vec<String>,
 }
@@ -175,6 +204,10 @@ pub struct PairClient {
     peers: Vec<PeerView>,
     /// The peer index currently sourcing the logical view.
     source: Option<usize>,
+    /// The grace [`health`](Self::health) allows a peer's
+    /// `unsynchronized` report before naming it — see
+    /// [`CONVERGENCE_GRACE`].
+    convergence_grace: Duration,
 }
 
 impl PairClient {
@@ -188,10 +221,23 @@ impl PairClient {
                     addr,
                     client: MonitorClient::new(addr),
                     status: PeerStatus::Unknown,
+                    unsynced_since: None,
                 })
                 .collect(),
             source: None,
+            convergence_grace: CONVERGENCE_GRACE,
         }
+    }
+
+    /// Overrides [`CONVERGENCE_GRACE`] — the wall-clock grace a peer
+    /// reporting `unsynchronized` gets before [`health`](Self::health)
+    /// names it a redundancy fault. A deployment whose tracking cadence
+    /// is slower than the default 100 ms scan period widens it;
+    /// `Duration::ZERO` names the first observed `unsynchronized`
+    /// report.
+    pub fn with_convergence_grace(mut self, grace: Duration) -> Self {
+        self.convergence_grace = grace;
+        self
     }
 
     /// The configured peers with their last-polled statuses — the pair
@@ -231,6 +277,19 @@ impl PairClient {
                     detail: error.to_string(),
                 },
             };
+            // The convergence grace [`health`](Self::health) reads: an
+            // `unsynchronized` report starts or continues the peer's
+            // run; any converged sync state — and the unreachable
+            // fault, which `health` already names on its own — ends
+            // it.
+            peer.unsynced_since = match &peer.status {
+                PeerStatus::Reporting(report)
+                    if matches!(report.sync, Some(StandbySync::Unsynchronized)) =>
+                {
+                    Some(peer.unsynced_since.unwrap_or_else(Instant::now))
+                }
+                _ => None,
+            };
         }
         let actives: Vec<usize> = self
             .peers
@@ -261,7 +320,10 @@ impl PairClient {
     /// the same verdict the page's `pairHealth` computes over a `?peer`
     /// pair: the uniquely reporting settled-`active` peer's address,
     /// and the named redundancy faults the last poll observed — an
-    /// unreachable peer, a degraded or diverged standby convergence, no
+    /// unreachable peer, a degraded or diverged standby convergence, a
+    /// peer still reporting `unsynchronized` past
+    /// [`CONVERGENCE_GRACE`] (the lost failover coverage a stranded
+    /// standby leaves, where `unsynchronized` may be permanent), no
     /// peer reporting `active`, or more than one reporting it (the
     /// dual-active split-brain the one-logical-controller contract makes
     /// impossible). Pair health, never plant faults.
@@ -279,6 +341,18 @@ impl PairClient {
                         actives.push(peer.addr);
                     }
                     match &report.sync {
+                        Some(StandbySync::Unsynchronized) => {
+                            if peer
+                                .unsynced_since
+                                .is_some_and(|since| since.elapsed() >= self.convergence_grace)
+                            {
+                                faults.push(format!(
+                                    "{} has not converged: unsynchronized past the \
+                                     convergence grace",
+                                    peer.addr
+                                ));
+                            }
+                        }
                         Some(StandbySync::Degraded { detail }) => {
                             faults.push(format!("{} sync degraded: {detail}", peer.addr));
                         }
