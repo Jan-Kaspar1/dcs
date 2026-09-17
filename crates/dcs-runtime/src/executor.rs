@@ -428,6 +428,15 @@ struct Entry {
     /// Declared requirements indexed by point; the step's scoped I/O view
     /// checks every access against this set.
     declared: HashMap<PointId, IoRequirement>,
+    /// The component's parameter report captured at construction — the
+    /// revision's declared defaults as the fresh instance stands before
+    /// any scan, command, or adopted receipt could tune them. The
+    /// reverted-tuning itemization diffs a crossing checkpoint's
+    /// declared parameters against this baseline, not the live report:
+    /// an `Accepted` receipt the checkpoint adopted and re-settled here,
+    /// or a tune aimed at this run directly, must not hide what the old
+    /// run's tuning reverted *from*.
+    parameter_defaults: StateMap,
     last_tick: Option<Tick>,
     step_errors: u64,
     last_error: Option<String>,
@@ -894,9 +903,11 @@ impl<'d> Executor<'d> {
                 }
                 declared.insert(point, requirement);
             }
+            let parameter_defaults = component.report_parameters();
             entries.push(Entry {
                 component,
                 declared,
+                parameter_defaults,
                 last_tick: None,
                 step_errors: 0,
                 last_error: None,
@@ -1880,14 +1891,18 @@ impl<'d> Executor<'d> {
         // The reverted-tuning itemization: every reinitialized
         // component's descriptor-declared parameters whose checkpointed
         // field differs from the revision's declared default — the
-        // fresh component's reported value — are named so the report
-        // says which tuning was lost, not just which components
-        // restarted. Component state never crosses, so a checkpointed
-        // field the descriptor does not declare is the component's own
-        // dropped vocabulary, and a checkpointed field whose kind the
-        // revision retyped itemizes like any differing value — nothing
-        // is reinterpreted, so the named-refusal convention does not
-        // apply.
+        // value the component's fresh construction reported, captured
+        // at wiring — are named so the report says which tuning was
+        // lost, not just which components restarted. The baseline is
+        // the captured defaults, not the live `report_parameters`: an
+        // `Accepted` receipt the crossing adopted can re-settle the
+        // same tune on this run, and a re-report that diffed the live
+        // value would then name nothing. Component state never crosses,
+        // so a checkpointed field the descriptor does not declare is
+        // the component's own dropped vocabulary, and a checkpointed
+        // field whose kind the revision retyped itemizes like any
+        // differing value — nothing is reinterpreted, so the
+        // named-refusal convention does not apply.
         let mut reverted_tuning = Vec::new();
         for entry in &self.components {
             let component = &entry.component;
@@ -1898,11 +1913,10 @@ impl<'d> Executor<'d> {
             let Some(checkpointed) = checkpoint.components.get(component.name()) else {
                 continue;
             };
-            let fresh = component.report_parameters();
             for parameter in declared_parameters {
                 let (Some(checkpointed_value), Some(declared_value)) = (
                     checkpointed.get(&parameter.name),
-                    fresh.get(&parameter.name),
+                    entry.parameter_defaults.get(&parameter.name),
                 ) else {
                     continue;
                 };
@@ -6907,6 +6921,37 @@ mod tests {
         // Two runs of the same crossing report identically.
         let mut second = revision_tuning_rig(&driver);
         assert_eq!(second.reinitialize(&checkpoint).unwrap(), report);
+    }
+
+    #[test]
+    fn reinitialize_itemizes_against_declared_defaults_not_live_tuning() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // This run's own `loop` got the same 3.0 tune — the shape an
+        // adopted `Accepted` receipt re-settling under the revision
+        // produces. The itemization diffs the checkpoint against the
+        // revision's declared defaults, not the live report, so the
+        // re-settled tune cannot hide what the old run's value
+        // reverted from.
+        executor.submit_command(set_parameter("loop", "gain", Value::Float(3.0)));
+        executor.scan().unwrap();
+        let parameters = &executor.snapshot().parameters[0];
+        assert_eq!(parameters.values["gain"], Value::Float(3.0));
+
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Float(3.0));
+        state.insert("limit", Value::Float(10.0));
+        let report = executor.reinitialize(&tuned_checkpoint(state)).unwrap();
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Float(3.0),
+                declared: Value::Float(2.0),
+            }]
+        );
     }
 
     #[test]
