@@ -25,10 +25,11 @@ scenario drives the runner-owned plant stop/start actions
 ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
 server directly on ctx['plant'] — the field's own fencing evidence.
 
-The field-fault case additionally opens one plant-protocol connection
-to the run's published plant port — the newline-JSON request/response
-surface crates/dcs-sim-net/src/protocol.rs documents — to inject and
-clear per-point faults on the shared simulated field.
+The field-fault and backup-health cases additionally open one
+plant-protocol connection to the run's published plant port — the
+newline-JSON request/response surface
+crates/dcs-sim-net/src/protocol.rs documents — to inject and clear
+per-point faults on the shared simulated field.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -4029,11 +4030,14 @@ def scenario_served_interface(ctx):
 # points, the operator-setpoint surface, so the model declares no
 # writable loopback field point (a channel-bound `writable` mark is
 # exactly what the model lint names). Releasing an internal point
-# resumes the held-value rule — the last-stamped (forced) sample
-# persists — so the recovery leg restamps the held value through the
-# receipted write path: a force still standing would re-substitute on
-# the next scan, so the held value read at Good with an empty `forces`
-# list proves the release took.
+# resumes the held-value rule — and the release boundary itself
+# re-stamps the held image Good (finding #498's merged fix): no
+# channel rewrites a held internal point, so without that re-stamp
+# the force's last Substituted mark would stand forever, tainting the
+# downstream p101-oos-ok cone and the tracking standby's adopted
+# snapshot. The recovery legs therefore observe the release before
+# any restamp write — the held-value write afterward is the suite's
+# restore step, not what proves the release took.
 
 FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
 
@@ -4064,20 +4068,48 @@ def _settled_receipts(journal):
             for entry in _journal_list(journal)]
 
 
+def _release_recovery_unmet(snap, target, follower, value, cone_value):
+    """The unmet clauses of the post-release recovery contract on one
+    served snapshot — the badge gone, the released point holding the
+    force's last stamp at Good, the inverted cone untainted at the
+    unforced read. Empty when the observation shows the recovered
+    state."""
+    unmet = []
+    if _forced_entry(snap, target) is not None:
+        unmet.append('an empty forces list')
+    if _point_value(snap, target) != value:
+        unmet.append('the held image at ' + str(value))
+    if _point_quality(snap, target) != 'good':
+        unmet.append('Good quality — the point reads '
+                     + json.dumps(_point_quality(snap, target)))
+    if _point_value(snap, follower) != cone_value:
+        unmet.append('p101-oos-ok reading ' + str(cone_value))
+    if _point_quality(snap, follower) != 'good':
+        unmet.append('the p101-oos-ok cone untainted')
+    return unmet
+
+
 def scenario_force_release(ctx):
     """A receipted force pins p101-oos at Substituted quality with the
-    control image following it; its release plus the restore write
-    return the held value at Good — every command journaled as a
-    settled, attributed receipt."""
+    control image following it; its release re-stamps the held image
+    Good on the active and on the tracking standby's adopted
+    snapshot, then the restore write returns the pre-force held
+    value — every command journaled as a settled, attributed
+    receipt."""
     case = Case('force-release',
                 'Receipted forcing and release on a writable point',
                 'force_point on the writable p101-oos point serves the '
                 'forced value at Uncertain(Substituted), lists the '
                 'point under snapshot.forces, and the inverted '
                 'p101-oos-ok carrier follows the forced value; '
-                'unforce_point clears the badge and the restored held '
-                'value reads at Good quality; both commands journal as '
-                'settled receipts attributed to qa-lane')
+                'unforce_point clears the badge and re-stamps the '
+                'held image Good on the same observation — the '
+                'released sample reads the persisted stamp and the '
+                'p101-oos-ok cone untaints, and the tracking '
+                'standby\'s adopted snapshot shows the same '
+                'post-release state — before the restore write '
+                'returns the pre-force held value; both commands '
+                'journal as settled receipts attributed to qa-lane')
     try:
         # Self-contained on either role layout, like evidence-capture:
         # replayed alone the rig is fresh (ctrl-a active), while the
@@ -4086,8 +4118,31 @@ def scenario_force_release(ctx):
                           time.monotonic() + 30)
         if active is None:
             return case.finish('failed', 'no peer reports role=active')
-        base = ctx[active]
-        case.observe('forcing against ' + active + ' (' + base + ')')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        case.observe('forcing against ' + active + ' (' + base
+                     + '); tracking peer ' + peer + ' (' + peer_base
+                     + ')')
+
+        # The standby-parity leg needs a settled pair: without a
+        # tracking peer the adopted-state check cannot be exercised.
+        def converged():
+            try:
+                report = _role(ctx, peer_base)
+            except Exception:
+                return None
+            sync = report.get('sync') or {}
+            return report if 'tracking' in sync else None
+
+        tracking = wait_for(converged, time.monotonic() + FORCE_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-peer-role.json',
+                            {'peer': peer, 'report': tracking})
+        case.evidence('file', ref, 'the tracking peer\'s role report')
+        if not tracking:
+            return case.finish('inconclusive', 'the peer never '
+                               'reported tracking convergence — the '
+                               'standby parity leg cannot be exercised')
 
         _, signals = http_json('GET', base + '/signals')
         ref = save_evidence(ctx['evidence_dir'],
@@ -4217,11 +4272,72 @@ def scenario_force_release(ctx):
                                'the forces badge never cleared after '
                                'unforce_point')
 
-        # The held-value rule resumed on release; restamping the held
-        # value through the receipted write path produces the Good read
-        # the case requires — a force still standing would re-substitute
-        # on the next scan, so this read persisting alongside an empty
-        # forces list is what proves the release took.
+        # Finding #498's pinned regression: the release boundary
+        # re-stamps the held image Good — the force's last stamp
+        # persists as the held sample — and the inverted p101-oos-ok
+        # cone untaints on the same observation. A released point
+        # still stamped Substituted here is the stuck image the
+        # finding reported; the restore write below must not be what
+        # papers it over.
+        def release_recovered():
+            try:
+                snap = _snapshot(ctx, base)
+            except Exception:
+                return None
+            observed['release_recovered'] = snap
+            return not _release_recovery_unmet(
+                snap, target, follower, forced_value, held) and snap
+
+        if not wait_for(release_recovered,
+                        time.monotonic() + FORCE_DEADLINE):
+            unmet = _release_recovery_unmet(
+                observed.get('release_recovered') or {},
+                target, follower, forced_value, held)
+            return case.finish('failed', 'the released point did not '
+                               'recover: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-release-recovered.json',
+                            observed.get('release_recovered') or {})
+        case.evidence('file', ref, 'the released snapshot before the '
+                      'restore write — held image at Good, cone '
+                      'untainted')
+        case.observe('released: point ' + str(target) + ' reads '
+                     + str(forced_value) + ' at Good with the '
+                     'p101-oos-ok cone untainted at ' + str(held)
+                     + ' — no restamp write needed')
+
+        # The finding tainted the tracking standby too: its adopted
+        # snapshot must carry the same post-release state — never a
+        # permanently Substituted cone on either peer.
+        def peer_recovered():
+            try:
+                snap = _snapshot(ctx, peer_base)
+            except Exception:
+                return None
+            observed['peer_recovered'] = snap
+            return not _release_recovery_unmet(
+                snap, target, follower, forced_value, held) and snap
+
+        if not wait_for(peer_recovered,
+                        time.monotonic() + FORCE_DEADLINE):
+            unmet = _release_recovery_unmet(
+                observed.get('peer_recovered') or {},
+                target, follower, forced_value, held)
+            return case.finish('failed', 'the tracking standby\'s '
+                               'adopted snapshot never showed the '
+                               'released state: ' + ' + '.join(unmet))
+        ref = save_evidence(ctx['evidence_dir'],
+                            'force-release-peer-recovered.json',
+                            observed.get('peer_recovered') or {})
+        case.evidence('file', ref, 'the tracking standby\'s adopted '
+                      'snapshot carrying the same recovered state')
+        case.observe('the tracking standby\'s adopted snapshot '
+                     'matches: point ' + str(target) + ' at Good, '
+                     'the cone untainted')
+
+        # The restore step: the release is proven above, so this
+        # receipted write only restamps the pre-force held value —
+        # later scenarios find the rig in its prior state.
         status, receipt = http_json(
             'POST', base + '/command',
             {'command': {'write_value': {
@@ -5980,6 +6096,584 @@ def scenario_field_fault(ctx):
 
 
 # --------------------------------------------------------------------
+# The backup-instrument-health annunciation (WW-OPS-003's redundant-
+# measurement clause — the station alarm set's latent-degradation
+# leg): issue #505's wiring ships in the deployed fixture, so a
+# backup-side fault is producible through the plant protocol's
+# inject_fault on the backup field point — the fault applies at the
+# read seam, independent of which dynamics element writes the value.
+# With the deployed pair settled and tracking, the injected non-Good
+# quality must surface through the failover-select's backup_unhealthy
+# output and the wired managed bool-latching alarm's standing and
+# unacknowledged flags — each transition journaled on its
+# declared-journaled point — while backup_active stays clear, the
+# selection keeps serving the primary, and no role change follows. The
+# receipted ack settles applied and journals attributed; clearing the
+# fault lands the journaled return transitions; the rig is restored
+# for later cases. The complementary primary-faulted leg stays with
+# #463 — this leg faults only the backup.
+
+BACKUP_HEALTH_DEADLINE = 30   # bound on each surfacing/settlement wait
+BACKUP_HEALTH_ACTOR = 'qa-lane'
+
+
+def _tracking_peer(ctx, active):
+    """The pair endpoint other than `active` reporting role=standby
+    with tracking convergence — the deployed pair's standby half — or
+    None while unsettled, unreachable, or unconverged."""
+    for name in ('active', 'standby'):
+        if name == active or ctx.get(name) is None:
+            continue
+        try:
+            report = _role(ctx, ctx[name])
+        except Exception:
+            continue
+        sync = report.get('sync')
+        if report.get('role') == 'standby' and isinstance(sync, dict) \
+                and 'tracking' in sync:
+            return name
+    return None
+
+
+def _journal_point_changes(journal):
+    """{point: [to-value, ...]} the point_changed entries a served
+    `GET /journal` payload carries — the durable transition record the
+    declared-journaled points land."""
+    changes = {}
+    for entry in _journal_list(journal):
+        change = (entry.get('event') or {}).get('point_changed')
+        if isinstance(change, dict):
+            changes.setdefault(change.get('point'), []) \
+                .append(change.get('to'))
+    return changes
+
+
+def scenario_backup_health(ctx):
+    """A backup-only field fault annunciates through the wired alarm
+    set — journaled, acknowledged through the receipted path, and
+    cleared — while the failover selection and the pair's roles never
+    move."""
+    case = Case('backup-health',
+                'Backup-instrument degradation annunciates without '
+                'failover',
+                'with the deployed pair settled and tracking, an '
+                'injected non-Good quality on the level-backup field '
+                'input asserts the failover-select\'s backup_unhealthy '
+                'output and stands the wired managed alarm '
+                'unacknowledged — each transition journaled on its '
+                'declared-journaled point — while backup_active stays '
+                'clear, the selection keeps serving the primary, and '
+                'no role change follows; the receipted ack settles '
+                'applied and journals attributed to the lane actor, '
+                'and clearing the fault lands the journaled return '
+                'transitions')
+    stream = None
+    injected = None      # the backup field point, while faulted
+    restore_ack = None   # (base, point) while the ack write stands
+    try:
+        # The leg needs the deployed pair settled and tracking — the
+        # pre-switch window where a converged standby could take over,
+        # so the unused backup leg's loss is exactly what must
+        # annunciate before it is needed.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        tracking = wait_for(lambda: _tracking_peer(ctx, active),
+                            time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                            interval=POLL_INTERVAL)
+        if tracking is None:
+            return case.finish('inconclusive',
+                               'no tracking peer — the deployed pair '
+                               'never settled')
+        case.observe('settled pair: ' + active + ' active, '
+                     + tracking + ' tracking')
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'backup-health-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the '
+                      'annunciation path')
+        names = {'level-primary': 'primary',
+                 'level-backup': 'backup',
+                 'level-selected': 'selected',
+                 'backup-active': 'backup_active',
+                 'backup-unhealthy': 'unhealthy',
+                 'backup-unhealthy-in': 'unhealthy_in',
+                 'backup-unhealthy-ack': 'ack',
+                 'backup-unhealthy-alarm': 'alarm',
+                 'backup-unhealthy-unacknowledged': 'unack'}
+        entries = {entry.get('name'): entry
+                   for entry in signals.get('points', [])
+                   if entry.get('name') in names}
+        missing = sorted(set(names) - set(entries))
+        if missing:
+            return case.finish('inconclusive', 'the deployed model '
+                               'lacks the backup-health annunciation '
+                               'wiring — no signals '
+                               + ', '.join(missing))
+        ack_entry = entries['backup-unhealthy-ack']
+        if not ack_entry.get('writable') \
+                or ack_entry.get('direction') != 'in' \
+                or ack_entry.get('value_type') != 'bool':
+            return case.finish('inconclusive', 'the '
+                               'backup-unhealthy-ack point is not the '
+                               'alarm\'s writable bool ack input: '
+                               + json.dumps(ack_entry)[:300])
+        points = {names[name]: entry.get('point')
+                  for name, entry in entries.items()}
+        case.observe('annunciation path: '
+                     + json.dumps({name: entry.get('point')
+                                   for name, entry in
+                                   sorted(entries.items())},
+                                  sort_keys=True))
+
+        if ctx.get('plant') is None:
+            return case.finish('inconclusive',
+                               'the run publishes no plant endpoint')
+        stream = _plant_connect(ctx)
+        field = _field_inputs(stream)
+        if points['backup'] not in field:
+            return case.finish('inconclusive', 'the level-backup '
+                               'signal\'s point ' + str(points['backup'])
+                               + ' is not a field in-point the plant '
+                               'serves')
+        case.observe('plant protocol connected; backup field point '
+                     + str(points['backup']))
+
+        last = {}
+
+        def healthy():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            if _quality_key((_point_sample(snap, points['backup'])
+                             or {}).get('quality')) != 'good' \
+                    or _quality_key((_point_sample(snap,
+                                                 points['primary'])
+                                     or {}).get('quality')) != 'good':
+                return None
+            for key in ('unhealthy', 'backup_active', 'alarm', 'unack'):
+                if _point_value(snap, points[key]) is not False:
+                    return None
+            return snap
+
+        baseline = wait_for(healthy,
+                            time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                            interval=POLL_INTERVAL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'backup-health-baseline.json',
+                            baseline or last.get('snap') or {})
+        case.evidence('file', ref, 'the settled healthy baseline')
+        if baseline is None:
+            return case.finish('inconclusive', 'the annunciation path '
+                               'never read settled-healthy ahead of '
+                               'the injection')
+
+        # The journal cursor ahead of the injection: transitions and
+        # settlements from earlier legs already sit in the retained
+        # tail — this leg's records are the ones above the floor.
+        _, journal0 = http_json('GET', base + '/journal?since=0')
+        floor = max((entry.get('seq') or 0
+                     for entry in _journal_list(journal0)
+                     if isinstance(entry, dict)), default=0)
+
+        verdict = _plant_request(
+            stream, {'op': 'inject_fault', 'point': points['backup'],
+                     'fault': {'quality': {'bad': 'device_fault'}}})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'inject_fault on the backup '
+                               'point refused: '
+                               + json.dumps(verdict)[:300])
+        injected = points['backup']
+        case.observe('bad:device_fault injected on backup field point '
+                     + str(injected) + ' — the fault applies at the '
+                     'read seam, independent of the dynamics element '
+                     'writing the value')
+
+        def asserted():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            if _quality_key((_point_sample(snap, points['backup'])
+                             or {}).get('quality')) == 'good':
+                return None
+            if _quality_key((_point_sample(snap, points['primary'])
+                             or {}).get('quality')) != 'good':
+                return None
+            if _point_value(snap, points['unhealthy']) is not True \
+                    or _point_value(snap, points['alarm']) is not True \
+                    or _point_value(snap, points['unack']) is not True:
+                return None
+            if _point_value(snap, points['backup_active']) is not False:
+                return None
+            if _point_value(snap, points['selected']) \
+                    != _point_value(snap, points['primary']):
+                return None
+            return snap
+
+        hit = wait_for(asserted, time.monotonic()
+                       + BACKUP_HEALTH_DEADLINE, interval=POLL_INTERVAL)
+        snap = last.get('snap') or {}
+        ref = save_evidence(
+            ctx['evidence_dir'], 'backup-health-asserted.json',
+            {'tick': snap.get('tick'),
+             'samples': {name: _point_sample(snap, entry.get('point'))
+                         for name, entry in sorted(entries.items())}})
+        case.evidence('file', ref, 'the served snapshot under the '
+                      'backup fault')
+        if not hit:
+            unmet = []
+            if _quality_key((_point_sample(snap, points['backup'])
+                             or {}).get('quality')) == 'good':
+                unmet.append('the backup point still serves Good')
+            if _quality_key((_point_sample(snap, points['primary'])
+                             or {}).get('quality')) != 'good':
+                unmet.append('the primary degraded alongside the '
+                             'injected backup')
+            if _point_value(snap, points['unhealthy']) is not True:
+                unmet.append('backup_unhealthy never asserted')
+            if _point_value(snap, points['alarm']) is not True:
+                unmet.append('the wired alarm never stood')
+            if _point_value(snap, points['unack']) is not True:
+                unmet.append('the alarm never latched unacknowledged')
+            if _point_value(snap, points['backup_active']) is not False:
+                unmet.append('backup_active asserted — the selection '
+                             'moved to the backup')
+            if _point_value(snap, points['selected']) \
+                    != _point_value(snap, points['primary']):
+                unmet.append('the selection left the primary')
+            return case.finish('failed', 'the backup-only fault never '
+                               'annunciated: ' + '; '.join(unmet))
+        case.observe('backup point ' + str(points['backup']) + ' serves '
+                     + _quality_key(
+                         (_point_sample(hit, points['backup']) or {})
+                         .get('quality'))
+                     + '; backup_unhealthy asserted, the wired alarm '
+                     'standing unacknowledged, backup_active clear, '
+                     'the selection still on the primary')
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'a backup-side field fault '
+                               'moved the active role — a field fault '
+                               'is not peer loss')
+
+        # The durable half: each assertion lands its point_changed on
+        # the declared-journaled point — backup_unhealthy, alarm,
+        # unacknowledged — while the selection's backup_active and the
+        # pair's roles record nothing.
+        found = {}
+        violations = {}
+
+        def journaled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            changes = _journal_point_changes(journal)
+            for key in ('unhealthy', 'alarm', 'unack'):
+                if {'bool': True} in changes.get(points[key], []):
+                    found[key] = True
+            if {'bool': True} in changes.get(points['backup_active'],
+                                             []):
+                violations['source-transition'] = \
+                    'backup_active journaled a source transition'
+            if changes.get(points['unhealthy_in']):
+                violations['unjournaled-carrier'] = \
+                    'the non-journaled carrier point ' \
+                    + str(points['unhealthy_in']) \
+                    + ' journaled a transition'
+            if any('role_changed' in (entry.get('event') or {})
+                   for entry in _journal_list(journal)):
+                violations['role-change'] = 'a role_changed event ' \
+                    'journaled under a backup-only fault'
+            if len(found) == 3 or violations:
+                return journal
+            return None
+
+        wait_for(journaled, time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'backup-health-journal.json',
+            {'floor': floor, 'asserted': sorted(found),
+             'violations': sorted(violations),
+             'entries': last.get('journal') or []})
+        case.evidence('file', ref, 'the journaled transitions above '
+                      'the pre-injection floor')
+        if violations:
+            return case.finish('failed', '; '.join(
+                violations[key] for key in sorted(violations)))
+        missing = [key for key in ('unhealthy', 'alarm', 'unack')
+                   if key not in found]
+        if missing:
+            return case.finish('failed', 'the served journal never '
+                               'recorded point_changed to true on: '
+                               + ', '.join(missing))
+        case.observe('journaled: backup_unhealthy, alarm, and '
+                     'unacknowledged transitions landed on the '
+                     'declared-journaled points; no source transition, '
+                     'no role change')
+
+        # The acknowledgment leg: a receipted write on the alarm's
+        # declared ack input clears the latch while the condition still
+        # stands — the managed alarm's ack-dominates rule — and the
+        # settlement journals attributed.
+        write = {'point': points['ack'], 'kind': 'bool',
+                 'value': {'bool': True}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': write},
+             'actor': BACKUP_HEALTH_ACTOR})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'backup-health-ack-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the ack submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'the ack write was refused: '
+                               + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+        restore_ack = (base, points['ack'])
+
+        def acked():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            if _point_value(snap, points['unack']) is not False \
+                    or _point_value(snap, points['alarm']) is not True:
+                return None
+            return snap
+
+        acknowledged = wait_for(acked, time.monotonic()
+                                + BACKUP_HEALTH_DEADLINE,
+                                interval=POLL_INTERVAL)
+        snap = last.get('snap') or {}
+        ref = save_evidence(
+            ctx['evidence_dir'], 'backup-health-acknowledged.json',
+            {'tick': snap.get('tick'),
+             'samples': {name: _point_sample(snap, entry.get('point'))
+                         for name, entry in
+                         (('backup-unhealthy-alarm',
+                           entries['backup-unhealthy-alarm']),
+                          ('backup-unhealthy-unacknowledged',
+                           entries['backup-unhealthy-unacknowledged']))}})
+        case.evidence('file', ref, 'the snapshot after the settled '
+                      'ack — the latch cleared while the condition '
+                      'stands')
+        if not acknowledged:
+            return case.finish(
+                'failed', 'the settled ack never cleared the '
+                'unacknowledged latch while the alarm stood: last '
+                'served unacknowledged='
+                + json.dumps(_point_sample(snap, points['unack']))
+                + ' alarm='
+                + json.dumps(_point_sample(snap, points['alarm']))[:300])
+
+        settled = {}
+
+        def settled_journal():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            for receipt_ in _settled_receipts(journal):
+                if (receipt_.get('command') or {}).get('write_value') \
+                        == write:
+                    settled['receipt'] = receipt_
+            if {'bool': False} in _journal_point_changes(journal) \
+                    .get(points['unack'], []):
+                settled['unack_cleared'] = True
+            if 'receipt' in settled and 'unack_cleared' in settled:
+                return journal
+            return None
+
+        wait_for(settled_journal,
+                 time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'backup-health-ack-journal.json',
+            {'receipt': settled.get('receipt'),
+             'unack_cleared': settled.get('unack_cleared')})
+        case.evidence('file', ref, 'the journaled ack settlement')
+        settled_receipt = settled.get('receipt')
+        if settled_receipt is None:
+            return case.finish('failed', 'the ack\'s CommandSettled '
+                               'never journaled')
+        if 'applied' not in (settled_receipt.get('outcome') or {}):
+            return case.finish('failed', 'the ack receipt did not '
+                               'settle applied: '
+                               + json.dumps(settled_receipt
+                                            .get('outcome'))[:200])
+        if settled_receipt.get('actor') != BACKUP_HEALTH_ACTOR:
+            return case.finish('failed', 'the journaled ack receipt '
+                               'is unattributed: actor='
+                               + json.dumps(settled_receipt
+                                            .get('actor')))
+        if not settled.get('unack_cleared'):
+            return case.finish('failed', 'the unacknowledged flag\'s '
+                               'clearing never journaled')
+        case.observe('ack settled applied, journaled attributed to '
+                     + BACKUP_HEALTH_ACTOR + ', unacknowledged '
+                     'cleared while the alarm stood')
+
+        # The recovery leg: clearing the fault returns the backup
+        # sample to Good and lands the return transitions — the
+        # health output and the standing alarm dropping on their
+        # declared-journaled points — with the selection unmoved.
+        verdict = _plant_request(stream, {'op': 'clear_fault',
+                                          'point': points['backup']})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'clear_fault on the backup '
+                               'point refused: '
+                               + json.dumps(verdict)[:300])
+        injected = None
+
+        def recovered():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            if _quality_key((_point_sample(snap, points['backup'])
+                             or {}).get('quality')) != 'good':
+                return None
+            if _point_value(snap, points['unhealthy']) is not False \
+                    or _point_value(snap, points['alarm']) is not False \
+                    or _point_value(snap, points['unack']) is not False \
+                    or _point_value(snap, points['backup_active']) \
+                    is not False:
+                return None
+            if _point_value(snap, points['selected']) \
+                    != _point_value(snap, points['primary']):
+                return None
+            return snap
+
+        hit = wait_for(recovered, time.monotonic()
+                       + BACKUP_HEALTH_DEADLINE, interval=POLL_INTERVAL)
+        snap = last.get('snap') or {}
+        ref = save_evidence(
+            ctx['evidence_dir'], 'backup-health-recovered.json',
+            {'tick': snap.get('tick'),
+             'samples': {name: _point_sample(snap, entry.get('point'))
+                         for name, entry in sorted(entries.items())}})
+        case.evidence('file', ref, 'the snapshot after the clear')
+        if not hit:
+            return case.finish(
+                'failed', 'the annunciation never returned after the '
+                'clear: last served backup_unhealthy='
+                + json.dumps(_point_sample(snap, points['unhealthy']))
+                + ' alarm='
+                + json.dumps(_point_sample(snap, points['alarm']))
+                + ' backup='
+                + json.dumps(_point_sample(snap, points['backup']))
+                [:300])
+
+        returned = {}
+
+        def return_journaled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            changes = _journal_point_changes(journal)
+            for key in ('unhealthy', 'alarm'):
+                if {'bool': False} in changes.get(points[key], []):
+                    returned[key] = True
+            return len(returned) == 2 and journal
+
+        wait_for(return_journaled,
+                 time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'],
+            'backup-health-return-journal.json',
+            {'floor': floor, 'returned': sorted(returned)})
+        case.evidence('file', ref, 'the journaled return transitions')
+        missing = [key for key in ('unhealthy', 'alarm')
+                   if key not in returned]
+        if missing:
+            return case.finish('failed', 'the return transition never '
+                               'journaled on: ' + ', '.join(missing))
+        case.observe('recovery journaled: backup_unhealthy and the '
+                     'standing alarm returned false on their '
+                     'declared-journaled points')
+
+        # Restore the rig for later cases: the operator ack point back
+        # to its declared initial through the same receipted path —
+        # a standing true would hold the latch clear for every later
+        # leg — and the field fault is already cleared.
+        restore = {'point': points['ack'], 'kind': 'bool',
+                   'value': {'bool': False}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': restore},
+             'actor': BACKUP_HEALTH_ACTOR})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'backup-health-restored.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the ack-restore receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'the ack restore write was '
+                               'refused: ' + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+
+        def restored():
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            return _point_value(snap, points['ack']) is False and snap
+
+        if not wait_for(restored,
+                        time.monotonic() + BACKUP_HEALTH_DEADLINE,
+                        interval=POLL_INTERVAL):
+            return case.finish('failed', 'the ack point never '
+                               'returned to false — the rig is left '
+                               'with the ack standing')
+        restore_ack = None
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'the active role moved '
+                               'during the leg')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+    finally:
+        # The injected point is the run's shared field and the ack
+        # point the alarm's operator input: a case that leaves either
+        # standing poisons every later scenario.
+        if stream is not None:
+            if injected is not None:
+                try:
+                    _plant_request(stream, {'op': 'clear_fault',
+                                            'point': injected})
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        if restore_ack is not None:
+            rbase, rpoint = restore_ack
+            try:
+                http_json('POST', rbase + '/command',
+                          {'command': {'write_value': {
+                              'point': rpoint, 'kind': 'bool',
+                              'value': {'bool': False}}},
+                           'actor': BACKUP_HEALTH_ACTOR})
+            except Exception:
+                pass
+
+
+# --------------------------------------------------------------------
 # The bounded command-admission contract (decision 83's ingress half):
 # commands submitted faster than the scan boundary drains them must each
 # take a structured receipt — a settlement or the named queue_full
@@ -6550,6 +7244,11 @@ def scenario_dcs_ctl(ctx):
 # pre-switch window — ctrl-a active, ctrl-b tracking — driving its
 # own a->b leg for the forced-point evidence and failing back to the
 # launch roles before the tune case runs its switch. The
+# backup-health case sits in the same restored window: only with the
+# pair settled and tracking does a backup-only field fault have a
+# standby whose takeover the annunciation must precede — the leg
+# injects, annunciates, acks, clears, and restores without moving the
+# selection or the roles. The
 # parameter-tune case also runs ahead of the
 # failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
 # so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
@@ -6582,7 +7281,8 @@ def scenario_dcs_ctl(ctx):
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_stale_freshness, scenario_force_carryover,
-             scenario_parameter_tune_carryover, scenario_failover,
+             scenario_backup_health, scenario_parameter_tune_carryover,
+             scenario_failover,
              scenario_checkpoint_negotiation,
              scenario_doomed_startup_claim,
              scenario_incompatible_revision, scenario_model_revision,
