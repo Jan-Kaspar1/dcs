@@ -43,7 +43,10 @@ use std::thread::{self, JoinHandle};
 
 mod support;
 
-use support::{SimTcp, controller_model, image_value, kill, pump, spawn_controller, spawn_plant};
+use support::{
+    SimTcp, controller_model, image_value, kill, pump, settled_receipts, sim_tcp_document,
+    spawn_controller, spawn_plant, write_model,
+};
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out, an analog-input scaling
@@ -75,6 +78,10 @@ const M: u64 = 10;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
+/// An image-carried writable point the fenced-command test layers onto
+/// the tank-loop document — the `write_value` surface that settles at
+/// the scan boundary without a field transaction.
+const HELD: PointId = PointId(30);
 
 /// A controllable network path for the checkpoint-pull heartbeat: while
 /// `partitioned` is clear the relay forwards each connection to the
@@ -1122,6 +1129,218 @@ fn a_restarted_superseded_active_fences_the_promoted_peer_into_demotion() {
     assert!(
         restarted_process.child.try_wait().unwrap().is_none(),
         "the restarted owner exited"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fenced-peer command-audit test — the QA finding
+/// `fenced-unscanned-peer-accepts-commands`. A peer superseded out of
+/// the field still reports `active` and accepts commands until its
+/// detection scan, and the commands that boundary settles land on an
+/// image the field never saw — the surviving owner does not carry
+/// them. The fencing demotion must reconcile those settlements —
+/// `rejected`/`superseded`, not `applied` — so the served receipts and
+/// the journaled `command_settled` entries never tell an operator a
+/// lost command took effect.
+#[test]
+fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
+    let dir = std::env::temp_dir().join(format!("dcs-fenced-commands-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    // The tank-loop document re-pointed at the shared plant, plus one
+    // writable internal point — the command surface whose boundary
+    // settlement never touches the field.
+    let mut document = sim_tcp_document(MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice);
+    document["io_points"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": HELD.0,
+            "direction": "in",
+            "value_type": "bool",
+            "initial": { "bool": false },
+            "writable": true,
+        }));
+    let pair_model = write_model(&dir, "pair.json", &document).0;
+
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences this attachment from boot, so every
+    // later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // The standby's promotion preempts the field claim — fencing the
+    // launched active, which has not scanned under the lost claim yet
+    // and still reports `active`: the finding's window.
+    standby.promote().unwrap();
+    let promoted = standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    let carried = field.read(VALVE).unwrap().value;
+    assert_eq!(carried, image_value(&promoted, VALVE));
+    assert_eq!(
+        active.role().unwrap().role,
+        Role::Active,
+        "the fenced peer reports active until its detection scan"
+    );
+
+    // Commands posted inside the window are receipted `accepted` —
+    // queue admission is honest about that much.
+    let held_write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let tune = Command::SetParameter {
+        component: "pid:2".to_string(),
+        name: "kp".to_string(),
+        value: Value::Float(9.9),
+    };
+    let field_write = Command::WriteValue {
+        point: SETPOINT,
+        kind: ValueKind::Float,
+        value: Value::Float(60.0),
+    };
+    for command in [&held_write, &tune, &field_write] {
+        let receipt = active.command(command).unwrap();
+        assert!(
+            matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+            "the finding's window must receipt accepted: {receipt:?}"
+        );
+    }
+
+    // The detection scan: the boundary applies the queued commands onto
+    // the superseded image, then the field write meets the fence and
+    // the demotion runs — reconciling the settlements before the
+    // journal echoes them.
+    let fenced = active.advance(1).unwrap();
+    assert_eq!(
+        fenced.io_health.last_error.map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the fenced peer's write must be refused at the field: {:?}",
+        fenced.io_health
+    );
+    let demoting = active.role().unwrap();
+    assert_eq!(demoting.role, Role::Demoting, "{demoting:?}");
+    assert_eq!(demoting.tick, fenced.tick);
+
+    // No settlement may report the phantom application — not on the
+    // served receipts, not in the journaled `command_settled` echo. The
+    // boundary's own refusals stand named: the field-bound write met
+    // the fence itself and settles `driver_rejected`/`fenced`.
+    let outcome_of = |command: &Command| -> Option<CommandOutcome> {
+        active
+            .receipts()
+            .unwrap()
+            .iter()
+            .find(|receipt| &receipt.command == command)
+            .map(|receipt| receipt.outcome.clone())
+    };
+    assert_eq!(
+        outcome_of(&held_write),
+        Some(CommandOutcome::Rejected {
+            reason: CommandError::Superseded { point: Some(HELD) }
+        }),
+        "the image write must settle superseded, not applied"
+    );
+    assert_eq!(
+        outcome_of(&tune),
+        Some(CommandOutcome::Rejected {
+            reason: CommandError::Superseded { point: None }
+        }),
+        "the parameter tune must settle superseded, not applied"
+    );
+    assert!(
+        matches!(
+            outcome_of(&field_write),
+            Some(CommandOutcome::Rejected {
+                reason: CommandError::DriverRejected { point, error },
+            }) if point == SETPOINT && error == IoError::Fenced(SETPOINT)
+        ),
+        "the field write's own fenced refusal stands: {:?}",
+        outcome_of(&field_write)
+    );
+    let journal = active.journal(0).unwrap();
+    for receipt in settled_receipts(&journal) {
+        if receipt.command == held_write || receipt.command == tune {
+            assert!(
+                matches!(
+                    receipt.outcome,
+                    CommandOutcome::Rejected {
+                        reason: CommandError::Superseded { .. }
+                    }
+                ),
+                "the journal must not echo a phantom application: {receipt:?}"
+            );
+        }
+    }
+    assert!(
+        journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost { point } if point == VALVE
+        )),
+        "the fenced owner's journal must record the claim loss: {journal:?}"
+    );
+
+    // The surviving owner and the field never carried any of it.
+    let owner = standby.snapshot().unwrap();
+    assert_eq!(
+        image_value(&owner, HELD),
+        Value::Bool(false),
+        "the surviving owner's image must not carry the superseded write"
+    );
+    assert_eq!(
+        owner
+            .parameters
+            .iter()
+            .find(|parameters| parameters.name == "pid:2")
+            .and_then(|parameters| parameters.values.get("kp")),
+        Some(&Value::Float(0.5)),
+        "the surviving owner's tuning must not carry the superseded parameter"
+    );
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        carried,
+        "the fenced scan staged nothing onto the field"
+    );
+    assert_eq!(
+        field.read(SETPOINT).unwrap().value,
+        Value::Float(50.0),
+        "the fenced peer's setpoint write never reached the field"
+    );
+
+    // The first quiesced scan settles `standby` — the pending queue
+    // was drained by the reconciliation, so nothing else settles — and
+    // the promoted peer keeps owning the field alone.
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    let owner = standby.advance(1).unwrap();
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        image_value(&owner, VALVE),
+        "the field must carry only the promoted owner's writes"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
