@@ -7,11 +7,26 @@ from . import review
 
 DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests']
 
+# Verified no-cost backends only; anything else is a rejected paid fallback.
+FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',
+               'opencode/union-alpha',
+               'opencode/muse-spark-1.3-contributor-free',
+               'opencode/muse-spark-1.2-contributor-free',
+               'opencode/ling-3.0-flash-fin-free',
+               'opencode/mimo-v2.5-free',
+               'opencode/nemotron-3-ultra-free',
+               'opencode/nemotron-3.5-lightning-free')
+
 def load(path=None):
     path = Path(path or Path.home() / '.config/dcs-agents/config.json')
     config = json.loads(path.read_text())
-    if config.get('model', 'swe-2-high') != 'swe-2-high':
-        raise ValueError('This installation permits only swe-2-high')
+    models = config.get('models') or [config.get('model', 'swe-2-high')]
+    if not isinstance(models, list) or not models or any(not isinstance(m, str) or not m for m in models):
+        raise ValueError('models must be a non-empty list of model identifiers')
+    unknown = [m for m in models if m not in FREE_MODELS]
+    if unknown:
+        raise ValueError('This installation permits only verified free models; rejected: ' + ', '.join(unknown))
+    config['models'] = models
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
