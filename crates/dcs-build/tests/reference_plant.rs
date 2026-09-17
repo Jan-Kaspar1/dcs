@@ -34,7 +34,15 @@
 //! answering the named `not_converged` refusal with no field hand-off,
 //! a receipted write to the tracking standby answering the named
 //! `not_active` rejection with no phantom effect or audit, and the
-//! same promote succeeding once the standby tracks — the `consumers`
+//! same promote succeeding once the standby tracks — plus the pair
+//! contract's takeover leg: with the pair tracking and the pump group
+//! holding a duty demand, receipted `p101-mode`/`p101-hand`/`p101-oos`
+//! writes through the active's `POST /command` producing the declared
+//! manual leg — group-demand exclusion, the hand-driven run under the
+//! thermal/moisture guards, a plant-protocol protection input's proven
+//! fault and managed alarm, the out-of-service inhibit, and the
+//! restore returning the pump to group control with each attributed
+//! transition journaled in order — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -58,7 +66,7 @@
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
 //! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
-//! `refusal-failed`, and the
+//! `refusal-failed`, `takeover-failed`, and the
 //! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -658,6 +666,60 @@ fn a_doctored_write_expectation_reports_refusal_failed() {
     assert!(
         stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
         "expected the named not_active evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored takeover leg asserting the pump still follows the
+/// group while `mode` stands manual is the `takeover-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag and
+/// refusal tests use. The driver's `follows-group` tamper flips the
+/// leg's own expectation; the honest manual selection — the auto leg
+/// reporting manual with the delivered command off the group's
+/// request — must fail it naming the actual readings, never a
+/// silently unexercised pass.
+#[test]
+fn a_doctored_follows_group_expectation_reports_takeover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-takeover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/takeover.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "follows-group",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the manual-takeover leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored follows-group expectation passed the takeover leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not follow the group"),
+        "expected the named follows-group evidence, got:\n{stderr}"
     );
 }
 

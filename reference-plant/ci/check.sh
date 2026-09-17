@@ -99,6 +99,24 @@
 #                field writes, receipts, and journal undisturbed
 #                throughout; two passes produce identical digests
 #                (refusal-failed, refusal-nondeterministic)
+#                The stage's takeover leg, ci/takeover.py on the same
+#                declared deployment: with the pair tracking and the
+#                pump group holding a duty demand on pump 1, the
+#                emitted model's declared per-pump mode seam is
+#                exercised through the receipted path — p101-mode
+#                cutting the delivered command off the group's cmd_1
+#                with the auto-leg carriers reporting the manual
+#                selection and the pump-group status reflecting the
+#                exclusion, p101-hand running the pump on the operator
+#                demand while the declared thermal/moisture guards
+#                still gate it — the protection input driven through
+#                the plant protocol asserting the proven fault and its
+#                managed alarm — p101-oos asserting the maintenance
+#                inhibit, and the restore returning the pump to group
+#                control with the served journal carrying each
+#                attributed transition in order; two passes produce
+#                identical digests (takeover-failed,
+#                takeover-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -717,6 +735,48 @@ fi
     || fail "refusal-unchecked: the expect-applied case did not report its named diagnostic: $out"
 echo "  expect-applied: reported, refusal-failed"
 
+# The pair contract's manual-takeover leg, on the same
+# manifest-declared deployment: ci/takeover.py converges the pair and
+# drives the simulated well until the pump group holds a duty demand on
+# pump 1, then exercises the emitted model's declared per-pump mode
+# seam (WW-ENG-003, WW-OPS-001, WW-CTL-002) through the receipted path
+# — p101-mode cutting the delivered command off the group's cmd_1 with
+# the auto-leg carriers reporting the manual selection and the
+# pump-group status handing the standing demand to pump 2; p101-hand
+# running the pump on the operator demand while the declared
+# thermal/moisture guards still gate it, the protection input driven
+# through the plant protocol asserting the proven fault and its
+# managed alarm; p101-oos asserting the maintenance inhibit — then
+# restores the pump to group control, auditing the active's served
+# journal for each attributed transition in order. Two passes must
+# produce identical digests.
+run_takeover() {
+    python3 ci/takeover.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_takeover)" \
+    || fail "takeover-failed: the manual-takeover leg did not hold — its evidence lines are above"
+SECOND="$(run_takeover)" \
+    || fail "takeover-failed: the manual-takeover leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "takeover-nondeterministic: two takeover-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg asserting the delivered command still
+# follows the group while mode stands manual must surface the named
+# diagnostic — never a silently unexercised pass.
+if out="$(run_takeover --tamper follows-group 2>&1)"; then
+    fail "takeover-unchecked: a doctored follows-group expectation passed the takeover leg"
+fi
+[[ "$out" == *"did not follow the group"* ]] \
+    || fail "takeover-unchecked: the follows-group case did not report its named diagnostic: $out"
+echo "  follows-group: reported, takeover-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -724,7 +784,7 @@ echo "== consumers =="
 # platform checkout.
 for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/pair.py \
         ci/refusal.py ci/restart.py ci/schema_conformance.py \
-        ci/simulate.py README.md; do
+        ci/simulate.py ci/takeover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
