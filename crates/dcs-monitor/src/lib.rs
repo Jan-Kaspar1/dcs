@@ -290,13 +290,18 @@
 //! reporting `active`, so the point listing, trends, and journal are the
 //! one logical controller's, while the pair section renders per-peer
 //! role, convergence, and reachability — an unreachable peer is a named
-//! redundancy fault, not a plant fault. Commands submit only to the
+//! redundancy fault, not a plant fault. Two peers reporting `active` at
+//! once is the dual-active split-brain that contract makes impossible:
+//! the pair summary names it as a redundancy fault rather than rendering
+//! the pair healthy, and commands find no unique target — nothing is
+//! sent while the fault stands. Commands submit only to the
 //! settled-active peer; a `not_active` rejection — the command landed
 //! mid-transition — triggers a role re-poll and one retry. The contract
 //! endpoints answer cross-origin reads (`Access-Control-Allow-Origin: *`)
 //! so the page can reach a peer on another host. [`PairClient`] is the
 //! same pair view for in-process consumers — tests and tooling — and
-//! carries the testable half of the routing rules.
+//! carries the testable half of the routing rules, including the
+//! dual-active verdict through [`PairClient::health`].
 //!
 //! ## The plant overview
 //!
@@ -350,7 +355,7 @@ mod store;
 
 use crate::store::Store;
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
-pub use pair::{PairClient, PairError, PeerStatus, PeerView};
+pub use pair::{PairClient, PairError, PairHealth, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
 pub use store::{Publication, PublicationGap, PublicationPage};
 

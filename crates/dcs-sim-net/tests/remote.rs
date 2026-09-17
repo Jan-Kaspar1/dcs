@@ -13,7 +13,7 @@ use dcs_runtime::{
 use dcs_sim::{
     ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
 };
-use dcs_sim_net::{PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
+use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -502,6 +502,87 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
             new_a.write(PointId(20), Value::Float(5.0)),
             Err(IoError::Fenced(PointId(20)))
         );
+    });
+}
+
+#[test]
+fn a_second_attachment_claiming_a_held_token_is_flagged_shared() {
+    with_server(loopback_map(), |addr| {
+        let first = RemoteDriver::connect(addr).unwrap();
+        let second = RemoteDriver::connect(addr).unwrap();
+        let takeover = RemoteDriver::connect(addr).unwrap();
+
+        // The first claim of a token is the sole-owner grant.
+        assert_eq!(first.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
+        // A second connection claiming the held token is still granted —
+        // one owner's several attachments share a token by design — but
+        // flagged: the token cannot tell that attachment from a second
+        // field-owning process pinned to it, which would defeat the
+        // fencing silently.
+        assert_eq!(second.claim_writer(7).unwrap(), ClaimGrant::Shared);
+        // The shared grant writes: the flag reports the sharing, it does
+        // not refuse it.
+        first.write(PointId(20), Value::Float(1.0)).unwrap();
+        second.step(0.1).unwrap();
+
+        // `ensure_writer` joining a held token is flagged the same way —
+        // the raw protocol answer, as a re-attaching owner sees it.
+        let mut raw = BufReader::new(TcpStream::connect(addr).unwrap());
+        raw.get_mut()
+            .write_all(b"{\"op\":\"ensure_writer\",\"owner\":7}\n")
+            .unwrap();
+        let mut line = String::new();
+        raw.read_line(&mut line).unwrap();
+        let response: PlantResponse = serde_json::from_str(&line).unwrap();
+        assert_eq!(response, PlantResponse::ClaimedShared { owner: 7 });
+        raw.get_mut()
+            .write_all(b"{\"op\":\"step\",\"dt\":0.1}\n")
+            .unwrap();
+        line.clear();
+        raw.read_line(&mut line).unwrap();
+        let response: PlantResponse = serde_json::from_str(&line).unwrap();
+        assert!(matches!(response, PlantResponse::Stepped { .. }));
+
+        // A different token preempts unconditionally and unflagged — a
+        // takeover is the claim's ordinary shape, not a shared owner.
+        assert_eq!(takeover.claim_writer(8).unwrap(), ClaimGrant::Exclusive);
+        assert_eq!(
+            first.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+    });
+}
+
+#[test]
+fn the_shared_flag_tracks_live_holders_not_the_standing_claim() {
+    with_server(loopback_map(), |addr| {
+        let first = RemoteDriver::connect(addr).unwrap();
+        let second = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(first.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
+        assert_eq!(second.claim_writer(7).unwrap(), ClaimGrant::Shared);
+
+        // The second holder's disconnect releases only its hold — the
+        // claim itself keeps fencing claim-less attachments — and a
+        // re-claim of the token is exclusive again rather than flagged
+        // against a dead connection.
+        drop(second);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match first.claim_writer(7).unwrap() {
+                ClaimGrant::Exclusive => break,
+                ClaimGrant::Shared => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the dropped holder was not reaped within {deadline:?}"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        // The claim stands through it all: a claim-less attachment is
+        // still fenced out of field mutations.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
     });
 }
 

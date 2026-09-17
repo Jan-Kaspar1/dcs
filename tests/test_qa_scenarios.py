@@ -3425,6 +3425,8 @@ class CtlFeed:
         self.wrong_actor = False       # the journaled receipt loses the actor
         self.no_events = False         # the events read attributes nothing
         self.silent_accept = False     # the undeclared invoke applies
+        self.carryover = None          # a receipt an adopted checkpoint
+                                       # re-journals above the cursor
 
     @staticmethod
     def _ok(payload):
@@ -3474,7 +3476,8 @@ class CtlFeed:
         refused = self._refusal(command)
         if refused is None:
             receipt = {'command': command,
-                       'outcome': {'applied': {'tick': self.tick}},
+                       'outcome': {'accepted':
+                                   {'apply_tick': self.tick + 1}},
                        'actor': actor}
             rc, stderr = 0, ''
         else:
@@ -3484,10 +3487,24 @@ class CtlFeed:
             rc = 1
             stderr = 'dcs-ctl: ' + addr + ': command rejected: ' \
                 + next(iter(refused))
-        # Rejected receipts settle at submission and journal like
-        # applied ones — the real executor's durable record.
+        # An accepted command journals its applied echo at the promised
+        # tick; a rejected receipt is already final and echoes verbatim —
+        # the real executor's durable record. `carryover` injects the
+        # entry a checkpoint-adopted receipt re-journals on this peer —
+        # an earlier leg's identical command under its own actor —
+        # landing above the consumer's pre-submission cursor, ahead of
+        # this submission's own settlement.
         if not self.no_journal_entry:
+            if self.carryover is not None:
+                self.journal.append({'seq': self.next_seq,
+                                     'tick': self.tick,
+                                     'event': {'command_settled': {
+                                         'receipt': self.carryover}}})
+                self.next_seq += 1
+                self.carryover = None
             settled = dict(receipt)
+            if refused is None:
+                settled['outcome'] = {'applied': {'tick': self.tick + 1}}
             if self.wrong_actor:
                 settled['actor'] = 'qa-lane'
             self.journal.append({'seq': self.next_seq, 'tick': self.tick,
@@ -3786,6 +3803,31 @@ class DcsCtlTests(unittest.TestCase):
         self.assertEqual(
             journal['entry']['event']['command_settled']['receipt']
             ['actor'], scenarios.CTL_ACTOR)
+
+    def test_carried_over_settlement_is_not_this_legs(self):
+        """The qa-20260917-002 defect: an earlier leg submits the same
+        picked command under actor 'qa-lane'; the receipt crosses peers
+        inside a checkpoint and re-journals on the serving peer only
+        when the adopting scan records it — landing above this leg's
+        pre-submission seq cursor, ahead of this submission's own
+        settlement. The settlement read must identify this leg's
+        receipt by the actor only it declares, not take the first
+        same-command entry past the floor."""
+        self.feed.carryover = {
+            'command': {'write_value': {'point': 302, 'kind': 'bool',
+                                        'value': {'bool': True}}},
+            'outcome': {'applied': {'tick': 40}},
+            'actor': 'qa-lane'}
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        journal = json.loads(
+            (self.evidence / 'dcs-ctl-journal.json').read_text())
+        entry = journal['entry']['event']['command_settled']['receipt']
+        self.assertEqual(entry['actor'], scenarios.CTL_ACTOR)
+        self.assertEqual(
+            journal['foreign']['event']['command_settled']['receipt']
+            ['actor'], 'qa-lane')
 
     def test_unattributed_event_fails(self):
         self.feed.no_events = True

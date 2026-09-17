@@ -28,7 +28,8 @@
 use dcs_assembly::assemble;
 use dcs_controller::registry;
 use dcs_core::{
-    IoDriver, IoError, JournalEvent, PointId, Role, StandbySync, TelemetrySnapshot, Value,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Role,
+    StandbySync, TelemetrySnapshot, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -897,6 +898,230 @@ fn a_misordered_promotion_degrades_the_superseded_active() {
     assert!(
         standby_process.child.try_wait().unwrap().is_none(),
         "the twice-superseded peer exited"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fenced-peer role-surface test: the QA finding's exact
+/// reproduction — the documented demote-then-promote switchover, then a
+/// restart of the superseded *launched* active (`docker restart` on the
+/// demoted container). The cold-start claim cannot know it was
+/// superseded, so it preempts the legitimately promoted peer — correct
+/// for takeover, and the finding's trigger. What must not survive is
+/// the split role surface: the fenced peer's first scan under the lost
+/// claim demotes it in place, `GET /role` walks `demoting` to
+/// `standby`, the claim loss journals, its writes stop reaching the
+/// field, and commands posted to it are refused `not_active` rather
+/// than receipted `accepted` onto a divergent local image. From the
+/// fenced scan on, exactly one peer — the restarted one — reports
+/// `active`.
+#[test]
+fn a_restarted_superseded_active_fences_the_promoted_peer_into_demotion() {
+    let dir = std::env::temp_dir().join(format!("dcs-failover-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    // The field observer's setpoint lands before the controllers spawn:
+    // the launched active's startup claim fences this attachment from
+    // boot, so every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    let mut active_process = spawn_controller(&pair_model, &[], DT);
+    let mut standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // The documented switchover: demote the launched active first —
+    // its gate closes with the request — then promote the converged
+    // standby, whose claim takes the field before its gate lifts.
+    let demoted = active.demote().unwrap();
+    assert_eq!(demoted.role, Role::Demoting);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    let promoted = standby.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+    let owner = standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        image_value(&owner, VALVE),
+        "the promoted peer must own the field it claimed"
+    );
+
+    // The restart: the demoted container returns as a launched active.
+    // Its cold-start claim preempts the promoted peer's before the
+    // monitor announces — the takeover claim, correct by design, is
+    // what fences the legitimate owner out.
+    kill(&mut active_process);
+    let mut restarted_process = spawn_controller(&pair_model, &[], DT);
+    let restarted = MonitorClient::new(restarted_process.addr);
+
+    // The reclaimed owner reports active and writes the field. The
+    // fenced peer still reports active — it has not scanned under the
+    // lost claim yet — so the role surface splits for exactly the
+    // detection window, one scan, never longer.
+    let mut carried = Value::Float(0.0);
+    for _ in 0..3 {
+        let owner = restarted.advance(1).unwrap();
+        carried = image_value(&owner, VALVE);
+        assert_eq!(
+            field.read(VALVE).unwrap().value,
+            carried,
+            "the restarted peer must own the field it claimed at startup"
+        );
+    }
+    assert_eq!(restarted.role().unwrap().role, Role::Active);
+    assert_eq!(
+        standby.role().unwrap().role,
+        Role::Active,
+        "the fenced peer reports active only until its first scan under the lost claim"
+    );
+
+    // The detection scan: the promoted peer's next write meets the
+    // fence — `fenced` counted into `io_health` — and the demote path
+    // runs in place: the gate re-closes, the claim loss journals, the
+    // reported role leaves the owner set. Nothing the fenced scan
+    // staged reached the field.
+    let fenced = standby.advance(1).unwrap();
+    assert_eq!(
+        fenced.io_health.last_error.map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the fenced peer's write must be refused at the field: {:?}",
+        fenced.io_health
+    );
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        carried,
+        "the fenced scan staged nothing onto the field"
+    );
+    let demoting = standby.role().unwrap();
+    assert_eq!(
+        demoting.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path: {demoting:?}"
+    );
+    assert_eq!(demoting.tick, fenced.tick);
+    assert!(
+        standby.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost { point } if point == VALVE
+        )),
+        "the fenced peer's journal must record the claim loss"
+    );
+
+    // A command posted to the fenced peer is refused at the role
+    // boundary — `demoting` is not a field owner — not receipted
+    // `accepted` onto an image the field will never see.
+    let receipt = standby
+        .command(&Command::WriteValue {
+            point: SETPOINT,
+            kind: ValueKind::Float,
+            value: Value::Float(60.0),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotActive {
+                    role: Role::Demoting,
+                    ..
+                }
+            }
+        ),
+        "a fenced peer must refuse commands, not accept them: {receipt:?}"
+    );
+
+    // The first quiesced scan settles `standby` — commands still
+    // refused, the run still off the field — while the restarted peer
+    // stays the one reported owner: exactly one peer reports active.
+    let quiesced = standby.advance(1).unwrap();
+    let settled = standby.role().unwrap();
+    assert_eq!(settled.role, Role::Standby, "{settled:?}");
+    assert_eq!(settled.tick, quiesced.tick);
+    let receipt = standby
+        .command(&Command::WriteValue {
+            point: SETPOINT,
+            kind: ValueKind::Float,
+            value: Value::Float(70.0),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotActive {
+                    role: Role::Standby,
+                    ..
+                }
+            }
+        ),
+        "a demoted peer must refuse commands: {receipt:?}"
+    );
+    assert_eq!(restarted.role().unwrap().role, Role::Active);
+
+    // The demoted peer keeps scanning and serving — quiesced behind
+    // the re-closed gate, so `failed_writes` counted the detection
+    // scan's fenced write and stays flat rather than accumulating —
+    // and the field carries only the restarted owner's writes. Its
+    // tracking source is the killed process's address, so the pulls
+    // miss and it reports the survivable degraded standby — alive, not
+    // crash-looping, and never split-brain.
+    let failed_writes = quiesced.io_health.failed_writes;
+    for tick in 1..=M {
+        let owner = restarted.advance(1).unwrap();
+        let survived = standby.advance(1).unwrap();
+        assert_eq!(
+            field.read(VALVE).unwrap().value,
+            image_value(&owner, VALVE),
+            "tick {tick}: the field must carry only the restarted owner's writes"
+        );
+        assert_eq!(
+            survived.io_health.failed_writes, failed_writes,
+            "tick {tick}: a demoted peer's writes are quiesced, not fenced"
+        );
+        assert_eq!(standby.role().unwrap().role, Role::Standby, "tick {tick}");
+        assert!(
+            matches!(
+                standby.role().unwrap().sync,
+                Some(StandbySync::Degraded { .. })
+            ),
+            "tick {tick}: the fenced peer's tracking source is gone — it reports degraded"
+        );
+    }
+    assert!(
+        standby_process.child.try_wait().unwrap().is_none(),
+        "the fenced peer exited"
+    );
+    assert!(
+        restarted_process.child.try_wait().unwrap().is_none(),
+        "the restarted owner exited"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

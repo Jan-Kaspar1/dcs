@@ -138,7 +138,13 @@
 //! promotion. The claim rides under a per-process owner token —
 //! `--owner-token N` pins it when an external attachment must share the
 //! owner's claim (a test harness driving plant stimuli); otherwise a
-//! fresh token is generated per process. A claim the field refuses —
+//! fresh token is generated per process. Pinning a second *controller*
+//! to the same token is a misconfiguration: both instances' claims
+//! succeed — the field cannot tell a same-owner attachment from a peer
+//! reusing the token — but the plant server flags each shared grant
+//! `claimed_shared` and this instance warns, because two controllers on
+//! one token both write and step, defeating the single-writer fencing
+//! promotion relies on. A claim the field refuses —
 //! or a launch that cannot reach it — fails startup with the named
 //! `FieldClaimFailed`. And a claim preempted mid-run — a rogue
 //! `claim_writer`, or a promote posted before the old peer was demoted
@@ -192,7 +198,7 @@ use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
-use dcs_sim_net::{RemoteDriver, RemoteError};
+use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -275,11 +281,27 @@ impl Driver {
     /// fencing claim every promotion runs before the gate lifts, so the
     /// field itself refuses a superseded owner's writes. A purely local
     /// simulated model has no shared field to claim and answers `Ok`.
+    ///
+    /// A grant the field flags `Shared` still holds — the token cannot
+    /// tell this instance's own second attachment from a peer process
+    /// pinned to the same token — but the sharing is warned about: two
+    /// controllers on one `--owner-token` both write and step, silently
+    /// defeating the arbitration this claim exists to provide.
     fn claim_writer(&self, owner: u64) -> Result<(), String> {
         match self {
-            Self::Remote(remote) => remote
-                .claim_writer(owner)
-                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+            Self::Remote(remote) => match remote.claim_writer(owner) {
+                Ok(ClaimGrant::Exclusive) => Ok(()),
+                Ok(ClaimGrant::Shared) => {
+                    eprintln!(
+                        "warning: field write-ownership claim for owner token {owner} is \
+                         shared with another live attachment — expected only for a \
+                         deliberate same-owner attachment; a second controller pinned to \
+                         the same --owner-token defeats single-writer fencing"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+            },
             Self::Local(fanout) => fanout
                 .claim_field_writer(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -389,7 +411,9 @@ struct Options {
     /// a fresh per-process one — so an external attachment can claim
     /// under the same token and share the owner's field access (a test
     /// harness driving plant stimuli through its own sim-net
-    /// connection).
+    /// connection). Pinning a second controller to the same token is a
+    /// misconfiguration the plant server flags `claimed_shared` and
+    /// this instance warns about.
     owner_token: Option<u64>,
 }
 
@@ -454,7 +478,11 @@ controller scan.
                   of generating a fresh per-process one — so an external
                   attachment claiming under the same token shares the
                   owner's field access (a test harness driving plant
-                  stimuli through its own sim-net connection)
+                  stimuli through its own sim-net connection). Never pin
+                  two controllers to the same token: both would write and
+                  step the shared plant, defeating single-writer fencing;
+                  the plant server flags such duplicate-owner claims and
+                  this instance warns on a shared grant
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle — atomically, by write-then-rename —
