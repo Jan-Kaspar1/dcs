@@ -3651,6 +3651,11 @@ def scenario_event_retention(ctx):
                             'event-retention-drives.json', drives_log)
         case.evidence('file', ref, 'the driven submissions, their '
                       'receipts, and the events each produced')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'event-retention-resources.json',
+                            view['last'])
+        case.evidence('file', ref, 'the served resource records the '
+                      'routed emissions landed in')
         if failures:
             return case.finish('failed', '; '.join(failures))
         missing = [cls for cls in ('history', 'latest')
