@@ -43,6 +43,15 @@ pub enum RemoteError {
     /// failover decision. Reads still succeed; writing again requires
     /// taking the claim back with [`claim_writer`](Self::claim_writer).
     Fenced,
+    /// The request mutates the shared field but no write-ownership
+    /// claim stands at all — the server is fresh or restarted, or the
+    /// last holder released. The field fails closed rather than opening
+    /// an unclaimed window any attachment could mutate through — or an
+    /// interposer claim ahead of the legitimate owner's re-arm. Reads
+    /// stay open; `write` and `step` resume once an owner claims,
+    /// through [`ensure_writer`](Self::ensure_writer) for the owner
+    /// re-arming or [`claim_writer`](Self::claim_writer) for a takeover.
+    Unclaimed,
 }
 
 impl RemoteError {
@@ -52,13 +61,16 @@ impl RemoteError {
     /// a protocol-carried [`IoError`] passes through unchanged. A refused
     /// or incoherent answer — `InvalidRequest`, or a response that does
     /// not match the request — means the peer is not serving the point
-    /// the protocol promises, which surfaces as `Disconnected`.
+    /// the protocol promises, which surfaces as `Disconnected`. An
+    /// `Unclaimed` refusal surfaces as the point's `Fenced`: the
+    /// point-level vocabulary has no "no claim stands" case, and the
+    /// write is refused either way.
     pub fn at_point(self, point: PointId) -> IoError {
         match self {
             Self::Disconnected | Self::InvalidRequest(_) => IoError::Disconnected(point),
             Self::Timeout => IoError::Timeout(point),
             Self::Io(error) => error,
-            Self::Fenced => IoError::Fenced(point),
+            Self::Fenced | Self::Unclaimed => IoError::Fenced(point),
         }
     }
 }
@@ -75,6 +87,9 @@ impl fmt::Display for RemoteError {
                     f,
                     "field mutation refused: another attachment owns field writes"
                 )
+            }
+            Self::Unclaimed => {
+                write!(f, "field mutation refused: no attachment owns field writes")
             }
         }
     }
@@ -95,6 +110,7 @@ impl From<PlantError> for RemoteError {
             PlantError::Io { error } => Self::Io(error),
             PlantError::InvalidRequest { detail } => Self::InvalidRequest(detail),
             PlantError::Fenced { .. } => Self::Fenced,
+            PlantError::Unclaimed { .. } => Self::Unclaimed,
         }
     }
 }
@@ -363,6 +379,12 @@ impl RemoteDriver {
     /// controller paces the plant at its scan boundary exactly as it
     /// paces a local `SimDriver`, and every attached client observes the
     /// same stepped values.
+    ///
+    /// Like `write`, the step is a field mutation: it fences
+    /// [`RemoteError::Fenced`] while another owner claims the field and
+    /// [`RemoteError::Unclaimed`] while no claim stands at all — the
+    /// fail-closed state a fresh or restarted server serves until an
+    /// owner claims.
     pub fn step(&self, dt: f64) -> Result<Tick, RemoteError> {
         match self.request(&PlantRequest::Step { dt })? {
             PlantResponse::Stepped { tick } => Ok(tick),
@@ -399,12 +421,15 @@ impl RemoteDriver {
     /// owner: one controller's several attachments claim the same token
     /// so all of them write, while a takeover claims a fresh one. The
     /// grant is unconditional — it preempts whichever owner held the
-    /// field — and it stands until preempted, never released on
+    /// field — and it stands until preempted or the last holder's
+    /// [`release_writer`](Self::release_writer) releases it, never on
     /// disconnect: a dead owner's silence is exactly what the claim
-    /// exists to fence. Once an owner is claimed, a `write` from a
-    /// connection not holding it answers the point's
-    /// [`IoError::Fenced`] and a `step` answers [`RemoteError::Fenced`];
-    /// reads and the plant-tooling requests stay open to every
+    /// exists to fence. The field fails closed on mutation: a `write`
+    /// from a connection not holding the claim answers the point's
+    /// [`IoError::Fenced`] and a `step` answers [`RemoteError::Fenced`]
+    /// — or [`RemoteError::Unclaimed`] while no claim stands at all,
+    /// the state a fresh or restarted server serves until a claim
+    /// lands. Reads and the plant-tooling requests stay open to every
     /// attachment.
     ///
     /// The granted token is recorded on the attachment: every later
@@ -429,6 +454,54 @@ impl RemoteDriver {
         };
         self.connection.lock().unwrap().owner = Some(owner);
         Ok(grant)
+    }
+
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer):
+    /// granted while the field is unclaimed or the standing claim already
+    /// names `owner` — the re-arm a field owner asserts after its
+    /// attachment drops, and the claim a mutation tool takes so it never
+    /// preempts a live owner. Refused [`RemoteError::Fenced`] while a
+    /// *different* owner stands: a superseded attachment cannot re-arm
+    /// past the attachment that claimed during its outage.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records it —
+    /// every later re-attach re-asserts it — so an attachment that
+    /// claimed only to mutate must follow with
+    /// [`release_writer`](Self::release_writer): a tool's claim left
+    /// standing would outlive the tool's connection and fence the field
+    /// owner's re-arm, the restart-window seize the unclaimed refusal
+    /// exists to prevent.
+    pub fn ensure_writer(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let grant = match self.request(&PlantRequest::EnsureWriter { owner })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => return Err(self.fail(error.into())),
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
+    }
+
+    /// Drops this connection's hold on the write claim — the field-side
+    /// half of a conditional claim's lifecycle. When the release empties
+    /// the claim's holder set the field returns to `unclaimed`: closed
+    /// to mutation again until the next claim lands, so a tool's write
+    /// window stays bounded rather than leaving a dead tool token the
+    /// field owner's re-arm would fence against.
+    ///
+    /// The recorded token is forgotten whether the release lands or not:
+    /// a failed exchange already severed the link, and re-asserting a
+    /// claim the caller meant to hand back is the stale-token race
+    /// `ensure_writer` re-arms against. [`release_claim`](Self::release_claim)
+    /// is the demotion counterpart — local-only, leaving the field's
+    /// standing claim untouched for the new owner to keep fencing it.
+    pub fn release_writer(&self) -> Result<(), RemoteError> {
+        self.connection.lock().unwrap().owner = None;
+        match self.request(&PlantRequest::ReleaseWriter)? {
+            PlantResponse::Done => Ok(()),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
+            _ => Err(self.protocol_violation()),
+        }
     }
 
     /// Forgets the recorded writer claim — the demotion counterpart of
@@ -555,6 +628,12 @@ impl IoDriver for RemoteDriver {
                 }
                 Err(error)
             }
+            // The unclaimed refusal — no claim stands at all — keeps the
+            // recorded token: nothing claimed the field away, and a
+            // later re-attach may still re-arm it.
+            Ok(PlantResponse::Error {
+                error: PlantError::Unclaimed { .. },
+            }) => Err(self.fail(RemoteError::Unclaimed).at_point(point)),
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }

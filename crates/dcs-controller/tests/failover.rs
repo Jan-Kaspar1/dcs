@@ -75,6 +75,10 @@ const BUDGET: u32 = 3;
 const N: u64 = 10;
 /// Post-failover ticks whose field trace must equal the reference's.
 const M: u64 = 10;
+/// The throwaway token the harness's pre-spawn setpoint seed claims
+/// under — `ensure_writer`, then released — so the seeding leaves no
+/// claim standing against the launched pair's startup claim.
+const SEED: u64 = 499_900;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
@@ -209,7 +213,9 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
     // before the controllers spawn: the launched active's startup claim
     // fences this attachment, so every later access is a read.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
 
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed.
@@ -228,10 +234,13 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
     let standby = MonitorClient::new(standby_process.addr);
 
     // The reference: the same model in-process against its own plant —
-    // its gate starts open, the field owner's posture. Its plant is
-    // never claimed — the in-process run carries no claim hook.
+    // its gate starts open, the field owner's posture. Both attachments
+    // claim the reference plant's fail-closed field under one token —
+    // the executor's driver for its writes, the stepping attachment for
+    // its steps.
     let model = PlantModel::load(MODEL_SOURCE).unwrap();
     let reference_driver = RemoteDriver::connect(reference_plant.addr).unwrap();
+    reference_driver.claim_writer(1).unwrap();
     let reference_gate = WriteGate::closed(&reference_driver);
     reference_gate.open();
     let mut reference = Reference {
@@ -239,6 +248,7 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
         gate: &reference_gate,
         plant: RemoteDriver::connect(reference_plant.addr).unwrap(),
     };
+    reference.plant.claim_writer(1).unwrap();
     reference.plant.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Phase 1: N converged ticks — the standby tracks the active's
@@ -375,7 +385,9 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     // The setpoint lands before the controllers spawn: the launched
     // active's startup claim fences this attachment from boot.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
@@ -516,7 +528,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // The setpoint lands before the controllers spawn: the launched
     // active's startup claim fences this attachment from boot.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
@@ -769,7 +783,9 @@ fn a_misordered_promotion_degrades_the_superseded_active() {
     // The setpoint lands before the controllers spawn: the launched
     // active's startup claim fences this attachment from boot.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
     let mut active_process = spawn_controller(&pair_model, &[], DT);
     let mut standby_process = spawn_controller(
         &pair_model,
@@ -941,7 +957,9 @@ fn a_restarted_superseded_active_fences_the_promoted_peer_into_demotion() {
     // the launched active's startup claim fences this attachment from
     // boot, so every later access is a read.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
     let mut active_process = spawn_controller(&pair_model, &[], DT);
     let mut standby_process = spawn_controller(
         &pair_model,
@@ -1169,7 +1187,9 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
     // active's startup claim fences this attachment from boot, so every
     // later access is a read.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
     let active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,

@@ -10,10 +10,15 @@
 //! development tooling, not part of the operator contract.
 //!
 //! Each invocation connects, sends one request, and prints the server's
-//! answer as JSON. An unreachable address exits nonzero naming the
-//! address; a request the server rejects exits nonzero with the reported
-//! error; malformed arguments print usage and exit nonzero — never a
-//! panic.
+//! answer as JSON. The field-mutating commands — `write` and `step` —
+//! ride the tool's own conditional claim: `ensure_writer` under a tool
+//! token, never `claim_writer`, so a plant already serving a field owner
+//! keeps it and the command fences exactly as a bare mutation would,
+//! then `release_writer` hands the claim back so the tool cannot leave
+//! a dead token standing against the field owner's re-arm. An
+//! unreachable address exits nonzero naming the address; a request the
+//! server rejects exits nonzero with the reported error; malformed
+//! arguments print usage and exit nonzero — never a panic.
 
 use dcs_core::{IoDriver, PointId, Quality, QualityReason, Value};
 use dcs_sim::Fault;
@@ -64,6 +69,14 @@ fn run(args: &[String]) -> Result<String, String> {
     serde_json::to_string_pretty(&response)
         .map_err(|error| format!("dcs-plant-ctl: cannot encode the server response: {error}"))
 }
+
+/// The owner token the tool's field mutations ride under — claimed
+/// conditionally (`ensure_writer`, never `claim_writer`) so the tool
+/// joins an unclaimed field or its own standing claim but can never
+/// preempt a live field owner, and released after the mutation so the
+/// claim dies with the invocation rather than fencing the owner's
+/// re-arm.
+const TOOL_OWNER: u64 = 0x6463_732d_706c_7463; // "dcs-pltc" — a tool, not a controller
 
 /// One parsed command line: the validated action to send.
 enum Action {
@@ -118,16 +131,42 @@ fn execute(driver: &RemoteDriver, action: &Action) -> Result<PlantResponse, Remo
             .read(point)
             .map(|sample| PlantResponse::Sample { sample })
             .map_err(RemoteError::Io),
-        Action::Write(point, value) => driver
-            .write(point, value)
-            .map(|()| PlantResponse::Done)
-            .map_err(RemoteError::Io),
+        Action::Write(point, value) => claimed(driver, || {
+            driver
+                .write(point, value)
+                .map(|()| PlantResponse::Done)
+                .map_err(RemoteError::Io)
+        }),
         Action::InjectFault(point, fault) => driver
             .inject_fault(point, fault)
             .map(|()| PlantResponse::Done),
         Action::ClearFault(point) => driver.clear_fault(point).map(|()| PlantResponse::Done),
-        Action::Step(dt) => driver.step(dt).map(|tick| PlantResponse::Stepped { tick }),
+        Action::Step(dt) => claimed(driver, || {
+            driver.step(dt).map(|tick| PlantResponse::Stepped { tick })
+        }),
     }
+}
+
+/// Runs a field-mutating command inside the tool's conditional claim:
+/// `ensure_writer` grants only while the field is unclaimed or already
+/// the tool's — a plant serving a field owner fences the command, the
+/// same refusal a bare mutation would have met — and `release_writer`
+/// hands the field back to `unclaimed` afterward, so the invocation's
+/// claim cannot outlive its connection and fence a returning owner's
+/// re-arm. A release failure cannot undo an applied mutation, so it
+/// warns on stderr rather than falsifying the command's result.
+fn claimed(
+    driver: &RemoteDriver,
+    mutation: impl FnOnce() -> Result<PlantResponse, RemoteError>,
+) -> Result<PlantResponse, RemoteError> {
+    driver.ensure_writer(TOOL_OWNER)?;
+    let result = mutation();
+    if let Err(error) = driver.release_writer() {
+        eprintln!(
+            "dcs-plant-ctl: the mutation applied but releasing the tool's field claim failed: {error}"
+        );
+    }
+    result
 }
 
 fn parse_point(arg: &str) -> Result<PointId, String> {

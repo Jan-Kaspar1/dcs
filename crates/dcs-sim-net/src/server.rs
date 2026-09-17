@@ -24,11 +24,14 @@ struct Shared {
     /// otherwise notice the server stopping.
     clients: Mutex<HashMap<u64, TcpStream>>,
     next_client: AtomicU64,
-    /// The field's write-ownership claim, or `None` while the plant has
-    /// never been claimed and stays open to every attachment. Once set
-    /// it is never cleared: a dead owner's silence is exactly the
-    /// failure the claim exists to fence, so only a fresh claim moves
-    /// the ownership.
+    /// The field's write-ownership claim, or `None` while the plant is
+    /// unclaimed — a fresh or restarted server, or one whose last
+    /// holder released. Unclaimed is a closed state, not an open one:
+    /// `write` and `step` are refused `unclaimed` until a claim lands.
+    /// Once set the claim is cleared only by the last holder's
+    /// explicit release — never by disconnect: a dead owner's silence
+    /// is exactly the failure the claim exists to fence, so otherwise
+    /// only a fresh claim moves the ownership.
     writer: Mutex<Option<WriterClaim>>,
 }
 
@@ -42,7 +45,9 @@ struct Shared {
 /// [`PlantResponse::ClaimedShared`]. A connection's end drops only its
 /// own hold — the claim stands even with no holders left, so a dead
 /// owner keeps the field fenced for its token until a fresh claim
-/// preempts.
+/// preempts — while an explicit `release_writer` that empties the set
+/// releases the claim itself, the deliberate hand-back a mutation
+/// tool performs.
 struct WriterClaim {
     owner: u64,
     /// The connection ids holding `owner`. An attachment not in this
@@ -135,11 +140,14 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
 /// refuses comes back as [`PlantError::Io`] carrying the driver's
 /// [`IoError`](dcs_core::IoError) verbatim so the remote client surfaces
 /// the same failure a local one would. `Write` and `Step` are the
-/// field-mutating operations: while an owner is claimed, a connection
-/// not holding the current claim sees its `write` refused with the
-/// point's [`IoError::Fenced`] and its `step` with
-/// [`PlantError::Fenced`] — the old owner's writes stop at the field,
-/// not merely at its own gate.
+/// field-mutating operations and the field fails closed: while an owner
+/// is claimed, a connection not holding the current claim sees its
+/// `write` refused with the point's [`IoError::Fenced`] and its `step`
+/// with [`PlantError::Fenced`] — the old owner's writes stop at the
+/// field, not merely at its own gate — while with no claim standing at
+/// all (a fresh or restarted server included) both are refused
+/// [`PlantError::Unclaimed`], so a restart never opens a window an
+/// unclaimed attachment can mutate through.
 fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantResponse {
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
@@ -160,15 +168,22 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
         // write already in flight on another connection.
         PlantRequest::Write { point, value } => {
             let writer = shared.writer.lock().unwrap();
-            if writer
-                .as_ref()
-                .is_some_and(|claim| !claim.holders.contains(&connection))
-            {
-                return PlantResponse::Error {
-                    error: PlantError::Io {
-                        error: IoError::Fenced(point),
-                    },
-                };
+            match writer.as_ref() {
+                Some(claim) if !claim.holders.contains(&connection) => {
+                    return PlantResponse::Error {
+                        error: PlantError::Io {
+                            error: IoError::Fenced(point),
+                        },
+                    };
+                }
+                None => {
+                    return PlantResponse::Error {
+                        error: PlantError::Unclaimed {
+                            detail: "no attachment holds field writes".to_string(),
+                        },
+                    };
+                }
+                _ => {}
             }
             applied(shared.driver.write(point, value))
         }
@@ -183,15 +198,22 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                 };
             }
             let writer = shared.writer.lock().unwrap();
-            if writer
-                .as_ref()
-                .is_some_and(|claim| !claim.holders.contains(&connection))
-            {
-                return PlantResponse::Error {
-                    error: PlantError::Fenced {
-                        detail: "another attachment owns field writes".to_string(),
-                    },
-                };
+            match writer.as_ref() {
+                Some(claim) if !claim.holders.contains(&connection) => {
+                    return PlantResponse::Error {
+                        error: PlantError::Fenced {
+                            detail: "another attachment owns field writes".to_string(),
+                        },
+                    };
+                }
+                None => {
+                    return PlantResponse::Error {
+                        error: PlantError::Unclaimed {
+                            detail: "no attachment holds field writes".to_string(),
+                        },
+                    };
+                }
+                _ => {}
             }
             PlantResponse::Stepped {
                 tick: shared.driver.step(dt),
@@ -266,6 +288,23 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                     PlantResponse::Done
                 }
             }
+        }
+        PlantRequest::ReleaseWriter => {
+            // The deliberate hand-back: this connection leaves the
+            // holder set, and the last hold out releases the claim —
+            // the field returns to `unclaimed`, still closed to
+            // mutation. Disconnect alone never does this
+            // (`release_hold` drops the hold but keeps the claim), so a
+            // crashed owner's claim keeps fencing its token while a
+            // tool that claimed conditionally can hand the field back.
+            let mut writer = shared.writer.lock().unwrap();
+            if let Some(claim) = writer.as_mut() {
+                claim.holders.remove(&connection);
+                if claim.holders.is_empty() {
+                    *writer = None;
+                }
+            }
+            PlantResponse::Done
         }
     }
 }

@@ -149,6 +149,10 @@ const DT: &str = "1.0";
 /// active owns the field (and across the state-file restart, whose
 /// respawned process claims the same token).
 const OWNER_TOKEN: u64 = 499_002;
+/// The throwaway token the harness's pre-launch field seeding claims
+/// under — `ensure_writer`, then released — so the seeding leaves no
+/// claim standing against the launched active's.
+const SEED_TOKEN: u64 = 499_902;
 /// The declared actor identity every operator command lands under —
 /// the receipted path's attribution the journal keeps.
 const OPERATOR: &str = "ops-lead";
@@ -753,10 +757,15 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     // The declared schedule's tick-0 entries, the tide forcing, and the
     // gate confirmed open — plus one step so the first scan sees the
     // dynamics' declared level rather than the bindings' neutral seed.
+    // The field fails closed while unclaimed, so the seeding rides a
+    // conditional claim released afterward — the tool's shape — leaving
+    // no dead token standing against the launched active's claim.
+    field.ensure_writer(SEED_TOKEN).unwrap();
     apply_script(&field, &script, 0);
     field.write(points::INFLOW, Value::Float(0.08)).unwrap();
     field.write(points::GATE_FB, Value::Float(1.0)).unwrap();
     field.step(1.0).unwrap();
+    field.release_writer().unwrap();
 
     // The pair: the field owner first — persisted and journaled for the
     // restart and record legs — then the tracking standby pulling

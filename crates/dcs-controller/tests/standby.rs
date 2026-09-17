@@ -177,6 +177,10 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
     thread::scope(|scope| {
         scope.spawn(|| plant.serve());
         let _plant = ShutdownOnDrop(&plant);
+        // The field fails closed while unclaimed: the active's
+        // mutations ride this attachment's claim — taken once the
+        // plant is serving, before the first scan.
+        active_driver.claim_writer(1).unwrap();
         scope.spawn(|| monitor.serve());
         let _monitor = ShutdownOnDrop(&monitor);
 
