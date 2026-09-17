@@ -17,8 +17,11 @@ stopped, and relaunches onto the same files. The resumed run must:
   never a silent cold start at tick zero;
 - reproduce the uninterrupted reference pass: identical per-leg
   outcomes, receipt outcomes, and served field image;
-- continue the durable journal's `seq` order across the file's
-  `run_boundary` marker, the marker recording the restored tick.
+- serve the replayed pre-restart journal verbatim behind the restart's
+  `run_boundary` entry — the file marker's served form, carrying the
+  restored tick — and continue the durable journal's `seq` order
+  across it, the run's settled receipts and standing census never
+  re-journaling.
 
 A state file gone missing is caught by those same assertions: the
 relaunch reports no resume — the release contract's documented cold
@@ -357,10 +360,22 @@ def interrupted_pass(args, scenario, persistence, tamper):
                 )
                 raise Abort
             replayed = simulate.http(f"{monitor}/journal")
-            if replayed != served:
+            if replayed[: len(served)] != served:
                 failures.append(
                     "the replayed journal no longer answers the "
                     "pre-restart entries verbatim"
+                )
+                raise Abort
+            boundary = {
+                "seq": len(served) + 1,
+                "tick": persisted,
+                "event": {"run_boundary": {"run": 2}},
+            }
+            if replayed[len(served) :] != [boundary]:
+                failures.append(
+                    "the resumed run's served journal does not open "
+                    f"with the run-2 boundary entry {boundary}: "
+                    f"{replayed[len(served):]}"
                 )
                 raise Abort
             evidence["replayed_entries"] = len(replayed)

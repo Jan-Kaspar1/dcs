@@ -632,9 +632,10 @@ fn the_scripted_run_yields_each_declared_metric_from_the_durable_record() {
         );
 
         // The served-journal view computes the same counts — the
-        // metrics all join — but carries no run-boundary markers:
-        // `journal_runs` is absent and cross-run durations are the
-        // documented ambiguity the file path exists to answer.
+        // metrics all join — but `journal_runs` still derives only
+        // from the file's markers: it is absent over `GET /journal`
+        // and cross-run durations are the documented ambiguity the
+        // file path exists to answer.
         let served = parsed(&report(addr, None, Some(&config_path)));
         assert_eq!(served.source.journal_runs, None);
         assert_eq!(served.rates.activations, 6);

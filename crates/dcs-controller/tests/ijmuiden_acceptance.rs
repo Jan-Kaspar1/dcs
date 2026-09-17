@@ -1521,11 +1521,22 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         )),
         "the resumed run carries the standing shelve"
     );
+    let served = active.journal(0).unwrap();
     assert_eq!(
-        active.journal(0).unwrap(),
-        before_restart,
+        &served[..before_restart.len()],
+        &before_restart[..],
         "the journal replays verbatim"
     );
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: interrupted,
+            event: JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(
         file_boundaries(&journal_active),
         vec![(1, 0), (2, interrupted.0)]

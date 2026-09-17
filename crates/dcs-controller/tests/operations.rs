@@ -39,8 +39,8 @@
 //! returns proves repeated scripted runs identical.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, LinkState, PointId, Role,
-    RoleReport, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, JournalEvent, LinkState,
+    PointId, Role, RoleReport, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -512,9 +512,21 @@ fn run_operations(tag: &str) -> serde_json::Value {
     );
 
     // `GET /journal` answers the pre-restart entries verbatim —
-    // replayed, not re-journaled — and the file's run-2 marker
-    // separates the two lifetimes at the restored tick.
-    assert_eq!(a_standby.journal(0).unwrap(), before_restart);
+    // replayed, not re-journaled — behind the restart's served
+    // boundary entry, the file's run-2 marker separating the two
+    // lifetimes at the restored tick.
+    let served = a_standby.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: Tick(PRE),
+            event: JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(file_boundaries(&journal_a_standby), vec![(1, 0), (2, PRE)]);
 
     // The pair cadence resumes: the restarted standby reconverges on

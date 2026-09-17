@@ -183,6 +183,22 @@ pub enum JournalEvent {
         /// The point whose write the field fenced.
         point: PointId,
     },
+    /// A new process lifetime began — the served form of the journal
+    /// file's run-boundary marker. A monitor bound over a journal file
+    /// that already records earlier lifetimes journals it once at
+    /// bind, before the resumed run's first scan: entries before it
+    /// belong to earlier process lifetimes, entries after it to the
+    /// run it opens. The entry's `tick` is the tick that run starts at
+    /// — `0` cold, the restored tick under `--state-file` — so a
+    /// `GET /journal` consumer can attribute each entry to a process
+    /// lifetime and read the backward tick seam a restart leaves as a
+    /// new run's own tick domain, not time travel. `run` counts the
+    /// file's lifetimes from 1, so a served boundary is always
+    /// `run >= 2`: a fresh record's first run needs no marker.
+    RunBoundary {
+        /// Which lifetime begins — the file counts runs from 1.
+        run: u64,
+    },
 }
 
 /// One journaled event: its stream position, the tick it is attributed
@@ -350,6 +366,11 @@ mod tests {
                     resumed_at: Tick(2),
                 },
             },
+            JournalEntry {
+                seq: 14,
+                tick: Tick(20),
+                event: JournalEvent::RunBoundary { run: 2 },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -367,6 +388,7 @@ mod tests {
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
+        assert!(json.contains("\"run_boundary\""), "{json}");
     }
 
     #[test]
