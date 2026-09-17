@@ -130,6 +130,22 @@ pub enum JournalEvent {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
+    /// A diverged peer returned to
+    /// [`StandbySync::Tracking`](crate::StandbySync) — the resolution of
+    /// the divergence the matching [`DivergenceDetected`](Self::DivergenceDetected)
+    /// opened, and the sync-state change that reopens the promote gate.
+    /// The entry's `tick` attributes it to the applied checkpoint's
+    /// tick — the compared staged image's tick when a same-tick field
+    /// comparison cleared the state. `compared` carries every staged
+    /// field `Out` point that comparison judged — the field reads that
+    /// succeeded — with both sides' values, in point order; an empty
+    /// `compared` records a clear no same-tick field comparison backed,
+    /// so the audit trail attributes the transition either way and a
+    /// clean resync stays distinguishable from an evidence-free one.
+    DivergenceResolved {
+        /// The compared field `Out` points — the resolution's evidence.
+        compared: Vec<Divergence>,
+    },
     /// A revision-armed peer consumed a checkpoint captured under a
     /// different model — the transition into
     /// [`StandbySync::Reinitialized`](crate::StandbySync) of the rolling
@@ -308,6 +324,17 @@ mod tests {
             },
             JournalEntry {
                 seq: 9,
+                tick: Tick(10),
+                event: JournalEvent::DivergenceResolved {
+                    compared: vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(4.5),
+                        field: Value::Float(4.5),
+                    }],
+                },
+            },
+            JournalEntry {
+                seq: 10,
                 tick: Tick(12),
                 event: JournalEvent::Reinitialized {
                     report: CarryoverReport {
@@ -330,12 +357,12 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 10,
+                seq: 11,
                 tick: Tick(13),
                 event: JournalEvent::FieldClaimLost { point: PointId(20) },
             },
             JournalEntry {
-                seq: 11,
+                seq: 12,
                 tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
@@ -351,7 +378,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 12,
+                seq: 13,
                 tick: Tick(15),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: Some(Tick(14)),
@@ -359,7 +386,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 13,
+                seq: 14,
                 tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
@@ -367,7 +394,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 14,
+                seq: 15,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },
@@ -384,6 +411,7 @@ mod tests {
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");
         assert!(json.contains("\"divergence_detected\""), "{json}");
+        assert!(json.contains("\"divergence_resolved\""), "{json}");
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");

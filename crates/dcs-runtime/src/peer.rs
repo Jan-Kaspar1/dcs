@@ -88,17 +88,21 @@
 //! against the peer's own reads of the same points. A mismatch moves the
 //! peer to [`StandbySync::Diverged`], which promotion refuses like any
 //! non-tracking state; the next clean transfer whose comparison matches
-//! returns the peer to `Tracking`. A diverged peer's gate stays closed
-//! throughout — the check observes, it never writes.
+//! returns the peer to `Tracking`. Both transitions queue for the
+//! transition journal — the detection with its mismatches, the
+//! resolution with the compared points it stands on. A diverged peer's
+//! gate stays closed throughout — the check observes, it never writes.
 
 use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
-use crate::divergence::{DivergenceReport, compare_staged};
+use crate::divergence::{
+    DivergenceReport, ResolutionReport, compare_staged_points, values_diverge,
+};
 use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarryoverReport, Command, CommandReceipt, IoError, PointId, Role, RoleReport, Sample,
-    StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandReceipt, Divergence, IoError, PointId, Role, RoleReport,
+    Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,6 +148,10 @@ pub struct Peer<'d> {
     /// Divergence detections not yet consumed for journaling — one per
     /// transition into [`StandbySync::Diverged`].
     pending_divergences: Vec<DivergenceReport>,
+    /// Divergence resolutions not yet consumed for journaling — one per
+    /// `Diverged` → `Tracking` transition, each carrying the applied
+    /// tick and the same-tick field comparison the clear stands on.
+    pending_resolutions: Vec<ResolutionReport>,
     /// Consecutive checkpoint pulls that produced no applied checkpoint
     /// — the heartbeat miss count the failover budget compares against.
     /// A produced checkpoint resets it, whether the apply lands or is
@@ -394,6 +402,7 @@ impl<'d> Peer<'d> {
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
+            pending_resolutions: Vec::new(),
             misses: 0,
             converged: false,
             failover: None,
@@ -478,6 +487,7 @@ impl<'d> Peer<'d> {
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
+            pending_resolutions: Vec::new(),
             misses: 0,
             converged: false,
             failover: None,
@@ -745,9 +755,17 @@ impl<'d> Peer<'d> {
         }
         self.staged = None;
         let (sync, converged) = (self.sync.clone(), self.converged);
+        let queued_resolutions = self.pending_resolutions.len();
         let _ = self.transfer(&checkpoint);
         self.sync = sync;
         self.converged = converged;
+        if matches!(self.sync, StandbySync::Diverged { .. }) {
+            // The restored verdict supersedes the transfer's sync
+            // write: a resolution the apply queued on a still-diverged
+            // peer never observably happened — the reported state never
+            // left `diverged` — so it must not journal.
+            self.pending_resolutions.truncate(queued_resolutions);
+        }
     }
 
     /// Applies a checkpoint received from the active, aligning the run
@@ -788,10 +806,16 @@ impl<'d> Peer<'d> {
     /// [`StandbySync::Diverged`] and queue a
     /// [`DivergenceReport`] for the journal — one per transition, not
     /// per transfer — while a matching comparison on a diverged peer is
-    /// the resync that returns it to [`StandbySync::Tracking`]. A
-    /// staged image the checkpoint stream has not caught up to — or has
-    /// overtaken — is discarded: only a same-tick comparison is honest
-    /// evidence.
+    /// the resync that returns it to [`StandbySync::Tracking`] and
+    /// queues a [`ResolutionReport`] carrying every compared point's
+    /// evidence. A clear with no same-tick comparison behind it — no
+    /// staged image, or one the checkpoint stream has not caught up to
+    /// — still queues the resolution, its `compared` empty, so the
+    /// audit trail attributes the gate-reopening transition either way
+    /// and a clean resync stays distinguishable from an evidence-free
+    /// one. A staged image the checkpoint stream has not caught up to —
+    /// or has overtaken — is discarded: only a same-tick comparison is
+    /// honest evidence.
     pub fn apply(&mut self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         if self.owns_field() {
             return Err(ApplyError::OwnsField);
@@ -836,8 +860,18 @@ impl<'d> Peer<'d> {
                 if let Some((tick, staged)) = self.staged.take()
                     && tick == landed
                 {
-                    let mismatches = compare_staged(self.executor.driver(), &staged);
-                    if !mismatches.is_empty() {
+                    let compared = compare_staged_points(self.executor.driver(), &staged);
+                    let mismatches: Vec<Divergence> = compared
+                        .iter()
+                        .copied()
+                        .filter(|point| values_diverge(point.staged, point.field))
+                        .collect();
+                    if mismatches.is_empty() {
+                        if was_diverged {
+                            self.pending_resolutions
+                                .push(ResolutionReport { tick, compared });
+                        }
+                    } else {
                         if !was_diverged {
                             self.pending_divergences.push(DivergenceReport {
                                 tick,
@@ -847,6 +881,17 @@ impl<'d> Peer<'d> {
                         self.sync = StandbySync::Diverged { mismatches };
                         self.converged = false;
                     }
+                } else if was_diverged {
+                    // The apply cleared `diverged` without a same-tick
+                    // field comparison — no staged image stood, or the
+                    // checkpoint stream had not caught up to it — so
+                    // the journal's resolution carries no compared
+                    // points: attributable, and distinguishable from a
+                    // comparison-backed resync.
+                    self.pending_resolutions.push(ResolutionReport {
+                        tick: landed,
+                        compared: Vec::new(),
+                    });
                 }
                 Ok(())
             }
@@ -1178,6 +1223,15 @@ impl<'d> Peer<'d> {
     /// layer records them into.
     pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
         std::mem::take(&mut self.pending_divergences)
+    }
+
+    /// Drains divergence resolutions queued since the last call — one
+    /// [`ResolutionReport`] per `Diverged` → [`StandbySync::Tracking`]
+    /// transition, each carrying the applied tick and the same-tick
+    /// field comparison the clear stands on — for the transition
+    /// journal the monitoring layer records them into.
+    pub fn take_resolutions(&mut self) -> Vec<ResolutionReport> {
+        std::mem::take(&mut self.pending_resolutions)
     }
 
     /// Drains reinitializations queued since the last call — one
@@ -2078,13 +2132,133 @@ mod tests {
         biased.armed.store(false, Ordering::Relaxed);
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        assert_eq!(
+            standby.take_resolutions(),
+            vec![],
+            "still diverged — nothing resolved yet"
+        );
         cycle(&mut active, &mut standby);
         assert_eq!(
             standby.sync_state(),
             &StandbySync::Tracking { aligned: Tick(8) }
         );
+        // The diverged → tracking transition queues once, attributed
+        // to the compared tick and carrying the compared-point evidence
+        // — both sides' values now agreeing.
+        assert_eq!(
+            standby.take_resolutions(),
+            vec![ResolutionReport {
+                tick: Tick(8),
+                compared: vec![Divergence {
+                    point: OUTPUT,
+                    staged: Value::Float(2.0),
+                    field: Value::Float(2.0),
+                }],
+            }]
+        );
         standby.promote().unwrap();
         assert!(gate.is_open());
+    }
+
+    /// A diverged peer whose next apply runs no same-tick field
+    /// comparison — the staged image's tick never matched the applied
+    /// checkpoint's — still transitions to `tracking`, and the queued
+    /// resolution records the clear with empty `compared`:
+    /// attributable in the journal, and distinguishable from a
+    /// comparison-backed resync.
+    #[test]
+    fn diverged_clear_without_same_tick_compare_queues_an_evidence_free_resolution() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
+        let biased = BiasedDriver {
+            inner: &field,
+            point: INPUT,
+            offset: 5.0,
+            armed: AtomicBool::new(true),
+        };
+        let gate = WriteGate::closed(&biased);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        let mut active = Peer::active(
+            Executor::new(&field, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+
+        // Converge, then diverge on the first same-tick compare — the
+        // skew is armed from the start, so the tick-2 staged image
+        // mismatches the field the active wrote.
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        cycle(&mut active, &mut standby);
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        assert_eq!(standby.take_divergences().len(), 1);
+
+        // The detecting apply consumed the staged image; two active
+        // scans before the next apply leave no staged image whose tick
+        // the checkpoint@4 matches — the clear runs no field
+        // comparison.
+        active.scan().unwrap();
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(4) }
+        );
+        assert_eq!(
+            standby.take_resolutions(),
+            vec![ResolutionReport {
+                tick: Tick(4),
+                compared: vec![],
+            }]
+        );
+    }
+
+    /// A `final_sync` pull on a diverged peer runs the transfer's apply
+    /// but restores the reported verdict — the peer never observably
+    /// leaves `diverged`, so the resolution the apply queued must not
+    /// reach the journal.
+    #[test]
+    fn final_sync_on_a_diverged_peer_queues_no_phantom_resolution() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
+        let biased = BiasedDriver {
+            inner: &field,
+            point: INPUT,
+            offset: 5.0,
+            armed: AtomicBool::new(true),
+        };
+        let gate = WriteGate::closed(&biased);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        let mut active = Peer::active(
+            Executor::new(&field, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+
+        active.scan().unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        cycle(&mut active, &mut standby);
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        standby.take_divergences();
+
+        // The promote path's boundary pull: its apply would clear the
+        // diverged state evidence-free, but the restored verdict keeps
+        // the report — and no resolution queues. The active scans once
+        // first so its checkpoint is fresh enough to land.
+        active.scan().unwrap();
+        standby.final_sync(|| Ok(active.checkpoint()));
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        assert_eq!(standby.take_resolutions(), vec![]);
+        assert!(matches!(
+            standby.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Diverged { .. }
+            })
+        ));
     }
 
     /// A converged standby with a failover budget of two: one transient

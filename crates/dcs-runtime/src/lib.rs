@@ -83,7 +83,10 @@ pub use checkpoint::{
     SUPPORTED_FORMAT_VERSIONS,
 };
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
-pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
+pub use divergence::{
+    DivergenceReport, FLOAT_TOLERANCE, ResolutionReport, compare_staged, compare_staged_points,
+    values_diverge,
+};
 pub use executor::{
     ComponentStatus, DEFAULT_COMMAND_QUEUE_CAPACITY, DEFAULT_RECEIPT_LOG_CAPACITY, Executor,
     LinkError, PointMap, PointSpec, ScanError, WiringError,
