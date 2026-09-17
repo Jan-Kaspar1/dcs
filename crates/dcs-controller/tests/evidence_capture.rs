@@ -115,6 +115,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     .with_field_claim(|| {
         active_driver
             .claim_writer(1)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     });
     active.activate().unwrap();
@@ -147,6 +148,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     .with_field_claim(|| {
         standby_driver
             .claim_writer(2)
+            .map(|_| ())
             .map_err(|error| error.to_string())
     });
     let standby_step = &standby_driver;

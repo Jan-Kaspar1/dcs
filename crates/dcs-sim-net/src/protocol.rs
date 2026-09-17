@@ -90,6 +90,14 @@ pub enum PlantRequest {
     /// claimed, `write` and `step` requests from a connection that has
     /// not itself claimed the current owner are refused; reads, fault
     /// injection, and `list_points` stay open to every attachment.
+    ///
+    /// A grant for the standing owner while another *live* attachment
+    /// already holds the token is answered
+    /// [`PlantResponse::ClaimedShared`] rather than `Done`: the grant
+    /// stands — the token cannot tell one owner's second attachment
+    /// from a second process reusing it — but the sharing is flagged,
+    /// because two field-owning processes pinned to one token defeat
+    /// the arbitration this claim exists to provide.
     ClaimWriter {
         /// The ownership token the claim asserts.
         owner: u64,
@@ -103,7 +111,9 @@ pub enum PlantRequest {
     /// request is refused [`PlantError::Fenced`], so a re-attaching
     /// superseded peer cannot steal the field back from the attachment
     /// that claimed it during the outage. A granted request also binds
-    /// `owner` to this connection exactly as `claim_writer` does.
+    /// `owner` to this connection exactly as `claim_writer` does —
+    /// including the [`PlantResponse::ClaimedShared`] flag when the
+    /// token is already held by another live attachment.
     EnsureWriter {
         /// The ownership token the claim asserts.
         owner: u64,
@@ -138,9 +148,22 @@ pub enum PlantResponse {
         points: Vec<PointInfo>,
     },
     /// Answer to [`PlantRequest::Write`], [`PlantRequest::InjectFault`],
-    /// [`PlantRequest::ClearFault`], and [`PlantRequest::ClaimWriter`]:
-    /// the request applied.
+    /// [`PlantRequest::ClearFault`], and the claim requests: the request
+    /// applied.
     Done,
+    /// Answer to a granted [`PlantRequest::ClaimWriter`] or
+    /// [`PlantRequest::EnsureWriter`] whose `owner` token another live
+    /// attachment already holds. The grant stands — one field owner's
+    /// several attachments claim the same token by design — but the
+    /// sharing is flagged because the token alone cannot distinguish
+    /// that from a second field-owning *process* reusing it, which
+    /// would defeat the single-writer arbitration a promotion relies
+    /// on. `Done` remains the answer when no other live attachment
+    /// holds the token.
+    ClaimedShared {
+        /// The token now held by more than one live attachment.
+        owner: u64,
+    },
     /// The request failed; `error` says why.
     Error {
         /// The failure the server reported.
@@ -319,6 +342,7 @@ mod tests {
                 }],
             },
             PlantResponse::Done,
+            PlantResponse::ClaimedShared { owner: 7 },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
@@ -359,6 +383,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantResponse::Done).unwrap(),
             r#"{"result":"done"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::ClaimedShared { owner: 7 }).unwrap(),
+            r#"{"result":"claimed_shared","owner":7}"#
         );
         // The point-census payload carries the shared `Direction` as
         // "in"/"out" — the shape the plant protocol has always emitted.
