@@ -5191,6 +5191,22 @@ def scenario_dcs_ctl(ctx):
         case.observe('picked command: ' + str(component) + ' '
                      + str(spec.get('name')) + ' -> dcs-ctl '
                      + ' '.join(argv) + ' --actor ' + CTL_ACTOR)
+
+        # The journal cursor ahead of the submission: earlier legs
+        # already settled identical commands into the ring — the
+        # served-interface case picks from the same selection logic
+        # and submits under its own actor — so the settlement read
+        # below starts above the high-water seq and never matches a
+        # prior leg's entry.
+        rc, prior, err = ctl(base, 'journal', '--since', '0')
+        if rc != 0 or not isinstance(prior, list):
+            return done('failed', 'dcs-ctl journal failed ahead of the '
+                        'submission: exit ' + str(rc) + ' '
+                        + str(err)[:200])
+        floor = max((entry.get('seq') or 0
+                     for entry in prior if isinstance(entry, dict)),
+                    default=0)
+
         rc, receipt, err = ctl(base, *argv, '--actor', CTL_ACTOR)
         ref = save_evidence(
             ctx['evidence_dir'], 'dcs-ctl-invoke.json',
@@ -5211,11 +5227,13 @@ def scenario_dcs_ctl(ctx):
 
         # The attributed CommandSettled in the served journal, read
         # through `dcs-ctl journal` — GET /journal through the shipped
-        # consumer.
+        # consumer — above the pre-submission cursor, so a prior leg's
+        # identical settled command cannot stand in for this one.
         observed = {}
 
         def journaled():
-            rc, journal, _err = ctl(base, 'journal', '--since', '0')
+            rc, journal, _err = ctl(base, 'journal', '--since',
+                                    str(floor))
             if rc != 0 or not isinstance(journal, list):
                 return None
             observed['journal_len'] = len(journal)

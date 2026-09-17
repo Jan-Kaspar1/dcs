@@ -3763,6 +3763,30 @@ class DcsCtlTests(unittest.TestCase):
         self.assertIn('unattributed', record.get('detail', ''))
         report.validate_scenario(record)
 
+    def test_stale_identical_settlement_is_not_this_legs(self):
+        """The qa-20260916-065 defect: the served-interface case
+        submits the same picked command under actor 'qa-lane' ahead of
+        this leg, so the journal already holds an identical settled
+        receipt — the settlement read must start above the
+        pre-submission seq cursor, not match the stale entry."""
+        stale = {'seq': self.feed.next_seq, 'tick': 0,
+                 'event': {'command_settled': {'receipt': {
+                     'command': {'write_value': {
+                         'point': 302, 'kind': 'bool',
+                         'value': {'bool': True}}},
+                     'outcome': {'applied': {'tick': 0}},
+                     'actor': 'qa-lane'}}}}
+        self.feed.journal.append(stale)
+        self.feed.next_seq += 1
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        journal = json.loads(
+            (self.evidence / 'dcs-ctl-journal.json').read_text())
+        self.assertEqual(
+            journal['entry']['event']['command_settled']['receipt']
+            ['actor'], scenarios.CTL_ACTOR)
+
     def test_unattributed_event_fails(self):
         self.feed.no_events = True
         record = self.run_scenario()
