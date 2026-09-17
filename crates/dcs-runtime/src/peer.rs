@@ -62,10 +62,12 @@
 //! with [`SwitchError::FieldClaimFailed`] — a peer that cannot take the
 //! field's single-writer arbitration does not take the field. And when
 //! a claim the owner held is preempted — the field's arbitration is
-//! unconditional, so a rogue claim can take it — the first fenced field
-//! write queues a [`FencingLoss`] for the journal beside the scan
-//! failure: the loss of the field's single-writer claim is a recorded
-//! run event, not only an exit cause.
+//! unconditional, so a rogue claim or a misordered promotion can take
+//! it — the first fenced field write demotes the superseded owner in
+//! place: the gate re-closes, the reported role walks `demoting` to
+//! `standby`, and one [`FencingLoss`] queues for the journal beside the
+//! role changes — the survivable quiesced state the demote path
+//! defines, not a dead process.
 //!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
@@ -159,8 +161,9 @@ pub struct Peer<'d> {
     /// Whether the field-ownership claim this peer holds was observed
     /// lost — set when a field-owning scan's write reports
     /// [`IoError::Fenced`], meaning another attachment now holds the
-    /// claim. Re-armed by each successful claim lift: the queued report
-    /// is once per ownership, not once per fenced scan.
+    /// claim and the peer demotes itself on the spot. Re-armed by each
+    /// successful claim lift: the queued report is once per ownership,
+    /// not once per fenced scan.
     fencing_lost: bool,
     /// Claim losses not yet consumed for journaling — one
     /// [`FencingLoss`] per observed preemption.
@@ -911,33 +914,62 @@ impl<'d> Peer<'d> {
     ///
     /// A field-owning scan whose write the shared field fenced —
     /// [`IoError::Fenced`], meaning the claim this peer held was
-    /// preempted — completes degraded like any field fault, and queues
-    /// one [`FencingLoss`] for the journal: the loss of the field's
-    /// single-writer claim is a recorded run event, not only a counter
-    /// in `io_health`.
+    /// preempted by another attachment — completes degraded like any
+    /// field fault: the refusal counts in `io_health` and one
+    /// [`FencingLoss`] queues for the journal. But the peer is
+    /// superseded, and a degraded report alone would leave it still
+    /// believing it owns the field — still writing into the fence: the
+    /// demote path runs in place, re-closing the gate and running the
+    /// release hook so a re-attaching link cannot re-assert the claim
+    /// this peer just lost, the reported role moving to `demoting` and
+    /// settling `standby` on the first quiesced scan that completes.
+    /// A misordered promotion or a rogue claim cannot kill or
+    /// split-brain a running field owner.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
         let tick = match self.executor.scan() {
             Ok(tick) => tick,
             Err(error) => {
                 if self.owns_field()
-                    && !self.fencing_lost
+                    && self.gate.is_some()
                     && let ScanError::Io(IoError::Fenced(point)) = &error
                 {
-                    self.fencing_lost = true;
-                    self.pending_fencing.push(FencingLoss {
-                        tick: self.executor.tick(),
-                        point: *point,
-                    });
+                    let tick = self.executor.tick();
+                    if !self.fencing_lost {
+                        self.fencing_lost = true;
+                        self.pending_fencing.push(FencingLoss {
+                            tick,
+                            point: *point,
+                        });
+                    }
+                    // Superseded: the field's single-writer claim
+                    // belongs to another attachment now. Re-close the
+                    // gate and report the aborted scan's tick — the
+                    // fenced write degrades this peer to the quiesced
+                    // tracking peer the demote path defines; it does
+                    // not end the run.
+                    self.demote().expect("a field-owning peer demotes");
+                    return Ok(tick);
                 }
                 return Err(error);
             }
         };
         if self.owns_field()
-            && !self.fencing_lost
             && let Some(point) = self.executor.fenced_write()
         {
-            self.fencing_lost = true;
-            self.pending_fencing.push(FencingLoss { tick, point });
+            if !self.fencing_lost {
+                self.fencing_lost = true;
+                self.pending_fencing.push(FencingLoss { tick, point });
+            }
+            // Superseded: the field's single-writer claim belongs to
+            // another attachment now. The scan completed degraded; the
+            // demote path is the survivable answer — the gate
+            // re-closes, the release hook forgets the recorded
+            // ownership token, and the reported role walks `demoting`
+            // to `standby`. The fenced scan ran under the lifted gate,
+            // so it does not settle the transition — the first
+            // quiesced scan does.
+            self.demote().expect("a field-owning peer demotes");
+            return Ok(tick);
         }
         match self.role {
             Role::Promoting => self.change(tick, Role::Active),
@@ -1457,9 +1489,9 @@ mod tests {
     }
 
     /// A write the shared field fenced — its answer to a preempted
-    /// claim — fails the owning peer's scan as before and queues one
-    /// `FencingLoss` for the journal: the claim loss is a recorded run
-    /// event, not only the caller's exit cause.
+    /// claim — demotes the owning peer in place rather than failing its
+    /// scan: the gate re-closes, the reported role walks `demoting` to
+    /// `standby`, and one `FencingLoss` queues for the journal.
     struct FencingDriver<'d> {
         inner: &'d (dyn IoDriver + Sync),
         armed: AtomicBool,
@@ -1479,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preempted_claim_journals_one_loss_per_ownership() {
+    fn a_preempted_claim_demotes_the_owner_and_journals_one_loss_per_ownership() {
         let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
         let fenced = FencingDriver {
             inner: &field,
@@ -1492,13 +1524,16 @@ mod tests {
         );
         peer.activate().unwrap();
         peer.scan().unwrap();
+        assert_eq!(field.value(OUTPUT), Value::Float(1.0));
         assert!(peer.take_fencing_losses().is_empty());
 
         // Another attachment took the claim: the next write is fenced.
         // The scan completes degraded — the boundary counted the fenced
-        // fault into `io_health` — and the claim loss queues once.
+        // fault into `io_health` — and the peer adopts the demote
+        // path's survivable state on the spot: gate re-closed, role
+        // reporting `demoting`, the claim loss queued once.
         fenced.armed.store(true, Ordering::Relaxed);
-        peer.scan().unwrap();
+        assert_eq!(peer.scan(), Ok(Tick(2)));
         assert_eq!(
             peer.snapshot().io_health.last_error,
             Some(IoFault {
@@ -1515,11 +1550,77 @@ mod tests {
                 point: OUTPUT
             }]
         );
+        assert_eq!(peer.role(), Role::Demoting);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert!(!gate.is_open());
+        assert!(!peer.owns_field());
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![RoleChange {
+                tick: Tick(2),
+                from: Role::Active,
+                to: Role::Demoting
+            }]
+        );
 
-        // The loss is one event per held claim — repeated fenced scans
-        // do not queue again.
-        peer.scan().unwrap();
+        // The next scan's write is quiesced at the closed gate — it
+        // never reaches the field — and the completed scan settles the
+        // demotion. The loss stays one event per held claim: the
+        // quiesced scans queue nothing further.
+        assert_eq!(peer.scan(), Ok(Tick(3)));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(
+            field.value(OUTPUT),
+            Value::Float(1.0),
+            "a demoted peer's writes must not reach the field"
+        );
         assert!(peer.take_fencing_losses().is_empty());
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![RoleChange {
+                tick: Tick(3),
+                from: Role::Demoting,
+                to: Role::Standby
+            }]
+        );
+
+        // The loss reports once per held claim: re-converged and
+        // re-promoted, a second preemption queues a second loss and
+        // walks the same demotion again.
+        let checkpoint = peer.checkpoint();
+        peer.apply(&checkpoint).unwrap();
+        peer.promote().unwrap();
+        assert!(gate.is_open());
+        assert_eq!(peer.scan(), Ok(Tick(4)));
+        assert_eq!(
+            peer.take_fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(4),
+                point: OUTPUT
+            }]
+        );
+        assert_eq!(peer.scan(), Ok(Tick(5)));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Standby,
+                    to: Role::Promoting
+                },
+                RoleChange {
+                    tick: Tick(4),
+                    from: Role::Promoting,
+                    to: Role::Demoting
+                },
+                RoleChange {
+                    tick: Tick(5),
+                    from: Role::Demoting,
+                    to: Role::Standby
+                },
+            ]
+        );
     }
 
     /// A read-biasing driver wrapper: adds `offset` to `Float` reads of

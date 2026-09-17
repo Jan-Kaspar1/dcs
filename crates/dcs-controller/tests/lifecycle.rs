@@ -33,8 +33,11 @@
 //! 4. **Automatic failover (#65)** — the relay drops the heartbeat path;
 //!    the converged standby self-promotes at the budget-th miss's scan
 //!    boundary, takes the plant's writer claim, and the superseded
-//!    peer's writes answer `fenced` — the shared-field single-writer
-//!    rule honored.
+//!    peer's next field write answers `fenced` — the plant's verdict,
+//!    which demotes the still-running peer in place: gate re-closed,
+//!    role walking `demoting` to `standby`, the claim loss journaled —
+//!    the shared-field single-writer rule honored without killing the
+//!    superseded process.
 //! 5. **Rolling model revision (#87)** — a `--revised` standby on model
 //!    v2 crosses the fingerprint boundary into the named `reinitialized`
 //!    state carrying its carryover report; the documented
@@ -813,14 +816,18 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     assert_eq!(carried, image_value(&promoted, VALVE));
     trace.push((carried, field.read(LEVEL).unwrap().value));
 
-    // The superseded peer — still running, still scanning — is fenced:
-    // the field refused its write inside the requested scan, counted as
-    // the `fenced` fault while the scan completes degraded, and the
-    // field keeps only the new owner's output.
-    let fenced = resumed.advance(1).unwrap();
+    // The superseded peer — still running — is fenced at the field:
+    // the plant refused its write inside the requested scan, counted
+    // as the `fenced` fault while the scan completes degraded, and the
+    // fenced boundary walks it down the demote path rather than ending
+    // the process — gate re-closed, the reported role `demoting`, the
+    // claim loss journaled. The field keeps only the new owner's
+    // output throughout.
+    let fenced_scan = resumed.advance(1).unwrap();
+    assert_eq!(fenced_scan.tick, Tick(promotion_tick));
     assert!(
         matches!(
-            fenced
+            fenced_scan
                 .io_health
                 .last_error
                 .as_ref()
@@ -828,30 +835,42 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             Some(IoError::Fenced(_))
         ),
         "the returning peer's write must be refused fenced: {:?}",
-        fenced.io_health
+        fenced_scan.io_health
     );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
-
-    // The link heals — the old peer's monitor answers again and still
-    // reports `active`: fencing is the field's verdict, not a role the
-    // fenced peer adopted. Its writes stay refused.
-    relay.partition(false);
-    let superseded_role = resumed.role().unwrap().role;
-    assert_eq!(superseded_role, Role::Active);
-    let fenced_again = resumed.advance(1).unwrap();
+    let superseded = resumed.role().unwrap();
+    assert_eq!(
+        superseded.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path, not die: {superseded:?}"
+    );
     assert!(
-        matches!(
-            fenced_again
-                .io_health
-                .last_error
-                .as_ref()
-                .map(|fault| &fault.error),
-            Some(IoError::Fenced(_))
-        ),
-        "a healed but superseded peer stays fenced: {:?}",
-        fenced_again.io_health
+        resumed.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost { point } if point == VALVE
+        )),
+        "the fenced owner's journal must record the claim loss"
     );
+
+    // The link heals — the demoted peer's monitor answers again — and
+    // its first quiesced scan settles `standby`, its writes staying
+    // behind the re-closed gate: the survivable degraded state the
+    // single-writer rule resolves a superseded owner to.
+    relay.partition(false);
+    let quiesced_scan = resumed.advance(1).unwrap();
+    assert_eq!(quiesced_scan.tick, Tick(promotion_tick + 1));
+    let settled = resumed.role().unwrap();
+    assert_eq!(settled.role, Role::Standby);
+    assert_eq!(settled.sync, Some(StandbySync::Unsynchronized));
     assert_eq!(field.read(VALVE).unwrap().value, carried);
+    assert_eq!(
+        role_changes(&resumed),
+        vec![
+            (Role::Active, Role::Demoting),
+            (Role::Demoting, Role::Standby)
+        ],
+        "the demotion the fenced boundary drove must journal in order"
+    );
 
     // The promoted peer owns the run: each tick the field carries
     // exactly its image's staged output.
@@ -1072,11 +1091,17 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         "failover": {
             "partitioned_at": at_partition,
             "promoted_at": promotion_tick,
-            "fenced": [
-                fenced.io_health.last_error.as_ref().map(|fault| fault.error.to_string()),
-                fenced_again.io_health.last_error.as_ref().map(|fault| fault.error.to_string()),
-            ],
-            "superseded_role": superseded_role,
+            "superseded": {
+                "fenced_fault": fenced_scan
+                    .io_health
+                    .last_error
+                    .as_ref()
+                    .map(|fault| fault.error.to_string()),
+                "fenced_scan": fenced_scan.tick,
+                "settled_scan": quiesced_scan.tick,
+                "roles": [superseded.role, settled.role],
+                "sync": settled.sync,
+            },
         },
         "revision": {
             "crossing_tick": crossing_tick,

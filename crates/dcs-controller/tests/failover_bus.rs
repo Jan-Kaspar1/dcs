@@ -646,8 +646,10 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // both device servers, its scan writes, its step advances the
     // banks. From this boundary the old peer is fenced — its next
     // requested scan's exchange is refused and counted as the named
-    // `fenced` fault while the scan completes degraded, and the field
-    // carries only the new owner's output.
+    // `fenced` fault while the scan completes degraded, and the verdict
+    // degrades the superseded peer through the demote path rather than
+    // ending its process: the gate re-closes and the reported role
+    // moves to `demoting`.
     let promoted = standby.advance(1).unwrap();
     assert_eq!(
         standby.role().unwrap().role,
@@ -678,6 +680,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     assert_eq!(fenced_ai.step(DT_F64), Err(LinkError::Fenced));
 
+    // The old peer's requested scan is fenced at the bank — counted as
+    // the named fault while the scan completes degraded — and the
+    // peer survives: the refusal demotes it in place.
     let fenced_scan = active.advance(1).unwrap();
     assert!(
         matches!(
@@ -691,28 +696,26 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         "the returning peer's exchange must be refused fenced: {:?}",
         fenced_scan.io_health
     );
-    // Nothing the fenced scan staged reached the register bank.
+    // Nothing the fenced scan staged reached the register bank — and
+    // the field's verdict demoted the superseded peer in place.
     assert_eq!(field_ao.read(VALVE).unwrap().value, carried);
-
-    // The link heals — the old peer's monitor answers again and still
-    // reports `active`: fencing is the field's verdict, not a role the
-    // fenced peer adopted. Its writes stay refused — exactly one peer
-    // writes the registers after failover.
-    relay.partition(false);
-    assert_eq!(active.role().unwrap().role, Role::Active);
-    let fenced_scan = active.advance(1).unwrap();
-    assert!(
-        matches!(
-            fenced_scan
-                .io_health
-                .last_error
-                .as_ref()
-                .map(|fault| &fault.error),
-            Some(IoError::Fenced(_))
-        ),
-        "a healed but superseded peer stays fenced: {:?}",
-        fenced_scan.io_health
+    let report = active.role().unwrap();
+    assert_eq!(
+        report.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path, not die: {report:?}"
     );
+    assert_eq!(report.tick, fenced_scan.tick);
+
+    // The link heals — the demoted peer's monitor answers again — and
+    // its first quiesced scan settles `standby`: the survivable
+    // degraded state. Its writes stay behind the re-closed gate —
+    // exactly one peer writes the registers after failover.
+    relay.partition(false);
+    active.advance(1).unwrap();
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
 
     for tick in 1..=M {
         let owner = standby.advance(1).unwrap();
@@ -722,20 +725,11 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             image_value(&owner, VALVE),
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
-        // And every fresh write attempt by the old peer is refused.
-        let fenced_scan = active.advance(1).unwrap();
-        assert!(
-            matches!(
-                fenced_scan
-                    .io_health
-                    .last_error
-                    .as_ref()
-                    .map(|fault| &fault.error),
-                Some(IoError::Fenced(_))
-            ),
-            "tick {tick}: {:?}",
-            fenced_scan.io_health
-        );
+        // The superseded peer keeps scanning and serving — quiesced at
+        // the re-closed gate, alive, and never reaching the banks
+        // again.
+        active.advance(1).unwrap();
+        assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -1086,10 +1086,11 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
             // it — but its boundary already counted the I/O faults
             // into `io_health`: publish the faulted boundary's state
             // so the served read model reports the fault rather than
-            // sitting on the last healthy scan. A field write the plant
-            // fenced — the claim this owner held was preempted — also
-            // journals its loss here: the event belongs to the run's
-            // audit trail, not only the exit cause.
+            // sitting on the last healthy scan. A fenced write on a
+            // peer that cannot quiesce it — no gate — still lands here
+            // carrying its claim-loss report, which journals the same
+            // way: the event belongs to the run's audit trail, not only
+            // the exit cause.
             for loss in peer.take_fencing_losses() {
                 recorder.note_field_claim_lost(loss.tick, loss.point);
             }
@@ -1098,16 +1099,17 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
         }
     };
     let snapshot = recorder.record_scan(peer.executor(), tick);
-    for change in peer.take_role_changes() {
-        recorder.note_role_change(change.tick, change.from, change.to);
-    }
     // A field write the plant fenced — the claim this owner held was
-    // preempted — degrades the completed scan rather than ending the
-    // run, so its loss journals here on the success path: the event
-    // belongs to the run's audit trail, beside the `io_health` fault
-    // the boundary already counted.
+    // preempted — completed the scan degraded and demoted the peer
+    // inside it rather than failing it: the claim loss and the role
+    // transition it drove journal beside the scan's own events, cause
+    // before effect, beside the `io_health` fault the boundary
+    // already counted.
     for loss in peer.take_fencing_losses() {
         recorder.note_field_claim_lost(loss.tick, loss.point);
+    }
+    for change in peer.take_role_changes() {
+        recorder.note_role_change(change.tick, change.from, change.to);
     }
     store.publish(tick, snapshot, peer.receipts());
     Ok(tick)
