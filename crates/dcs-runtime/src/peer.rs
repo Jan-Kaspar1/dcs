@@ -925,6 +925,16 @@ impl<'d> Peer<'d> {
     /// settling `standby` on the first quiesced scan that completes.
     /// A misordered promotion or a rogue claim cannot kill or
     /// split-brain a running field owner.
+    ///
+    /// The same demotion reconciles the command audit: commands the
+    /// still-reporting-`active` peer accepted between the preemption
+    /// and this detection scan applied at its head onto an image the
+    /// field never saw — the superseding owner does not carry them —
+    /// so [`Executor::supersede_commands`] rewrites the boundary's
+    /// `Applied` settlements `Rejected` with
+    /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
+    /// before the journaled `CommandSettled` would echo a phantom
+    /// application.
     pub fn scan(&mut self) -> Result<Tick, ScanError> {
         let tick = match self.executor.scan() {
             Ok(tick) => tick,
@@ -946,7 +956,10 @@ impl<'d> Peer<'d> {
                     // gate and report the aborted scan's tick — the
                     // fenced write degrades this peer to the quiesced
                     // tracking peer the demote path defines; it does
-                    // not end the run.
+                    // not end the run. Commands the aborted boundary
+                    // settled are reconciled first: they applied onto
+                    // the abandoned image only.
+                    self.executor.supersede_commands(tick);
                     self.demote().expect("a field-owning peer demotes");
                     return Ok(tick);
                 }
@@ -967,7 +980,10 @@ impl<'d> Peer<'d> {
             // ownership token, and the reported role walks `demoting`
             // to `standby`. The fenced scan ran under the lifted gate,
             // so it does not settle the transition — the first
-            // quiesced scan does.
+            // quiesced scan does. Commands the fenced boundary applied
+            // reconcile first: the image they changed is the abandoned
+            // run's, so they settle superseded rather than applied.
+            self.executor.supersede_commands(tick);
             self.demote().expect("a field-owning peer demotes");
             return Ok(tick);
         }
@@ -1099,9 +1115,10 @@ mod tests {
     use super::*;
     use crate::{Component, ComponentIo, ComponentIoExt, IoRequirement, PointMap, StepError};
     use dcs_core::{
-        CommandArgument, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor,
-        Direction, Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention,
-        EventValue, IoDriver, IoError, IoFault, PointId, Sample, StateMap, Value, ValueKind,
+        CommandArgument, CommandAvailability, CommandDecl, CommandError, CommandOutcome,
+        ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
+        EventFieldKind, EventRetention, EventValue, IoDriver, IoError, IoFault, PointId, Sample,
+        StateMap, Value, ValueKind,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1621,6 +1638,107 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A peer whose claim was preempted between scans still reports
+    /// `active` and accepts commands until the detection scan — the
+    /// fencing demotion must reconcile what that boundary settled onto
+    /// the abandoned image: `Rejected`/`Superseded`, never `Applied`
+    /// for an effect the field never saw.
+    #[test]
+    fn a_fenced_owner_supersedes_the_commands_its_detection_scan_applied() {
+        const HELD: PointId = PointId(30);
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let map = loop_map()
+            .with_writable_point(INPUT, Direction::In, ValueKind::Float)
+            .with_writable_internal(HELD, Direction::In, ValueKind::Float, Value::Float(0.0));
+        let mut peer = Peer::active(
+            Executor::new(&gate, map, vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+
+        // A command applied while the peer still owned the field keeps
+        // its applied settlement — only the superseded boundary
+        // reconciles.
+        peer.submit_command(Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(2.0),
+        });
+        assert_eq!(peer.scan(), Ok(Tick(1)));
+        assert_eq!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The claim is preempted between scans: the still-`active` peer
+        // accepts the window's commands — they queue for its next
+        // boundary.
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert!(peer.accepts_commands());
+        let internal = peer.submit_command(Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(9.9),
+        });
+        assert_eq!(
+            internal.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(2)
+            }
+        );
+        let field_write = peer.submit_command(Command::WriteValue {
+            point: INPUT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        assert!(matches!(
+            field_write.outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        // The detection scan: the boundary applies the queued commands
+        // onto the image, then the field write meets the fence and the
+        // demotion runs. The reconciled settlements name the
+        // supersession; the field write's own fenced refusal stands as
+        // the named driver rejection; nothing reached the field.
+        assert_eq!(peer.scan(), Ok(Tick(2)));
+        assert_eq!(peer.role(), Role::Demoting);
+        assert!(!gate.is_open());
+        assert_eq!(field.value(INPUT), Value::Float(1.0));
+        assert_eq!(
+            peer.receipts()[1].outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: Some(HELD) }
+            }
+        );
+        assert_eq!(
+            peer.receipts()[2].outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::DriverRejected {
+                    point: INPUT,
+                    error: IoError::Fenced(INPUT),
+                }
+            }
+        );
+        // The earlier boundary's settlement stands: it applied while
+        // the peer owned the field.
+        assert_eq!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
+
+        // The demoted peer's next quiesced boundary settles no strays —
+        // the pending queue was drained by the reconciliation.
+        assert_eq!(peer.scan(), Ok(Tick(3)));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.receipts().len(), 3);
     }
 
     /// A read-biasing driver wrapper: adds `offset` to `Float` reads of

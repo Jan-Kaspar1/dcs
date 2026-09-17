@@ -2092,6 +2092,38 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// Reconciles the commands a superseded run must not report applied.
+    ///
+    /// [`Peer`](crate::Peer) runs this on the scan that discovered the
+    /// lost field claim: the boundary settled the run's queued commands
+    /// onto an image the field will never see — the claim already
+    /// belonged to another attachment — so `Applied` would overstate
+    /// what an auditing operator reads as "took effect". Every receipt
+    /// still `Accepted` in the pending queue, and every receipt the
+    /// boundary at `tick` settled `Applied`, is rewritten `Rejected`
+    /// carrying [`CommandError::Superseded`]. Settlements of earlier
+    /// boundaries — applied while the run still owned the field — stand,
+    /// as do the boundary's own refusals (a field-point write the fence
+    /// already answered `DriverRejected`).
+    pub fn supersede_commands(&mut self, tick: Tick) {
+        while let Some(index) = self.pending_commands.pop_front() {
+            self.receipts[index].outcome = CommandOutcome::Rejected {
+                reason: CommandError::Superseded {
+                    point: self.receipts[index].command.point(),
+                },
+            };
+        }
+        for receipt in &mut self.receipts {
+            if receipt.outcome == (CommandOutcome::Applied { tick }) {
+                receipt.outcome = CommandOutcome::Rejected {
+                    reason: CommandError::Superseded {
+                        point: receipt.command.point(),
+                    },
+                };
+            }
+        }
+    }
+
     /// The cyclic exchange at the read boundary: when the driver
     /// implemented [`CyclicIoDriver`] at wiring, one `exchange` call —
     /// after command application, so a command-staged write publishes in
