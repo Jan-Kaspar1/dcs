@@ -145,6 +145,9 @@ fn with_server<R>(map: ChannelMap, test: impl FnOnce(SocketAddr) -> R) -> R {
 fn write_then_read_through_the_remote_driver_roundtrips_a_value() {
     with_server(loopback_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();
+        // The field fails closed while unclaimed: the test attachment
+        // owns the claim its mutations ride under.
+        remote.claim_writer(1).unwrap();
         let driver: &dyn IoDriver = &remote;
 
         driver.write(PointId(20), Value::Float(3.5)).unwrap();
@@ -178,6 +181,7 @@ fn a_second_client_observes_the_same_stepped_point_values() {
     with_server(loopback_map(), |addr| {
         let active = RemoteDriver::connect(addr).unwrap();
         let standby = RemoteDriver::connect(addr).unwrap();
+        active.claim_writer(1).unwrap();
 
         active.write(PointId(20), Value::Float(3.5)).unwrap();
         let tick = active.step(0.1).unwrap();
@@ -208,6 +212,9 @@ fn a_second_client_observes_the_same_stepped_point_values() {
 fn protocol_answers_map_to_named_io_errors() {
     with_server(loopback_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();
+        // Claimed before any mutation — the fail-closed field refuses a
+        // claim-less attachment before the kind check could run.
+        remote.claim_writer(1).unwrap();
         let driver: &dyn IoDriver = &remote;
 
         // The server's `IoError`s arrive unchanged.
@@ -297,6 +304,8 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
     thread::scope(|scope| {
         scope.spawn(|| server.serve());
         let remote = RemoteDriver::connect(addr).unwrap();
+        // The executor's output writes ride this attachment's claim.
+        remote.claim_writer(1).unwrap();
         let point_map: PointMap = [
             (PointId(10), dcs_core::Direction::In, ValueKind::Float),
             (PointId(20), dcs_core::Direction::Out, ValueKind::Float),
@@ -432,6 +441,7 @@ fn executor_runs_unchanged_with_identical_behavior_local_and_remote() {
     let local_trace = scripted_run(&local, |dt| local.step(dt));
     let remote_trace = with_server(scenario_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
         scripted_run(&remote, |dt| remote.step(dt).unwrap())
     });
     // Same components, same script, same point map — only the transport
@@ -444,6 +454,7 @@ fn two_identical_scripted_runs_produce_identical_sample_sequences() {
     let run = || {
         with_server(scenario_map(), |addr| {
             let remote = RemoteDriver::connect(addr).unwrap();
+            remote.claim_writer(1).unwrap();
             scripted_run(&remote, |dt| remote.step(dt).unwrap())
         })
     };
@@ -461,10 +472,15 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
         let new_b = RemoteDriver::connect(addr).unwrap();
         let observer = RemoteDriver::connect(addr).unwrap();
 
-        // Unclaimed, every attachment writes — the pre-claim behavior.
-        old_a.write(PointId(20), Value::Float(1.0)).unwrap();
-        old_b.step(0.1).unwrap();
-        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(1.0));
+        // Unclaimed the field fails closed — the named `unclaimed`
+        // refusal on step, the point's `IoError::Fenced` on write —
+        // while reads stay open. No attachment mutates before a claim.
+        assert_eq!(old_a.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            old_b.write(PointId(20), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(0.0));
 
         // The old owner's several attachments claim the same token; all
         // of them keep writing.
@@ -630,13 +646,25 @@ fn a_restarted_server_is_re_served_by_the_same_attachment() {
         scope.spawn(|| restarted.serve());
         let _guard = ShutdownOnDrop(&restarted);
 
+        // The restart is a new claim lifetime, and the unclaimed field
+        // fails closed: before the owner re-arms, a fresh attachment's
+        // mutation is refused `unclaimed` — the named, closed window the
+        // restart left — while reads stay open.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            probe.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(probe.read(PointId(20)).unwrap().value, Value::Float(0.0));
+
         wait_for_reattach(&remote, Duration::from_secs(10));
         assert!(remote.connected());
         // The recorded claim re-armed itself on the re-attach: the fresh
-        // plant's empty arbitration now names owner 7 again, and a
-        // claim-less attachment's mutation is fenced exactly as before
-        // the outage.
-        let probe = RemoteDriver::connect(addr).unwrap();
+        // plant's empty arbitration now names owner 7 again, and the
+        // same claim-less attachment's mutation answers `fenced` — a
+        // distinguishable verdict from `unclaimed`, so a probe can tell
+        // the owner's re-arm landed.
         assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
         assert_eq!(
             probe.write(PointId(20), Value::Float(9.0)),
@@ -674,6 +702,10 @@ fn a_reconnecting_attachment_cannot_preempt_a_standing_claim() {
         scope.spawn(|| restarted.serve());
         let _guard = ShutdownOnDrop(&restarted);
         let new_owner = RemoteDriver::connect(addr).unwrap();
+        // The restart window is fail-closed: the fresh field refuses an
+        // unclaimed mutation rather than admitting whatever attached
+        // first — the claim has to land explicitly.
+        assert_eq!(new_owner.step(0.1), Err(RemoteError::Unclaimed));
         new_owner.claim_writer(9).unwrap();
 
         // The superseded attachment re-attaches, but `ensure_writer`
@@ -714,10 +746,53 @@ fn release_claim_keeps_a_demoted_attachment_from_re_arm() {
         let _guard = ShutdownOnDrop(&restarted);
         wait_for_reattach(&remote, Duration::from_secs(10));
         // Had the demoted attachment re-armed owner 7, a claim-less
-        // attachment's mutation would be fenced; the field answers open
-        // instead — free for whichever peer legitimately owns it.
+        // attachment's mutation would answer `fenced`; it answers the
+        // named `unclaimed` refusal instead — the field is closed but
+        // still free for whichever peer legitimately claims it.
         let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            probe.write(PointId(20), Value::Float(5.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        probe.claim_writer(9).unwrap();
         probe.step(0.1).unwrap();
         probe.write(PointId(20), Value::Float(5.0)).unwrap();
+    });
+}
+
+#[test]
+fn a_released_claim_returns_the_field_to_unclaimed_not_open() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        let probe = RemoteDriver::connect(addr).unwrap();
+
+        // The tool's shape: a conditional claim, the mutation, then the
+        // deliberate hand-back — `ensure_writer`, never `claim_writer`,
+        // so tooling can never preempt a live field owner.
+        owner.ensure_writer(5).unwrap();
+        owner.write(PointId(20), Value::Float(1.0)).unwrap();
+        owner.step(0.1).unwrap();
+        owner.release_writer().unwrap();
+
+        // The last hold out released the claim itself: the field is
+        // `unclaimed` again — still closed, not the old free-for-all —
+        // and claimable by whoever legitimately owns it next.
+        assert_eq!(probe.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            probe.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        probe.claim_writer(9).unwrap();
+        probe.step(0.1).unwrap();
+
+        // A partial release keeps the claim standing: one holder
+        // releasing while another still holds the token leaves the
+        // field owned.
+        let second = RemoteDriver::connect(addr).unwrap();
+        second.ensure_writer(9).unwrap();
+        probe.release_writer().unwrap();
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        second.write(PointId(20), Value::Float(4.0)).unwrap();
     });
 }

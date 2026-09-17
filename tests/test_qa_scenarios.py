@@ -3212,8 +3212,14 @@ class PlantLinkFeed:
                         'error': {'kind': 'fenced',
                                   'detail': 'another attachment owns '
                                             'field writes'}}
-            self.plant_tick += 1
-            return {'result': 'stepped', 'tick': self.plant_tick}
+            # The field fails closed while unclaimed: a restarted
+            # plant's claim-less window is a named refusal, not an
+            # open one — so the probe can tell "waiting for the owner's
+            # re-arm" from "fenced by a standing owner".
+            return {'result': 'error',
+                    'error': {'kind': 'unclaimed',
+                              'detail': 'no attachment holds '
+                                        'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
     # The monitor surface — replaces scenarios.http_json.

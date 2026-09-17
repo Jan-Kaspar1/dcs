@@ -2725,8 +2725,10 @@ def _plant_probe(ctx, request, timeout=5):
     the field's own evidence: `list_points` is the census of points the
     boundary fails at once, and a `step` mutation is the fencing probe
     — answered `fenced` while any attachment holds the plant's
-    single-writer claim, `stepped` while nobody does. Each probe takes
-    a new connection because the outage it watches is exactly a dead
+    single-writer claim, `unclaimed` while none does: the field fails
+    closed across a restart, so `unclaimed` means "waiting on the
+    owner's re-arm", not an open window. Each probe takes a new
+    connection because the outage it watches is exactly a dead
     listener; the probe never sends `claim_writer` — claiming from
     here would preempt the field owner it is checking for."""
     stream = _plant_connect(ctx, timeout=timeout)

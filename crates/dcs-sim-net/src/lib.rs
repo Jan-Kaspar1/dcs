@@ -51,22 +51,34 @@
 //!   unclaimed or already claims `owner` — `claimed_shared` when other
 //!   live attachments hold the token — `fenced` while a different
 //!   owner stands.
+//! - `{"op":"release_writer"}` — drops this connection's hold on the
+//!   write claim, releasing the claim itself when the last holder
+//!   leaves; answers `done`.
 //!
 //! ## Field write-ownership fencing
 //!
 //! The server arbitrates a single field writer, per the failover
 //! decision: a connection issues `claim_writer` naming an `owner` token
 //! — one controller's several attachments claim the same token — and
-//! the grant preempts unconditionally. Once an owner is claimed, `write`
-//! and `step` requests from a connection that has not claimed the
-//! current owner are refused — `write` with the point's
-//! `IoError::Fenced`, `step` with `PlantError::Fenced` — so a promoted
-//! standby's claim stops a still-alive old owner's writes at the field
-//! itself. The claim stands until preempted, never released on
-//! disconnect: a dead owner's silence is the failure the claim exists
-//! to fence. Reads, fault injection, and `list_points` stay open to
-//! every attachment. Until the first `claim_writer`, every attachment
-//! writes freely.
+//! the grant preempts unconditionally. The field fails closed: `write`
+//! and `step` requests from a connection not holding the current claim
+//! are refused — `write` with the point's `IoError::Fenced`, `step`
+//! with `PlantError::Fenced` — so a promoted standby's claim stops a
+//! still-alive old owner's writes at the field itself. The claim
+//! stands until preempted or the last holder's `release_writer` hands
+//! it back, never released on disconnect: a dead owner's silence is
+//! the failure the claim exists to fence. Reads, fault injection, and
+//! `list_points` stay open to every attachment.
+//!
+//! Unclaimed is a closed state too, not an open window: a fresh or
+//! restarted server — and one whose last holder released — refuses
+//! `write` and `step` with `PlantError::Unclaimed` (surfaced by
+//! `RemoteDriver` as the point's `IoError::Fenced`, respectively
+//! [`RemoteError::Unclaimed`]) until a claim lands. A plant restart
+//! therefore drops the claim into a named refusal rather than a field
+//! any attachment can write through, and the returning owner's
+//! `ensure_writer` re-arms deterministically instead of racing an
+//! interposer that could otherwise seize the field first.
 //!
 //! The claim tracks the live connections holding it, so a grant joining
 //! a token another live attachment already holds is flagged
@@ -85,6 +97,11 @@
 //! claims that owner, answering `fenced` while a *different* owner
 //! stands. A reconnecting field owner re-arms the claim through it
 //! without preempting whichever attachment claimed during the outage.
+//! `release_writer` is the deliberate hand-back: it drops only this
+//! connection's hold, releasing the claim itself when the last holder
+//! leaves — the shape a mutation tool that claimed conditionally
+//! (`dcs-plant-ctl`) needs so its claim cannot outlive its connection
+//! and fence the owner's re-arm.
 //!
 //! The `dcs-plant-ctl` binary in this crate is the protocol's
 //! development-tooling client: it lists, reads, and writes points and
@@ -97,9 +114,12 @@
 //! [`IoError`](dcs_core::IoError) verbatim (`UnknownPoint`,
 //! `TypeMismatch`, or an injected fault's `Disconnected`/`Timeout`), and
 //! `{"kind":"invalid_request","detail":…}` covers an unparseable line or
-//! an invalid `step`, and `{"kind":"fenced","detail":…}` the
-//! write-ownership refusal described above. A line exceeding
-//! [`MAX_MESSAGE`] is answered by closing the connection.
+//! an invalid `step`. The write-ownership refusals are
+//! `{"kind":"fenced","detail":…}` while another owner stands and
+//! `{"kind":"unclaimed","detail":…}` while none does — distinct kinds so
+//! a probe can tell "closed until an owner claims" from "fenced out by
+//! one". A line exceeding [`MAX_MESSAGE`] is answered by closing the
+//! connection.
 //!
 //! Point values must cross the wire bit-exactly or remote and local runs
 //! diverge, so the crate builds `serde_json` with its `float_roundtrip`

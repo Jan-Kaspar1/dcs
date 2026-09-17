@@ -12,7 +12,7 @@ use dcs_model::SignalIndex;
 use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{Executor, PointMap};
 use dcs_sim::{ChannelId, ChannelMap, Fault, Loopback, PointBinding, SimDriver};
-use dcs_sim_net::{PlantResponse, PlantServer, RemoteDriver};
+use dcs_sim_net::{PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Command, Output};
 use std::thread;
@@ -161,6 +161,29 @@ fn read_write_and_step_roundtrip() {
                 sample: Sample::good(Value::Float(3.5), Tick(2))
             }
         );
+    });
+}
+
+#[test]
+fn the_tools_mutation_claim_is_conditional_and_released() {
+    with_server(fixture_map(), |addr| {
+        // Each mutating command rides a conditional claim the invocation
+        // releases: a fresh attachment finds the field `unclaimed`
+        // afterward — closed, not left under a dead tool token that
+        // would fence the field owner's re-arm.
+        assert_eq!(ctl_ok(addr, &["write", "10", "2.5"]), PlantResponse::Done);
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.5), Err(RemoteError::Unclaimed));
+
+        // While a field owner claims the plant the tool's claim cannot
+        // preempt it: the command fences at `ensure_writer` exactly as a
+        // bare write would have at the field.
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(1).unwrap();
+        let output = ctl(addr, &["write", "10", "9.0"]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("owns field writes"), "{output:?}");
+        assert_eq!(owner.read(PointId(10)).unwrap().value, Value::Float(2.5));
     });
 }
 

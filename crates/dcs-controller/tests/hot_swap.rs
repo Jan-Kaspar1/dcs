@@ -56,6 +56,10 @@ const DT: &str = "0.1";
 const N: u64 = 20;
 /// Ticks after the switch whose outputs must equal the reference run's.
 const M: u64 = 40;
+/// The throwaway token the harness's pre-spawn setpoint seed claims
+/// under — `ensure_writer`, then released — so the seeding leaves no
+/// claim standing against the launched pair's startup claim.
+const SEED: u64 = 499_900;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
@@ -94,8 +98,14 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
     // every later access is a read.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
     let reference_field = RemoteDriver::connect(reference_plant.addr).unwrap();
+    // The fields fail closed while unclaimed: the seeding writes ride a
+    // conditional claim released afterward — the tool's shape.
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+    reference_field.ensure_writer(SEED).unwrap();
     reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    reference_field.release_writer().unwrap();
 
     // The pair: the active first — the standby's --standby names its
     // monitoring address — then the standby, then the reference run on
@@ -318,8 +328,12 @@ fn a_demoted_launched_active_follows_its_successor_and_fails_back() {
 
     // The observer's setpoint lands before the controllers spawn: the
     // launched active's startup claim fences this attachment from boot.
+    // The field fails closed while unclaimed, so the seeding write
+    // rides a conditional claim released afterward — the tool's shape.
     let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
     field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
 
     // The reproduction's launch shape: the active names no peer; the
     // standby tracks it by `--standby`.

@@ -114,6 +114,9 @@ fn mixed_kind_fixture_assembles_scans_and_routes() {
             .unwrap()
             .build()
             .unwrap();
+        // The remote plant fails closed while unclaimed: the fan-out's
+        // field-facing backend claims it under this run's token.
+        driver.claim_field_writer(1).unwrap();
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
 
         // The point space is one surface: the setpoint write lands on the
@@ -186,6 +189,7 @@ fn two_backend_run_matches_single_backend_reference() {
             .unwrap()
             .build()
             .unwrap();
+        driver.claim_field_writer(1).unwrap();
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
