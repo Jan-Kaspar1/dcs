@@ -722,6 +722,29 @@ fn served_documents_tolerate_new_categories_and_older_readers() {
         for entry in &view.components {
             assert!(entry.events.is_empty());
         }
+
+        // An events document predating the `retention` mark reads each
+        // entry as the durable journal record it then was — the
+        // additive default — while a served document marks every
+        // entry's store.
+        let (status, body) = client.request("GET", "/resources", None).unwrap();
+        assert_eq!(status, 200, "{body}");
+        let mut document: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for entry in document["components"].as_array_mut().unwrap() {
+            for event in entry["events"].as_array_mut().unwrap() {
+                event.as_object_mut().unwrap().remove("retention");
+            }
+        }
+        let view: ResourceView = serde_json::from_value(document).unwrap();
+        for entry in &view.components {
+            assert!(
+                entry
+                    .events
+                    .iter()
+                    .all(|event| event.retention == dcs_core::EventRetention::Journal),
+                "an unmarked entry must read as the durable record"
+            );
+        }
     });
 }
 

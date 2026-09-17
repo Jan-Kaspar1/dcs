@@ -132,12 +132,7 @@ pub(crate) fn resource_view(
                     .iter()
                     .map(|command| command_state(command, signals))
                     .collect(),
-                events: attributed_events(
-                    journal,
-                    routed,
-                    &descriptor.name,
-                    &bound,
-                ),
+                events: attributed_events(journal, routed, &descriptor.name, &bound),
             }
         })
         .collect();

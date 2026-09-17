@@ -6,8 +6,9 @@
 //! monitored loop's `track_cycle` does.
 
 use dcs_core::{
-    Direction, Divergence, IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync,
-    Tick, Value, ValueKind,
+    ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
+    EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent, PointId, Role,
+    Sample, StandbySync, StateMap, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Driven, Monitor, MonitorClient};
@@ -78,6 +79,88 @@ impl Component for Scale {
     }
 }
 
+/// A component emitting declared events during `step` — `fired`
+/// (`Journal`-retained), `shift` (`History`), `beat` (`Latest`) per
+/// scan, the payload's `n` counting emissions — the routed classes'
+/// parity rig: the checkpointed `n` carries the emission sequence
+/// across the tracking pull, so a standby's first tracked scan already
+/// emits what the active's does.
+struct Emitter {
+    n: i64,
+}
+
+impl Emitter {
+    fn event(event: &str, n: i64) -> EmittedEvent {
+        EmittedEvent {
+            event: event.to_string(),
+            component: String::new(),
+            fields: [("n".to_string(), EventValue::Value(Value::Int(n)))]
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+impl Component for Emitter {
+    fn name(&self) -> &str {
+        "em"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        Vec::new()
+    }
+
+    fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        self.n += 1;
+        Ok(())
+    }
+
+    fn describe(&self) -> ComponentDescriptor {
+        let event = |name: &str, retention: EventRetention| EventDecl {
+            name: name.to_string(),
+            payload: vec![EventField {
+                name: "n".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention,
+        };
+        ComponentDescriptor {
+            name: "em".to_string(),
+            kind: "emitter".to_string(),
+            label: "em".to_string(),
+            ports: Vec::new(),
+            parameters: Vec::new(),
+            commands: Vec::new(),
+            events: vec![
+                event("fired", EventRetention::Journal),
+                event("shift", EventRetention::History),
+                event("beat", EventRetention::Latest),
+            ],
+        }
+    }
+
+    fn drain_events(&mut self) -> Vec<EmittedEvent> {
+        vec![
+            Self::event("fired", self.n),
+            Self::event("shift", self.n),
+            Self::event("beat", self.n),
+        ]
+    }
+
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("n", Value::Int(self.n));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+        state.ensure_known_fields("em", &["n"])?;
+        self.n = state.require_i64("em", "n")?;
+        Ok(())
+    }
+}
+
 /// The model fixture behind the monitors; both peers serve the same index.
 const MODEL: &str = include_str!("../fixtures/monitor.json");
 
@@ -85,12 +168,18 @@ fn signal_index() -> SignalIndex {
     PlantModel::load(MODEL).unwrap().signal_index()
 }
 
-fn executor(driver: &(dyn IoDriver + Sync)) -> Executor<'_> {
+fn executor(driver: &'static StubDriver) -> Executor<'static> {
     let map = PointMap::new()
         .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
         .with_point(PointId(30), Direction::Out, ValueKind::Float);
     Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// The parity rig's executor: one `Emitter` and no I/O surface — the
+/// tracked emissions exercise every routed store.
+fn emitter_executor(driver: &'static StubDriver) -> Executor<'static> {
+    Executor::new(driver, PointMap::new(), vec![Box::new(Emitter { n: 0 })]).unwrap()
 }
 
 /// One serving monitor: the `Arc` shares the handle so `stop` can drop
@@ -148,6 +237,16 @@ impl DrivenStandby {
     /// promotion manual. Returns the standby rig and the serving
     /// active it tracks.
     fn start(failover: Option<u32>) -> (Self, Serving) {
+        Self::start_with(failover, executor)
+    }
+
+    /// `build` constructs each peer's executor over its private driver —
+    /// the event-parity rig's emitter rides the same driven tracking
+    /// cycle.
+    fn start_with(
+        failover: Option<u32>,
+        build: fn(&'static StubDriver) -> Executor<'static>,
+    ) -> (Self, Serving) {
         let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(3.0)),
             (PointId(20), Value::Float(0.0)),
@@ -156,7 +255,7 @@ impl DrivenStandby {
         let active = Serving::start(
             Monitor::bind_peer(
                 "127.0.0.1:0",
-                Peer::active(executor(active_driver), None),
+                Peer::active(build(active_driver), None),
                 signal_index(),
             )
             .unwrap(),
@@ -168,7 +267,7 @@ impl DrivenStandby {
             (PointId(20), Value::Float(0.0)),
             (PointId(30), Value::Float(0.0)),
         ])));
-        let mut peer = Peer::standby(executor(standby_driver), None);
+        let mut peer = Peer::standby(build(standby_driver), None);
         if let Some(budget) = failover {
             peer = peer.with_failover(budget);
         }
@@ -344,4 +443,64 @@ fn driven_track_cycle_journals_the_divergence_transition() {
         )),
         "the driven cycle journaled the divergence at the compared tick: {journal:?}"
     );
+}
+
+/// Emit-identical parity at the served surface: the tracking peer
+/// emits the same declared events on the adopted run state, its
+/// recorder routes them by the same declared retentions, and
+/// `GET /resources` on either peer answers the same routed events —
+/// the journal tail's `fired` records beside the event-history ring's
+/// `shift` records and the latest view's standing `beat`.
+#[test]
+fn a_tracking_standbys_resources_answer_the_same_routed_events() {
+    let (standby, active) = DrivenStandby::start_with(None, emitter_executor);
+
+    // Lockstep from before the first emission: each requested standby
+    // scan pulls the active's checkpoint first — the tracked adopt —
+    // then scans, so the peers emit and route identical streams scan
+    // by scan.
+    for _ in 0..4 {
+        standby.standby.client.advance(1).unwrap();
+        active.client.advance(1).unwrap();
+    }
+    assert_eq!(standby.standby.client.role().unwrap().role, Role::Standby);
+
+    let events = |client: &MonitorClient| {
+        client
+            .resources()
+            .unwrap()
+            .components
+            .into_iter()
+            .find(|entry| entry.name == "em")
+            .expect("the emitter is served")
+            .events
+    };
+    let expected = events(&active.client);
+    let named = |name: &str| {
+        expected
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.event,
+                    JournalEvent::EventEmitted { event } if event.event == name
+                )
+            })
+            .count()
+    };
+    // Every declared class landed: `fired` journaled per scan, `shift`
+    // in the event-history ring, `beat` standing as the newest
+    // `Latest` record — each entry's `retention` marking its store.
+    assert_eq!(named("fired"), 4);
+    assert_eq!(named("shift"), 4);
+    assert_eq!(named("beat"), 1);
+    for retention in [
+        EventRetention::Journal,
+        EventRetention::History,
+        EventRetention::Latest,
+    ] {
+        assert!(expected.iter().any(|entry| entry.retention == retention));
+    }
+    // The parity itself: the standby's `events` is the same record —
+    // same seqs, ticks, payloads, and retention marks.
+    assert_eq!(events(&standby.standby.client), expected);
 }

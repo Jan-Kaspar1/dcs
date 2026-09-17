@@ -607,10 +607,7 @@ mod tests {
                 .iter()
                 .map(|record| (record.retention, record.seq))
                 .collect::<Vec<_>>(),
-            vec![
-                (EventRetention::History, 1),
-                (EventRetention::Latest, 2)
-            ]
+            vec![(EventRetention::History, 1), (EventRetention::Latest, 2)]
         );
         // Drained: the next publication carries no stale delta.
         let publication = store.publish(Tick(2), snapshot(Tick(2)), &[]);
