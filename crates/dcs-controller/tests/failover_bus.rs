@@ -645,9 +645,10 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // The budget-th miss promotes the standby: its claim preempts on
     // both device servers, its scan writes, its step advances the
     // banks. From this boundary the old peer is fenced — its next
-    // requested scan's register write is refused with the named
-    // `fenced` error, and the field carries only the new owner's
-    // output.
+    // requested scan's register write is refused by the bank, and the
+    // fenced boundary degrades it through the demote path rather than
+    // ending its process: the gate re-closes and the reported role
+    // moves to `demoting`.
     let promoted = standby.advance(1).unwrap();
     assert_eq!(
         standby.role().unwrap().role,
@@ -678,25 +679,28 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     assert_eq!(fenced_ai.step(DT_F64), Err(LinkError::Fenced));
 
-    let error = active.advance(1).unwrap_err();
-    assert!(
-        error.to_string().contains("fenced"),
-        "the returning peer's write must fail fenced: {error}"
-    );
+    // The old peer's requested scan is fenced at the bank — and the
+    // peer survives: the refusal demotes it in place.
+    let fenced_scan = active.advance(1).unwrap();
     // Nothing the fenced scan staged reached the register bank.
     assert_eq!(field_ao.read(VALVE).unwrap().value, carried);
-
-    // The link heals — the old peer's monitor answers again and still
-    // reports `active`: fencing is the field's verdict, not a role the
-    // fenced peer adopted. Its writes stay refused — exactly one peer
-    // writes the registers after failover.
-    relay.partition(false);
-    assert_eq!(active.role().unwrap().role, Role::Active);
-    let error = active.advance(1).unwrap_err();
-    assert!(
-        error.to_string().contains("fenced"),
-        "a healed but superseded peer stays fenced: {error}"
+    let report = active.role().unwrap();
+    assert_eq!(
+        report.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path, not die: {report:?}"
     );
+    assert_eq!(report.tick, fenced_scan.tick);
+
+    // The link heals — the demoted peer's monitor answers again — and
+    // its first quiesced scan settles `standby`: the survivable
+    // degraded state. Its writes stay behind the re-closed gate —
+    // exactly one peer writes the registers after failover.
+    relay.partition(false);
+    active.advance(1).unwrap();
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
 
     for tick in 1..=M {
         let owner = standby.advance(1).unwrap();
@@ -706,9 +710,10 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             image_value(&owner, VALVE),
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
-        // And every fresh write attempt by the old peer is refused.
-        let error = active.advance(1).unwrap_err();
-        assert!(error.to_string().contains("fenced"), "tick {tick}: {error}");
+        // The superseded peer keeps scanning and serving — quiesced,
+        // alive, and never reaching the banks again.
+        active.advance(1).unwrap();
+        assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -122,8 +122,13 @@
 //! owner's claim (a test harness driving plant stimuli); otherwise a
 //! fresh token is generated per process. A claim the field refuses —
 //! or a launch that cannot reach it — fails startup with the named
-//! `FieldClaimFailed`, and a claim a rogue `claim_writer` preempts
-//! journals `field_claim_lost` beside the fenced scan failure.
+//! `FieldClaimFailed`. And a claim preempted mid-run — a rogue
+//! `claim_writer`, or a promote posted before the old peer was demoted
+//! — demotes the superseded owner at its first fenced write: the gate
+//! re-closes and the reported role settles to `standby`, with
+//! `field_claim_lost` and the role changes journaled — a fenced active
+//! degrades instead of exiting, so a misordered promotion or a
+//! restarted superseded process cannot crash-loop the pair.
 //!
 //! Rolling a revised plant model into production, per the rolling
 //! model-revision decision: start the standby with `--revised` against
@@ -950,7 +955,24 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        peer.scan()
+                        let scanned = peer.scan();
+                        // Transitions the scan itself produced — a
+                        // fenced write's claim loss and the demotion it
+                        // drove — log at the boundary they happened,
+                        // not a cycle late.
+                        for change in peer.take_role_changes() {
+                            eprintln!(
+                                "standby: role {} -> {} at tick {}",
+                                change.from, change.to, change.tick.0
+                            );
+                        }
+                        for loss in peer.take_fencing_losses() {
+                            eprintln!(
+                                "standby: field write-ownership claim lost at tick {}: {:?} fenced",
+                                loss.tick.0, loss.point
+                            );
+                        }
+                        scanned
                     },
                     || peer.borrow().snapshot(),
                     || peer.borrow().checkpoint(),
@@ -993,14 +1015,34 @@ fn main() -> ExitCode {
             None => {
                 // The RefCell lets the two loop closures share the peer;
                 // the loop is single-threaded, so the borrows never
-                // overlap. No monitor means no demotion path, so the
-                // field ownership below never changes.
+                // overlap. No monitor means no *operator* demotion
+                // path, but a write the field fenced still demotes this
+                // peer mid-run — the scan closure logs the claim loss
+                // and the transition it drove, and the step consults
+                // the role each cycle so a demoted peer stops stepping
+                // a shared plant it no longer owns.
                 let peer = std::cell::RefCell::new(peer);
                 scan_loop(
-                    || peer.borrow_mut().scan(),
+                    || {
+                        let mut peer = peer.borrow_mut();
+                        let scanned = peer.scan();
+                        for loss in peer.take_fencing_losses() {
+                            eprintln!(
+                                "field write-ownership claim lost at tick {}: {:?} fenced",
+                                loss.tick.0, loss.point
+                            );
+                        }
+                        for change in peer.take_role_changes() {
+                            eprintln!(
+                                "role {} -> {} at tick {}",
+                                change.from, change.to, change.tick.0
+                            );
+                        }
+                        scanned
+                    },
                     || peer.borrow().snapshot(),
                     || peer.borrow().checkpoint(),
-                    || driver.step(dt, true),
+                    || driver.step(dt, peer.borrow().owns_field()),
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
