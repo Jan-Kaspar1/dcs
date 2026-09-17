@@ -833,6 +833,14 @@ CONTAINER_RUN_DIR = '/var/lib/dcs-run'
 CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 
+# Deterministic plant-writer owner tokens pinned per endpoint key so a
+# scenario attachment can `ensure_writer` with the standing owner's
+# token — the designed shared-claim path for a test harness driving
+# plant stimuli (the controller's --owner-token contract). Each
+# process keeps its own token: the sim's writer claim still fences
+# every other owner, and a standby holds no claim until it promotes.
+PLANT_OWNER_TOKENS = {'active': 424243, 'standby': 424244}
+
 
 def _controller_dir(run_dir, name):
     """The run-dir state directory bind-mounted into controller `name`'s
@@ -1154,7 +1162,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     per endpoint key (the model-revision case's third controller
     answers on 'revised' once launched, the checkpoint-negotiation
     case's foreign peer on 'foreign'), the published plant-protocol
-    endpoint, the run's evidence dir and deadline, the runner-owned
+    endpoint, the pinned plant-writer owner token per endpoint key,
+    the run's evidence dir and deadline, the runner-owned
     controller restart/cold-restart, plant stop/start,
     model-revision, and foreign-peer launch/teardown actions, and
     the host-side
@@ -1169,6 +1178,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # The pinned --owner-token per endpoint key: a scenario
+        # attachment ensures the writer claim under the active's token
+        # to drive plant stimuli on the designed shared-claim path.
+        'plant_owner': dict(PLANT_OWNER_TOKENS),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
@@ -1261,6 +1274,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(PLANT_OWNER_TOKENS['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1273,6 +1287,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(PLANT_OWNER_TOKENS['standby']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
