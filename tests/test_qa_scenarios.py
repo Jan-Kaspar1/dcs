@@ -368,43 +368,86 @@ class RestartFeed:
     """A stubbed pair for the controller-restart scenario. ctrl-a owns
     the field and persists every scan — the --state-file checkpoint is
     `persisted` — while ctrl-b tracks it and degrades during the
-    restart gap. The journal file is a real append-only record the
-    feed writes itself: a run_boundary marker per process lifetime and
-    one entry per settled command, matching the durable record's
-    format. Fault flags stage each named failure the issue calls
-    out."""
+    restart gap. Commands queue at admission and apply at the next
+    scan's boundary, so a stop inside the admission-to-application
+    window leaves the Accepted receipt riding the checkpoint — the
+    resumed run re-queues it. Each peer's --journal-file is a real
+    append-only record the feed writes itself: a run_boundary marker
+    per process lifetime, the restart's served run_boundary entry, one
+    entry per settled command, and the declared-journaled point's
+    value transitions — matching the durable record's format. Fault
+    flags stage each named failure the issue calls out."""
 
-    def __init__(self, journal_path):
+    def __init__(self, journal_path, peer_journal_path):
         self.tick = 100      # well past the resume slack
         self.persisted = 100
         self.point = False
+        self.pending = []        # accepted receipts awaiting a scan
+        self.settled = []        # journaled receipts (the replay fold)
+        self.served = []         # the monitor's served journal ring
         self.up = True           # ctrl-a's monitor answers
         self.serves = True       # False: the monitor never returns
         self.returns = True      # False: the restart action fails
         self.cold = False        # restart resumes nothing
         self.regress = False     # resume lands far behind
-        self.loses_state = False  # written point value does not persist
         self.seq_restarts = False  # journal seq numbering restarts
         self.peer_promoted = False
+        # The extended scenario's named failures.
+        self.applies_early = False    # the second write lands pre-stop
+        self.drops_pending = False    # resume loses the carried receipt
+        self.replays_receipts = False  # resume re-journals settlements
+        self.phantom_census = False   # resume re-journals the census
+        self.peer_disturbed = False   # the peer's journal gains a run
+        self.skips_served_boundary = False  # the served marker never seeds
         self.restarts = []
         self.path = Path(journal_path)
+        self.peer_path = Path(peer_journal_path)
         self.next_seq = 1
         self.runs = 1
-        self._append({'run_boundary': {'run': 1, 'tick': 0}})
+        self._append(self.path, {'run_boundary': {'run': 1, 'tick': 0}})
+        # Run 1's observation record — the baseline the resumed run's
+        # replayed fold diffs its standing points against.
+        self._entry({'quality_changed': {'point': 10, 'from': None,
+                                         'to': 'good'}})
+        self._entry({'point_changed': {'point': 10, 'from': None,
+                                       'to': {'bool': False}}})
+        self._append(self.peer_path,
+                     {'run_boundary': {'run': 1, 'tick': 0}})
 
-    def _append(self, record):
-        with self.path.open('a') as stream:
+    def _append(self, path, record):
+        with path.open('a') as stream:
             stream.write(json.dumps(record) + '\n')
 
-    def _journal_entry(self):
-        self._append({'entry': {'seq': self.next_seq,
-                                'tick': self.tick, 'event': {}}})
+    def _entry(self, event):
+        entry = {'seq': self.next_seq, 'tick': self.tick,
+                 'event': event}
+        self._append(self.path, {'entry': entry})
+        self.served.append(entry)
         self.next_seq += 1
 
+    def _apply_pending(self):
+        # The scan boundary's command phase: queued receipts settle,
+        # the journaled point's transition records, and the receipt
+        # log carries the settled outcome.
+        for receipt in self.pending:
+            write = receipt['command']['write_value']
+            receipt['outcome'] = {'applied': {'tick': self.tick}}
+            new = write['value']['bool']
+            if new != self.point:
+                self._entry({'point_changed': {
+                    'point': write['point'],
+                    'from': {'bool': self.point},
+                    'to': {'bool': new}}})
+                self.point = new
+            self._entry({'command_settled': {'receipt': receipt}})
+            self.settled.append(receipt)
+        self.pending = []
+
     def _scan(self):
-        # One completed scan per snapshot read; the state file follows
-        # at the same end-of-cycle boundary.
+        # One completed scan per snapshot read; queued commands apply
+        # at its boundary and the state file follows at end of cycle.
         self.tick += 1
+        self._apply_pending()
         self.persisted = self.tick
 
     # The runner-owned lifecycle action — replaces
@@ -413,6 +456,13 @@ class RestartFeed:
         self.restarts.append(name)
         if not self.returns:
             raise RuntimeError('docker start failed: no such container')
+        if self.applies_early:
+            # The stop landed late: the queued write's applying scan
+            # ran before the process died — the settlement journals
+            # ahead of the run boundary.
+            self.tick += 1
+            self._apply_pending()
+            self.persisted = self.tick
         self.up = False
         self.down_left = 2  # refused polls before the monitor returns
         resumed = self.persisted
@@ -421,13 +471,37 @@ class RestartFeed:
         if self.regress:
             resumed = max(1, resumed - 100)
         self.tick = resumed
-        if self.loses_state:
-            self.point = False
+        if self.drops_pending:
+            # The checkpoint never carried the Accepted receipt — the
+            # command is lost unaudited, the failure the admission-time
+            # persist closed. The pre-application value stands.
+            self.pending = []
         self.runs += 1
-        self._append({'run_boundary': {'run': self.runs,
-                                       'tick': resumed}})
+        self._append(self.path, {'run_boundary': {'run': self.runs,
+                                                  'tick': resumed}})
+        # The served form of the marker: journaled once on replay,
+        # taking the next seq like any event.
+        if not self.skips_served_boundary:
+            self._entry({'run_boundary': {'run': self.runs}})
         if self.seq_restarts:
             self.next_seq = 1
+        if self.replays_receipts:
+            # The resumed run re-journals the settled receipts its
+            # checkpoint still carries — the restart-integrity
+            # regression the finding closed.
+            for receipt in self.settled:
+                self._entry({'command_settled': {'receipt': receipt}})
+        if self.phantom_census:
+            # The resumed run diffs its standing points against
+            # nothing and re-journals the whole census as first
+            # observations.
+            self._entry({'quality_changed': {'point': 10, 'from': None,
+                                             'to': 'good'}})
+            self._entry({'point_changed': {'point': 10, 'from': None,
+                                           'to': {'bool': self.point}}})
+        if self.peer_disturbed:
+            self._append(self.peer_path,
+                         {'run_boundary': {'run': 2, 'tick': resumed}})
 
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('/')[2]
@@ -466,13 +540,14 @@ class RestartFeed:
                 {'point': 10, 'sample': {
                     'value': {'bool': self.point},
                     'quality': {'quality': 'good'}}}]}
+        if (method, route) == ('GET', '/journal'):
+            return 200, list(self.served)
         if (method, route) == ('POST', '/command'):
-            write = body['command']['write_value']
-            self.point = write['value']['bool']
             receipt = {'command': body['command'],
-                       'outcome': {'applied': {'tick': self.tick}},
+                       'outcome': {'accepted': {
+                           'apply_tick': self.tick + 1}},
                        'actor': body.get('actor')}
-            self._journal_entry()
+            self.pending.append(receipt)
             return 200, receipt
         raise AssertionError('unexpected request %s %s' % (method, url))
 
@@ -482,27 +557,32 @@ class ControllerRestartTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.evidence = Path(self.tmp.name) / 'evidence'
         self.evidence.mkdir()
-        self.journal = Path(self.tmp.name) / 'controllers' / 'a'
-        self.journal.mkdir(parents=True)
-        self.journal = self.journal / 'journal.jsonl'
-        self.feed = RestartFeed(self.journal)
+        self.journal = Path(self.tmp.name) / 'controllers' / 'a' \
+            / 'journal.jsonl'
+        self.journal.parent.mkdir(parents=True)
+        self.peer_journal = Path(self.tmp.name) / 'controllers' / 'b' \
+            / 'journal.jsonl'
+        self.peer_journal.parent.mkdir(parents=True)
+        self.feed = RestartFeed(self.journal, self.peer_journal)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_scenario(self, **patches):
+    def run_scenario(self, feed=None, **patches):
+        feed = feed or self.feed
         ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
                'evidence_dir': str(self.evidence),
-               'restart_controller': self.feed.restart,
+               'restart_controller': feed.restart,
                'journal_files': {'active': str(self.journal),
-                                 'standby': str(self.journal)},
+                                 'standby': str(self.peer_journal)},
                'state_files': {}}
         defaults = {'POLL_INTERVAL': 0.001, 'RESTART_POLL': 0.001,
                     'RESTART_RETURN_DEADLINE': 0.5,
                     'RESTART_SETTLE_DEADLINE': 0.5,
-                    'RESTART_JOURNAL_DEADLINE': 0.3}
+                    'RESTART_JOURNAL_DEADLINE': 0.3,
+                    'RESTART_COMMAND_DEADLINE': 0.3}
         defaults.update(patches)
-        with patch.object(scenarios, 'http_json', self.feed.http_json):
+        with patch.object(scenarios, 'http_json', feed.http_json):
             for key, value in defaults.items():
                 patcher = patch.object(scenarios, key, value)
                 patcher.start()
@@ -513,10 +593,69 @@ class ControllerRestartTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'passed', record)
         self.assertEqual(self.feed.restarts, ['active'])
+        # The restart-window command rode the checkpoint: its
+        # settlement landed past the resumed run's boundary.
+        self.assertTrue(any('post-boundary' in note
+                            for note in record['observations']),
+                        record['observations'])
         report.validate_scenario(record)
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
+
+    def test_applied_before_stop_passes(self):
+        # The other admissible answer: the queued write's applying
+        # scan ran before the container died — the settlement journals
+        # ahead of the run boundary and still satisfies the contract.
+        self.feed.applies_early = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertTrue(any('pre-boundary' in note
+                            for note in record['observations']),
+                        record['observations'])
+        report.validate_scenario(record)
+
+    def test_dropped_pending_command_fails(self):
+        # The failure the admission-time persist closed: the carried
+        # Accepted receipt never re-queues — the point keeps its
+        # pre-application value and the journal stays silent on the
+        # settlement.
+        self.feed.drops_pending = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('silently lost', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_replayed_receipts_fail(self):
+        # The resumed run re-journals the settled receipts its
+        # checkpoint still carries past the run boundary — the
+        # restart-integrity regression.
+        self.feed.replays_receipts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('re-journaled', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_phantom_census_fails(self):
+        self.feed.phantom_census = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('phantom', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_served_boundary_fails(self):
+        self.feed.skips_served_boundary = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('served journal', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_disturbed_peer_journal_fails(self):
+        self.feed.peer_disturbed = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('peer', record.get('detail', ''))
+        report.validate_scenario(record)
 
     def test_cold_start_resume_fails(self):
         self.feed.cold = True
@@ -530,14 +669,6 @@ class ControllerRestartTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('regressed', record.get('detail', ''))
-        report.validate_scenario(record)
-
-    def test_lost_point_state_fails(self):
-        self.feed.loses_state = True
-        record = self.run_scenario()
-        self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('lost its written value',
-                      record.get('detail', ''))
         report.validate_scenario(record)
 
     def test_seq_restart_fails(self):
@@ -584,6 +715,25 @@ class ControllerRestartTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('never returned', record.get('detail', ''))
         report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs of the scenario
+        # against the same rig layout record the same report and the
+        # same evidence files — the feed's transitions are call-count
+        # keyed, never wall-clock.
+        runs = []
+        for _index in range(2):
+            for path in (self.journal, self.peer_journal):
+                if path.exists():
+                    path.unlink()
+            for stale in self.evidence.iterdir():
+                stale.unlink()
+            feed = RestartFeed(self.journal, self.peer_journal)
+            record = self.run_scenario(feed=feed)
+            runs.append((record, {p.name: p.read_bytes()
+                                  for p in self.evidence.iterdir()}))
+        self.assertEqual(runs[0][0]['outcome'], 'passed', runs[0][0])
+        self.assertEqual(runs[0], runs[1])
 
 
 class ServedFeed:

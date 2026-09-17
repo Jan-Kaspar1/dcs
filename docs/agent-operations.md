@@ -1,6 +1,6 @@
 # Local agent pool operations
 
-Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation explicitly selects `swe-2-high` with `--permission-mode dangerous`, authorized by the user on 2026-09-14. This gives local Devin full tool access as the WSL user; clones provide work separation, not a security sandbox. Model fallback is rejected.
+Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation runs with full tool access — `devin -p --permission-mode dangerous` for `swe-2-*` models, `opencode run --auto` for `opencode/*` models — authorized by the user on 2026-09-14 and extended to OpenCode free models on 2026-09-17. This gives agents full tool access as the WSL user; clones provide work separation, not a security sandbox. The `models` config list is validated against a verified free-model allow-list; paid fallback is rejected. Worker clones rotate through `models` by slot so parallel jobs spread across separate model quotas; the planner and review lane use the first configured model. OpenCode invocations are not resumable through the Devin session id, so retries carry repair context in the prompt instead.
 
 ## Installation and startup
 

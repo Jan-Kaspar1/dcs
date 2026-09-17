@@ -10,3 +10,5 @@ Use these statuses:
 - `deferred` — deliberately outside the current product phase, with a revisit condition.
 
 Implementation issues cite requirement IDs in their scope. Research findings distinguish source facts, DCS product decisions, and assumptions. Do not silently turn a vendor feature into a product requirement.
+
+Open assumptions needing customer validation are consolidated per market pilot under `docs/research/`; the water/wastewater pilot baseline is `docs/research/pilot-acceptance.md`, which classifies each open item as satisfied-by-product, a first-client decision with a named owner, or out-of-scope with a revisit condition.

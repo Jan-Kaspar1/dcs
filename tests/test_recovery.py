@@ -29,8 +29,8 @@ class FakeRuntime(Runtime):
         super().__init__(*args, **kwargs)
         self.spawned = []
 
-    def spawn(self, key, cwd, prompt, resume_session=None):
-        self.spawned.append({'key': key, 'cwd': str(cwd), 'resume': resume_session})
+    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None, model='swe-2-high'):
+        self.spawned.append({'key': key, 'cwd': str(cwd), 'resume': resume_session, 'model': model})
         return {'key': key, 'cwd': str(cwd), 'pid': 999999999, 'identity': 'fake',
                 'receipt': str(self.state_root / key / 'receipt.json'),
                 'invocation': str(self.state_root / key), 'log': '/nonexistent',

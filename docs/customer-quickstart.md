@@ -32,12 +32,25 @@ Its `README.md` walks the full customer path:
    `--state-file`/`--journal-file` flags: `state_file` lets a
    restarted container resume in place at its persisted checkpoint,
    `journal_file` keeps the attributed operator-action record durable
-   past the process lifetime. A consumer without durable storage
+   past the process lifetime. These fields are also what make the
+   recorded dead-active recovery a warm resume rather than a cold
+   start — when an active dies while its standby cannot promote, the
+   deliberate path is restarting a fresh active, whose unconditional
+   startup claim preempts the dead owner's field claim (decision 86,
+   `docs/architecture.md`). A consumer without durable storage
    omits both fields and the flags stay absent.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,
    `manifest-fingerprint-mismatch`, …) rather than silent misbehavior.
+
+The check's `pair` stage proves the declared redundant pair runs — not
+just that its definition parses: `ci/pair.py` reads the standby wiring
+and persistence fields out of `deploy/manifest.json` and spawns the two
+declared controllers on released tooling, converging the standby to
+`tracking`, issuing the receipted `demote`/`promote` switchover, and
+asserting the run continues bumplessly with the adopted receipts and
+the durable journal files' transition records intact.
 
 The served operator surface a monitoring or UI consumer can rely on —
 proved by the check's `surface` stage against the emitted model — is:

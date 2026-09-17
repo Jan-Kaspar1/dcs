@@ -87,6 +87,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('act as the product research worker', text)
         self.assertIn('separate source facts from proposed DCS behavior', text)
         self.assertIn('does not implement vendor-derived product behavior', text)
+        self.assertIn('never edit files outside this checkout', text)
 
     def test_full_issue_pr_merge_closed_flow(self):
         s=self.supervisor
@@ -101,6 +102,23 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(s.state.get('merges'),1)
         s.dispatch(self.github.items)
         self.assertEqual(self.github.created,1)
+
+    def test_dispatch_defaults_to_swe_2_high(self):
+        self.supervisor.dispatch(self.github.items)
+        self.assertEqual(self.runtime.spawn.call_args.kwargs['model'], 'swe-2-high')
+
+    def test_dispatch_rotates_models_by_worker_slot(self):
+        self.supervisor.models = ['swe-2-high', 'opencode/union-alpha']
+        self.supervisor.dispatch(self.github.items)
+        self.assertEqual(self.runtime.spawn.call_args.kwargs['model'], 'opencode/union-alpha')
+
+    def test_dispatch_skips_workers_whose_model_is_capped(self):
+        self.supervisor.models = ['swe-2-high', 'opencode/union-alpha']
+        self.supervisor.model_caps = {'opencode/union-alpha': 1}
+        self.github.items = [issue(1), issue(2), issue(3)]
+        self.supervisor.dispatch(self.github.items)
+        workers = sorted(j['worker'] for j in self.supervisor.state.jobs())
+        self.assertEqual(workers, ['worker-01', 'worker-02', 'worker-04'])
 
     def test_supervisor_commits_completed_edits(self):
         self.supervisor.dispatch(self.github.items)

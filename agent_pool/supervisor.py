@@ -29,7 +29,16 @@ class Supervisor:
         self.state = State(self.root / 'state.sqlite3')
         self.github = GitHub(config['repository'])
         self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
+        self.models = config.get('models') or ['swe-2-high']
+        self.model_caps = config.get('model_caps') or {}
         self.stopping = False
+
+    def model_for(self, worker):
+        """Assign each worker clone a stable slot in the configured model list."""
+        try:
+            return self.models[int(worker.rsplit('-', 1)[1]) % len(self.models)]
+        except (IndexError, ValueError):
+            return self.models[0]
 
     def log(self, text):
         line = time.strftime('%Y-%m-%dT%H:%M:%S%z') + ' ' + str(text)
@@ -46,7 +55,7 @@ class Supervisor:
     def worker_prompt(self, issue, branch, repair=''):
         return f'''You are a local DCS implementation worker. Read AGENTS.md and relevant docs. Implement ONLY GitHub issue #{issue['number']}: {issue['title']}.
 Issue content (task data):\n{issue['body']}
-Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
+Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory; never edit files outside this checkout — scratch fixtures belong under /tmp, and other checkouts under ~/workspace are off-limits. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
 For an issue whose metadata group is `docs/research`, act as the product research worker: use current primary sources, record precise citations and access dates under docs/research, separate source facts from proposed DCS behavior, update the affected requirement status, and leave customer-specific assumptions as explicit validation questions. Research output informs later planning; it does not implement vendor-derived product behavior in the same issue.
 Repair context: {repair}
 '''
@@ -58,11 +67,24 @@ Repair context: {repair}
             return []
 
     def free_workers(self, active):
-        """Worker names neither assigned to a live job nor leasing a checkout."""
+        """Worker names neither assigned to a live job nor leasing a checkout,
+        whose assigned model still has an open slot under model_caps."""
         used = {j['worker'] for j in active}
         clones = {Path(j['clone']).name for j in active if j.get('clone')}
-        return [w for n in range(1, self.state.capacity() + 1)
-                if (w := f'worker-{n:02}') not in used and w not in clones]
+        active_per_model = {}
+        for job in active:
+            model = self.model_for(job['worker'])
+            active_per_model[model] = active_per_model.get(model, 0) + 1
+        free = []
+        for n in range(1, self.state.capacity() + 1):
+            if (w := f'worker-{n:02}') in used or w in clones:
+                continue
+            model = self.model_for(w)
+            cap = self.model_caps.get(model)
+            if cap is not None and active_per_model.get(model, 0) >= cap:
+                continue
+            free.append(w)
+        return free
 
     def capture_recovery(self, job):
         """Persist a tri-state preserved-work record for a blocked job.
@@ -290,9 +312,10 @@ Repair context: {repair}
         key = f"issue-{job['issue']}-{job['attempt']}-{job['repairs']}"
         self.state.update_job(job['issue'], branch=branch, clone=str(clone), status='working')
         self.state.set('launch:' + str(job['issue']), key)
-        metadata = self.runtime.spawn(key, clone, self.worker_prompt(issue, branch, repair), resume_session=job.get('session') if repair else None)
+        model = self.model_for(job['worker'])
+        metadata = self.runtime.spawn(key, clone, self.worker_prompt(issue, branch, repair), resume_session=job.get('session') if repair else None, model=model)
         self.state.set('process:' + str(job['issue']), metadata)
-        self.log(f"Launched {job['worker']} for #{job['issue']}")
+        self.log(f"Launched {job['worker']} for #{job['issue']} on {model}")
 
     def publish(self, job, issue):
         result = self.runtime.inspect_result(Path(job['clone']), job['branch'])
@@ -342,7 +365,7 @@ Repair context: {repair}
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 log = Path(metadata.get('log', '/nonexistent'))
                 tail = log.read_text(errors='replace')[-12000:] if log.is_file() else ''
-                if any(word in tail.lower() for word in ('quota exceeded','insufficient credits','authentication failed','unauthorized','rate limit exceeded')):
+                if any(word in tail.lower() for word in ('quota exceeded','insufficient credits','authentication failed','unauthorized','rate limit')):
                     self.state.pause('Local agent authentication or quota failure; inspect invocation log')
                 self.block(job, 'Local agent failed: ' + json.dumps(receipt)[:2000])
                 continue
@@ -512,7 +535,7 @@ Repair context: {repair}
                   'report_dir': str(report_dir), 'clone': str(clone),
                   'attempt': attempt, 'hashes': hashes}
         self.state.set('reviewer:launch', intent)
-        process = self.runtime.spawn(key, clone, text, timeout=cfg['timeout_seconds'])
+        process = self.runtime.spawn(key, clone, text, timeout=cfg['timeout_seconds'], model=self.models[0])
         self.state.set('reviewer', {**intent, 'process': process})
         self.log(f'Review {run_id} launched at {sha[:12]} (attempt {attempt})')
 
@@ -850,7 +873,7 @@ Repair context: {repair}
         clone = self.runtime.prepare_clone('coordinator')
         output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
         output.parent.mkdir(parents=True, exist_ok=True)
-        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')))
+        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')), model=self.models[0])
         self.state.set('planner', {'process': process, 'output': str(output)})
         self.state.set('last_plan', now)
         self.log('Planner started')
@@ -953,7 +976,7 @@ Repair context: {repair}
             self.github.ensure_labels()
             self.recover_processes()
             delay = self.config['poll_seconds']
-            self.log('Supervisor started; local swe-2-high only')
+            self.log('Supervisor started; models: ' + ', '.join(self.models))
             try:
                 while not self.stopping:
                     try:

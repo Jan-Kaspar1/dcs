@@ -191,6 +191,19 @@
 //! model whose field-facing devices cannot arbitrate a single writer
 //! refuses `--auto-promote` at startup; manual promotion still works.
 //!
+//! The one active-loss case the pair cannot heal itself, per the
+//! dead-active recovery decision: the active dies holding the field
+//! claim while its standby is not converged — `POST /promote` answers
+//! `not_converged` and no checkpoint will ever arrive to change that.
+//! The recorded recovery is restart-as-active: relaunch the controller
+//! on the same model without `--standby`, and the launched active's
+//! unconditional startup claim preempts the dead owner's token — a
+//! surviving `--state-file` resumes the run at its last persisted
+//! cycle, and the standby reconverges on the new active's checkpoint
+//! stream where its tracking source resolves. There is deliberately no
+//! force-promote and no operator claim-release: a standby that never
+//! proved it tracks the field is never a writer.
+//!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
 //! address as `?peer=<host:port>` — e.g.
