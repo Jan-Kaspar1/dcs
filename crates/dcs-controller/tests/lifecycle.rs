@@ -48,9 +48,9 @@
 //! the run returns proves repeated scripted runs identical.
 
 use dcs_core::{
-    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, JournalEvent,
-    ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, IoError,
+    JournalEvent, ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -817,13 +817,26 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     trace.push((carried, field.read(LEVEL).unwrap().value));
 
     // The superseded peer — still running — is fenced at the field:
-    // the plant refused its write inside the requested scan, and the
+    // the plant refused its write inside the requested scan, counted
+    // as the `fenced` fault while the scan completes degraded, and the
     // fenced boundary walks it down the demote path rather than ending
     // the process — gate re-closed, the reported role `demoting`, the
     // claim loss journaled. The field keeps only the new owner's
     // output throughout.
     let fenced_scan = resumed.advance(1).unwrap();
     assert_eq!(fenced_scan.tick, Tick(promotion_tick));
+    assert!(
+        matches!(
+            fenced_scan
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the returning peer's write must be refused fenced: {:?}",
+        fenced_scan.io_health
+    );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
     let superseded = resumed.role().unwrap();
     assert_eq!(
@@ -1079,6 +1092,11 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             "partitioned_at": at_partition,
             "promoted_at": promotion_tick,
             "superseded": {
+                "fenced_fault": fenced_scan
+                    .io_health
+                    .last_error
+                    .as_ref()
+                    .map(|fault| fault.error.to_string()),
                 "fenced_scan": fenced_scan.tick,
                 "settled_scan": quiesced_scan.tick,
                 "roles": [superseded.role, settled.role],

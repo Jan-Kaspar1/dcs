@@ -1102,9 +1102,9 @@ fn the_health_panes_fields_ride_the_served_snapshot() {
         });
         driver.faults.lock().unwrap().insert(PointId(10));
         driver.faults.lock().unwrap().insert(PointId(20));
-        // The failed output write fails the scan — the health section
-        // still counted and attributed it.
-        assert!(client.advance(1).is_err());
+        // The failed output write degrades the scan — the health
+        // section counted and attributed it while the run continues.
+        client.advance(1).unwrap();
 
         // Every field the pane reads is present in the served snapshot.
         let health = &client.snapshot().unwrap().io_health;

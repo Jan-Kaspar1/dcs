@@ -542,8 +542,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
 
     // The budget-th miss promotes the standby: its claim preempts, its
     // scan writes, its step drives. From this boundary the old peer is
-    // fenced — its next requested scan's field write is refused by the
-    // plant, and the fenced boundary degrades it through the demote
+    // fenced — its next requested scan's field write is refused and
+    // counted as the `fenced` fault while the scan completes degraded,
+    // and the verdict degrades the superseded peer through the demote
     // path rather than ending its process: the gate re-closes and the
     // reported role moves to `demoting`.
     let promoted = standby.advance(1).unwrap();
@@ -556,9 +557,19 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let carried = field.read(VALVE).unwrap().value;
     assert_eq!(carried, image_value(&promoted, VALVE));
 
-    let fenced_scan = active.advance(1).unwrap();
-    // Nothing the fenced scan staged reached the field — the plant
-    // refused the write inside the requested scan.
+    let fenced = active.advance(1).unwrap();
+    assert_eq!(
+        fenced
+            .io_health
+            .last_error
+            .as_ref()
+            .map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the returning peer's write must be refused fenced: {:?}",
+        fenced.io_health
+    );
+    // Nothing the fenced scan staged reached the field — and the
+    // field's verdict demoted the superseded peer in place.
     assert_eq!(field.read(VALVE).unwrap().value, carried);
     let report = active.role().unwrap();
     assert_eq!(
@@ -566,7 +577,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         Role::Demoting,
         "the fenced peer must adopt the demote path, not die: {report:?}"
     );
-    assert_eq!(report.tick, fenced_scan.tick);
+    assert_eq!(report.tick, fenced.tick);
     // The journal carries the claim loss beside the transition it drove.
     assert!(
         active.journal(0).unwrap().iter().any(|entry| matches!(
@@ -594,8 +605,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             image_value(&owner, VALVE),
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
-        // The superseded peer keeps scanning and serving — quiesced,
-        // alive, and never reaching the field again.
+        // The superseded peer keeps scanning and serving — quiesced at
+        // the re-closed gate, alive, and never reaching the field
+        // again.
         active.advance(1).unwrap();
         assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }
@@ -665,12 +677,24 @@ fn the_launched_active_claims_the_field_and_a_rogue_claim_is_journaled() {
 
     // A rogue claim still preempts unconditionally — the plant cannot
     // tell it from a promoted peer's takeover — but the loss is no
-    // longer silent *or* fatal: the fenced owner's next scan is refused
-    // at the field, and the fenced boundary walks it down the demote
-    // path — gate re-closed, role `demoting` — with the claim loss and
-    // the transition journaled.
+    // longer silent *or* fatal: the fenced owner's next scan completes
+    // degraded with the `fenced` fault counted, and the verdict walks
+    // it down the demote path — gate re-closed, role `demoting` — with
+    // the claim loss and the transition journaled.
     rogue.claim_writer(0xdead_beef).unwrap();
-    active.advance(1).unwrap();
+    let fenced = active.advance(1).unwrap();
+    assert!(
+        matches!(
+            fenced
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the preempted owner's write must be refused fenced: {:?}",
+        fenced.io_health
+    );
     assert_eq!(
         active.role().unwrap().role,
         Role::Demoting,

@@ -645,8 +645,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // The budget-th miss promotes the standby: its claim preempts on
     // both device servers, its scan writes, its step advances the
     // banks. From this boundary the old peer is fenced — its next
-    // requested scan's register write is refused by the bank, and the
-    // fenced boundary degrades it through the demote path rather than
+    // requested scan's exchange is refused and counted as the named
+    // `fenced` fault while the scan completes degraded, and the verdict
+    // degrades the superseded peer through the demote path rather than
     // ending its process: the gate re-closes and the reported role
     // moves to `demoting`.
     let promoted = standby.advance(1).unwrap();
@@ -679,10 +680,24 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     assert_eq!(fenced_ai.step(DT_F64), Err(LinkError::Fenced));
 
-    // The old peer's requested scan is fenced at the bank — and the
+    // The old peer's requested scan is fenced at the bank — counted as
+    // the named fault while the scan completes degraded — and the
     // peer survives: the refusal demotes it in place.
     let fenced_scan = active.advance(1).unwrap();
-    // Nothing the fenced scan staged reached the register bank.
+    assert!(
+        matches!(
+            fenced_scan
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the returning peer's exchange must be refused fenced: {:?}",
+        fenced_scan.io_health
+    );
+    // Nothing the fenced scan staged reached the register bank — and
+    // the field's verdict demoted the superseded peer in place.
     assert_eq!(field_ao.read(VALVE).unwrap().value, carried);
     let report = active.role().unwrap();
     assert_eq!(
@@ -710,8 +725,9 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             image_value(&owner, VALVE),
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
-        // The superseded peer keeps scanning and serving — quiesced,
-        // alive, and never reaching the banks again.
+        // The superseded peer keeps scanning and serving — quiesced at
+        // the re-closed gate, alive, and never reaching the banks
+        // again.
         active.advance(1).unwrap();
         assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }

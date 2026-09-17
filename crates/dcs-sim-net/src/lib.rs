@@ -45,6 +45,10 @@
 //! - `{"op":"claim_writer","owner":7}` — takes the plant's
 //!   field-write ownership for the `owner` token; answers
 //!   `{"result":"done"}`.
+//! - `{"op":"ensure_writer","owner":7}` — the conditional re-grant a
+//!   re-attaching owner asserts; answers `done` while the field is
+//!   unclaimed or already claims `owner`, `fenced` while a different
+//!   owner stands.
 //!
 //! ## Field write-ownership fencing
 //!
@@ -61,6 +65,13 @@
 //! to fence. Reads, fault injection, and `list_points` stay open to
 //! every attachment. Until the first `claim_writer`, every attachment
 //! writes freely.
+//!
+//! A restarted server is a new claim lifetime — the `owner` mutex dies
+//! with the process — so `ensure_writer` is the conditional re-grant:
+//! it claims for `owner` only while the field is unclaimed or already
+//! claims that owner, answering `fenced` while a *different* owner
+//! stands. A reconnecting field owner re-arms the claim through it
+//! without preempting whichever attachment claimed during the outage.
 //!
 //! The `dcs-plant-ctl` binary in this crate is the protocol's
 //! development-tooling client: it lists, reads, and writes points and
@@ -84,9 +95,11 @@
 //!
 //! `RemoteDriver` maps the remaining failure surface: a dead or severed
 //! link and any incoherent answer surface as `IoError::Disconnected`, an
-//! unanswered request as `IoError::Timeout`, and the first failure drops
-//! the connection for good — a late response could otherwise pair with
-//! the next request.
+//! unanswered request as `IoError::Timeout`, and a failed exchange drops
+//! the connection — a late response could otherwise pair with the next
+//! request — while the next access re-attaches lazily, so a field outage
+//! degrades telemetry instead of killing the driver, and a returned
+//! plant is served by the same attachment.
 //!
 //! All protocol types are shared serde contracts in this crate, so any
 //! JSON-capable tool can drive or inspect the simulated plant.

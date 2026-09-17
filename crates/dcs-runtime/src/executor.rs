@@ -370,14 +370,19 @@ impl fmt::Display for WiringError {
 
 impl std::error::Error for WiringError {}
 
-/// Why a scan failed after the step phase.
+/// Why a scan failed.
 ///
-/// Component `step` errors never fail a scan — they are counted per
-/// component in [`Executor::component_statuses`]. `ScanError` covers the
-/// driver boundary: the output image could not be delivered to the field.
+/// No scan phase currently produces one: component `step` errors are
+/// counted per component in [`Executor::component_statuses`], and
+/// driver-boundary failures — reads, writes, the cyclic exchange —
+/// degrade into [`IoHealth`](dcs_core::IoHealth) counters and held
+/// samples rather than aborting the scan. The variant set is retained
+/// for the [`Executor::scan`]/[`Peer`](crate::Peer)/monitor `Result`
+/// contract the callers write against.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanError {
-    /// Writing the output image to the driver failed.
+    /// A driver-boundary failure ended the scan — kept for contract
+    /// compatibility; the executor's field faults now degrade instead.
     Io(IoError),
 }
 
@@ -590,11 +595,14 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 ///    probe answer never refuses, applies, or alters a command;
 /// 7. writes the image's field `Out` points to the driver — points a
 ///    component never wrote keep their last output, so a failed step
-///    holds outputs. Under the cyclic contract each write stages the
+///    holds outputs, and a failed write is counted and attributed like
+///    a failed read rather than aborting the scan: a field outage must
+///    degrade the run's telemetry, not end the run that reports it.
+///    Under the cyclic contract each write stages the
 ///    pending output image, publishing on the next scan's exchange —
 ///    the contract's one-scan actuation delay.
 ///
-/// The driver-boundary failures of phases 3, 4, and 6 are also counted
+/// The driver-boundary failures of phases 3, 4, and 7 are also counted
 /// into
 /// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
 /// read, write, or exchange increments its named counter and the
@@ -748,6 +756,14 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// The first point whose output write the shared field fenced —
+    /// answered [`IoError::Fenced`] — during the most recent scan:
+    /// `None` before the first scan and on scans with no fenced write.
+    /// A scan product like `emitted`: cleared when the next scan starts
+    /// and by a checkpoint apply, which converges the run to a line that
+    /// did not see the abandoned scan's fencing. [`Peer`](crate::Peer)
+    /// reads it to journal the claim loss a degraded scan still carries.
+    fenced_write: Option<PointId>,
     /// The fingerprint of the model this run was assembled from, when
     /// the assembling layer supplied one: stamped into every checkpoint
     /// and the value a restored checkpoint's fingerprint must equal.
@@ -876,6 +892,7 @@ impl<'d> Executor<'d> {
             command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
+            fenced_write: None,
             model_fingerprint: None,
             tick: Tick::ZERO,
         })
@@ -930,6 +947,16 @@ impl<'d> Executor<'d> {
     /// scan, thereafter the tick the last scan ran at.
     pub fn tick(&self) -> Tick {
         self.tick
+    }
+
+    /// The first point the last scan's output phase saw the shared field
+    /// fence — the write answered [`IoError::Fenced`], meaning the claim
+    /// this run held was preempted — or `None` when no write was fenced.
+    /// The scan degrades and completes either way; this marker is how a
+    /// field-owning [`Peer`](crate::Peer) tells the claim loss apart from
+    /// ordinary field trouble so it can journal it once per held claim.
+    pub fn fenced_write(&self) -> Option<PointId> {
+        self.fenced_write
     }
 
     /// Diagnostics for each registered component, in scan order.
@@ -1260,12 +1287,13 @@ impl<'d> Executor<'d> {
         let tick = self.tick;
 
         self.emitted.clear();
+        self.fenced_write = None;
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
         self.probe_command_verdicts();
-        self.write_outputs()?;
+        self.write_outputs();
         Ok(tick)
     }
 
@@ -1481,6 +1509,7 @@ impl<'d> Executor<'d> {
         // component state.
         self.emitted.clear();
         self.command_verdicts.clear();
+        self.fenced_write = None;
         self.adopt_receipts(checkpoint);
         Ok(())
     }
@@ -1638,6 +1667,7 @@ impl<'d> Executor<'d> {
         self.tick = checkpoint.tick;
         self.emitted.clear();
         self.command_verdicts.clear();
+        self.fenced_write = None;
         self.adopt_receipts(checkpoint);
 
         let initialized = self
@@ -2259,7 +2289,13 @@ impl<'d> Executor<'d> {
     /// Points a component never wrote keep no image entry and are left
     /// untouched; internal `Out` points are image-carried for monitoring
     /// and never reach the driver.
-    fn write_outputs(&mut self) -> Result<(), ScanError> {
+    ///
+    /// A failed write is the read boundary's mirror: counted under
+    /// `failed_writes`, attributed as `last_error`, and the scan
+    /// continues — the image still records the intended output, the
+    /// field holds its last written value, and a dead link must never
+    /// take the controller and its telemetry down with it.
+    fn write_outputs(&mut self) {
         let image = self.image.borrow();
         for (point, spec) in self.map.iter() {
             if spec.direction != Direction::Out || spec.internal.is_some() {
@@ -2271,6 +2307,11 @@ impl<'d> Executor<'d> {
             match self.driver.write(point, sample.value) {
                 Ok(()) => self.io_health.consecutive_failures = 0,
                 Err(error) => {
+                    if self.fenced_write.is_none()
+                        && let IoError::Fenced(point) = error
+                    {
+                        self.fenced_write = Some(point);
+                    }
                     self.io_health.failed_writes += 1;
                     self.io_health.consecutive_failures += 1;
                     self.io_health.last_error = Some(IoFault {
@@ -2279,11 +2320,9 @@ impl<'d> Executor<'d> {
                         direction: Direction::Out,
                         error,
                     });
-                    return Err(error.into());
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -3259,12 +3298,10 @@ mod tests {
         executor.scan().unwrap();
         driver.faults.lock().unwrap().insert(PointId(20));
 
-        // The documented write behavior continues — the scan fails with
-        // ScanError — and the failure is counted and attributed.
-        assert_eq!(
-            executor.scan(),
-            Err(ScanError::Io(IoError::Disconnected(PointId(20))))
-        );
+        // The write boundary's degrade rule — the same one reads carry:
+        // the failure is counted and attributed while the scan completes.
+        executor.scan().unwrap();
+        assert_eq!(executor.tick(), Tick(2));
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_writes, 1);
         assert_eq!(health.failed_reads, 0);

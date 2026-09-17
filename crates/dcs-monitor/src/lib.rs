@@ -1100,9 +1100,11 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
     };
     let snapshot = recorder.record_scan(peer.executor(), tick);
     // A field write the plant fenced — the claim this owner held was
-    // preempted — demoted the peer inside the scan rather than failing
-    // it: the loss and the role transition it drove journal beside the
-    // scan's own events.
+    // preempted — completed the scan degraded and demoted the peer
+    // inside it rather than failing it: the claim loss and the role
+    // transition it drove journal beside the scan's own events, cause
+    // before effect, beside the `io_health` fault the boundary
+    // already counted.
     for loss in peer.take_fencing_losses() {
         recorder.note_field_claim_lost(loss.tick, loss.point);
     }
