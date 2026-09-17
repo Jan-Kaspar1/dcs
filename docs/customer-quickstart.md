@@ -39,6 +39,14 @@ Its `README.md` walks the full customer path:
    `surface-incompatible`, `tooling-rejected`,
    `manifest-fingerprint-mismatch`, …) rather than silent misbehavior.
 
+The check's `pair` stage proves the declared redundant pair runs — not
+just that its definition parses: `ci/pair.py` reads the standby wiring
+and persistence fields out of `deploy/manifest.json` and spawns the two
+declared controllers on released tooling, converging the standby to
+`tracking`, issuing the receipted `demote`/`promote` switchover, and
+asserting the run continues bumplessly with the adopted receipts and
+the durable journal files' transition records intact.
+
 The served operator surface a monitoring or UI consumer can rely on —
 proved by the check's `surface` stage against the emitted model — is:
 

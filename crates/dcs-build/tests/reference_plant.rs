@@ -23,7 +23,13 @@
 //! kind-declared command's structured receipt through `POST /command`,
 //! a kind-emitted event's arrival in the consumer-visible record, and
 //! the served registry document's structural conformance to the
-//! fetched record artifact —
+//! fetched record artifact — the `pair` stage, which runs the
+//! manifest-declared standby pair on the released tooling: the second
+//! controller converging to `tracking`, scans driven through
+//! `POST /scan` keeping the peers identical, a receipted
+//! `demote`/`promote` switching the roles, and the run continuing
+//! bumplessly with the adopted receipts and the durable journal
+//! files' transition records intact —
 //! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
@@ -46,7 +52,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, and the `surface-mismatch` paths
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`, and the
+//! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -348,6 +355,30 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
         "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
     );
+    // The pair stage ran and held: the manifest-declared standby
+    // converged to tracking, the receipted demote/promote switched the
+    // roles, the run continued bumplessly, and each peer's durable
+    // journal file carried the transition records — its digest line
+    // reports the evidence, and the broken-peer-flag case reported its
+    // named diagnostic.
+    assert!(
+        stdout.contains("== pair =="),
+        "the pair stage did not run:\n{stdout}"
+    );
+    let pair_line = stdout
+        .lines()
+        .find(|line| line.contains("pair-digest"))
+        .unwrap_or_else(|| panic!("the pair leg reported no digest:\n{stdout}"));
+    for phrase in ["switched at tick", "persisted journal records"] {
+        assert!(
+            pair_line.contains(phrase),
+            "the pair digest names no '{phrase}' evidence: {pair_line}"
+        );
+    }
+    assert!(
+        stdout.contains("broken-peer-flag: reported, pair-failed"),
+        "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -497,6 +528,58 @@ fn a_divergent_rig_definition_reports_rig_mismatch() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("rig-mismatch"),
         "expected the rig-mismatch diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A standby wired at a peer that never serves is the `pair-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, so the remote stand-in is not needed.
+/// The driver's `broken-peer-flag` tamper wires the tracking peer's
+/// `--standby` flag at an address nothing serves; the leg must refuse
+/// the run naming the lost convergence, which the check reports as
+/// `pair-failed` — never a silently unconverged pass.
+#[test]
+fn a_broken_peer_flag_reports_pair_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-pair-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/pair.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "broken-peer-flag",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the redundant-pair leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a broken peer flag passed the pair leg"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
+        "expected the lost-convergence evidence, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
