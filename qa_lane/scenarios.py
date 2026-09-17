@@ -4255,13 +4255,22 @@ def scenario_force_carryover(ctx):
             lambda: (r.get('role') == 'active' and r or None)
             if (r := _role(ctx, base)) else None,
             time.monotonic() + FORCE_DEADLINE)
+        # The launch assignment is a role pair, not one role: the
+        # demoted successor must be back tracking the restored active,
+        # or the next carryover leg has no converged peer to promote.
+        peer_back = wait_for(
+            lambda: (r.get('role') == 'standby'
+                     and 'tracking' in (r.get('sync') or {})
+                     and r or None)
+            if (r := _role(ctx, peer_base)) else None,
+            time.monotonic() + FORCE_DEADLINE)
         ref = save_evidence(ctx['evidence_dir'],
                             'force-carryover-restored.json',
                             {'demoted': peer, 'promote': restored,
-                             'role': settled_back})
+                             'role': settled_back, 'peer': peer_back})
         case.evidence('file', ref, 'the fail-back responses and the '
-                      'restored role')
-        if restored is None or not settled_back:
+                      'restored roles')
+        if restored is None or not settled_back or not peer_back:
             return case.finish('failed', 'the pair is not restored '
                                'to its pre-scenario role assignment')
         case.observe('restored: ' + active + ' reports active again, '

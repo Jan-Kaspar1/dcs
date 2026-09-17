@@ -1424,6 +1424,7 @@ class CarryoverPair:
         self.release_never_applies = False  # the release stays accepted
         self.resubstitutes_on = set()       # the released point re-substitutes
         self.never_activates_on = set()     # the restore leg never re-activates
+        self.never_retracks_on = set()      # the demoted peer stays unsynchronized
 
     def _advance(self, peer):
         """One completed scan on `peer`: pending role transitions
@@ -1433,7 +1434,9 @@ class CarryoverPair:
         peer.tick += 1
         if peer.role == 'demoting':
             peer.role = 'standby'
-            peer.tracking = True    # the demoted peer follows its successor
+            # the demoted peer follows its successor — unless the
+            # never_retracks_on fault holds it unsynchronized
+            peer.tracking = peer.name not in self.never_retracks_on
         elif peer.role == 'promoting':
             peer.role = 'standby' \
                 if peer.name in self.never_activates_on else 'active'
@@ -1649,6 +1652,15 @@ class ForceCarryoverTests(unittest.TestCase):
 
     def test_unrestored_pair_fails(self):
         self.pair.never_activates_on.add('a')
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('not restored', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_demoted_peer_never_retracking_fails(self):
+        # The original active re-activates but the demoted successor
+        # stays unsynchronized — the launch role pair is not restored.
+        self.pair.never_retracks_on.add('b')
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('not restored', record.get('detail', ''))
