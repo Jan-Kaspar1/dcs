@@ -871,6 +871,42 @@ def restart_controller(run_id, name, timeline):
     timeline('controller-restarted', container + ' running')
 
 
+def cold_restart_controller(run_id, run_dir, name, timeline):
+    """The scenario-callable cold restart: `docker stop` on one of the
+    run's controller containers, remove that controller's host-side
+    --state-file inside the bounded run dir, then `docker start` — the
+    induction the source-restart scenario needs to produce a
+    checkpoint stream whose served tick regresses below the tracking
+    peer's last alignment. Where `restart_controller` preserves the
+    persisted state and resumes the same run, this leaves the
+    restarted process nothing to resume: it binds its --journal-file
+    (which stays — the new run-boundary marker at tick 0 is part of
+    the evidence the resume was cold) and serves its checkpoint
+    stream from the beginning of a fresh run.
+
+    `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
+    container and state dir, 'standby' ctrl-b's, whichever role each
+    currently reports. Only the named controller's state.json is
+    removed, and only inside this run's bounded directory. Both
+    docker halves are recorded on the run's action timeline; a docker
+    or state-file failure raises so the calling scenario reports the
+    cold restart never completed rather than silently performing a
+    warm restart.
+    """
+    container = _controller_container(run_id, name)
+    peer = container.rsplit('-', 1)[1]
+    state = _controller_dir(run_dir, peer) / 'state.json'
+    timeline('controller-cold-restart', 'docker stop ' + container
+             + '; drop ' + str(state))
+    docker('stop', '--time', '2', container, timeout=90)
+    existed = state.is_file()
+    state.unlink(missing_ok=True)
+    docker('start', container, timeout=60)
+    timeline('controller-cold-restarted', container
+             + ' running cold (state file '
+             + ('dropped' if existed else 'already absent') + ')')
+
+
 def stop_controller(run_id, name, timeline):
     """The stop half of the lifecycle action, alone: `docker stop` on
     one of the run's controller containers, held down until the scenario
@@ -1119,8 +1155,9 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     answers on 'revised' once launched, the checkpoint-negotiation
     case's foreign peer on 'foreign'), the published plant-protocol
     endpoint, the run's evidence dir and deadline, the runner-owned
-    controller-restart, plant stop/start, model-revision, and
-    foreign-peer launch/teardown actions, and the host-side
+    controller restart/cold-restart, plant stop/start,
+    model-revision, and foreign-peer launch/teardown actions, and
+    the host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
@@ -1136,6 +1173,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'cold_restart_controller': lambda name: cold_restart_controller(
+            run_id, run_dir, name, timeline),
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(

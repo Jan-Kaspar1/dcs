@@ -195,6 +195,115 @@ class RestartActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-restart'])
 
 
+class ColdRestartActionTests(unittest.TestCase):
+    """The scenario-callable cold restart: stop, drop the named
+    controller's host-side state.json inside the bounded run dir —
+    the journal file stays, its run-boundary marker part of the
+    evidence — then start, both docker halves on the timeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self.tmp.name) / 'runs' / 'qa-1'
+        self.a_dir = self.run_dir / 'controllers' / 'a'
+        self.b_dir = self.run_dir / 'controllers' / 'b'
+        for directory in (self.a_dir, self.b_dir):
+            directory.mkdir(parents=True)
+            (directory / 'state.json').write_text('{"tick": 400}')
+            (directory / 'journal.jsonl').write_text(
+                '{"run_boundary": {"run": 1, "tick": 0}}\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cold_restart(self, name='active', docker=None, events=None):
+        calls = []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        seen = events if events is not None else []
+        with patch.object(runner, 'docker', docker):
+            runner.cold_restart_controller(
+                'qa-1', self.run_dir, name,
+                lambda event, detail=None: seen.append((event, detail)))
+        return calls, seen
+
+    def test_stop_remove_start_recorded_on_timeline(self):
+        calls, events = self._cold_restart()
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-a'),
+                    ('start', 'dcs-hw-qa-1-a')])
+        self.assertEqual([event for event, _ in events],
+                         ['controller-cold-restart',
+                          'controller-cold-restarted'])
+        self.assertIn('dcs-hw-qa-1-a', events[0][1])
+        self.assertFalse((self.a_dir / 'state.json').exists())
+        self.assertTrue((self.a_dir / 'journal.jsonl').exists())
+
+    def test_standby_endpoint_drops_b_state_only(self):
+        calls, _ = self._cold_restart(name='standby')
+        self.assertEqual(calls[0][-1], 'dcs-hw-qa-1-b')
+        self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-b'))
+        self.assertFalse((self.b_dir / 'state.json').exists())
+        self.assertTrue((self.b_dir / 'journal.jsonl').exists())
+        self.assertTrue((self.a_dir / 'state.json').exists())
+
+    def test_state_removal_stays_inside_the_run_dir(self):
+        # The removed path resolves under the bounded run dir — the
+        # peer's sibling state and journal survive, and nothing outside
+        # the run dir is touched.
+        before_b = (self.b_dir / 'state.json').read_text()
+        self._cold_restart()
+        self.assertFalse((self.a_dir / 'state.json').exists())
+        self.assertEqual((self.b_dir / 'state.json').read_text(),
+                         before_b)
+        touched = sorted(p for p in self.run_dir.rglob('*'))
+        self.assertNotIn(self.a_dir / 'state.json', touched)
+
+    def test_missing_state_file_still_restarts(self):
+        (self.a_dir / 'state.json').unlink()
+        calls, events = self._cold_restart()
+        self.assertEqual(calls[0][0], 'stop')
+        self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-a'))
+        self.assertIn('already absent', events[1][1])
+
+    def test_failed_stop_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'stop' and check:
+                raise RuntimeError('docker stop failed: no such')
+            return Result('')
+
+        with self.assertRaises(RuntimeError):
+            self._cold_restart(docker=raising, events=events)
+        self.assertEqual([event for event, _ in events],
+                         ['controller-cold-restart'])
+        self.assertTrue((self.a_dir / 'state.json').exists())
+
+    def test_scenario_ctx_carries_the_cold_restart_action(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                dict(runner.DEFAULT_CONFIG), record, Path('src'),
+                self.run_dir, 'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['cold_restart_controller']('standby')
+        self.assertEqual(calls, [('stop', '--time', '2',
+                                  'dcs-hw-qa-1-b'),
+                                 ('start', 'dcs-hw-qa-1-b')])
+        self.assertFalse((self.b_dir / 'state.json').exists())
+        self.assertTrue((self.b_dir / 'journal.jsonl').exists())
+        self.assertIn('controller-cold-restart', events)
+        self.assertIn('controller-cold-restarted', events)
+
+
 class LifecycleActionTests(unittest.TestCase):
     """The scenario-callable stop/start pair: each action records its
     own attempt and completion on the run's action timeline, so a
