@@ -3602,6 +3602,394 @@ def _settled_receipts(journal):
             for entry in _journal_list(journal)]
 
 
+def _ctl_write_legs(ctx, case, ctl, signals, schema, roles):
+    """The dcs-ctl case's mutation legs over the closure's ctl: a
+    receipted write, a descriptor-bounded set-parameter, force and
+    unforce, promote/demote through the CLI, and the driven scan
+    probe. Returns (outcome, detail)."""
+    active = next((name for name, report in roles.items()
+                   if (report or {}).get('role') == 'active'), None)
+    if active is None:
+        return 'inconclusive', 'no peer reports role=active'
+    base = ctx[active]
+    target = None
+    for entry in signals.get('points', []):
+        if entry.get('name') == 'p101-oos' and entry.get('writable') \
+                and entry.get('direction') == 'in' \
+                and entry.get('value_type') == 'bool':
+            target = entry.get('point')
+            break
+    if target is None:
+        return 'inconclusive', 'the rig model declares no writable ' \
+            'bool p101-oos point for the mutation legs'
+    rc0, baseline, _e0 = ctl(base, 'snapshot')
+    if rc0 != 0 or not isinstance(baseline, dict):
+        return 'inconclusive', 'dcs-ctl snapshot failed ahead of the ' \
+            'mutation legs'
+    held = _point_value(baseline, target)
+    if not isinstance(held, bool):
+        return 'inconclusive', 'the write target holds no bool ' \
+            'served baseline: ' \
+            + json.dumps(_point_sample(baseline, target))[:300]
+    written_value = not held
+    case.observe('mutation legs on ' + active + ' (' + base + '): '
+                 'target point ' + str(target) + ' holds '
+                 + str(held) + ' in the served snapshot')
+    tuned = _float_tune_plan(schema, baseline)
+    if tuned is None:
+        return 'inconclusive', 'the served registry offers no ' \
+            'descriptor-declared Float parameter the tune leg can ' \
+            'exercise'
+    tune_component, tune_name, tune_current, tune_value, _outside = tuned
+    leg_seq = {'n': 0}
+    pre_roles = {name: (report or {}).get('role')
+                 for name, report in roles.items()}
+
+    def ctl_seq(*args):
+        leg_seq['n'] += 1
+        return ctl(base, *args, '--actor',
+                   CTL_ACTOR + '-leg-' + str(leg_seq['n']))
+
+    def journal_since(seq):
+        rc, entries, err = ctl(base, 'journal', '--since', str(seq))
+        return entries if rc == 0 and isinstance(entries, list) else None
+
+    def wait_settled(command, floor):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            entries = journal_since(floor)
+            if entries is not None:
+                for item in entries:
+                    receipt = ((item.get('event') or {})
+                               .get('command_settled') or {}) \
+                        .get('receipt') or {}
+                    if receipt.get('command') == command:
+                        return receipt
+            time.sleep(0.5)
+        return None
+
+    def snapshot_ok():
+        rc, snap, _err = ctl(base, 'snapshot')
+        return snap if rc == 0 and isinstance(snap, dict) else None
+
+
+    def wait_leg_value(snap_of, point, want):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            snap = snap_of()
+            if snap is not None and _point_value(snap, point) == want:
+                return snap
+            time.sleep(0.5)
+        return None
+
+    def wait_leg_parameter(snap_of, component, name, want):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            snap = snap_of()
+            if snap is not None and _parameter_value(
+                    snap, component, name) == want:
+                return snap
+            time.sleep(0.5)
+        return None
+
+    def wait_leg_forced(snap_of, point, want):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            snap = snap_of()
+            badge = _forced_entry(snap, point) if snap else None
+            if snap is not None and badge is not None \
+                    and badge.get('value') == {'bool': want} \
+                    and _point_quality(snap, point) \
+                    == {'uncertain': 'substituted'}:
+                return snap
+            time.sleep(0.5)
+        return None
+
+    def wait_leg_released(snap_of, point):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            snap = snap_of()
+            if snap is not None and _forced_entry(snap, point) is None:
+                return snap
+            time.sleep(0.5)
+        return None
+
+    def wait_leg_tick(snap_of, after_tick):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            snap = snap_of()
+            if snap is not None \
+                    and (snap.get('tick') or 0) > (after_tick or 0):
+                return snap
+            time.sleep(0.5)
+        return None
+
+
+    def wait_role_events(ctx, transitions):
+        deadline = time.monotonic() + CTL_DEADLINE
+        wanted = set(transitions)
+        seen = set()
+        while time.monotonic() < deadline:
+            rc, journal, _err = ctl(base, 'journal', '--since', '0')
+            if rc == 0 and isinstance(journal, list):
+                for item in journal:
+                    event = (item or {}).get('event') or {}
+                    changed = event.get('role_changed') or {}
+                    to = changed.get('to')
+                    if to in transitions.values():
+                        seen.add(to)
+            if wanted <= seen:
+                return seen
+            time.sleep(0.5)
+        return None
+
+    def wait_roles_settled(name, role):
+        deadline = time.monotonic() + CTL_DEADLINE
+        while time.monotonic() < deadline:
+            rc, report, _err = ctl(ctx[name], 'role')
+            if rc == 0 and isinstance(report, dict) \
+                    and report.get('role') == role:
+                return report
+            time.sleep(0.5)
+        return None
+
+    restored = False
+    wrote = False
+    tuned_applied = False
+    forced_now = False
+    leg = {}
+
+    def restore():
+        nonlocal restored
+        if restored:
+            return
+        restored = True
+        try:
+            if forced_now:
+                ctl_seq('unforce', str(target))
+            if tuned_applied:
+                ctl_seq('set-parameter', str(tune_component),
+                        str(tune_name), repr(tune_current))
+            if wrote:
+                ctl_seq('write', str(target),
+                        'true' if held else 'false')
+            if pre_roles:
+                settled = {}
+                for name in pre_roles:
+                    rc, report, _err = ctl(ctx[name], 'role')
+                    settled[name] = report.get('role') \
+                        if rc == 0 and isinstance(report, dict) else None
+                holder = next((name for name, role in settled.items()
+                               if role == 'active'), None)
+                if holder is not None:
+                    ctl(ctx[holder], 'demote')
+                    demoted = next(
+                        (name for name, role in pre_roles.items()
+                         if role == 'active'), None)
+                    if demoted is not None:
+                        wait_roles_settled(demoted, 'standby')
+                        ctl(ctx[demoted], 'promote')
+        except Exception:
+            pass
+
+    try:
+        rc, journal, err = ctl(base, 'journal', '--since', '0')
+        if rc != 0 or not isinstance(journal, list):
+            return 'inconclusive', 'dcs-ctl journal failed ahead of ' \
+                'the mutation legs: exit ' + str(rc) + ' ' + str(err)[:200]
+        floor = max((item.get('seq') or 0 for item in journal
+                     if isinstance(item, dict)), default=0)
+
+        try:
+            rc, receipt, err = ctl_seq('write', str(target),
+                                       'true' if written_value else 'false')
+            write_command = {'write_value': {
+                'point': target, 'kind': 'bool',
+                'value': {'bool': written_value}}}
+            leg['write'] = {'argv': ['write', str(target),
+                                     'true' if written_value
+                                     else 'false'],
+                            'exit': rc, 'receipt': receipt}
+            if rc != 0 or not isinstance(receipt, dict) \
+                    or not (receipt.get('outcome') or {}).get('applied'):
+                return 'failed', 'the write leg did not settle ' \
+                    'applied: exit ' + str(rc) + ' ' \
+                    + json.dumps(receipt)[:300] + ' ' + str(err)[:200]
+            if receipt.get('actor') != CTL_ACTOR + '-leg-' \
+                    + str(leg_seq['n']):
+                return 'failed', 'the printed write receipt dropped ' \
+                    'the declared leg actor: actor=' \
+                    + json.dumps(receipt.get('actor'))
+            settle = wait_settled(write_command, floor)
+            if settle is None:
+                return 'failed', 'the served journal never settled ' \
+                    'the write leg'
+            if settle.get('actor') != receipt.get('actor'):
+                return 'failed', 'the journaled write settlement ' \
+                    'carries a foreign actor: ' \
+                    + json.dumps(settle.get('actor'))
+            snap = wait_leg_value(snapshot_ok, target, written_value)
+            if snap is None:
+                return 'failed', 'the written value never surfaced ' \
+                    'in the served snapshot'
+            wrote = True
+            case.observe('write leg: applied receipt under '
+                         + str(receipt.get('actor')) + ', journaled '
+                         'settlement matches, served snapshot now '
+                         'holds ' + str(written_value))
+        finally:
+            restore()
+
+        try:
+            rc, receipt, err = ctl_seq('set-parameter',
+                                       str(tune_component),
+                                       str(tune_name),
+                                       repr(tune_value))
+            tune_command = {'set_parameter': {
+                'component': tune_component, 'name': tune_name,
+                'value': {'float': tune_value}}}
+            leg['set-parameter'] = {
+                'argv': ['set-parameter', str(tune_component),
+                         str(tune_name), repr(tune_value)],
+                'exit': rc, 'receipt': receipt}
+            if rc != 0 or not isinstance(receipt, dict) \
+                    or not (receipt.get('outcome') or {}).get('applied'):
+                return 'failed', 'the set-parameter leg did not ' \
+                    'settle applied: exit ' + str(rc) + ' ' \
+                    + json.dumps(receipt)[:300] + ' ' + str(err)[:200]
+            settle = wait_settled(tune_command, floor)
+            if settle is None:
+                return 'failed', 'the served journal never settled ' \
+                    'the set-parameter leg'
+            snap = wait_leg_parameter(snapshot_ok, tune_component,
+                                      tune_name, tune_value)
+            if snap is None:
+                return 'failed', 'the tuned value never surfaced in ' \
+                    'the served parameter report'
+            tuned_applied = True
+            case.observe('set-parameter leg: '
+                         + str(tune_component) + '.'
+                         + str(tune_name) + ' -> '
+                         + repr(tune_value) + ' applied, journaled, '
+                         'and served')
+        finally:
+            restore()
+
+        try:
+            rc, receipt, err = ctl_seq('force', str(target),
+                                       'true' if written_value
+                                       else 'false')
+            force_command = {'force_point': {
+                'point': target, 'kind': 'bool',
+                'value': {'bool': written_value}}}
+            leg['force'] = {'argv': ['force', str(target),
+                                     'true' if written_value
+                                     else 'false'],
+                            'exit': rc, 'receipt': receipt}
+            if rc != 0 or not isinstance(receipt, dict) \
+                    or not (receipt.get('outcome') or {}).get('applied'):
+                return 'failed', 'the force leg did not settle ' \
+                    'applied: exit ' + str(rc) + ' ' \
+                    + json.dumps(receipt)[:300] + ' ' + str(err)[:200]
+            badge = wait_leg_forced(snapshot_ok, target, written_value)
+            if badge is None:
+                return 'failed', 'the forced point never served the ' \
+                    'substituted badge and value'
+            forced_now = True
+            case.observe('force leg: point ' + str(target)
+                         + ' badged under snapshot.forces at '
+                         'Uncertain(Substituted) holding '
+                         + str(written_value))
+
+            rc, receipt, err = ctl_seq('unforce', str(target))
+            unforce_command = {'unforce_point': {'point': target}}
+            leg['unforce'] = {'argv': ['unforce', str(target)],
+                              'exit': rc, 'receipt': receipt}
+            if rc != 0 or not isinstance(receipt, dict) \
+                    or not (receipt.get('outcome') or {}).get('applied'):
+                return 'failed', 'the unforce leg did not settle ' \
+                    'applied: exit ' + str(rc) + ' ' \
+                    + json.dumps(receipt)[:300] + ' ' + str(err)[:200]
+            settle = wait_settled(unforce_command, floor)
+            if settle is None:
+                return 'failed', 'the served journal never settled ' \
+                    'the unforce leg'
+            snap = wait_leg_released(snapshot_ok, target)
+            if snap is None:
+                return 'failed', 'the forces badge never cleared ' \
+                    'after the release'
+            forced_now = False
+            case.observe('unforce leg: badge cleared, held value '
+                         're-stamped Good through the restore write')
+        finally:
+            restore()
+
+        try:
+            rc, report, err = ctl(ctx[active], 'demote')
+            leg['demote'] = {'argv': ['demote'], 'exit': rc,
+                             'receipt': report, 'stderr': err}
+            if rc != 0 or not isinstance(report, dict):
+                return 'failed', 'the demote leg did not answer a ' \
+                    'RoleReport: exit ' + str(rc) + ' ' \
+                    + json.dumps(report)[:300] + ' ' + str(err)[:200]
+            settled = wait_roles_settled(active, 'standby')
+            if settled is None:
+                return 'failed', 'the demoted peer never settled ' \
+                    'standby through GET /role'
+            case.observe('demote leg: transitional report accepted, '
+                         'peer settled standby')
+            promoted = next((name for name, role in pre_roles.items()
+                             if role == 'standby'), None)
+            if promoted is None:
+                return 'inconclusive', 'the pair layout offers no ' \
+                    'peer to promote'
+            rc, report, err = ctl(ctx[promoted], 'promote')
+            leg['promote'] = {'argv': ['promote'], 'exit': rc,
+                              'receipt': report, 'stderr': err}
+            if rc != 0 or not isinstance(report, dict):
+                return 'failed', 'the promote leg did not answer a ' \
+                    'RoleReport: exit ' + str(rc) + ' ' \
+                    + json.dumps(report)[:300] + ' ' + str(err)[:200]
+            settled = wait_roles_settled(promoted, 'active')
+            if settled is None:
+                return 'failed', 'the promoted peer never settled ' \
+                    'active through GET /role'
+            role_events = wait_role_events(ctx, {active: 'standby',
+                                                 promoted: 'active'})
+            if role_events is None:
+                return 'failed', 'the journal never recorded the ' \
+                    'switch legs\' role_changed transitions'
+            case.observe('switch legs: demote and promote settled '
+                         'through the CLI; journaled role_changed '
+                         'events cover both transitions ('
+                         + json.dumps(sorted(role_events)) + ')')
+            if not ctx.get('driven', False):
+                leg['scan'] = {'skipped': 'paced monitor — scan leg '
+                               'skipped by design'}
+                case.observe('scan leg: paced monitor — skipped')
+            else:
+                rc, snap, err = ctl(ctx[promoted], 'scan', '1')
+                leg['scan'] = {'argv': ['scan', '1'], 'exit': rc,
+                               'receipt': snap, 'stderr': err}
+                if rc != 0 or not isinstance(snap, dict):
+                    return 'inconclusive', 'the driven scan leg ' \
+                        'failed: exit ' + str(rc) + ' ' \
+                        + json.dumps(snap)[:300] + ' ' + str(err)[:200]
+                served = wait_leg_tick(snapshot_ok, snap.get('tick'))
+                if served is None:
+                    return 'failed', 'the served snapshot never ' \
+                        'advanced past the scan leg\'s returned tick'
+                case.observe('scan leg: returned snapshot tick '
+                             + str(snap.get('tick')) + ', served '
+                             'snapshot advanced past it')
+            return 'passed', 'mutation legs complete'
+        finally:
+            restore()
+    except Exception as exc:
+        restore()
+        return 'inconclusive', str(exc)
+
+
 def scenario_force_release(ctx):
     """A receipted force pins p101-oos at Substituted quality with the
     control image following it; its release plus the restore write
@@ -5667,10 +6055,11 @@ def scenario_command_admission(ctx):
 # `cargo build -p dcs-monitor --bin dcs-ctl` beside the image
 # binaries), handed to the scenario as ctx['dcs_ctl']; every asserted
 # read and mutation travels through CLI invocations against the
-# published monitor addresses. The leg is read-mostly by construction:
-# its single mutation is the writable-safe declared command the
-# served-interface case's selection logic picks, and the refusal
-# probes are rejected before they can perturb the plant.
+# published monitor addresses. The read and refusal legs below leave
+# the plant untouched; the mutation legs — the receipted write,
+# descriptor-bounded tune, force/unforce, the CLI switch legs, and the
+# driven scan probe — run in _ctl_write_legs with per-leg actors and
+# full finally-restores.
 
 DCS_CTL_TIMEOUT = 20   # bound on one dcs-ctl invocation
 CTL_DEADLINE = 30      # bound on the journaled-settlement wait
@@ -5731,9 +6120,19 @@ def scenario_dcs_ctl(ctx):
                 'declares, the command the served-interface selection '
                 'logic picks settles a receipt journaled with the '
                 '--actor the leg passed, the emitted-events read '
-                'attributes a produced event to its component, and an '
+                'attributes a produced event to its component, an '
                 'undeclared or unavailable invocation is refused by '
-                'name — never silently accepted')
+                'name — never silently accepted — and the mutation '
+                'legs drive a receipted write of the writable '
+                'p101-oos point from the served snapshot, a '
+                'range-bounded set-parameter tune, a force and '
+                'unforce asserting the Uncertain(Substituted) badge '
+                'and its release, the demote/promote switch legs '
+                'settling through the CLI with journaled '
+                'role_changed events, and a driven scan probe — '
+                'every leg under its own CTL_ACTOR-prefixed actor '
+                'with the changed values, parameters, forces, and '
+                'role layout restored before the case returns')
     transcript = []
 
     def done(outcome, detail=None):
@@ -6076,6 +6475,17 @@ def scenario_dcs_ctl(ctx):
                             + json.dumps(refusals['unavailable'])[:300])
             case.observe('unavailable command refused by name: '
                          + rejection(refusals['unavailable']))
+
+        outcome, detail = _ctl_write_legs(ctx, case, ctl, signals,
+                                          schema, roles)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-write-legs.json',
+                            {'outcome': outcome, 'detail': detail})
+        case.evidence('file', ref, 'the mutation legs receipts, '
+                      'reports, and restores')
+        if outcome != 'passed':
+            return done(outcome, detail)
+        case.observe('mutation legs: ' + str(detail))
         return done('passed')
     except Exception as exc:
         return done('inconclusive', str(exc))
