@@ -111,6 +111,14 @@ class SupervisorTests(unittest.TestCase):
         self.supervisor.dispatch(self.github.items)
         self.assertEqual(self.runtime.spawn.call_args.kwargs['model'], 'opencode/union-alpha')
 
+    def test_dispatch_skips_workers_whose_model_is_capped(self):
+        self.supervisor.models = ['swe-2-high', 'opencode/union-alpha']
+        self.supervisor.model_caps = {'opencode/union-alpha': 1}
+        self.github.items = [issue(1), issue(2), issue(3)]
+        self.supervisor.dispatch(self.github.items)
+        workers = sorted(j['worker'] for j in self.supervisor.state.jobs())
+        self.assertEqual(workers, ['worker-01', 'worker-02', 'worker-04'])
+
     def test_supervisor_commits_completed_edits(self):
         self.supervisor.dispatch(self.github.items)
         self.runtime.inspect_result.side_effect = [{'clean':False,'changed':False}, {'clean':True,'changed':True}]

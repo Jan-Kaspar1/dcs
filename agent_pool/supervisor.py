@@ -30,6 +30,7 @@ class Supervisor:
         self.github = GitHub(config['repository'])
         self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
         self.models = config.get('models') or ['swe-2-high']
+        self.model_caps = config.get('model_caps') or {}
         self.stopping = False
 
     def model_for(self, worker):
@@ -66,11 +67,24 @@ Repair context: {repair}
             return []
 
     def free_workers(self, active):
-        """Worker names neither assigned to a live job nor leasing a checkout."""
+        """Worker names neither assigned to a live job nor leasing a checkout,
+        whose assigned model still has an open slot under model_caps."""
         used = {j['worker'] for j in active}
         clones = {Path(j['clone']).name for j in active if j.get('clone')}
-        return [w for n in range(1, self.state.capacity() + 1)
-                if (w := f'worker-{n:02}') not in used and w not in clones]
+        active_per_model = {}
+        for job in active:
+            model = self.model_for(job['worker'])
+            active_per_model[model] = active_per_model.get(model, 0) + 1
+        free = []
+        for n in range(1, self.state.capacity() + 1):
+            if (w := f'worker-{n:02}') in used or w in clones:
+                continue
+            model = self.model_for(w)
+            cap = self.model_caps.get(model)
+            if cap is not None and active_per_model.get(model, 0) >= cap:
+                continue
+            free.append(w)
+        return free
 
     def capture_recovery(self, job):
         """Persist a tri-state preserved-work record for a blocked job.
