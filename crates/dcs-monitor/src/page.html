@@ -422,9 +422,15 @@ for (const raw of urlParams.getAll("peer")) {
 // on every command submission as the attributed envelope's actor (see
 // postCommand). Declared, not authenticated; null submits unattributed.
 const operator = urlParams.get("operator");
-// Per-peer last-polled state: { report: RoleReport | null, error } —
-// error non-null is the named unreachable redundancy fault.
-const peerState = peers.map(() => ({ report: null, error: null }));
+// Per-peer last-polled state: { report: RoleReport | null, error,
+// unsyncedSince } — error non-null is the named unreachable redundancy
+// fault; unsyncedSince is the convergence-grace clock pairHealth reads
+// (epoch ms of the first still-unsynchronized report, else null).
+const peerState = peers.map(() => ({
+  report: null,
+  error: null,
+  unsyncedSince: null,
+}));
 // Index of the peer currently sourcing the logical view's data.
 let source = 0;
 
@@ -594,6 +600,28 @@ function pointName(point) {
   return meta ? meta.name + " (point " + point + ")" : "point " + point;
 }
 
+// The wall-clock grace a peer reporting "unsynchronized" gets before
+// pairHealth names it a redundancy fault — the transient a fresh or
+// newly demoted standby legitimately occupies while its first tracking
+// pulls land at the documented pull-per-scan cadence. Past it the peer
+// cannot demonstrate convergence — a demoted peer with no checkpoint
+// source stays unsynchronized forever and can never be promoted back —
+// and the pair has no failover coverage to call healthy.
+const CONVERGENCE_GRACE_MS = 5000;
+
+// The convergence-grace clock pairHealth reads: a report of
+// "unsynchronized" starts or continues the peer's run; any converged
+// sync state — and the unreachable fault, which pairHealth already
+// names on its own — ends it. Called wherever a role poll lands.
+function noteSyncAge(state) {
+  if (state.error === null && state.report !== null &&
+      state.report.sync === "unsynchronized") {
+    state.unsyncedSince = state.unsyncedSince || Date.now();
+  } else {
+    state.unsyncedSince = null;
+  }
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -608,6 +636,7 @@ async function pollRoles() {
     } catch (error) {
       peerState[i].error = String(error);
     }
+    noteSyncAge(peerState[i]);
   }));
   selectSource();
 }
@@ -703,7 +732,8 @@ function describeSync(sync) {
 // The pair's redundancy health for either the pair section or an
 // overview card: the reported-active peers' names plus the named
 // redundancy faults — an unreachable peer, a degraded or diverged
-// standby convergence, no peer reporting active, or more than one
+// standby convergence, a peer still reporting "unsynchronized" past
+// CONVERGENCE_GRACE_MS, no peer reporting active, or more than one
 // reporting it. Two actives is the dual-active split-brain the
 // one-logical-controller contract makes impossible — an alarmable
 // state the summary names rather than presenting the pair as healthy.
@@ -720,6 +750,12 @@ function pairHealth(pairPeers, states) {
     }
     if (state.report === null) return;
     if (state.report.role === "active") actives.push(peer.name);
+    if (state.report.sync === "unsynchronized" &&
+        state.unsyncedSince != null &&
+        Date.now() - state.unsyncedSince >= CONVERGENCE_GRACE_MS) {
+      faults.push(peer.name + " has not converged: unsynchronized " +
+        "past the convergence grace");
+    }
     if (state.report.sync && typeof state.report.sync === "object") {
       if ("degraded" in state.report.sync) {
         faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
@@ -857,9 +893,9 @@ function renderFeed() {
 
 // Parses one ?pair= value — `[name=]host:port[,host:port],…` — into a
 // card's pair record, or null for a value naming no peers. The record
-// carries the card's whole polled state: per-peer {report, error} like
-// the pair view's peerState, the snapshot-source index, and the source
-// peer's last snapshot or its fetch error.
+// carries the card's whole polled state: per-peer {report, error,
+// unsyncedSince} like the pair view's peerState, the snapshot-source
+// index, and the source peer's last snapshot or its fetch error.
 function parsePairSpec(raw) {
   const eq = raw.indexOf("=");
   const spec = eq >= 0 ? raw.slice(eq + 1) : raw;
@@ -875,7 +911,7 @@ function parsePairSpec(raw) {
   return {
     name: name === "" ? pairPeers[0].name : name,
     peers: pairPeers,
-    state: pairPeers.map(() => ({ report: null, error: null })),
+    state: pairPeers.map(() => ({ report: null, error: null, unsyncedSince: null })),
     source: 0,
     snapshot: null,
     snapshotError: null,
@@ -921,6 +957,7 @@ async function pollPairCard(pair) {
     } catch (error) {
       pair.state[i].error = String(error);
     }
+    noteSyncAge(pair.state[i]);
   }));
   selectPairSource(pair);
   pair.snapshot = null;
