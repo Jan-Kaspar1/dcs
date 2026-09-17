@@ -345,9 +345,10 @@ fn run_scenario() -> Outcome {
         );
         let resynced_sync = resynced.sync.unwrap();
 
-        // The clear is journaled as its own named event: a same-tick
-        // comparison that read the field and matched — attributed to
-        // the compared tick and naming the verified points.
+        // The clear is journaled as its own named event — detection
+        // then resolution then promotion is the auditable sequence —
+        // attributed to the compared tick and carrying the same-tick
+        // comparison the verdict stood on.
         let resolutions: Vec<JournalEntry> = standby_client
             .journal(0)
             .unwrap()
@@ -402,12 +403,20 @@ fn skewed_standby_diverges_blocks_promotion_and_resyncs() {
         panic!("journal entry must be divergence_detected");
     };
     assert_eq!(journaled, mismatches);
-    // The clear journaled as `divergence_resolved` naming the point the
-    // fully-read same-tick compare verified.
-    let JournalEvent::DivergenceResolved { points } = &outcome.resolutions[0].event else {
+    // The resync journals its own entry at the compared tick, carrying
+    // every compared field `Out` point with both sides' values — the
+    // fully-read match the reopen of the promote gate stands on.
+    assert_eq!(outcome.resolutions.len(), 1, "{:?}", outcome.resolutions);
+    assert_eq!(outcome.resolutions[0].tick, Tick(N + K + 2));
+    let JournalEvent::DivergenceResolved { compared } = &outcome.resolutions[0].event else {
         panic!("journal entry must be divergence_resolved");
     };
-    assert_eq!(points, &[VALVE]);
+    assert_eq!(compared.len(), 1, "the fixture's only field Out compares");
+    assert_eq!(compared[0].point, VALVE);
+    assert_eq!(
+        compared[0].staged, compared[0].field,
+        "the resolved comparison's values agree"
+    );
     assert_eq!(
         outcome.resynced_sync,
         StandbySync::Tracking {

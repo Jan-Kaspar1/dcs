@@ -84,7 +84,7 @@ pub use checkpoint::{
 };
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{
-    DivergenceReport, DivergenceResolution, FLOAT_TOLERANCE, FieldComparison, compare_staged,
+    DivergenceReport, FLOAT_TOLERANCE, ResolutionReport, compare_staged, compare_staged_points,
     values_diverge,
 };
 pub use executor::{

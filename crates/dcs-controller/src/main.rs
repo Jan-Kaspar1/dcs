@@ -1080,10 +1080,10 @@ fn main() -> ExitCode {
                                 divergence.tick.0, divergence.mismatches
                             );
                         }
-                        for resolution in peer.take_divergence_resolutions() {
+                        for resolution in peer.take_resolutions() {
                             eprintln!(
-                                "standby: divergence resolved at tick {} — staged outputs match the field at {:?}",
-                                resolution.tick.0, resolution.points
+                                "standby: divergence resolved at tick {} — compared {:?}",
+                                resolution.tick.0, resolution.compared
                             );
                         }
                         for reinitialized in peer.take_reinitializations() {

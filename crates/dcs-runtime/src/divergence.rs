@@ -24,10 +24,12 @@
 //! The comparison is deterministic and exact per value kind: `Bool` and
 //! `Int` values must be identical; `Float` values agree within
 //! [`FLOAT_TOLERANCE`]. A point whose field read fails — a communication
-//! fault is neither divergence evidence nor convergence evidence —
-//! reports as [`FieldComparison::unread`], and a staged image whose tick
-//! no transferred checkpoint has reached yet runs no comparison at all,
-//! so the check only ever acts on same-tick, same-field observations.
+//! fault is neither divergence evidence nor convergence evidence — is
+//! absent from [`compare_staged_points`]'s answer, so the caller can
+//! tell a partially-observed comparison from a fully-read one; a staged
+//! image whose tick no transferred checkpoint has reached yet runs no
+//! comparison at all, so the check only ever acts on same-tick,
+//! same-field observations.
 
 use dcs_core::{Divergence, IoDriver, PointId, Sample, Tick, Value};
 use std::collections::BTreeMap;
@@ -66,75 +68,68 @@ pub struct DivergenceReport {
     pub mismatches: Vec<Divergence>,
 }
 
-/// One transfer's divergence clear: the tick the compared staged image
-/// belonged to and the field `Out` points the comparison verified
-/// matching — the positive evidence a `Diverged` verdict clears on,
-/// journaled as its own named event.
+/// One `Diverged` → `Tracking` transition — the resolution a successful
+/// checkpoint apply produced — carrying the applied tick and the
+/// same-tick field comparison the clear stands on.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DivergenceResolution {
-    /// The tick both sides describe — the staged scan's tick, equal to
-    /// the applied checkpoint's tick by the check's pairing rule.
+pub struct ResolutionReport {
+    /// The applied checkpoint's tick — equal to the compared staged
+    /// image's tick by the check's pairing rule.
     pub tick: Tick,
-    /// The staged `Out` points whose field reads matched, in ascending
-    /// point order.
-    pub points: Vec<PointId>,
-}
-
-/// One same-tick comparison's verdict over a staged field `Out` image:
-/// every staged point lands in exactly one of the three lists, so a
-/// comparison that observed nothing is distinguishable from one that
-/// observed the image agreeing with the field.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldComparison {
-    /// Staged `Out` points whose field reads matched, in ascending
-    /// point order — the positive convergence evidence.
-    pub matched: Vec<PointId>,
-    /// The mismatched field `Out` points, in ascending point order —
-    /// the divergence evidence itself.
-    pub mismatches: Vec<Divergence>,
-    /// Staged points whose field read failed — a communication fault is
-    /// the driver's own diagnostics' business, not divergence evidence;
-    /// the comparison neither convicts nor clears them. A comparison
-    /// that cleared a `Diverged` verdict must have this list empty:
-    /// only a fully-read match is the "staged outputs now track the
-    /// field" evidence the clear stands on.
-    pub unread: Vec<PointId>,
+    /// Every staged field `Out` point the clearing comparison verified
+    /// matching, with both sides' values, in ascending point order: the
+    /// positive evidence the clear stands on. A `Diverged` verdict
+    /// clears only on a same-tick comparison that read every staged
+    /// point and matched, so `compared` always names the full staged
+    /// image — the proof the promotion gate reopened on.
+    pub compared: Vec<Divergence>,
 }
 
 /// Compares the staged field `Out` image — what the standby's scan would
-/// have written — against the driver's reads of the same points.
-/// Deterministic: the result is ordered by `PointId` and depends only on
-/// the staged image and the driver's answers.
+/// have written — against the driver's reads of the same points, and
+/// reports only the mismatches. Deterministic: the result is ordered by
+/// `PointId` and depends only on the staged image and the driver's
+/// answers.
 ///
-/// A point whose field read fails reports in
-/// [`FieldComparison::unread`] rather than being silently skipped: the
-/// failed read observed nothing, so it can neither convict the staged
-/// image nor clear a standing `Diverged` verdict — only a comparison
-/// that actually read the field and matched carries the clearing
+/// A point whose field read fails is absent — the failed read observed
+/// nothing, so it can neither convict the staged image nor clear a
+/// standing `Diverged` verdict; [`compare_staged_points`]'s full answer
+/// is what lets the caller tell "no mismatches observed" from "the field
+/// read clean and matched", and only the latter carries the clearing
 /// evidence.
 pub fn compare_staged(
     driver: &(dyn IoDriver + Sync),
     staged: &BTreeMap<PointId, Sample>,
-) -> FieldComparison {
-    let mut comparison = FieldComparison {
-        matched: Vec::new(),
-        mismatches: Vec::new(),
-        unread: Vec::new(),
-    };
-    for (&point, &staged_sample) in staged {
-        match driver.read(point) {
-            Ok(field) if values_diverge(staged_sample.value, field.value) => {
-                comparison.mismatches.push(Divergence {
-                    point,
-                    staged: staged_sample.value,
-                    field: field.value,
-                });
-            }
-            Ok(_) => comparison.matched.push(point),
-            Err(_) => comparison.unread.push(point),
-        }
-    }
-    comparison
+) -> Vec<Divergence> {
+    compare_staged_points(driver, staged)
+        .into_iter()
+        .filter(|point| values_diverge(point.staged, point.field))
+        .collect()
+}
+
+/// The full same-tick comparison of a staged field `Out` image against
+/// the field: every staged point the driver answered, in `PointId`
+/// order, each entry carrying both sides' values — the evidence record a
+/// divergence resolution journals, agreements and mismatches alike.
+/// [`values_diverge`] over each entry splits the two; a point whose
+/// field read failed is absent — evidence of neither — so an answer as
+/// long as `staged` is the fully-read comparison a `Diverged` verdict
+/// clears on.
+pub fn compare_staged_points(
+    driver: &(dyn IoDriver + Sync),
+    staged: &BTreeMap<PointId, Sample>,
+) -> Vec<Divergence> {
+    staged
+        .iter()
+        .filter_map(|(&point, &staged_sample)| {
+            let field = driver.read(point).ok()?;
+            Some(Divergence {
+                point,
+                staged: staged_sample.value,
+                field: field.value,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -190,14 +185,15 @@ mod tests {
     }
 
     #[test]
-    fn compare_staged_is_point_ordered_and_marks_failed_reads_unread() {
+    fn compare_staged_is_point_ordered_and_leaves_failed_reads_absent() {
         let field = FieldStub {
             samples: Mutex::new(
                 [
                     (PointId(1), good(Value::Bool(true))),
                     (PointId(2), good(Value::Float(4.5))),
                     // Point 3 absent: the failed read is evidence-free —
-                    // reported unread, neither convicting nor clearing.
+                    // absent from the comparison, neither convicting nor
+                    // clearing.
                 ]
                 .into_iter()
                 .collect(),
@@ -212,15 +208,30 @@ mod tests {
         .collect();
         assert_eq!(
             compare_staged(&field, &staged),
-            FieldComparison {
-                matched: vec![PointId(1)],
-                mismatches: vec![Divergence {
+            vec![Divergence {
+                point: PointId(2),
+                staged: Value::Float(9.0),
+                field: Value::Float(4.5),
+            }]
+        );
+        // The full comparison answers only the reads that succeeded: the
+        // agreement at point 1, the mismatch at point 2 — and no entry
+        // for point 3, so `compared.len() != staged.len()` marks the
+        // comparison partially observed.
+        assert_eq!(
+            compare_staged_points(&field, &staged),
+            vec![
+                Divergence {
+                    point: PointId(1),
+                    staged: Value::Bool(true),
+                    field: Value::Bool(true),
+                },
+                Divergence {
                     point: PointId(2),
                     staged: Value::Float(9.0),
                     field: Value::Float(4.5),
-                }],
-                unread: vec![PointId(3)],
-            }
+                },
+            ]
         );
     }
 }

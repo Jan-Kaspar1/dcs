@@ -31,7 +31,7 @@ use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
     JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
-use dcs_runtime::{Executor, SourceRestart};
+use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -234,12 +234,17 @@ impl Recorder {
         self.push(tick, JournalEvent::DivergenceDetected { mismatches });
     }
 
-    /// Journals a divergence clear at `tick` — the tick the compared
-    /// staged image belonged to — naming the field `Out` points the
-    /// fully-read same-tick comparison verified matching: the positive
-    /// evidence the peer's return to `tracking` stands on.
-    pub(super) fn note_divergence_resolved(&mut self, tick: Tick, points: Vec<PointId>) {
-        self.push(tick, JournalEvent::DivergenceResolved { points });
+    /// Journals a divergence resolution — a `Diverged` peer's return to
+    /// `Tracking` — attributed to the applied checkpoint's tick,
+    /// carrying the same-tick field comparison the clear stands on:
+    /// every staged point the fully-read comparison verified matching.
+    pub(super) fn note_resolution(&mut self, resolution: ResolutionReport) {
+        self.push(
+            resolution.tick,
+            JournalEvent::DivergenceResolved {
+                compared: resolution.compared,
+            },
+        );
     }
 
     /// Journals a model-boundary crossing — a revision-armed peer's

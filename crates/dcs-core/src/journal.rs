@@ -130,17 +130,20 @@ pub enum JournalEvent {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
-    /// A diverged tracking peer's staged field `Out` image compared
-    /// cleanly against the field at the tick this entry is attributed
-    /// to — the transition out of
-    /// [`StandbySync::Diverged`](crate::StandbySync) back to `tracking`,
-    /// the only evidence the promotion gate reopens on: a same-tick
-    /// comparison whose field reads all succeeded and matched.
-    /// `points` names the staged `Out` points the comparison verified —
-    /// the positive evidence the clear stands on, in point order.
+    /// A diverged peer returned to
+    /// [`StandbySync::Tracking`](crate::StandbySync) — the resolution of
+    /// the divergence the matching [`DivergenceDetected`](Self::DivergenceDetected)
+    /// opened, and the sync-state change that reopens the promote gate.
+    /// The entry's `tick` attributes it to the applied checkpoint's
+    /// tick — the compared staged image's tick. `compared` carries every
+    /// staged field `Out` point the clearing comparison verified, with
+    /// both sides' values, in point order: `Diverged` clears only on
+    /// that positive evidence — a same-tick comparison whose field
+    /// reads all succeeded and matched — so the audit trail names the
+    /// proof the gate reopened on.
     DivergenceResolved {
-        /// The field `Out` points the comparison verified matching.
-        points: Vec<PointId>,
+        /// The compared field `Out` points — the resolution's evidence.
+        compared: Vec<Divergence>,
     },
     /// A revision-armed peer consumed a checkpoint captured under a
     /// different model — the transition into
@@ -319,14 +322,18 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 15,
-                tick: Tick(21),
+                seq: 9,
+                tick: Tick(10),
                 event: JournalEvent::DivergenceResolved {
-                    points: vec![PointId(20)],
+                    compared: vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(4.5),
+                        field: Value::Float(4.5),
+                    }],
                 },
             },
             JournalEntry {
-                seq: 9,
+                seq: 10,
                 tick: Tick(12),
                 event: JournalEvent::Reinitialized {
                     report: CarryoverReport {
@@ -349,12 +356,12 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 10,
+                seq: 11,
                 tick: Tick(13),
                 event: JournalEvent::FieldClaimLost { point: PointId(20) },
             },
             JournalEntry {
-                seq: 11,
+                seq: 12,
                 tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
@@ -370,7 +377,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 12,
+                seq: 13,
                 tick: Tick(15),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: Some(Tick(14)),
@@ -378,7 +385,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 13,
+                seq: 14,
                 tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
@@ -386,7 +393,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 14,
+                seq: 15,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },

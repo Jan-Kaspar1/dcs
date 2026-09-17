@@ -298,8 +298,9 @@ fn driven_track_cycle_reports_the_refused_self_promotion() {
 }
 
 /// A staged image the applied checkpoint's tick matches still runs the
-/// divergence check on the driven path, and the transition drains into
-/// the journal at the compared tick.
+/// divergence check on the driven path, and both transitions drain into
+/// the journal at the compared tick — the detection with its mismatches,
+/// the resync's resolution with the compared-point evidence.
 #[test]
 fn driven_track_cycle_journals_the_divergence_transition() {
     let (standby, active) = DrivenStandby::start(None);
@@ -345,6 +346,39 @@ fn driven_track_cycle_journals_the_divergence_transition() {
                 && entry.tick == Tick(4)
         )),
         "the driven cycle journaled the divergence at the compared tick: {journal:?}"
+    );
+
+    // The field carries what the standby stages again: the next pull's
+    // same-tick compare is the resync, and the journal records the
+    // resolution — the diverged → tracking transition that reopens the
+    // promote gate — at the compared tick with its compared points.
+    standby
+        .standby_driver
+        .write(PointId(20), Value::Float(6.0))
+        .unwrap();
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(
+        report.sync,
+        Some(StandbySync::Tracking { aligned: Tick(5) }),
+        "the clean compare resyncs: {report:?}"
+    );
+    let journal = standby.standby.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::DivergenceResolved { compared }
+                if *compared
+                    == vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(6.0),
+                        field: Value::Float(6.0),
+                    }]
+                && entry.tick == Tick(5)
+        )),
+        "the driven cycle journaled the resolution at the compared tick: {journal:?}"
     );
 }
 
@@ -410,8 +444,11 @@ fn driven_stale_apply_leaves_the_standby_diverged() {
     assert!(
         journal.iter().any(|entry| matches!(
             &entry.event,
-            JournalEvent::DivergenceResolved { points }
-                if *points == vec![PointId(20)] && entry.tick == Tick(5)
+            JournalEvent::DivergenceResolved { compared }
+                if compared.len() == 1
+                    && compared[0].point == PointId(20)
+                    && compared[0].staged == compared[0].field
+                    && entry.tick == Tick(5)
         )),
         "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
     );
