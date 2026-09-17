@@ -437,6 +437,86 @@ fn silent_active_pull_keeps_the_monitor_responsive() {
     assert_dead_peer_pull_stays_off_the_request_path(silent.local_addr().unwrap());
 }
 
+/// The driven-surface half of the dead-source starvation finding
+/// (`driven-scan-batch-pins-control-plane`): a `POST /scan` batch
+/// whose every per-scan pull waits out the fetch bound on an
+/// unreachable tracking source must not starve the other endpoints —
+/// each pull runs outside the request-serving lock on the batch's own
+/// worker, so `GET /role`, `GET /snapshot`, and `POST /command` answer
+/// while the batch is still walking its scans. The batch itself stays
+/// slow — its scans each owe the pull — but its slowness no longer
+/// reaches the lock or the request queue.
+#[test]
+fn driven_scan_batch_on_a_dead_source_does_not_starve_the_endpoints() {
+    // A listener that accepts but never answers: every pull sits in
+    // flight until the dedicated pull bound — a deterministic stall,
+    // unlike an unroutable address whose connect may fail fast.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = silent.local_addr().unwrap();
+
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dead),
+            after_scan: None,
+        }),
+    );
+
+    // The batch runs on its own connection from a second thread: six
+    // stalled pulls at the one-second fetch bound keep it in flight
+    // far past the request bound asserted below.
+    let batch_addr = standby.monitor.local_addr();
+    let batch = thread::spawn(move || MonitorClient::new(batch_addr).advance(6));
+
+    // While the batch walks its stalled pulls, the read and
+    // control-plane endpoints answer promptly — on a standby the
+    // command refuses with a receipt, which is still an answer.
+    for _ in 0..10 {
+        let started = Instant::now();
+        standby.client.role().unwrap();
+        let role_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby.client.snapshot().unwrap();
+        let snapshot_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby
+            .client
+            .command(&dcs_core::Command::WriteValue {
+                point: PointId(10),
+                kind: ValueKind::Float,
+                value: Value::Float(1.0),
+            })
+            .unwrap();
+        let command_elapsed = started.elapsed();
+        assert!(
+            role_elapsed < Duration::from_millis(500)
+                && snapshot_elapsed < Duration::from_millis(500)
+                && command_elapsed < Duration::from_millis(500),
+            "monitor requests serialized behind the scan batch's stalled \
+             pulls: /role took {role_elapsed:?}, /snapshot took \
+             {snapshot_elapsed:?}, /command took {command_elapsed:?}"
+        );
+    }
+    // The batch still completed its requested scans — the tracking
+    // misses are the named degraded state, not a request failure.
+    batch.join().unwrap().unwrap();
+    let report = standby.client.role().unwrap();
+    assert!(
+        matches!(&report.sync, Some(StandbySync::Degraded { .. })),
+        "the stalled pulls report the degraded heartbeat: {report:?}"
+    );
+}
+
 /// The lock property behind the reproduction's fix, without any
 /// network timing: `track_cycle` invokes its `pull` outside the
 /// request-serving lock, so even a deliberately slow pull cannot make

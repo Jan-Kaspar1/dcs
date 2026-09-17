@@ -1,10 +1,14 @@
 //! HTTP+JSON monitoring access to a running executor.
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
-//! small synchronous HTTP server, so no async runtime is involved and every
-//! request is handled one at a time. The executor lives behind a [`Mutex`]
+//! small synchronous HTTP server, so no async runtime is involved.
+//! Requests dispatch across a small worker pool so a request whose
+//! handling legitimately waits on the network — a driven `POST /scan`
+//! batch's per-scan checkpoint pull, a promotion's final-sync fetch —
+//! stalls only its own worker instead of head-of-line blocking every
+//! endpoint behind it. The executor lives behind a [`Mutex`]
 //! the control-plane endpoints and the scan loop share — scans, commands,
-//! checkpoints, and role changes hold it for their whole handling, so a
+//! checkpoints, and role changes hold it for their mutation, so a
 //! snapshot can never observe a half-run scan and commands always
 //! interleave between scans, where the executor's documented boundary
 //! applies them. The read endpoints do not touch it: after each completed
@@ -419,6 +423,16 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The worker count [`Monitor::serve`] dispatches requests across.
+/// tiny_http queues accepted requests internally; each worker pops one
+/// and handles it end to end. The pool exists so a request whose work
+/// legitimately waits on the network — a driven `POST /scan` batch's
+/// per-scan checkpoint pull, a promotion's final-sync fetch — stalls
+/// only its own worker while every other endpoint keeps answering;
+/// control-plane mutations still serialize on the shared lock, the
+/// pool only choosing which request waits on it next.
+const SERVE_WORKERS: usize = 4;
+
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
 /// ownership decides the step), and the checkpoint a state-file run
@@ -647,18 +661,36 @@ impl<'d> Monitor<'d> {
 
     /// Serves requests until [`shutdown`](Self::shutdown).
     ///
-    /// Blocking: run this on a dedicated thread. Requests are handled
-    /// serially — one at a time, in arrival order — which keeps the
-    /// executor's command/scan interleaving deterministic.
+    /// Blocking: run this on a dedicated thread. Requests dispatch
+    /// across a pool of [`SERVE_WORKERS`] workers rather than one at a
+    /// time: a request whose handling legitimately waits — a driven
+    /// `POST /scan` batch walking its per-scan pulls, a promotion's
+    /// final-sync fetch — occupies only its own worker and never
+    /// head-of-line blocks the reads and control-plane requests queued
+    /// behind it. The executor's command/scan interleaving stays
+    /// deterministic because the pool only decides which request waits
+    /// on the shared lock next: scans, commands, checkpoints, and role
+    /// changes still serialize on it.
     pub fn serve(&self) {
-        for request in self.server.incoming_requests() {
-            self.handle(request);
-        }
+        std::thread::scope(|scope| {
+            for _ in 0..SERVE_WORKERS {
+                scope.spawn(|| {
+                    while let Ok(request) = self.server.recv() {
+                        self.handle(request);
+                    }
+                });
+            }
+        });
     }
 
     /// Stops a [`serve`](Self::serve) loop running on another thread.
     pub fn shutdown(&self) {
-        self.server.unblock();
+        // Each queued `Unblock` ends one worker's `recv` loop — a
+        // worker mid-request consumes it on its next pop — so the pool
+        // drains on one per worker.
+        for _ in 0..SERVE_WORKERS {
+            self.server.unblock();
+        }
     }
 
     /// Runs one executor scan through the shared lock, records it, and
@@ -963,7 +995,6 @@ impl<'d> Monitor<'d> {
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
                 Ok(_) if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
                 Ok(body) => {
-                    let mut shared = self.shared.lock().unwrap();
                     let mut failure = None;
                     for _ in 0..body.scans {
                         // A tracking standby resynchronizes once per scan
@@ -974,14 +1005,27 @@ impl<'d> Monitor<'d> {
                         // promotion — reports through the peer's named
                         // sync state, which `GET /role` serves; the scan
                         // still runs on its last-known state.
+                        //
+                        // `track_cycle` runs the fetch outside the
+                        // shared lock — a slow or unreachable tracking
+                        // source stalls only this request's worker,
+                        // never the lock the other endpoints queue on —
+                        // and consumes the result under it, re-applying
+                        // the owns-field gate.
                         if let Some(active) = self.tracking_source() {
                             let own = self.local_addr();
-                            track_and_record(&mut shared, &self.store, || {
+                            self.track_cycle(|| {
                                 MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
                                     .checkpoint_announcing(own)
                                     .map_err(|error| format!("fetch from {active}: {error}"))
                             });
                         }
+                        // Each scan takes the lock fresh and releases
+                        // it at the boundary, so a request queued
+                        // mid-batch — a command, a role poll — lands
+                        // between scans instead of waiting the batch
+                        // out.
+                        let mut shared = self.shared.lock().unwrap();
                         if let Err(error) = scan_and_record(&mut shared, &self.store) {
                             failure = Some(error.to_string());
                             break;
@@ -998,13 +1042,10 @@ impl<'d> Monitor<'d> {
                         // The last scan already published its read model —
                         // answer with that immutable copy, released from
                         // the executor lock before serialization.
-                        None => {
-                            drop(shared);
-                            match self.store.latest() {
-                                Some(publication) => json(200, &publication.snapshot),
-                                None => json(503, "no publication yet"),
-                            }
-                        }
+                        None => match self.store.latest() {
+                            Some(publication) => json(200, &publication.snapshot),
+                            None => json(503, "no publication yet"),
+                        },
                     }
                 }
                 Err(response) => response,
@@ -1084,7 +1125,8 @@ impl<'d> Monitor<'d> {
 }
 
 /// One standby tracking cycle plus its journal recording — the body
-/// `track_cycle` and `POST /scan` share: `Peer::track_once` runs the
+/// `track_cycle` runs, and `POST /scan` reaches through it:
+/// `Peer::track_once` runs the
 /// owns-field gate, the pull routing, the miss accounting, and the
 /// promote-on-budget sequence, then the queues it filled — divergence
 /// detections, reinitialization reports, the role change a
