@@ -80,6 +80,32 @@ impl fmt::Display for DroppedElement {
     }
 }
 
+/// One descriptor-declared parameter whose checkpointed value the
+/// crossing reverted to the revision's declared default — the itemized
+/// record of tuning a reinitialized component lost.
+///
+/// Component state reinitializes across the boundary by rule, so a
+/// receipted `set_parameter` tune does not carry; the report names what
+/// reverted instead, so the witnessed record of the in-service change
+/// says exactly which declared parameters lost their tuned values —
+/// the value the old run's checkpoint held beside the revision's
+/// declared default now standing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevertedParameter {
+    /// The component owning the parameter — the same name the report's
+    /// `reinitialized` list carries.
+    pub component: String,
+    /// The parameter's declared name — the descriptor's key, matching
+    /// the plant model's parameter map and the `set_parameter` target.
+    pub parameter: String,
+    /// The value the old run's checkpoint held — the tuning that was
+    /// lost.
+    pub checkpointed: Value,
+    /// The revision's declared default the parameter reverted to — the
+    /// value the reinitialized component reports.
+    pub declared: Value,
+}
+
 /// The audit record of one model-boundary crossing: what a revised-model
 /// standby took from the old model's checkpoint, what it initialized
 /// fresh, and what it named as dropped.
@@ -121,6 +147,19 @@ pub struct CarryoverReport {
     /// revised model starts fresh. Selected per-kind state compat rules
     /// are a future extension; none exist yet.
     pub reinitialized: Vec<String>,
+    /// The descriptor-declared parameters whose checkpointed values the
+    /// crossing reverted — the itemized half of the reinitialize rule:
+    /// per component, every declared parameter whose checkpointed value
+    /// differed from the revision's declared default, in component scan
+    /// order then parameter declaration order — so the record says
+    /// which tuning was lost, not just which components restarted. See
+    /// [`RevertedParameter`].
+    ///
+    /// Serde-optional like the contract's other additive sections: a
+    /// report a pre-itemization build journaled carries no field and
+    /// deserializes with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_tuning: Vec<RevertedParameter>,
     /// The revision's writable internal `In` points no checkpoint value
     /// carried into — each stands at its declared `initial` value.
     pub initialized: Vec<PointId>,
@@ -130,7 +169,7 @@ impl fmt::Display for CarryoverReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "reinitialized under model {} (from {}) at tick {}: {} carried, {} initialized, {} dropped",
+            "reinitialized under model {} (from {}) at tick {}: {} carried, {} initialized, {} dropped, {} reverted",
             self.to
                 .map(|fingerprint| fingerprint.to_string())
                 .unwrap_or_else(|| "<none>".to_string()),
@@ -141,6 +180,104 @@ impl fmt::Display for CarryoverReport {
             self.carried.len(),
             self.initialized.len(),
             self.dropped.len(),
+            self.reverted_tuning.len(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report() -> CarryoverReport {
+        CarryoverReport {
+            from: Some(ModelFingerprint(7)),
+            to: Some(ModelFingerprint(9)),
+            resumed_at: Tick(41),
+            carried: vec![CarriedPoint {
+                point: PointId(10),
+                value: Value::Float(3.5),
+            }],
+            carried_outputs: vec![],
+            carried_forces: vec![ForcedPoint {
+                point: PointId(10),
+                value: Value::Float(1.0),
+            }],
+            dropped: vec![
+                DroppedElement::InternalPoint { point: PointId(11) },
+                DroppedElement::Component {
+                    name: "gone".to_string(),
+                },
+                DroppedElement::DriverState,
+            ],
+            reinitialized: vec!["loop".to_string()],
+            reverted_tuning: vec![
+                RevertedParameter {
+                    component: "loop".to_string(),
+                    parameter: "gain".to_string(),
+                    checkpointed: Value::Float(3.0),
+                    declared: Value::Float(2.0),
+                },
+                RevertedParameter {
+                    component: "loop".to_string(),
+                    parameter: "bias".to_string(),
+                    checkpointed: Value::Int(4),
+                    declared: Value::Float(0.0),
+                },
+            ],
+            initialized: vec![PointId(30)],
+        }
+    }
+
+    #[test]
+    fn carryover_report_serde_roundtrip() {
+        let report = report();
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CarryoverReport>(&json).unwrap(),
+            report
+        );
+    }
+
+    #[test]
+    fn empty_reverted_tuning_omits_the_key() {
+        // The serde-optional convention: a report with nothing reverted
+        // serializes without the section, keeping the wire shape a
+        // pre-itemization consumer expects.
+        let mut report = report();
+        report.reverted_tuning = Vec::new();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("reverted_tuning"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CarryoverReport>(&json).unwrap(),
+            report
+        );
+    }
+
+    #[test]
+    fn reports_predating_reverted_tuning_still_parse() {
+        // The durable journal replays entries across restarts — a
+        // report an older build journaled carries no `reverted_tuning`
+        // and must deserialize with an empty list rather than fail the
+        // replay.
+        let mut document = serde_json::to_value(report()).unwrap();
+        document.as_object_mut().unwrap().remove("reverted_tuning");
+        let parsed: CarryoverReport = serde_json::from_value(document).unwrap();
+        assert_eq!(parsed.reverted_tuning, Vec::new());
+    }
+
+    #[test]
+    fn reverted_parameter_serde_roundtrip() {
+        let parameter = RevertedParameter {
+            component: "loop".to_string(),
+            parameter: "gain".to_string(),
+            checkpointed: Value::Float(3.0),
+            declared: Value::Float(2.0),
+        };
+        let json = serde_json::to_string(&parameter).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RevertedParameter>(&json).unwrap(),
+            parameter
+        );
     }
 }

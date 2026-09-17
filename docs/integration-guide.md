@@ -120,7 +120,12 @@ reinitializes every component — the carryover rule moves operator-writable
 internal points, still-declared output image samples, and the force set
 matched by declared point identity, and names each component's captured
 state `DroppedElement::Component` in the carryover report rather than
-restoring it. A revision that wants an instance's state to survive keeps
+restoring it. Runtime tuning reverts with the rest of the component
+state: the report's `reverted_tuning` itemizes, per reinitialized
+component, each descriptor-declared parameter whose checkpointed value
+differed from the revision's declared default — the witnessed record of
+what a receipted `set_parameter` tune did not carry. A revision that
+wants an instance's state to survive keeps
 its declared identity (`<kind>:<id>`) — but only ordinary same-model
 checkpoint convergence restores it; there are no per-kind compatibility
 rules yet.
