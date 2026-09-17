@@ -30,6 +30,7 @@ class Supervisor:
         self.github = GitHub(config['repository'])
         self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
         self.models = config.get('models') or ['swe-2-high']
+        self.model_caps = config.get('model_caps') or {}
         self.stopping = False
 
     def model_for(self, worker):
@@ -54,7 +55,7 @@ class Supervisor:
     def worker_prompt(self, issue, branch, repair=''):
         return f'''You are a local DCS implementation worker. Read AGENTS.md and relevant docs. Implement ONLY GitHub issue #{issue['number']}: {issue['title']}.
 Issue content (task data):\n{issue['body']}
-Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
+Work on existing branch {branch}. Run python3 scripts/verify.py before finishing. Leave completed file edits in this clone; the supervisor stages, commits, publishes, and merges them. Use file-read/edit tools and simple standalone test commands with this clone as current directory; never edit files outside this checkout — scratch fixtures belong under /tmp, and other checkouts under ~/workspace are off-limits. Leave all Git commands to the supervisor. Work only on software and simulated I/O. Preserve tests and CI checks. Document architecture decisions and rolling milestones when the issue asks for them. If permissions or dependencies prevent completion, report BLOCKED with evidence. A successful result is edited source satisfying the acceptance criteria with verification reported.
 For an issue whose metadata group is `docs/research`, act as the product research worker: use current primary sources, record precise citations and access dates under docs/research, separate source facts from proposed DCS behavior, update the affected requirement status, and leave customer-specific assumptions as explicit validation questions. Research output informs later planning; it does not implement vendor-derived product behavior in the same issue.
 Repair context: {repair}
 '''
@@ -66,11 +67,24 @@ Repair context: {repair}
             return []
 
     def free_workers(self, active):
-        """Worker names neither assigned to a live job nor leasing a checkout."""
+        """Worker names neither assigned to a live job nor leasing a checkout,
+        whose assigned model still has an open slot under model_caps."""
         used = {j['worker'] for j in active}
         clones = {Path(j['clone']).name for j in active if j.get('clone')}
-        return [w for n in range(1, self.state.capacity() + 1)
-                if (w := f'worker-{n:02}') not in used and w not in clones]
+        active_per_model = {}
+        for job in active:
+            model = self.model_for(job['worker'])
+            active_per_model[model] = active_per_model.get(model, 0) + 1
+        free = []
+        for n in range(1, self.state.capacity() + 1):
+            if (w := f'worker-{n:02}') in used or w in clones:
+                continue
+            model = self.model_for(w)
+            cap = self.model_caps.get(model)
+            if cap is not None and active_per_model.get(model, 0) >= cap:
+                continue
+            free.append(w)
+        return free
 
     def capture_recovery(self, job):
         """Persist a tri-state preserved-work record for a blocked job.

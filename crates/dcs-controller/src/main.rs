@@ -142,7 +142,12 @@
 //! `Peer::active` claims the shared plant's write arbitration before
 //! the gate lifts, so the field is fenced for this owner from the
 //! first scan rather than open to every attachment until the first
-//! promotion. The claim rides under a per-process owner token —
+//! promotion. Because the claim preempts unconditionally and outlives
+//! a dead holder, the startup activation is deliberately the run's
+//! last local step — journal replay, monitor bind, and peer-address
+//! resolution all run first, so a process that cannot finish starting
+//! never leaves a stale claim fencing the field's standing owner. The
+//! claim rides under a per-process owner token —
 //! `--owner-token N` pins it when an external attachment must share the
 //! owner's claim (a test harness driving plant stimuli); otherwise a
 //! fresh token is generated per process. Pinning a second *controller*
@@ -185,6 +190,19 @@
 //! (`IoError::Fenced`), and a promoted standby continues writing. A
 //! model whose field-facing devices cannot arbitrate a single writer
 //! refuses `--auto-promote` at startup; manual promotion still works.
+//!
+//! The one active-loss case the pair cannot heal itself, per the
+//! dead-active recovery decision: the active dies holding the field
+//! claim while its standby is not converged — `POST /promote` answers
+//! `not_converged` and no checkpoint will ever arrive to change that.
+//! The recorded recovery is restart-as-active: relaunch the controller
+//! on the same model without `--standby`, and the launched active's
+//! unconditional startup claim preempts the dead owner's token — a
+//! surviving `--state-file` resumes the run at its last persisted
+//! cycle, and the standby reconverges on the new active's checkpoint
+//! stream where its tracking source resolves. There is deliberately no
+//! force-promote and no operator claim-release: a standby that never
+//! proved it tracks the field is never a writer.
 //!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
@@ -348,6 +366,15 @@ fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
         }
         Err(error) => Err(format!("plant step failed: {error}")),
         Ok(()) => Ok(()),
+    }
+}
+
+/// Reports the field-ownership claim a launched active's deferred
+/// startup activation just took — the line every field-owning startup
+/// logs once the claim holds.
+fn report_claim(driver: &Driver, owner: u64) {
+    if driver.has_shared_field() {
+        eprintln!("field write-ownership claim held under owner token {owner}");
     }
 }
 
@@ -911,9 +938,15 @@ fn main() -> ExitCode {
     // checkpoints gate-closed until promoted; anything else owns the
     // field from the start. The field's write-ownership claim is taken
     // under this instance's token at every transition into field
-    // ownership — a launched active's startup activation below, and
-    // every promotion — so the shared plant itself refuses every
-    // attachment not holding the claim.
+    // ownership — a launched active's startup activation, and every
+    // promotion — so the shared plant itself refuses every attachment
+    // not holding the claim. The startup activation is deliberately
+    // deferred to the run's last local step: the claim preempts
+    // unconditionally and outlives a dead holder, so it runs only after
+    // every fallible startup step — journal replay, monitor bind,
+    // peer-address resolution — has proven this process can serve; a
+    // starter that fails earlier leaves no stale claim fencing the
+    // field's standing owner.
     let owner = options.owner_token.unwrap_or_else(owner_token);
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
@@ -935,21 +968,6 @@ fn main() -> ExitCode {
         true => peer.with_revision(),
         false => peer,
     };
-
-    // A launched active owns the field from startup: activation runs
-    // the same claim-then-lift sequence a promotion does — the plant's
-    // single-writer claim under this instance's token first, the gate
-    // second — so the shared field is fenced for this owner from the
-    // first scan. A claim the field refuses is a named startup failure,
-    // not an unfenced run.
-    if options.standby.is_none() {
-        if let Err(error) = peer.activate() {
-            return fail(format!("{error}"));
-        }
-        if driver.has_shared_field() {
-            eprintln!("field write-ownership claim held under owner token {owner}");
-        }
-    }
 
     // The simulated process time per scan: explicit --dt, else the
     // wall-clock period in seconds, else one unit per unpaced tick.
@@ -1005,6 +1023,21 @@ fn main() -> ExitCode {
                 Ok(())
             })),
         });
+        // A launched active owns the field from startup: activation
+        // runs the same claim-then-lift sequence a promotion does —
+        // the plant's single-writer claim under this instance's token
+        // first, the gate second — deferred to here, after every
+        // fallible local startup step (the track address resolved, the
+        // journal replayed, the monitor bound), so a starter that
+        // cannot serve never lands the preemptive claim on the field's
+        // standing owner. A claim the field refuses is a named startup
+        // failure, not an unfenced run.
+        if options.standby.is_none() {
+            if let Err(error) = monitor.activate() {
+                return fail(format!("{error}"));
+            }
+            report_claim(&driver, owner);
+        }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
         return ExitCode::SUCCESS;
@@ -1160,6 +1193,18 @@ fn main() -> ExitCode {
                     },
                     None => monitor,
                 };
+                // The launched active's deferred startup activation —
+                // the same claim-then-lift sequence the driven path
+                // runs: the preemptive field claim lands only now, the
+                // journal replayed, the monitor bound, and the peer
+                // address resolved, so a startup that failed earlier
+                // left no stale claim fencing the field's standing
+                // owner. A claim the field refuses is a named startup
+                // failure, not an unfenced run.
+                if let Err(error) = monitor.activate() {
+                    return fail(format!("{error}"));
+                }
+                report_claim(&driver, owner);
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
@@ -1180,6 +1225,15 @@ fn main() -> ExitCode {
                 )
             }
             None => {
+                // The launched active's startup activation — the same
+                // claim-then-lift sequence the monitored paths defer to
+                // their last startup step: nothing fallible stands
+                // between here and the scan loop, so the preemptive
+                // claim runs only now that startup can no longer abort.
+                if let Err(error) = peer.activate() {
+                    return fail(format!("{error}"));
+                }
+                report_claim(&driver, owner);
                 // The RefCell lets the two loop closures share the peer;
                 // the loop is single-threaded, so the borrows never
                 // overlap. No monitor means no *operator* demotion

@@ -27,6 +27,13 @@ def load(path=None):
     if unknown:
         raise ValueError('This installation permits only verified free models; rejected: ' + ', '.join(unknown))
     config['models'] = models
+    caps = config.get('model_caps') or {}
+    if not isinstance(caps, dict) or any(not isinstance(v, int) or v < 1 for v in caps.values()):
+        raise ValueError('model_caps must map model identifiers to positive integers')
+    unknown = [m for m in caps if m not in FREE_MODELS]
+    if unknown:
+        raise ValueError('model_caps references unpermitted models: ' + ', '.join(unknown))
+    config['model_caps'] = caps
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
