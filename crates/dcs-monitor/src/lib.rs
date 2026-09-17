@@ -1027,9 +1027,11 @@ impl<'d> Monitor<'d> {
     /// tracking source first ([`Peer::final_sync`]): a command the
     /// active admitted after the standby's last tracking pull — still
     /// `Accepted`, riding the checkpoint's receipt log — carries into
-    /// the promoted run and settles at its next boundary. A failed or
-    /// stale pull leaves the standing convergence to decide, exactly as
-    /// an unpulled promote would.
+    /// the promoted run and settles at its next boundary, even when the
+    /// serving checkpoint's tick is older than the standby's own (the
+    /// driven cadence's resting shape) and its state cannot land. A
+    /// failed pull leaves the standing convergence to decide, exactly
+    /// as an unpulled promote would.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
         // The final-sync fetch runs outside the shared lock under the
         // dedicated pull bound — like the tracking pull it can wait on

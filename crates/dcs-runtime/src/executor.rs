@@ -1543,6 +1543,43 @@ impl<'d> Executor<'d> {
             .max(self.pending_commands.len());
     }
 
+    /// Adopts the admissions a checkpoint's receipt log carries past
+    /// this run's own — the promote boundary's stale-tick path
+    /// ([`Peer::final_sync`](crate::Peer::final_sync)): a checkpoint
+    /// older than the run's tick cannot [`apply`](Self::apply) without
+    /// rewinding scans the peer already ran — replaying their commands
+    /// and re-emitting their events — but the commands the tracked
+    /// active admitted since this run's last alignment still must not
+    /// be lost.
+    ///
+    /// The receipt log is append-only in submission order, so the
+    /// entries beyond this log's length are exactly the submissions
+    /// the checkpoint holds that this run never saw. Each lands
+    /// verbatim — the pair's one command audit — and the entries still
+    /// [`CommandOutcome::Accepted`] queue for this run's next boundary,
+    /// settling there like any adopted pending command, past the
+    /// admission bound just as under [`apply`](Self::apply). The
+    /// overlapping prefix is this run's log already — settlements
+    /// included — and stays untouched: a command this line settled is
+    /// never re-queued, so nothing applies twice. The admission
+    /// counters measuring the adopted log converge with it.
+    pub fn carry_pending_commands(&mut self, checkpoint: &Checkpoint) {
+        if checkpoint.receipts.len() <= self.receipts.len() {
+            return;
+        }
+        for receipt in &checkpoint.receipts[self.receipts.len()..] {
+            self.receipts.push(receipt.clone());
+            if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                self.pending_commands.push_back(self.receipts.len() - 1);
+            }
+        }
+        self.command_admission = checkpoint.command_admission;
+        self.command_admission.high_water = self
+            .command_admission
+            .high_water
+            .max(self.pending_commands.len());
+    }
+
     /// Consumes a checkpoint captured under a *different* model — the
     /// model-boundary carryover a revision-armed peer runs instead of
     /// [`apply`](Self::apply), whose fingerprint gate would refuse it.

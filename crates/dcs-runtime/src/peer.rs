@@ -80,7 +80,7 @@
 //! returns the peer to `Tracking`. A diverged peer's gate stays closed
 //! throughout — the check observes, it never writes.
 
-use crate::checkpoint::{Checkpoint, RestoreError};
+use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{DivergenceReport, compare_staged};
 use crate::executor::{Executor, ScanError};
 use crate::gate::WriteGate;
@@ -634,7 +634,16 @@ impl<'d> Peer<'d> {
     /// peer has no source to sync from; a produced-nothing pull changes
     /// nothing; and a checkpoint older than the run's tick is stale —
     /// applying it would rewind scans the peer already ran, re-applying
-    /// their commands and re-emitting their events — so it is skipped.
+    /// their commands and re-emitting their events — so its state does
+    /// not land. Stale is not empty, though: the receipt log inside the
+    /// stale checkpoint may still carry admissions the run lacks — the
+    /// driven cadence rests at `aligned + 1`, so the freshest checkpoint
+    /// carrying a just-admitted command is exactly this one — and the
+    /// boundary adopts that log's new tail instead
+    /// ([`Executor::carry_pending_commands`]), the still-`Accepted`
+    /// entries queueing on the standing state to settle at the promoted
+    /// run's first scan. A checkpoint this build cannot read — an
+    /// unsupported format version — is skipped whole.
     /// A landed checkpoint is an ordinary [`transfer`](Self::transfer)
     /// on the executor side — the reinitialization report a
     /// model-boundary crossing owes the journal queues as it would on
@@ -669,6 +678,15 @@ impl<'d> Peer<'d> {
             return;
         };
         if checkpoint.tick < self.executor.tick() {
+            // Stale by the run's clock: the state cannot land without
+            // rewinding scans this peer already ran, but the receipt
+            // log's newer tail still carries — a command the active
+            // admitted since this run's last alignment queues here and
+            // settles at the promoted run's first scan rather than
+            // being lost to the gap the skip used to leave.
+            if SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
+                self.executor.carry_pending_commands(&checkpoint);
+            }
             return;
         }
         self.staged = None;
@@ -2416,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn final_sync_is_a_no_op_for_a_failed_or_stale_pull() {
+    fn final_sync_is_a_no_op_for_a_failed_or_refused_pull() {
         let field = StubDriver::field(&[]);
         let gate = WriteGate::closed(&field);
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
@@ -2451,21 +2469,108 @@ mod tests {
         );
         assert!(standby.receipts().is_empty());
 
-        // And a checkpoint older than the run's position is skipped:
-        // the standby has scanned past tick 2, so re-applying it would
-        // replay that scan's commands and events.
-        standby.scan().unwrap();
-        source.submit_command(Clocked::bump(7));
-        standby.final_sync(|| Ok(source.checkpoint()));
-        assert!(
-            standby.receipts().is_empty(),
-            "the stale checkpoint's pending invoke is not adopted"
-        );
-        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(0));
-
         // The standing proof still promotes.
         standby.promote().unwrap();
         assert_eq!(standby.role(), Role::Promoting);
+    }
+
+    #[test]
+    fn final_sync_carries_a_stale_checkpoints_pending_commands() {
+        // The driven pair's resting shape is the QA finding's: the
+        // standby's last pull applied ckpt@2 and its scan advanced the
+        // run to 3, so the freshest checkpoint the active can serve —
+        // @2, carrying the invoke admitted since that pull — is stale
+        // by the run's clock. The stale state cannot land without
+        // rewinding the standby's own scan, but the receipt log's new
+        // tail still carries: the pending invoke queues on the
+        // standing state and settles once at the promoted run's first
+        // scan.
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Clocked::executor(&source_driver);
+        source.run(2).unwrap();
+        standby.apply(&source.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        assert_eq!(standby.tick(), Tick(3));
+
+        source.submit_command(Clocked::bump(7));
+        let checkpoint = source.checkpoint();
+        assert_eq!(checkpoint.tick, Tick(2));
+        standby.final_sync(|| Ok(checkpoint.clone()));
+
+        // Carried, not rewound: the pending receipt joined the log and
+        // queued, while the run's tick, its component state, and the
+        // cadence's convergence verdict all stand.
+        assert_eq!(standby.tick(), Tick(3));
+        assert_eq!(standby.receipts().len(), 1);
+        assert!(matches!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(0));
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Tracking { aligned: Tick(2) }
+        );
+
+        // The same stale pull a second time carries nothing twice —
+        // the log's overlap is already this run's.
+        standby.final_sync(|| Ok(checkpoint));
+        assert_eq!(standby.receipts().len(), 1);
+
+        standby.promote().unwrap();
+        standby.scan().unwrap();
+        assert_eq!(standby.role(), Role::Active);
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(4) }
+        );
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+
+        // Never again: the settled outcome stays the log's one entry.
+        standby.scan().unwrap();
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+    }
+
+    #[test]
+    fn final_sync_never_requeues_a_command_the_run_already_settled() {
+        // The stale checkpoint's still-`Accepted` view of a receipt
+        // this run already applied is the tracked line lagging, not a
+        // new admission: the suffix rule adopts only entries past the
+        // log's own length, so a settled command never queues again.
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Clocked::executor(&source_driver);
+        source.run(2).unwrap();
+        source.submit_command(Clocked::bump(7));
+
+        // The standby's own quiesced scan settles the carried invoke —
+        // `Applied` on its line while the active, stalled at tick 2,
+        // still serves it `Accepted`.
+        standby.apply(&source.checkpoint()).unwrap();
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+
+        standby.final_sync(|| Ok(source.checkpoint()));
+        assert_eq!(standby.receipts().len(), 1);
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+
+        standby.promote().unwrap();
+        standby.scan().unwrap();
+        // Settled once, never re-applied: the count holds at one bump.
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
 
     #[test]
