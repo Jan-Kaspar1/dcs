@@ -188,8 +188,8 @@ fn command_state(spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
 /// follows: point transitions on the instance's bound points, command
 /// receipts its commands settle (addressed by name or by bound point),
 /// its own step failures, and its kind-emitted events. Run-level
-/// entries — role changes, divergence detections, reinitializations,
-/// run boundaries — belong to no instance.
+/// entries — role changes, divergence detections and resolutions,
+/// reinitializations, run boundaries — belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
@@ -206,6 +206,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         JournalEvent::EventEmitted { event } => event.component == name,
         JournalEvent::RoleChanged { .. }
         | JournalEvent::DivergenceDetected { .. }
+        | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::SourceRestarted { .. }
         | JournalEvent::RunBoundary { .. } => false,

@@ -61,6 +61,23 @@ pub struct DivergenceReport {
     pub mismatches: Vec<Divergence>,
 }
 
+/// One `Diverged` → `Tracking` transition — the resolution a successful
+/// checkpoint apply produced — carrying the applied tick and the
+/// same-tick field comparison the clear stands on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolutionReport {
+    /// The applied checkpoint's tick — the compared staged image's tick
+    /// when a same-tick comparison ran.
+    pub tick: Tick,
+    /// Every staged field `Out` point the comparison judged — the field
+    /// reads that succeeded — with both sides' values, in ascending
+    /// point order: the agreements a clean resync stands on. Empty when
+    /// the clear had no same-tick field comparison behind it, so the
+    /// audit trail attributes the transition either way and a clean
+    /// resync stays distinguishable from an evidence-free one.
+    pub compared: Vec<Divergence>,
+}
+
 /// Compares the staged field `Out` image — what the standby's scan would
 /// have written — against the driver's reads of the same points.
 /// Deterministic: the result is ordered by `PointId` and depends only on
@@ -73,11 +90,27 @@ pub fn compare_staged(
     driver: &(dyn IoDriver + Sync),
     staged: &BTreeMap<PointId, Sample>,
 ) -> Vec<Divergence> {
+    compare_staged_points(driver, staged)
+        .into_iter()
+        .filter(|point| values_diverge(point.staged, point.field))
+        .collect()
+}
+
+/// The full same-tick comparison of a staged field `Out` image against
+/// the field: every staged point the driver answered, in `PointId`
+/// order, each entry carrying both sides' values — the evidence record a
+/// divergence resolution journals, agreements and mismatches alike.
+/// [`values_diverge`] over each entry splits the two; a point whose
+/// field read failed is absent — evidence of neither.
+pub fn compare_staged_points(
+    driver: &(dyn IoDriver + Sync),
+    staged: &BTreeMap<PointId, Sample>,
+) -> Vec<Divergence> {
     staged
         .iter()
         .filter_map(|(&point, &staged_sample)| {
             let field = driver.read(point).ok()?;
-            values_diverge(staged_sample.value, field.value).then_some(Divergence {
+            Some(Divergence {
                 point,
                 staged: staged_sample.value,
                 field: field.value,
