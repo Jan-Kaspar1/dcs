@@ -745,6 +745,59 @@ fn specs_match_registered_kinds_descriptors() {
         sequencer_spec.declared_parameters().is_none(),
         "sequencer's parameter set is not statically enumerable"
     );
+    // The declared event vocabulary the drift sweep pins verbatim:
+    // `sequencer` is the library's retention-class proving kind — one
+    // declared event per class. `step_completed` records each step's
+    // completing scan — the bounded operational record `History`
+    // retains; `sequence_completed` is the run-level boundary — the
+    // durable `Journal` audit record; `progress` is the standing
+    // position publication — `Latest`, each emission superseding the
+    // last.
+    assert_eq!(
+        sequencer.describe().events,
+        [
+            EventDecl {
+                name: "step_completed".to_string(),
+                payload: vec![EventField {
+                    name: "step".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::History,
+            },
+            EventDecl {
+                name: "sequence_completed".to_string(),
+                payload: vec![EventField {
+                    name: "steps".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::Journal,
+            },
+            EventDecl {
+                name: "progress".to_string(),
+                payload: vec![
+                    EventField {
+                        name: "step".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    },
+                    EventField {
+                        name: "elapsed".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    },
+                    EventField {
+                        name: "done".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Bool),
+                        optional: false,
+                    },
+                ],
+                retention: EventRetention::Latest,
+            },
+        ],
+        "sequencer's declared event retentions drifted"
+    );
     let step_table: Vec<(String, _, _)> = sequencer
         .describe()
         .parameters
