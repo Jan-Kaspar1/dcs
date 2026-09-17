@@ -292,6 +292,7 @@ mod tests {
                         carried_forces: vec![],
                         dropped: vec![],
                         reinitialized: vec![],
+                        reverted_tuning: vec![],
                         initialized: vec![],
                     }),
                 }),

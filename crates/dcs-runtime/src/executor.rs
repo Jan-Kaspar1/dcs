@@ -17,8 +17,8 @@ use dcs_core::{
     CommandQueueDiagnostics, CommandReceipt, CommandVerdict, ComponentCommands,
     ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
     EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
-    PointTelemetry, Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -511,6 +511,20 @@ fn failure_quality(error: IoError) -> Quality {
             Quality::Bad(QualityReason::ConfigurationFault)
         }
     }
+}
+
+/// Whether a checkpointed parameter value and the revision's declared
+/// default stand equal for the reverted-tuning itemization — exact
+/// match per kind, `NaN` agreeing only with `NaN` like the divergence
+/// rule's comparison: a checkpointed `NaN` against a declared `NaN` is
+/// no reversion.
+fn parameter_value_stands(checkpointed: Value, declared: Value) -> bool {
+    checkpointed == declared
+        || matches!(
+            (checkpointed, declared),
+            (Value::Float(checkpointed), Value::Float(declared))
+                if checkpointed.is_nan() && declared.is_nan()
+        )
 }
 
 /// A command resolved past static validation: what
@@ -1759,7 +1773,11 @@ impl<'d> Executor<'d> {
     /// log carries verbatim — the run's audit survives the boundary,
     /// entries still `Accepted` re-queued to settle under the revision —
     /// component and driver state reinitialize, and the tick resumes at
-    /// the checkpoint's. The rule classifies the whole checkpoint before any
+    /// the checkpoint's. The report itemizes the tuning the reinitialize
+    /// rule reverted: per reinitialized component, every
+    /// descriptor-declared parameter whose checkpointed value differs
+    /// from the revision's declared default. The rule classifies the
+    /// whole checkpoint before any
     /// state moves, so a revision that breaks it — a kind-retyped
     /// carried point, an unservable force, an unreadable format — fails
     /// with a named [`CarryoverError`] and changes nothing the run
@@ -1859,6 +1877,46 @@ impl<'d> Executor<'d> {
             dropped.push(DroppedElement::DriverState);
         }
 
+        // The reverted-tuning itemization: every reinitialized
+        // component's descriptor-declared parameters whose checkpointed
+        // field differs from the revision's declared default — the
+        // fresh component's reported value — are named so the report
+        // says which tuning was lost, not just which components
+        // restarted. Component state never crosses, so a checkpointed
+        // field the descriptor does not declare is the component's own
+        // dropped vocabulary, and a checkpointed field whose kind the
+        // revision retyped itemizes like any differing value — nothing
+        // is reinterpreted, so the named-refusal convention does not
+        // apply.
+        let mut reverted_tuning = Vec::new();
+        for entry in &self.components {
+            let component = &entry.component;
+            let declared_parameters = component.describe().parameters;
+            if declared_parameters.is_empty() {
+                continue;
+            }
+            let Some(checkpointed) = checkpoint.components.get(component.name()) else {
+                continue;
+            };
+            let fresh = component.report_parameters();
+            for parameter in declared_parameters {
+                let (Some(checkpointed_value), Some(declared_value)) = (
+                    checkpointed.get(&parameter.name),
+                    fresh.get(&parameter.name),
+                ) else {
+                    continue;
+                };
+                if !parameter_value_stands(checkpointed_value, declared_value) {
+                    reverted_tuning.push(RevertedParameter {
+                        component: component.name().to_string(),
+                        parameter: parameter.name,
+                        checkpointed: checkpointed_value,
+                        declared: declared_value,
+                    });
+                }
+            }
+        }
+
         // Apply: carried samples land verbatim — quality and tick as the
         // checkpoint captured them — over the image's seeded initials;
         // the force set becomes exactly the checkpoint's; the run's
@@ -1902,6 +1960,7 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|entry| entry.component.name().to_string())
                 .collect(),
+            reverted_tuning,
             initialized,
         })
     }
@@ -6772,6 +6831,109 @@ mod tests {
             Some(Sample::good(Value::Float(2.5), Tick(0)))
         );
         assert!(executor.snapshot().forces.is_empty());
+    }
+
+    /// The reinitialize rig with a tunable component: `Tunable` ("loop")
+    /// declares `gain`/`limit` at the construction defaults 2.0/10.0 —
+    /// the revision's declared defaults the itemization diffs against.
+    fn revision_tuning_rig(driver: &StubDriver) -> Executor<'_> {
+        Executor::new(
+            driver,
+            internal_map(),
+            vec![Box::new(Tunable {
+                name: "loop",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+                limit: 10.0,
+            })],
+        )
+        .unwrap()
+        .with_model_fingerprint(ModelFingerprint::of(b"model-b"))
+    }
+
+    /// A checkpoint captured under `model-a` carrying `loop`'s
+    /// component state — the fields `Tunable::capture_state` writes.
+    fn tuned_checkpoint(state: StateMap) -> Checkpoint {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            tick: Tick(50),
+            components: [("loop".to_string(), state)].into_iter().collect(),
+            driver: None,
+            outputs: BTreeMap::new(),
+            internal: BTreeMap::new(),
+            forces: BTreeMap::new(),
+            receipts: Vec::new(),
+            command_admission: CommandAdmissionCounts::default(),
+        }
+    }
+
+    #[test]
+    fn reinitialize_itemizes_reverted_tuning() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // The receipted tune the old run settled: `gain` driven to 3.0
+        // while `limit` stayed at its declared 10.0 — the checkpoint's
+        // component section carries both, exactly as `capture_state`
+        // wrote them.
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Float(3.0));
+        state.insert("limit", Value::Float(10.0));
+        let checkpoint = tuned_checkpoint(state);
+
+        let report = executor.reinitialize(&checkpoint).unwrap();
+        assert_eq!(report.reinitialized, vec!["loop".to_string()]);
+        // Only the differing tune is named: `limit` matched the
+        // revision's declared default and lists nothing.
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Float(3.0),
+                declared: Value::Float(2.0),
+            }]
+        );
+
+        // The tune does not carry: the reinitialized component stands
+        // at its declared default — the itemization is the witnessed
+        // record of what reverted.
+        let parameters = &executor.snapshot().parameters[0];
+        assert_eq!(parameters.name, "loop");
+        assert_eq!(parameters.values["gain"], Value::Float(2.0));
+
+        // Two runs of the same crossing report identically.
+        let mut second = revision_tuning_rig(&driver);
+        assert_eq!(second.reinitialize(&checkpoint).unwrap(), report);
+    }
+
+    #[test]
+    fn reinitialize_itemizes_a_retyped_parameter_and_skips_undeclared_state() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // `gain` checkpointed as Int where the revision declares Float:
+        // nothing component-side crosses, so the field itemizes as
+        // reverted like any differing value — the named-refusal
+        // convention binds the carried sections, not state that never
+        // moves. `integrator` is captured run state the descriptor does
+        // not declare: the component's own dropped vocabulary, not a
+        // reverted parameter.
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Int(3));
+        state.insert("integrator", Value::Float(1.5));
+        let report = executor.reinitialize(&tuned_checkpoint(state)).unwrap();
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Int(3),
+                declared: Value::Float(2.0),
+            }]
+        );
     }
 
     #[test]

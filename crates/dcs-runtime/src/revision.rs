@@ -31,6 +31,21 @@
 //!   model boundary; a checkpointed component the revision does not
 //!   register is named dropped. Selected per-kind compatibility rules
 //!   are a future extension of this contract; none exist yet.
+//!   Descriptor-declared parameters reinitialize with the rest of the
+//!   component state — the recorded tuning-carry decision: the
+//!   checkpoint's component section cannot distinguish a tuned value
+//!   from a constructed default, so carrying by (component name,
+//!   parameter name, value kind) would silently defeat the revising
+//!   engineer's deliberate re-default. The report's `reverted_tuning`
+//!   itemizes what the rule reverted instead — per component, each
+//!   declared parameter whose checkpointed value differed from the
+//!   revision's declared default, with both values — so the witnessed
+//!   record names the tuning that was lost, and deliberate re-tuning
+//!   re-enters through the receipted `set_parameter` path. A
+//!   checkpointed field whose kind the revision retyped itemizes like
+//!   any differing value: nothing is reinterpreted, so the
+//!   named-refusal convention that binds the carried sections does not
+//!   apply.
 //! - **Driver state never carries** — the revision's driver observes the
 //!   real field through its own channels; the checkpoint's captured
 //!   section is named dropped.
