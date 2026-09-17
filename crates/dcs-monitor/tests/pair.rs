@@ -443,6 +443,82 @@ fn a_command_is_never_sent_to_a_standby_role_peer() {
 }
 
 #[test]
+fn dual_active_is_a_named_redundancy_fault_and_commands_have_no_target() {
+    // The fenced-active split-brain: two peers both reporting settled
+    // active — the impossible state the one-logical-controller contract
+    // cannot represent. The pair view must name it, not render
+    // "redundant pair healthy".
+    let fenced = PeerRig::start(Role::Active);
+    let promoted = PeerRig::start(Role::Active);
+    let mut pair = PairClient::new([fenced.addr, promoted.addr]);
+    pair.poll_roles();
+
+    // The summary verdict: both peers' reports are recorded, the
+    // dual-active fault names both claimants, and no unique active
+    // stands.
+    match status_of(&pair, fenced.addr) {
+        PeerStatus::Reporting(report) => assert_eq!(report.role, Role::Active),
+        other => panic!("expected the fenced peer's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, None);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains("dual-active")
+                && fault.contains(&fenced.addr.to_string())
+                && fault.contains(&promoted.addr.to_string())),
+        "expected the dual-active fault naming both peers, got {:?}",
+        health.faults
+    );
+
+    // Reads are held, not interrupted: the view keeps its source and
+    // data keeps flowing while the fault names the ambiguity.
+    assert_eq!(pair.source(), Some(fenced.addr));
+    fenced.client.advance(1).unwrap();
+    assert_eq!(pair.snapshot().unwrap().tick, Tick(1));
+
+    // Command routing has no legitimate target: nothing is sent to
+    // either claimant — no queued receipt, no journaled command.
+    let error = pair
+        .command(&write_value(10, ValueKind::Float, Value::Float(1.0)))
+        .unwrap_err();
+    assert!(matches!(error, PairError::AmbiguousActive), "{error:?}");
+    assert!(fenced.client.receipts().unwrap().is_empty());
+    assert!(promoted.client.receipts().unwrap().is_empty());
+    for rig in [&fenced, &promoted] {
+        assert!(
+            rig.client
+                .journal(0)
+                .unwrap()
+                .iter()
+                .all(|entry| !matches!(entry.event, JournalEvent::CommandSettled { .. })),
+            "no command reached the claimant"
+        );
+    }
+
+    // The fault is poll-driven, not sticky: once the fenced claimant
+    // demotes and settles to standby the pair is healthy again and
+    // commands route to the surviving unique active.
+    assert_eq!(fenced.client.demote().unwrap().role, Role::Demoting);
+    fenced.client.advance(1).unwrap();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(promoted.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    let receipt = pair
+        .command(&write_value(10, ValueKind::Float, Value::Float(1.0)))
+        .unwrap();
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    assert_eq!(promoted.client.receipts().unwrap().len(), 1);
+    assert!(fenced.client.receipts().unwrap().is_empty());
+
+    fenced.stop();
+    promoted.stop();
+}
+
+#[test]
 fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
     let active = PeerRig::start(Role::Active);
 
@@ -464,6 +540,17 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
         "function submitCommand(command)",
         "not_active",
         "role_changed",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+    // The dual-active defense: the summary counts actives and names the
+    // split-brain fault, and the command path requires a unique
+    // settled-active target rather than picking the first claimant.
+    for needle in [
+        "function pairHealth(pairPeers, states)",
+        "dual-active",
+        "function activePeers()",
+        "actives.length === 1",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
