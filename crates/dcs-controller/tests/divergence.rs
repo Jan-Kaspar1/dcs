@@ -150,7 +150,8 @@ struct Outcome {
     diverged_sync: StandbySync,
     /// The journal's `divergence_detected` entries, in order.
     journal: Vec<JournalEntry>,
-    /// The journal's `divergence_resolved` entries, in order.
+    /// The journal's `divergence_resolved` entries, in order — the
+    /// named event a verdict-clearing compare owes the record.
     resolutions: Vec<JournalEntry>,
     /// The named error `POST /promote` answered while diverged.
     promote_error: SwitchError,
@@ -344,15 +345,18 @@ fn run_scenario() -> Outcome {
         );
         let resynced_sync = resynced.sync.unwrap();
 
-        // The resolution is journaled once — detection then resolution
-        // then promotion is the auditable sequence — attributed to the
-        // compared tick and carrying the compared-point evidence.
+        // The clear is journaled as its own named event — detection
+        // then resolution then promotion is the auditable sequence —
+        // attributed to the compared tick and carrying the same-tick
+        // comparison the verdict stood on.
         let resolutions: Vec<JournalEntry> = standby_client
             .journal(0)
             .unwrap()
             .into_iter()
             .filter(|entry| matches!(entry.event, JournalEvent::DivergenceResolved { .. }))
             .collect();
+        assert_eq!(resolutions.len(), 1, "the clear is journaled once");
+        assert_eq!(resolutions[0].tick, Tick(N + K + 2));
 
         let promoted = standby_client.promote().unwrap();
         assert_eq!(promoted.role, Role::Promoting);
@@ -401,7 +405,7 @@ fn skewed_standby_diverges_blocks_promotion_and_resyncs() {
     assert_eq!(journaled, mismatches);
     // The resync journals its own entry at the compared tick, carrying
     // every compared field `Out` point with both sides' values — the
-    // agreements the reopen of the promote gate stands on.
+    // fully-read match the reopen of the promote gate stands on.
     assert_eq!(outcome.resolutions.len(), 1, "{:?}", outcome.resolutions);
     assert_eq!(outcome.resolutions[0].tick, Tick(N + K + 2));
     let JournalEvent::DivergenceResolved { compared } = &outcome.resolutions[0].event else {

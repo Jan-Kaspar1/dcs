@@ -236,8 +236,8 @@ impl Recorder {
 
     /// Journals a divergence resolution — a `Diverged` peer's return to
     /// `Tracking` — attributed to the applied checkpoint's tick,
-    /// carrying the same-tick field comparison the clear stands on
-    /// (`compared` empty when no such evidence backed it).
+    /// carrying the same-tick field comparison the clear stands on:
+    /// every staged point the fully-read comparison verified matching.
     pub(super) fn note_resolution(&mut self, resolution: ResolutionReport) {
         self.push(
             resolution.tick,

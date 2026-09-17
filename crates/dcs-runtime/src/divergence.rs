@@ -14,15 +14,22 @@
 //! point against the peer's own reads of the same `Out` points —
 //! the field-observing path the decision allows. A mismatch moves the
 //! peer to the named `Diverged` synchronization state, blocks promotion,
-//! and journals the evidence; a fresh clean transfer whose comparison
-//! matches clears it.
+//! and journals the evidence; a fresh transfer whose same-tick
+//! comparison *read the field and matched* clears it — and only that:
+//! `Diverged` is the promotion-blocking "my staged outputs differ from
+//! the field" verdict, so an apply that ran no comparison, or a
+//! comparison whose field reads failed, carries no such evidence and
+//! leaves the verdict standing.
 //!
 //! The comparison is deterministic and exact per value kind: `Bool` and
 //! `Int` values must be identical; `Float` values agree within
 //! [`FLOAT_TOLERANCE`]. A point whose field read fails — a communication
-//! fault is not divergence evidence — and a staged image whose tick no
-//! transferred checkpoint has reached yet are skipped, so the check only
-//! ever fires on same-tick, same-field observations.
+//! fault is neither divergence evidence nor convergence evidence — is
+//! absent from [`compare_staged_points`]'s answer, so the caller can
+//! tell a partially-observed comparison from a fully-read one; a staged
+//! image whose tick no transferred checkpoint has reached yet runs no
+//! comparison at all, so the check only ever acts on same-tick,
+//! same-field observations.
 
 use dcs_core::{Divergence, IoDriver, PointId, Sample, Tick, Value};
 use std::collections::BTreeMap;
@@ -66,26 +73,30 @@ pub struct DivergenceReport {
 /// same-tick field comparison the clear stands on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolutionReport {
-    /// The applied checkpoint's tick — the compared staged image's tick
-    /// when a same-tick comparison ran.
+    /// The applied checkpoint's tick — equal to the compared staged
+    /// image's tick by the check's pairing rule.
     pub tick: Tick,
-    /// Every staged field `Out` point the comparison judged — the field
-    /// reads that succeeded — with both sides' values, in ascending
-    /// point order: the agreements a clean resync stands on. Empty when
-    /// the clear had no same-tick field comparison behind it, so the
-    /// audit trail attributes the transition either way and a clean
-    /// resync stays distinguishable from an evidence-free one.
+    /// Every staged field `Out` point the clearing comparison verified
+    /// matching, with both sides' values, in ascending point order: the
+    /// positive evidence the clear stands on. A `Diverged` verdict
+    /// clears only on a same-tick comparison that read every staged
+    /// point and matched, so `compared` always names the full staged
+    /// image — the proof the promotion gate reopened on.
     pub compared: Vec<Divergence>,
 }
 
 /// Compares the staged field `Out` image — what the standby's scan would
-/// have written — against the driver's reads of the same points.
-/// Deterministic: the result is ordered by `PointId` and depends only on
-/// the staged image and the driver's answers.
+/// have written — against the driver's reads of the same points, and
+/// reports only the mismatches. Deterministic: the result is ordered by
+/// `PointId` and depends only on the staged image and the driver's
+/// answers.
 ///
-/// A point whose field read fails is skipped: a communication fault is
-/// the driver's own diagnostics' business, not divergence evidence — the
-/// check only acts on a value the field demonstrably carries.
+/// A point whose field read fails is absent — the failed read observed
+/// nothing, so it can neither convict the staged image nor clear a
+/// standing `Diverged` verdict; [`compare_staged_points`]'s full answer
+/// is what lets the caller tell "no mismatches observed" from "the field
+/// read clean and matched", and only the latter carries the clearing
+/// evidence.
 pub fn compare_staged(
     driver: &(dyn IoDriver + Sync),
     staged: &BTreeMap<PointId, Sample>,
@@ -101,7 +112,9 @@ pub fn compare_staged(
 /// order, each entry carrying both sides' values — the evidence record a
 /// divergence resolution journals, agreements and mismatches alike.
 /// [`values_diverge`] over each entry splits the two; a point whose
-/// field read failed is absent — evidence of neither.
+/// field read failed is absent — evidence of neither — so an answer as
+/// long as `staged` is the fully-read comparison a `Diverged` verdict
+/// clears on.
 pub fn compare_staged_points(
     driver: &(dyn IoDriver + Sync),
     staged: &BTreeMap<PointId, Sample>,
@@ -172,13 +185,15 @@ mod tests {
     }
 
     #[test]
-    fn compare_staged_is_point_ordered_and_skips_failed_reads() {
+    fn compare_staged_is_point_ordered_and_leaves_failed_reads_absent() {
         let field = FieldStub {
             samples: Mutex::new(
                 [
                     (PointId(1), good(Value::Bool(true))),
                     (PointId(2), good(Value::Float(4.5))),
-                    // Point 3 absent: the failed read is skipped.
+                    // Point 3 absent: the failed read is evidence-free —
+                    // absent from the comparison, neither convicting nor
+                    // clearing.
                 ]
                 .into_iter()
                 .collect(),
@@ -198,6 +213,25 @@ mod tests {
                 staged: Value::Float(9.0),
                 field: Value::Float(4.5),
             }]
+        );
+        // The full comparison answers only the reads that succeeded: the
+        // agreement at point 1, the mismatch at point 2 — and no entry
+        // for point 3, so `compared.len() != staged.len()` marks the
+        // comparison partially observed.
+        assert_eq!(
+            compare_staged_points(&field, &staged),
+            vec![
+                Divergence {
+                    point: PointId(1),
+                    staged: Value::Bool(true),
+                    field: Value::Bool(true),
+                },
+                Divergence {
+                    point: PointId(2),
+                    staged: Value::Float(9.0),
+                    field: Value::Float(4.5),
+                },
+            ]
         );
     }
 }

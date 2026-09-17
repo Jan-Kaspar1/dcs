@@ -135,13 +135,12 @@ pub enum JournalEvent {
     /// the divergence the matching [`DivergenceDetected`](Self::DivergenceDetected)
     /// opened, and the sync-state change that reopens the promote gate.
     /// The entry's `tick` attributes it to the applied checkpoint's
-    /// tick — the compared staged image's tick when a same-tick field
-    /// comparison cleared the state. `compared` carries every staged
-    /// field `Out` point that comparison judged — the field reads that
-    /// succeeded — with both sides' values, in point order; an empty
-    /// `compared` records a clear no same-tick field comparison backed,
-    /// so the audit trail attributes the transition either way and a
-    /// clean resync stays distinguishable from an evidence-free one.
+    /// tick — the compared staged image's tick. `compared` carries every
+    /// staged field `Out` point the clearing comparison verified, with
+    /// both sides' values, in point order: `Diverged` clears only on
+    /// that positive evidence — a same-tick comparison whose field
+    /// reads all succeeded and matched — so the audit trail names the
+    /// proof the gate reopened on.
     DivergenceResolved {
         /// The compared field `Out` points — the resolution's evidence.
         compared: Vec<Divergence>,

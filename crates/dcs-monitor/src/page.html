@@ -2790,7 +2790,9 @@ function describeEventField(field) {
 // {"role_changed": {from, to}} |
 // {"divergence_detected": {mismatches}} |
 // {"divergence_resolved": {compared}} — the compared points a clean
-// resync stood on, empty on an evidence-free clear — |
+// resync stood on; a diverged verdict clears only on that fully-read
+// same-tick evidence, so an empty list marks an entry an older build
+// journaled — |
 // {"reinitialized": {report}} |
 // {"source_restarted": {was_aligned, resumed_at}} — the tracked
 // stream's generation boundary — | {"run_boundary": {run}} — a new
@@ -2834,6 +2836,8 @@ function describeEvent(event) {
   if ("divergence_resolved" in event) {
     const compared = event.divergence_resolved.compared;
     if (compared.length === 0) {
+      // Reachable only in a journal an older build wrote: a clear now
+      // always stands on the fully-read same-tick comparison below.
       return "standby divergence cleared — no same-tick field " +
         "comparison stands behind the clear";
     }
