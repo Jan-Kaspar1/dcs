@@ -59,8 +59,10 @@
 //! instance's `ComponentResources` entry — its measurements and
 //! state with quality, current configuration, and each command's
 //! `available`/`refusal` beside the attributed events; and `events
-//! [<component>]` prints that view's per-instance `events`, the
-//! retained journal tail attributed to the named component, or every
+//! [<component>]` prints that view's per-instance `events` — the
+//! retained journal tail attributed to the named component beside its
+//! routed `History`/`Latest` emission records, each entry's
+//! `retention` marking its store — or every
 //! component's list keyed by name when the argument is absent. A
 //! name the served registry does not carry fails the invocation
 //! naming it — the read is a lookup, never a submission, so there is
@@ -81,7 +83,7 @@
 //! change unattributed.
 
 use dcs_core::{
-    Command, CommandOutcome, CommandReceipt, ComponentResources, JournalEntry, PointId,
+    Command, CommandOutcome, CommandReceipt, ComponentResources, PointId, ResourceEvent,
     ResourceView, RoleReport, SwitchError, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
@@ -502,13 +504,15 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
         Action::Events { component } => {
             // The resource view's per-instance `events` is the served
             // event record — the retained journal tail attributed to
-            // each instance, so between-scans entries (a refused
+            // each instance beside its routed `History`/`Latest`
+            // emission records, each entry's `retention` marking the
+            // store it came from — so between-scans entries (a refused
             // command, say) appear ahead of the stamped publication.
             let view = client.resources().map_err(|e| transport(addr, e))?;
             match component {
                 Some(name) => print_json(&resource_entry(&view, name, addr)?.events, addr),
                 None => {
-                    let events: BTreeMap<&str, &[JournalEntry]> = view
+                    let events: BTreeMap<&str, &[ResourceEvent]> = view
                         .components
                         .iter()
                         .map(|entry| (entry.name.as_str(), entry.events.as_slice()))

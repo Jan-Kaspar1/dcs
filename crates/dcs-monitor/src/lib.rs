@@ -68,10 +68,14 @@
 //!   latest value and quality from the bound point's sample, each
 //!   configuration resource's current value from the snapshot's
 //!   `parameters` section, each command's `available` flag or the named
-//!   refusal a submission would meet, and the retained journal tail's
-//!   entries attributed to the instance (its bound points' transitions,
-//!   its settled command receipts, its step failures, its emitted
-//!   events). Collections are parallel to the interface's, so a
+//!   refusal a submission would meet, and the attributed event streams
+//!   — the retained journal tail's entries (its bound points'
+//!   transitions, its settled command receipts, its step failures, its
+//!   `Journal`-retained and undeclared emissions) beside its
+//!   `History`-retained emissions' bounded ring records and its
+//!   `Latest`-retained emissions' standing records, each entry's
+//!   `retention` marking the store it came from. Collections are
+//!   parallel to the interface's, so a
 //!   consumer zips the schema and resource views by index or joins by
 //!   `name`. Both reads serve published copies — never the executor
 //!   lock — exactly like `/snapshot`
@@ -1029,7 +1033,12 @@ impl<'d> Monitor<'d> {
             (Method::Get, "/resources") => match self.store.latest() {
                 Some(publication) => json(
                     200,
-                    &serve::resource_view(&publication, &self.signals, &self.store.journal(0)),
+                    &serve::resource_view(
+                        &publication,
+                        &self.signals,
+                        &self.store.journal(0),
+                        &self.store.routed_events(),
+                    ),
                 ),
                 None => json(503, "no publication yet"),
             },

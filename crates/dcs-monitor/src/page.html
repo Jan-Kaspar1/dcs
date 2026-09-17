@@ -1927,10 +1927,15 @@ function commandTable(component, specs, states, resources) {
     "</div>";
 }
 
-// The recent-events list: the component's retained journal tail —
-// point transitions on its bound points, its commands' settled
-// receipts, its step failures, and its kind-emitted events — rendered
-// through the same describeEvent the journal pane uses, newest last.
+// The recent-events list: the component's attributed event record —
+// the retained journal tail (point transitions on its bound points,
+// its commands' settled receipts, its step failures, its
+// Journal-retained and undeclared kind emissions) beside its routed
+// History/Latest emission records — rendered through the same
+// describeEvent the journal pane uses, newest last. The store column
+// reads the entry's `retention` mark — journal | history | latest —
+// telling the durable record from the diagnostic streams; entries
+// from a pre-marker document render under the journal they are.
 function eventList(events) {
   const recent = (events || []).slice(-EVENT_LIMIT);
   return "<div class=\"res\" data-category=\"events\">" +
@@ -1938,10 +1943,11 @@ function eventList(events) {
     (recent.length === 0
       ? "<p class=\"res-empty\">no recent events</p>"
       : "<table class=\"ports\"><thead><tr>" +
-        "<th>Seq</th><th>Tick</th><th>Event</th>" +
+        "<th>Seq</th><th>Tick</th><th>Store</th><th>Event</th>" +
         "</tr></thead><tbody>" +
         recent.map(entry =>
           "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+          "</td><td>" + esc(entry.retention || "journal") +
           "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>"
         ).join("") + "</tbody></table>") +
     "</div>";
