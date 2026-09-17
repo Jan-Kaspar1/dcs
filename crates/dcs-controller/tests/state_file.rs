@@ -4,7 +4,7 @@
 //! path the state-file decision records. The scripted runs below spawn
 //! the binary itself, deterministic like every `--ticks` run.
 
-use dcs_core::{TelemetrySnapshot, Tick};
+use dcs_core::{Command, CommandOutcome, PointId, TelemetrySnapshot, Tick, Value, ValueKind};
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, Checkpoint};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::process::Command as Process;
 
 mod support;
 
-use support::{Spawned, kill, listening_on, spawn};
+use support::{Spawned, image_value, kill, listening_on, spawn};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: a PID integrating a setpoint error against a
@@ -328,6 +328,100 @@ fn a_driven_run_resumes_from_its_state_file() {
     let resumed = spawn_driven(&args(true));
     let continued = MonitorClient::new(resumed.addr).advance(HALF).unwrap();
     assert_eq!(continued, reference);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The restart-durability regression: a command accepted between the
+/// last cycle-end state-file write and the restart used to evaporate —
+/// `/receipts` empty after resume, the value never applied, the journal
+/// silent. The admission boundary now persists the checkpoint, so the
+/// carried `Accepted` receipt re-queues on the resumed run and settles
+/// applied at the promised tick.
+#[test]
+fn an_accepted_command_survives_a_restart_before_its_apply_tick() {
+    let dir = scratch("admitted");
+    let journal = dir.join("journal.jsonl");
+    let state = dir.join("state.json");
+    let args = || {
+        vec![
+            TANK_LOOP.to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--driven".to_string(),
+            "--state-file".to_string(),
+            state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            journal.to_str().unwrap().to_string(),
+        ]
+    };
+    let command = Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(2.5),
+    };
+
+    // Three requested scans, then the write — accepted, promised
+    // apply_tick 4 — and the process dies before that scan ever runs.
+    let mut first = spawn_driven(&args());
+    let client = MonitorClient::new(first.addr);
+    client.advance(3).unwrap();
+    let receipt = client.command(&command).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }
+    );
+    kill(&mut first);
+
+    // The admission persisted at its boundary: the state file holds the
+    // still-Accepted receipt at the tick the run reached.
+    let checkpoint = persisted(&state);
+    assert_eq!(checkpoint.tick, Tick(3));
+    assert_eq!(
+        checkpoint.receipts.last().map(|receipt| &receipt.outcome),
+        Some(&CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }),
+        "{checkpoint:?}"
+    );
+
+    // The resumed run re-queues the carried receipt — `/receipts`
+    // answers it before any scan — and the next scan applies it at the
+    // promised tick: the point takes the written value, the receipt
+    // settles applied, and the durable journal records the settlement
+    // across the restart.
+    let second = spawn_driven(&args());
+    let client = MonitorClient::new(second.addr);
+    let receipts = client.receipts().unwrap();
+    assert_eq!(
+        receipts.last().map(|receipt| &receipt.outcome),
+        Some(&CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }),
+        "{receipts:?}"
+    );
+    let snapshot = client.advance(1).unwrap();
+    assert_eq!(snapshot.tick, Tick(4));
+    assert_eq!(image_value(&snapshot, PointId(10)), Value::Float(2.5));
+    let receipts = client.receipts().unwrap();
+    assert_eq!(
+        receipts.last().map(|receipt| &receipt.outcome),
+        Some(&CommandOutcome::Applied { tick: Tick(4) }),
+        "{receipts:?}"
+    );
+    assert!(
+        client.journal(0).unwrap().iter().any(|entry| matches!(
+            &entry.event,
+            dcs_core::JournalEvent::CommandSettled { receipt }
+                if receipt.command == command
+                    && receipt.outcome == CommandOutcome::Applied { tick: Tick(4) }
+        )),
+        "the settled command must be journaled across the restart"
+    );
+    let file = std::fs::read_to_string(&journal).unwrap();
+    assert!(file.contains("command_settled"), "{file}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
