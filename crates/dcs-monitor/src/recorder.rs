@@ -98,7 +98,13 @@ pub(super) struct Recorder {
     /// command that crossed peers inside the checkpoint journals its
     /// settlement on the observing peer as well — the pair's one
     /// command audit trail.
-    receipt_outcomes: Vec<Option<CommandOutcome>>,
+    ///
+    /// Entries are keyed by the receipt's absolute submission index —
+    /// `receipt_base + position` — so the executor's bounded log
+    /// evicting its settled prefix never shifts what an entry compares
+    /// against; observations the served window no longer covers drop on
+    /// each record, keeping the map bounded with the log.
+    receipt_outcomes: HashMap<u64, CommandOutcome>,
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
@@ -134,7 +140,7 @@ impl Recorder {
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
             values: HashMap::new(),
-            receipt_outcomes: Vec::new(),
+            receipt_outcomes: HashMap::new(),
             step_counts: Vec::new(),
             sink,
         })
@@ -147,18 +153,14 @@ impl Recorder {
         self.store.clone()
     }
 
-    /// Notes the receipt a `submit_command` just produced, at
-    /// `receipt_index` in the executor's log.
+    /// Notes the receipt a `submit_command` just produced, at its
+    /// absolute submission index `receipt_index` — the executor's
+    /// `receipt_base` plus its position in the retained log.
     ///
     /// A command refused at submission is already final and is journaled
     /// at the run's current tick; an accepted one is marked observed and
     /// the next record journals the outcome its boundary settled.
-    pub(super) fn note_command(
-        &mut self,
-        receipt_index: usize,
-        receipt: CommandReceipt,
-        tick: Tick,
-    ) {
+    pub(super) fn note_command(&mut self, receipt_index: u64, receipt: CommandReceipt, tick: Tick) {
         match receipt.outcome {
             CommandOutcome::Accepted { .. } => {}
             CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. } => {
@@ -179,15 +181,11 @@ impl Recorder {
         self.push(tick, JournalEvent::CommandSettled { receipt });
     }
 
-    /// Marks `outcome` as the last observed at `index` in the receipt
-    /// log, extending the observed vector on first sight of an index —
-    /// a checkpoint-adopted log's receipts surface here before ever
-    /// passing `note_command`.
-    fn observe(&mut self, index: usize, outcome: CommandOutcome) {
-        if self.receipt_outcomes.len() <= index {
-            self.receipt_outcomes.resize(index + 1, None);
-        }
-        self.receipt_outcomes[index] = Some(outcome);
+    /// Marks `outcome` as the last observed at absolute submission
+    /// `index` in the receipt log — a checkpoint-adopted log's receipts
+    /// surface here before ever passing `note_command`.
+    fn observe(&mut self, index: u64, outcome: CommandOutcome) {
+        self.receipt_outcomes.insert(index, outcome);
     }
 
     /// Journals a reported-role transition at `tick` — a promotion or
@@ -251,13 +249,20 @@ impl Recorder {
         // the same on either peer. An applied receipt reports the tick
         // it applied at; a boundary rejection is attributed to this
         // scan.
-        for index in 0..executor.receipts().len() {
-            let receipt = &executor.receipts()[index];
-            let observed = self
-                .receipt_outcomes
-                .get(index)
-                .and_then(|outcome| outcome.as_ref());
-            if observed == Some(&receipt.outcome) {
+        // Entries key on the absolute submission index, not the served
+        // position: the bounded log's evictions shift positions, while
+        // the index is stable for the receipt's lifetime. Observations
+        // outside the served window — evicted settled entries, or the
+        // abandoned stretch a replaced log leaves — drop here so the
+        // map stays bounded with the log it diffs.
+        let base = executor.receipt_base();
+        let end = base + executor.receipts().len() as u64;
+        self.receipt_outcomes
+            .retain(|index, _| *index >= base && *index < end);
+        for offset in 0..executor.receipts().len() {
+            let index = base + offset as u64;
+            let receipt = &executor.receipts()[offset];
+            if self.receipt_outcomes.get(&index) == Some(&receipt.outcome) {
                 continue;
             }
             match receipt.outcome {

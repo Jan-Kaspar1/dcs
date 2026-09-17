@@ -37,7 +37,13 @@
 //!   `kind:id` diagnostic name the descriptor reports
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the receipt
 //!   log's published mirror, refreshed wherever the control-plane lock
-//!   changes it, so a submission between scans is immediately visible
+//!   changes it, so a submission between scans is immediately visible.
+//!   The log is a bounded tail
+//!   ([`Executor::with_receipt_log_capacity`](dcs_runtime::Executor::with_receipt_log_capacity)):
+//!   settled receipts evict oldest-first while pending ones never do,
+//!   and the evicted count reads off the snapshot's
+//!   `command_queue.attempts` minus the served length — the same
+//!   numbering-gap convention the history and journal streams use
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
 //!   point's retained samples in tick order from the store's bounded
 //!   rings; `?point=<id>` (repeatable) selects points and
@@ -1026,7 +1032,15 @@ impl<'d> Monitor<'d> {
                     // receipt — the settled entry the journal echoes.
                     let receipt = if peer.accepts_commands() {
                         let receipt = peer.submit_command_as(command, actor);
-                        let index = peer.receipts().len() - 1;
+                        // The journal diff keys on the receipt's
+                        // absolute submission index — the bounded log's
+                        // evictions shift positions, the index does not.
+                        // `base + len` is `attempts` — the submission's
+                        // own index is one below — and the subtraction
+                        // saturates so a `capacity = 0` log that already
+                        // evicted this receipt cannot underflow it.
+                        let index =
+                            (peer.receipt_base() + peer.receipts().len() as u64).saturating_sub(1);
                         let tick = peer.tick();
                         recorder.note_command(index, receipt.clone(), tick);
                         // An accepted admission is owed durability
@@ -1594,7 +1608,8 @@ impl MonitorClient {
         self.get_json("/snapshot")
     }
 
-    /// `GET /receipts`: the executor's full receipt log.
+    /// `GET /receipts`: the executor's receipt log — the bounded tail
+    /// of retained receipts, pending ones included.
     pub fn receipts(&self) -> io::Result<Vec<CommandReceipt>> {
         self.get_json("/receipts")
     }
