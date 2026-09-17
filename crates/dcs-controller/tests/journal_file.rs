@@ -541,10 +541,33 @@ fn a_state_file_restart_continues_the_record_without_re_journaling() {
     );
     assert_eq!(served.len(), before_restart.len() + 1);
 
-    // One post-restart scan — the reproduction's trigger. The file's new
-    // run segment continues the record: nothing the resumed run already
-    // recorded re-journals.
-    client.advance(1).unwrap();
+    // Two post-restart scans — the reproduction's trigger. The served
+    // stream itself continues the record past its boundary entry: the
+    // run-1 entries answer verbatim before it, and nothing the resumed
+    // run already recorded re-journals after it — no standing census
+    // re-emitted as `from: null` transitions, no settled receipts
+    // repeated. A `GET /journal` consumer attributes each side of the
+    // seam to its process lifetime.
+    client.advance(2).unwrap();
+    let served = client.journal(0).unwrap();
+    let seam = served
+        .iter()
+        .position(|entry| matches!(entry.event, dcs_core::JournalEvent::RunBoundary { run: 2 }))
+        .expect("GET /journal must serve the restart's run boundary");
+    assert_eq!(&served[..seam], &before_restart[..]);
+    assert!(
+        served[seam + 1..].iter().all(|entry| !matches!(
+            entry.event,
+            dcs_core::JournalEvent::QualityChanged { from: None, .. }
+                | dcs_core::JournalEvent::PointChanged { from: None, .. }
+                | dcs_core::JournalEvent::CommandSettled { .. }
+        )),
+        "the served journal must not re-emit the standing census: {served:?}"
+    );
+
+    // The file's new run segment is the same record: its boundary
+    // marker separates the lifetimes and nothing journaled before the
+    // restart re-appends behind it.
     let records = file_records(&journal);
     let marker = records
         .iter()
