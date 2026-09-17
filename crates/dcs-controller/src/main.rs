@@ -102,7 +102,10 @@
 //! scan cycle consuming the latest completed pull non-blockingly: an
 //! unreachable or wedged active stalls neither the scan cadence nor
 //! the monitor's request serving, and a cycle whose pull produced no
-//! checkpoint is the heartbeat miss the failover budget counts. There,
+//! checkpoint is the heartbeat miss the failover budget counts. Each
+//! pull also announces the pulling monitor's own address
+//! (`GET /checkpoint?peer=`), so the serving instance learns where its
+//! successor lives. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -111,6 +114,21 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//!
+//! Demotion is the launch asymmetry the follow-peer half of the
+//! tracking contract closes: a launched active never named a peer —
+//! `--standby` is the only peer address the CLI used to take — yet a
+//! `POST /demote` turns it into a standby that must track *something*
+//! or strand `unsynchronized` and unpromotable forever. The demoted
+//! peer's checkpoint source is therefore resolved per scan cycle: the
+//! configured `--peer ADDR` when given — "active now, but here is my
+//! peer for later" — else the address the tracking peer announced
+//! through its pulls. Either way the demoted instance pulls, applies,
+//! and reconverges like any standby, and a later `POST /promote`
+//! fails back without a restart. A field owner with neither — nothing
+//! configured and no peer ever announced — refuses `POST /demote`
+//! outright (`no_tracking_source`) rather than silently marooning
+//! itself.
 //!
 //! The field's single-writer claim is taken at every transition into
 //! field ownership — a promotion, and a launched active's startup:
@@ -337,6 +355,10 @@ struct Options {
     /// Run as a standby pulling checkpoints from the active at this
     /// monitoring address.
     standby: Option<String>,
+    /// Run as the active, but name the peer this instance tracks if it
+    /// is later demoted — "active now, but here is my peer for later".
+    /// Mutually exclusive with `--standby`.
+    peer: Option<String>,
     /// Attach to the shared simulated plant at this `dcs-sim-net`
     /// address instead of building a local `SimDriver`.
     remote: Option<String>,
@@ -374,9 +396,9 @@ struct Options {
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
-                      [--remote ADDR] [--driven] [--auto-promote N]
-                      [--owner-token N] [--revised] [--state-file PATH]
-                      [--journal-file PATH]
+                      [--peer ADDR] [--remote ADDR] [--driven]
+                      [--auto-promote N] [--owner-token N] [--revised]
+                      [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -399,6 +421,11 @@ controller scan.
                   its monitoring address ADDR and apply one per scan;
                   combines with --listen, whose POST /promote is the
                   switchover action
+  --peer ADDR     run as the active, but name the peer's monitoring
+                  address this instance tracks if it is later demoted
+                  — so a demoted active reconverges and stays
+                  promotable. Mutually exclusive with --standby;
+                  requires --listen
   --revised       declare this standby's model a deliberate revision of
                   the active's: a pulled checkpoint whose model
                   fingerprint differs crosses the boundary under the
@@ -460,6 +487,7 @@ impl Options {
         let mut dt = None;
         let mut listen = None;
         let mut standby = None;
+        let mut peer = None;
         let mut remote = None;
         let mut driven = false;
         let mut auto_promote = None;
@@ -498,6 +526,7 @@ impl Options {
                 }
                 "--listen" => listen = Some(value("--listen")?),
                 "--standby" => standby = Some(value("--standby")?),
+                "--peer" => peer = Some(value("--peer")?),
                 "--remote" => remote = Some(value("--remote")?),
                 "--driven" => driven = true,
                 "--revised" => revised = true,
@@ -542,6 +571,7 @@ impl Options {
                 ("--dt", dt.is_some()),
                 ("--listen", listen.is_some()),
                 ("--standby", standby.is_some()),
+                ("--peer", peer.is_some()),
                 ("--remote", remote.is_some()),
                 ("--driven", driven),
                 ("--auto-promote", auto_promote.is_some()),
@@ -583,6 +613,22 @@ impl Options {
                     .to_string(),
             );
         }
+        if peer.is_some() {
+            if standby.is_some() {
+                return Err(
+                    "--peer names the tracking peer of a launched active; it does not \
+                     combine with --standby, which already runs as the tracking peer"
+                        .to_string(),
+                );
+            }
+            if listen.is_none() {
+                return Err(
+                    "--peer requires --listen: the demotion it answers and the tracking \
+                     announcements live on the monitor"
+                        .to_string(),
+                );
+            }
+        }
         if driven {
             if listen.is_none() {
                 return Err(
@@ -614,6 +660,7 @@ impl Options {
             dt,
             listen,
             standby,
+            peer,
             remote,
             driven,
             auto_promote,
@@ -875,7 +922,7 @@ fn main() -> ExitCode {
     // requests, tick by tick, without a wall clock.
     if options.driven {
         let addr = options.listen.as_deref().unwrap();
-        let track = match &options.standby {
+        let track = match options.standby.as_deref().or(options.peer.as_deref()) {
             Some(active) => match resolve(active) {
                 Ok(active) => Some(active),
                 Err(error) => return fail(error),
@@ -916,15 +963,6 @@ fn main() -> ExitCode {
             Ok(active_addr) => active_addr,
             Err(error) => return fail(error),
         };
-        // The fetch worker the tracking cycles pull from: checkpoint
-        // fetches run on its own thread, each scan cycle consuming the
-        // latest completed pull non-blockingly — an unreachable or
-        // wedged active stalls neither the scan cadence nor the
-        // monitor's request serving, and a cycle whose pull produced
-        // no checkpoint is the heartbeat miss the failover budget
-        // counts, so the promotion window stays budget × scan period
-        // whatever the fetch latency.
-        let mut puller = CheckpointPuller::new(active_addr);
         match &options.listen {
             Some(addr) => {
                 let monitor = match Monitor::bind_paced_peer_with(
@@ -944,21 +982,10 @@ fn main() -> ExitCode {
                 let monitor = monitor.with_standby_source(active_addr);
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
+                let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || {
-                        // The standby's per-scan tracking: one pull, the
-                        // miss accounting, and the promote-on-budget
-                        // sequence — `Peer::track_once` under the
-                        // monitor's lock, its queued transitions
-                        // journaled by the recorder; the report is the
-                        // loop's log lines. The pull consumes the fetch
-                        // worker's latest result — the network wait
-                        // itself runs off the lock and off the cycle.
-                        let report = monitor.track_cycle(|| puller.poll());
-                        report_tracking(&report, active_addr);
-                        monitor.paced_scan()
-                    },
+                    || tracked_cycle(&monitor, &mut puller),
                     step,
                     &options,
                     period.unwrap(),
@@ -968,6 +995,11 @@ fn main() -> ExitCode {
                 // Without a monitor nothing external can promote this
                 // standby — only the armed failover path can — and the
                 // RefCell lets the two loop closures share the peer.
+                // There is also no monitor address to announce on the
+                // pulls — the serving peer could not track this one
+                // back anyway, since a monitorless standby serves no
+                // checkpoint endpoint.
+                let mut puller = CheckpointPuller::new(active_addr, None);
                 let peer = std::cell::RefCell::new(peer);
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
@@ -1039,16 +1071,31 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                // A --peer launched active names its tracking source up
+                // front — where this instance pulls checkpoints if it is
+                // demoted — ahead of anything a tracking peer announces
+                // through its pulls.
+                let monitor = match &options.peer {
+                    Some(peer) => match resolve(peer) {
+                        Ok(peer) => monitor.with_standby_source(peer),
+                        Err(error) => return fail(error),
+                    },
+                    None => monitor,
+                };
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
                 eprintln!("listening on {}", monitor.local_addr());
                 // Demotion may re-quiesce this instance mid-run, so the
-                // plant step consults the role each scan.
+                // plant step consults the role each scan — and the scan
+                // cycle itself tracks a checkpoint source once demoted:
+                // the configured --peer, or the address the tracking peer
+                // announced through its pulls.
                 let step = || driver.step(dt, monitor.owns_field());
+                let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || monitor.paced_scan(),
+                    || tracked_cycle(&monitor, &mut puller),
                     step,
                     &options,
                     period.unwrap(),
@@ -1092,6 +1139,34 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// One paced scan cycle behind the monitor: the tracking pull first —
+/// while the peer does not own the field and a checkpoint source exists
+/// — then the scan itself. The source is re-resolved every cycle:
+/// the configured `--standby`/`--peer` target when set, else the monitor
+/// address a tracking peer announced through its `?peer=` pulls — the
+/// follow-peer half that lets a demoted launched active find its
+/// successor without a restart. The puller follows the resolved source,
+/// respawning when it changes, and announces this monitor's own address
+/// on every pull so the serving peer learns where to track back. A
+/// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
+/// the pull, so the puller's fetch thread idles until a demotion.
+fn tracked_cycle(
+    monitor: &Monitor<'_>,
+    puller: &mut Option<(SocketAddr, CheckpointPuller)>,
+) -> Result<Tick, ScanError> {
+    if let Some(source) = monitor.tracking_source() {
+        if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
+            *puller = Some((
+                source,
+                CheckpointPuller::new(source, Some(monitor.local_addr())),
+            ));
+        }
+        let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
+        report_tracking(&report, source);
+    }
+    monitor.paced_scan()
 }
 
 /// The standby loop's presentation half of a tracking cycle: logs what

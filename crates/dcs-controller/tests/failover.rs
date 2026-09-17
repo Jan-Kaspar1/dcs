@@ -591,11 +591,16 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // its first quiesced scan settles the reported role to `standby`:
     // the survivable degraded state. Its writes stay behind the
     // re-closed gate — exactly one peer writes the field after failover.
+    // The promoted peer announced itself through its pulls, so the
+    // demoted run's first tracking cycle reconverges on its successor.
     relay.partition(false);
     active.advance(1).unwrap();
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby, "{report:?}");
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {report:?}"
+    );
 
     for tick in 1..=M {
         let owner = standby.advance(1).unwrap();
@@ -806,7 +811,10 @@ fn a_misordered_promotion_degrades_the_superseded_active() {
     let quiesced = active.advance(1).unwrap();
     let settled = active.role().unwrap();
     assert_eq!(settled.role, Role::Standby, "{settled:?}");
-    assert_eq!(settled.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(settled.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {settled:?}"
+    );
     assert_eq!(quiesced.tick.0, fenced_scan.tick.0 + 1);
 
     // The journal carries the evidence: the claim loss beside the

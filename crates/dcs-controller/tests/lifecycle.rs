@@ -308,12 +308,22 @@ fn answer_fixture(shared: &FixtureShared, stream: &mut TcpStream) {
         }
     }
     let request = String::from_utf8_lossy(&head);
-    let (status, body) = if !request.starts_with("GET /checkpoint ") {
+    let target = request.split_whitespace().nth(1).unwrap_or("");
+    // A tracking pull announces the pulling monitor on `?peer=` —
+    // forward it so the proxied upstream learns its follow-peer source
+    // exactly like an unproxied pull's.
+    let announcing = announced_peer(target);
+    let (status, body) = if !(target == "/checkpoint" || target.starts_with("/checkpoint?")) {
         (404, "not found".to_string())
     } else {
         let upstream = *shared.upstream.lock().unwrap();
         let rewrite = *shared.rewrite.lock().unwrap();
-        match MonitorClient::new(upstream).checkpoint() {
+        let client = MonitorClient::new(upstream);
+        let pulled = match announcing {
+            Some(peer) => client.checkpoint_announcing(peer),
+            None => client.checkpoint(),
+        };
+        match pulled {
             Ok(checkpoint) => (200, rewritten(&checkpoint, rewrite)),
             Err(error) => (500, error.to_string()),
         }
@@ -323,6 +333,15 @@ fn answer_fixture(shared: &FixtureShared, stream: &mut TcpStream) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// The `peer=` announcement a tracking pull carries on its request
+/// target — `None` for a plain `GET /checkpoint`.
+fn announced_peer(target: &str) -> Option<SocketAddr> {
+    target.split_once('?')?.1.split('&').find_map(|pair| {
+        pair.strip_prefix("peer=")
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 /// The document the fixture serves under `rewrite`: the live active
@@ -855,13 +874,18 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     // The link heals — the demoted peer's monitor answers again — and
     // its first quiesced scan settles `standby`, its writes staying
     // behind the re-closed gate: the survivable degraded state the
-    // single-writer rule resolves a superseded owner to.
+    // single-writer rule resolves a superseded owner to. The promoted
+    // peer announced itself through its pulls, so the demoted run's
+    // first tracking cycle reconverges on its successor.
     relay.partition(false);
     let quiesced_scan = resumed.advance(1).unwrap();
     assert_eq!(quiesced_scan.tick, Tick(promotion_tick + 1));
     let settled = resumed.role().unwrap();
     assert_eq!(settled.role, Role::Standby);
-    assert_eq!(settled.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(settled.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {settled:?}"
+    );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
     assert_eq!(
         role_changes(&resumed),

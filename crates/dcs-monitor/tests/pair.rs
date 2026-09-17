@@ -120,6 +120,13 @@ impl PeerRig {
     /// `None`: pair-view tests exercise roles and routing, not field
     /// quiescence — and serves its monitor on a spawned thread.
     fn start(role: Role) -> Self {
+        Self::start_tracking(role, None)
+    }
+
+    /// [`start`](Self::start) with `source` recorded as the monitor's
+    /// tracking source — the configured `--peer`/`--standby` half of
+    /// the follow-peer contract a demotion tracks.
+    fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
             (PointId(20), Value::Float(0.0)),
@@ -134,7 +141,12 @@ impl PeerRig {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
         };
-        let monitor = Arc::new(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
+        let monitor = match source {
+            Some(source) => monitor.with_standby_source(source),
+            None => monitor,
+        };
+        let monitor = Arc::new(monitor);
         let addr = monitor.local_addr();
         let client = MonitorClient::new(addr);
         let serving = Arc::clone(&monitor);
@@ -314,8 +326,10 @@ fn dropped_standby_is_a_named_redundancy_fault_while_the_active_view_runs() {
 
 #[test]
 fn role_flip_moves_the_command_target_and_the_tick_domain_continues() {
-    let peer_a = PeerRig::start(Role::Active);
     let peer_b = PeerRig::start(Role::Standby);
+    // A launched active naming its peer — the configured tracking
+    // source its demotion follows.
+    let peer_a = PeerRig::start_tracking(Role::Active, Some(peer_b.addr));
     let mut pair = PairClient::new([peer_a.addr, peer_b.addr]);
 
     // A runs three ticks; B applies the checkpoint — converging to

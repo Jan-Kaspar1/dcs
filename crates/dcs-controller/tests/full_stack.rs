@@ -996,8 +996,8 @@ fn run_full_stack(tag: &str) -> Outcome {
         POST_SWITCH_SCANS,
     );
     // Roles settled on the first post-switch scan: the promoted peer
-    // reports active, the demoted peer standby — unsynchronized, its
-    // track ended with its field ownership.
+    // reports active, the demoted peer standby — and already tracking
+    // its successor again through the announced follow-peer source.
     assert_eq!(
         standby.role().unwrap(),
         RoleReport {
@@ -1008,7 +1008,10 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby);
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {report:?}"
+    );
     let reports = poll(&mut pair);
     assert_eq!(reports[0].role, Role::Standby);
     assert_eq!(reports[1].role, Role::Active);

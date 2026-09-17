@@ -373,7 +373,7 @@ fn assert_dead_peer_pull_stays_off_the_request_path(dead: SocketAddr) {
 
     // The paced loop, shaped like dcs-controller's: one tracking cycle
     // consuming the fetch worker's latest pull, then one paced scan.
-    let mut puller = CheckpointPuller::new(dead);
+    let mut puller = CheckpointPuller::new(dead, None);
     let pacing = Arc::clone(&standby.monitor);
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);

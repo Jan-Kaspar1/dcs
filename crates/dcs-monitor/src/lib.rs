@@ -356,7 +356,7 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    PublicationHealth, ResourceView, RoleReport, SchemaView, TelemetrySnapshot, Tick,
+    PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
@@ -468,12 +468,20 @@ pub struct Monitor<'d> {
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
     /// The tracking source a standby pulls checkpoints from — the
-    /// `--standby` target on a paced standby's monitor, or `Driven`'s
-    /// `track` on a driven one. `POST /promote` runs one final pull
-    /// against it before the gate lifts ([`Peer::final_sync`]), so a
-    /// command the active admitted up to the promote request is carried
-    /// into the promoted run.
+    /// `--standby` target on a paced standby's monitor, `--peer` on a
+    /// launched active's, or `Driven`'s `track` on a driven one.
+    /// `POST /promote` runs one final pull against it before the gate
+    /// lifts ([`Peer::final_sync`]), so a command the active admitted up
+    /// to the promote request is carried into the promoted run.
     standby_source: Option<SocketAddr>,
+    /// The monitor address a tracking peer announced through its
+    /// `GET /checkpoint?peer=` pulls — the follow-peer half of the
+    /// tracking-source contract: a peer with no configured source that
+    /// is later demoted tracks its successor here, so a launched active
+    /// demoted mid-run reconverges and stays promotable instead of
+    /// stranding `unsynchronized` forever. Outside `shared`: the value
+    /// is request-path bookkeeping, never part of a scan's state.
+    announced: Mutex<Option<SocketAddr>>,
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
@@ -585,6 +593,7 @@ impl<'d> Monitor<'d> {
             paced: false,
             driven: Driven::default(),
             standby_source: None,
+            announced: Mutex::new(None),
         })
     }
 
@@ -606,6 +615,21 @@ impl<'d> Monitor<'d> {
     pub fn with_standby_source(mut self, source: SocketAddr) -> Self {
         self.standby_source = Some(source);
         self
+    }
+
+    /// The checkpoint address this peer tracks — `Driven`'s `track` or
+    /// the configured [`with_standby_source`](Self::with_standby_source)
+    /// when set, else the monitor address a tracking peer announced
+    /// through its `GET /checkpoint?peer=` pulls. The announced fallback
+    /// is the follow-peer half of the tracking-source contract: a peer
+    /// launched without a source — an active never told its peer — that
+    /// is later demoted tracks its successor here and reconverges
+    /// instead of stranding `unsynchronized` and unpromotable.
+    pub fn tracking_source(&self) -> Option<SocketAddr> {
+        self.driven
+            .track
+            .or(self.standby_source)
+            .or_else(|| *self.announced.lock().unwrap())
     }
 
     /// The address the listener is bound to.
@@ -858,6 +882,13 @@ impl<'d> Monitor<'d> {
             },
             (Method::Get, "/receipts") => json(200, &*self.store.receipts()),
             (Method::Get, "/checkpoint") => {
+                // The follow-peer half of the tracking-source
+                // contract: a tracking peer announces its own monitor
+                // address on the pull, so this instance knows where to
+                // track if it is later demoted.
+                if let Some(announced) = checkpoint_peer(query) {
+                    *self.announced.lock().unwrap() = Some(announced);
+                }
                 json(200, &self.shared.lock().unwrap().peer.checkpoint())
             }
             (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
@@ -938,10 +969,11 @@ impl<'d> Monitor<'d> {
                         // promotion — reports through the peer's named
                         // sync state, which `GET /role` serves; the scan
                         // still runs on its last-known state.
-                        if let Some(active) = self.driven.track {
+                        if let Some(active) = self.tracking_source() {
+                            let own = self.local_addr();
                             track_and_record(&mut shared, &self.store, || {
                                 MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
-                                    .checkpoint()
+                                    .checkpoint_announcing(own)
                                     .map_err(|error| format!("fetch from {active}: {error}"))
                             });
                         }
@@ -1002,10 +1034,10 @@ impl<'d> Monitor<'d> {
         // gate `Peer::final_sync` itself applies — so it fetches
         // nothing; the consume below re-applies the gate, discarding a
         // checkpoint fetched while a concurrent promotion landed.
-        let pulled = match self.standby_source {
+        let pulled = match self.tracking_source() {
             Some(source) if promote && !self.shared.lock().unwrap().peer.owns_field() => Some(
                 MonitorClient::with_timeout(source, CHECKPOINT_PULL_TIMEOUT)
-                    .checkpoint()
+                    .checkpoint_announcing(self.local_addr())
                     .map_err(|error| format!("fetch from {source}: {error}")),
             ),
             _ => None,
@@ -1024,6 +1056,13 @@ impl<'d> Monitor<'d> {
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
+        } else if peer.owns_field() && self.tracking_source().is_none() {
+            // A field owner with no tracking source — nothing
+            // configured and no standby that announced itself — would
+            // demote into a permanently unsynchronized standby that no
+            // pull can ever reconverge; refuse up front rather than
+            // silently marooning the instance.
+            Err(SwitchError::NoTrackingSource)
         } else {
             peer.demote()
         };
@@ -1146,6 +1185,21 @@ fn history_query(query: &str) -> Result<(Vec<PointId>, u64), String> {
         }
     }
     Ok((points, since))
+}
+
+/// The `/checkpoint` query's `peer` key — the pulling monitor's own
+/// address, announced so this instance knows where to track after a
+/// demotion. An absent or unparseable value simply announces nothing:
+/// the checkpoint itself is still served, keeping older pullers and
+/// plain `GET /checkpoint` readers compatible.
+fn checkpoint_peer(query: &str) -> Option<SocketAddr> {
+    query_pairs(query).find_map(|(key, value)| {
+        if key == "peer" {
+            value.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// The `/journal` query: `since` keeps only entries with a higher `seq`.
@@ -1278,7 +1332,10 @@ pub struct CheckpointPuller {
 impl CheckpointPuller {
     /// Spawns the fetch worker for a standby tracking the active at
     /// `active` — its monitor address, the same `--standby` target.
-    pub fn new(active: SocketAddr) -> Self {
+    /// `announce`, when set, is this monitor's own address carried on
+    /// each fetch as `?peer=` — the announcement that gives the serving
+    /// peer somewhere to track if it is demoted later.
+    pub fn new(active: SocketAddr, announce: Option<SocketAddr>) -> Self {
         let (requests, request_rx) = mpsc::channel::<()>();
         let (result_tx, results) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1286,9 +1343,11 @@ impl CheckpointPuller {
             // One fetch per request; the channels closing — the puller
             // dropped — ends the loop.
             while request_rx.recv().is_ok() {
-                let pulled = client
-                    .checkpoint()
-                    .map_err(|error| format!("fetch from {active}: {error}"));
+                let pulled = match announce {
+                    Some(own) => client.checkpoint_announcing(own),
+                    None => client.checkpoint(),
+                }
+                .map_err(|error| format!("fetch from {active}: {error}"));
                 if result_tx.send((Instant::now(), pulled)).is_err() {
                     return;
                 }
@@ -1416,6 +1475,14 @@ impl MonitorClient {
     /// peer-transport decision.
     pub fn checkpoint(&self) -> io::Result<Checkpoint> {
         self.get_json("/checkpoint")
+    }
+
+    /// `GET /checkpoint?peer=<addr>`: the tracking pull — the
+    /// checkpoint fetch plus the follow-peer announcement: `peer`
+    /// names this client's own monitor address, which the serving
+    /// monitor records as its tracking source for a later demotion.
+    pub fn checkpoint_announcing(&self, peer: SocketAddr) -> io::Result<Checkpoint> {
+        self.get_json(&format!("/checkpoint?peer={peer}"))
     }
 
     /// `GET /role`: the instance's reported redundancy role and standby
