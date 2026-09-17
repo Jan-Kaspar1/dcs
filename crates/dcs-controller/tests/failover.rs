@@ -29,7 +29,7 @@ use dcs_assembly::assemble;
 use dcs_controller::registry;
 use dcs_core::{
     Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Role,
-    StandbySync, TelemetrySnapshot, Value, ValueKind,
+    StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -89,12 +89,16 @@ const HELD: PointId = PointId(30);
 
 /// A controllable network path for the checkpoint-pull heartbeat: while
 /// `partitioned` is clear the relay forwards each connection to the
-/// active's monitor; while set it accepts and immediately drops them —
-/// the refused/EOF failure a partitioned or dead peer produces. The flag
-/// is only ever flipped between scripted ticks, so a pull's verdict is
-/// never racy.
+/// upstream the standby's `--standby` is pointed at; while set it
+/// accepts and immediately drops them — the refused/EOF failure a
+/// partitioned or dead peer produces. The flag is only ever flipped
+/// between scripted ticks, so a pull's verdict is never racy. The
+/// upstream itself is retargetable — a restarted process binds a new
+/// ephemeral port, and the configured `--standby` address must keep
+/// reaching it.
 struct Relay {
     addr: SocketAddr,
+    upstream: Arc<std::sync::Mutex<SocketAddr>>,
     partitioned: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
@@ -106,9 +110,11 @@ impl Relay {
     fn forwarding(upstream: SocketAddr) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
+        let upstream = Arc::new(std::sync::Mutex::new(upstream));
         let partitioned = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let accept = {
+            let upstream = Arc::clone(&upstream);
             let partitioned = Arc::clone(&partitioned);
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
@@ -123,6 +129,7 @@ impl Relay {
                         // a hang.
                         drop(stream);
                     } else {
+                        let upstream = *upstream.lock().unwrap();
                         thread::spawn(move || pump(stream, upstream));
                     }
                 }
@@ -130,6 +137,7 @@ impl Relay {
         };
         Self {
             addr,
+            upstream,
             partitioned,
             stop,
             accept: Some(accept),
@@ -139,6 +147,12 @@ impl Relay {
     /// Drops or restores the heartbeat path mid-run.
     fn partition(&self, cut: bool) {
         self.partitioned.store(cut, Ordering::Relaxed);
+    }
+
+    /// Repoints the forwarding at a restarted process's new address —
+    /// each later connection follows it.
+    fn retarget(&self, upstream: SocketAddr) {
+        *self.upstream.lock().unwrap() = upstream;
     }
 }
 
@@ -1361,6 +1375,195 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
         field.read(VALVE).unwrap().value,
         image_value(&owner, VALVE),
         "the field must carry only the promoted owner's writes"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA finding `tracking-apply-rewinds-run-tick-on-source-restart`,
+/// on the driven failover rig: the documented switchover promotes the
+/// standby; the launched active is then killed and respawned cold — no
+/// `--state-file` — so its startup claim fences the promoted peer into
+/// demotion and its fresh monitor serves the demoted peer tick-1
+/// checkpoints. The demoted run must adopt the restarted generation's
+/// state without rewinding its own tick: the journal names the
+/// boundary (`source_restarted`), the run's tick and every point's
+/// `/history` stay monotone, and the peer reconverges as a tracking
+/// standby of the restarted owner — instead of silently replaying its
+/// own recorded ticks.
+#[test]
+fn a_cold_restarted_source_resyncs_the_demoted_peer_without_rewinding() {
+    let dir = std::env::temp_dir().join(format!("dcs-failover-resync-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    // The field observer's setpoint lands before the controllers spawn:
+    // the launched active's startup claim fences this attachment from
+    // boot, so every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    let mut active_process = spawn_controller(&pair_model, &[], DT);
+    // The standby's configured tracking source is the relay the test
+    // retargets at the respawned process: a cold restart binds a new
+    // ephemeral port, so `--standby` must keep reaching the stream.
+    let relay = Relay::forwarding(active_process.addr);
+    let mut standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), relay.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // The defect the test watches for: the standby's run tick — the
+    // journal/history attribution domain — must never decrease.
+    let mut last_tick = 0u64;
+    let mut advance_standby = |ticks: u64| {
+        let snapshot = standby.advance(ticks).unwrap();
+        assert!(
+            snapshot.tick.0 >= last_tick,
+            "the standby's run tick rewound: {last_tick} -> {}",
+            snapshot.tick.0
+        );
+        last_tick = snapshot.tick.0;
+        snapshot
+    };
+
+    for _ in 0..N {
+        advance_standby(1);
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // The documented switchover: demote the launched active, then
+    // promote the converged standby — its claim takes the field.
+    active.demote().unwrap();
+    active.advance(1).unwrap();
+    standby.promote().unwrap();
+    let promoted = advance_standby(1);
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    let carried = field.read(VALVE).unwrap().value;
+    assert_eq!(carried, image_value(&promoted, VALVE));
+
+    // The finding's trigger: kill the demoted launched active and
+    // respawn it cold — no `--state-file`. The fresh process's startup
+    // claim preempts the promoted peer's, and its monitor serves the
+    // demoted peer a checkpoint stream restarting at tick 1 through
+    // the retargeted relay.
+    kill(&mut active_process);
+    let restarted_process = spawn_controller(&pair_model, &[], DT);
+    let restarted = MonitorClient::new(restarted_process.addr);
+    relay.retarget(restarted_process.addr);
+
+    // The restarted owner's first scan runs at its own tick 1; the
+    // fenced peer's next write meets the claim and demotes it in
+    // place — the run tick still advancing its own line.
+    let owner = restarted.advance(1).unwrap();
+    assert_eq!(owner.tick.0, 1);
+    let fenced = advance_standby(1);
+    assert_eq!(
+        fenced.io_health.last_error.map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the fenced peer's write must be refused at the field: {:?}",
+        fenced.io_health
+    );
+    assert_eq!(standby.role().unwrap().role, Role::Demoting);
+    let demoted_at = fenced.tick;
+
+    // The first tracking cycle against the restarted stream: the
+    // demoted peer pulls the tick-1 checkpoint — a regressed stream,
+    // not a continuation — adopts its state, and lands it at its own
+    // run tick rather than rewinding to 1.
+    let resynced = advance_standby(1);
+    let settled = standby.role().unwrap();
+    assert_eq!(settled.role, Role::Standby, "{settled:?}");
+    assert_eq!(resynced.tick.0, demoted_at.0 + 1);
+    assert!(
+        matches!(
+            settled.sync,
+            Some(StandbySync::Tracking { aligned: Tick(1) })
+        ),
+        "the demoted peer must converge onto the restarted generation: {settled:?}"
+    );
+
+    // The boundary is named in the audit trail — the finding's
+    // "invisible generation change" — and the journal's tick
+    // attribution stays monotone throughout.
+    let journal = standby.journal(0).unwrap();
+    let restart = journal.iter().find_map(|entry| match &entry.event {
+        JournalEvent::SourceRestarted {
+            was_aligned,
+            resumed_at,
+        } => Some((entry.tick, *was_aligned, *resumed_at)),
+        _ => None,
+    });
+    assert_eq!(
+        restart,
+        Some((demoted_at, None, Tick(1))),
+        "the resync must journal the source restart: {journal:?}"
+    );
+    let attributed: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        attributed.windows(2).all(|pair| pair[0] <= pair[1]),
+        "journal ticks must be non-decreasing in seq order: {attributed:?}"
+    );
+
+    // Tracking continues upward on the new generation — every scan's
+    // tick monotone — while the field carries only the restarted
+    // owner's writes.
+    for _ in 0..3 {
+        let owner = restarted.advance(1).unwrap();
+        advance_standby(1);
+        assert_eq!(
+            field.read(VALVE).unwrap().value,
+            image_value(&owner, VALVE),
+            "the field must carry only the restarted owner's writes"
+        );
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the resynced peer must stay a promotable tracking standby: {:?}",
+        standby.role().unwrap()
+    );
+
+    // `/history` is newest-last per point: no sample may carry a tick
+    // below an earlier one's — the finding's non-monotonic tail.
+    for point_history in standby.history(&[], 0).unwrap() {
+        let ticks: Vec<u64> = point_history
+            .samples
+            .iter()
+            .map(|sample| sample.sample.tick.0)
+            .collect();
+        assert!(
+            ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+            "point {:?} history is not monotone: {ticks:?}",
+            point_history.point
+        );
+    }
+    assert!(
+        standby_process.child.try_wait().unwrap().is_none(),
+        "the resynced peer exited"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -1083,6 +1083,14 @@ fn main() -> ExitCode {
                         for reinitialized in peer.take_reinitializations() {
                             eprintln!("standby: {reinitialized}");
                         }
+                        for restart in peer.take_source_restarts() {
+                            eprintln!(
+                                "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
+                                restart.tick.0,
+                                restart.resumed_at.0,
+                                restart.was_aligned.map(|tick| tick.0)
+                            );
+                        }
                         for change in peer.take_role_changes() {
                             eprintln!(
                                 "standby: role {} -> {} at tick {}",

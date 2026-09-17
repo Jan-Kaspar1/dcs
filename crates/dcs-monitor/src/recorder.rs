@@ -31,7 +31,7 @@ use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
     JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
-use dcs_runtime::Executor;
+use dcs_runtime::{Executor, SourceRestart};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -218,6 +218,21 @@ impl Recorder {
     /// observed at.
     pub(super) fn note_field_claim_lost(&mut self, tick: Tick, point: PointId) {
         self.push(tick, JournalEvent::FieldClaimLost { point });
+    }
+
+    /// Journals a tracked-source restart — the checkpoint stream
+    /// regressed, the signature of a cold-restarted or replaced source
+    /// — attributed to the run tick the resync landed at, the apply
+    /// having adopted the regressed state without rewinding the run's
+    /// clock.
+    pub(super) fn note_source_restart(&mut self, restart: SourceRestart) {
+        self.push(
+            restart.tick,
+            JournalEvent::SourceRestarted {
+                was_aligned: restart.was_aligned,
+                resumed_at: restart.resumed_at,
+            },
+        );
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the

@@ -860,6 +860,9 @@ impl<'d> Monitor<'d> {
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
         }
+        for restart in peer.take_source_restarts() {
+            recorder.note_source_restart(restart);
+        }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
         // before the next scan publishes.
@@ -885,6 +888,9 @@ impl<'d> Monitor<'d> {
         }
         for report in peer.take_reinitializations() {
             recorder.note_reinitialized(report);
+        }
+        for restart in peer.take_source_restarts() {
+            recorder.note_source_restart(restart);
         }
         self.store.sync_receipts(peer.receipts());
         result
@@ -1169,6 +1175,9 @@ impl<'d> Monitor<'d> {
                 for report in peer.take_reinitializations() {
                     recorder.note_reinitialized(report);
                 }
+                for restart in peer.take_source_restarts() {
+                    recorder.note_source_restart(restart);
+                }
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
@@ -1218,6 +1227,9 @@ fn track_and_record(
     }
     for report in peer.take_reinitializations() {
         recorder.note_reinitialized(report);
+    }
+    for restart in peer.take_source_restarts() {
+        recorder.note_source_restart(restart);
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
