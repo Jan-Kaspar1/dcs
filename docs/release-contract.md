@@ -273,7 +273,17 @@ controller converging to `tracking` through `GET /role`, scans driven
 through `POST /scan` keeping the peers' images identical, a receipted
 `demote`/`promote` switching the roles, and the run continuing
 bumplessly with the adopted receipts and the durable journal files'
-transition records intact — the `consumers` stage, which replays that driven run
+transition records intact — plus the pair contract's refusal half on
+the same declared deployment: `POST /promote` on a freshly launched
+standby before its first transfer answering the named `not_converged`
+refusal with no field hand-off, a receipted write against a declared
+writable point submitted to the tracking standby's monitor answering
+the named `not_active` rejection with the point unchanged in the
+active's served snapshot and no command-side journal entry on either
+peer recording it as anything but the refusal, and the same promote
+succeeding once the standby tracks — the active's field writes,
+receipts, and journal undisturbed throughout — the `consumers` stage,
+which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -342,6 +352,8 @@ The checks' failures are named diagnostics:
 | `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `pair-failed` | The redundant-pair leg did not hold: the manifest-declared standby did not converge to `tracking`, the peers' images or adopted receipt logs diverged, the receipted `demote`/`promote` switch did not answer its named reports or refusals, the run did not continue bumplessly, or a declared `--state-file`/`--journal-file` path was not honored — the durable records missing the run's transitions or `seq` order. Reported by the reference plant's `ci/check.sh`. |
 | `pair-nondeterministic` | Two passes of the redundant-pair leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `refusal-failed` | The pair contract's refusal half did not hold: a `POST /promote` on the freshly launched standby before its first transfer did not answer the named `not_converged` refusal or handed the field off, a receipted write to the tracking standby's monitor did not answer the named `not_active` rejection — or moved the point in the active's served snapshot, entered a peer's adopted receipt log, or left a journal entry recording it as anything but the refusal — the same promote did not succeed once the standby tracked, or the active's field writes, receipts, or journal did not run undisturbed. Reported by the reference plant's `ci/check.sh`. |
+| `refusal-nondeterministic` | Two passes of the role-gated refusal leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |

@@ -29,15 +29,20 @@
 //! `POST /scan` keeping the peers identical, a receipted
 //! `demote`/`promote` switching the roles, and the run continuing
 //! bumplessly with the adopted receipts and the durable journal
-//! files' transition records intact —
-//! the `consumers` stage,
-//! which replays that driven run under each consumer schedule (no UI,
-//! polling, a stalled reader, churn, malformed/flooded traffic, a UI
+//! files' transition records intact — plus the pair contract's
+//! refusal half: `POST /promote` before the standby's first transfer
+//! answering the named `not_converged` refusal with no field hand-off,
+//! a receipted write to the tracking standby answering the named
+//! `not_active` rejection with no phantom effect or audit, and the
+//! same promote succeeding once the standby tracks — the `consumers`
+//! stage, which replays that driven run under each consumer schedule
+//! (no UI, polling, a stalled reader, churn, malformed/flooded
+//! traffic, a UI
 //! process restart) requiring identical digests, the `ctl` stage,
 //! which exercises the released `dcs-ctl` operator CLI's receipted
 //! `invoke` path, read subcommands, and named refusal modes against
-//! the same driven run, and the `upgrade`
-//! stage, which repins the materialized tree to the checkout's `HEAD`
+//! the same driven run, and the `upgrade` stage, which repins the
+//! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
 //!
@@ -52,7 +57,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`, and the
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `refusal-failed`, and the
 //! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -379,6 +385,25 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("broken-peer-flag: reported, pair-failed"),
         "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
+    // The pair contract's refusal half ran and held: the pre-transfer
+    // promote answered not_converged, the standby-directed write
+    // answered not_active, and the same promote succeeded once
+    // tracking — its digest line reports the evidence, and the
+    // doctored applied-expectation case reported its named diagnostic.
+    let refusal_line = stdout
+        .lines()
+        .find(|line| line.contains("refusal-digest"))
+        .unwrap_or_else(|| panic!("the refusal leg reported no digest:\n{stdout}"));
+    for phrase in ["not_converged", "not_active", "promoted at tick"] {
+        assert!(
+            refusal_line.contains(phrase),
+            "the refusal digest names no '{phrase}' evidence: {refusal_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-applied: reported, refusal-failed"),
+        "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -581,6 +606,58 @@ fn a_broken_peer_flag_reports_pair_failed() {
         String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
         "expected the lost-convergence evidence, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A doctored refusal leg asserting the standby-directed write settles
+/// `applied` is the `refusal-failed` diagnostic — exercised against a
+/// copied tree at script level with the locally built tooling, the
+/// same seam the broken-peer-flag test uses. The driver's
+/// `expect-applied` tamper flips the leg's own expectation; the
+/// tracking standby's honest `not_active` rejection must fail it
+/// naming the actual answer — never a silently unrefused pass.
+#[test]
+fn a_doctored_write_expectation_reports_refusal_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-refusal-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/refusal.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-applied",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the role-gated refusal leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored write expectation passed the refusal leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
+        "expected the named not_active evidence, got:\n{stderr}"
     );
 }
 

@@ -40,6 +40,10 @@ ci/restart.py          the restart-recovery leg — the driven
 ci/pair.py             the redundant-pair leg — the manifest-declared
                        standby pair run, switched, and checked against
                        its persisted state and journal files
+ci/refusal.py          the pair contract's refusal half — the
+                       pre-transfer promote answering not_converged,
+                       the standby-directed write answering not_active,
+                       the same promote succeeding once tracking
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -223,6 +227,26 @@ behavioral exercise, not just its static agreement. A violated
 contract fails `pair-failed`; two passes must produce the identical
 `pair-digest`, a divergence failing `pair-nondeterministic`.
 
+The stage's refusal half — `ci/refusal.py` on the same declared
+deployment — then proves the pair refuses honestly at its role
+boundaries, the half a customer driving their own pair needs the
+deployed controllers to answer. `POST /promote` on the freshly
+launched standby — before its first checkpoint transfer completes —
+answers the named `409 not_converged` refusal and hands nothing off:
+the duty stays `active`, the standby stays `unsynchronized`, and no
+`role_changed` lands in either peer's journal. A receipted
+`write_value` against a declared writable point submitted to the
+tracking standby's monitor answers the named `not_active` rejection —
+the point unchanged in the active's served snapshot, the write absent
+from both peers' adopted receipt logs, and no `command_settled`
+journal entry on either peer recording it as anything but the named
+refusal. And once the standby tracks, the same `POST /promote`
+succeeds through the documented `demote`/`promote` switch — the
+active's field writes, receipts, and journal undisturbed throughout.
+A violated contract fails `refusal-failed`; two passes must produce
+the identical `refusal-digest`, a divergence failing
+`refusal-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -390,7 +414,11 @@ or failing to name a refused checkpoint — is `restart-resume-failed`;
 two restart-leg passes diverging is `restart-resume-nondeterministic`;
 a declared pair failing to converge, switch, or keep its journaled
 record is `pair-failed`; two pair-leg passes diverging is
-`pair-nondeterministic`;
+`pair-nondeterministic`; a role boundary refusing dishonestly — a
+pre-transfer promote not answering `not_converged`, a standby-directed
+write not answering `not_active`, or a refusal disturbing the active —
+is `refusal-failed`; two refusal-leg passes diverging is
+`refusal-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
