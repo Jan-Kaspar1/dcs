@@ -99,6 +99,24 @@ impl From<PlantError> for RemoteError {
     }
 }
 
+/// What a granted [`RemoteDriver::claim_writer`] found at the field:
+/// whether the claimed token was already held by another live
+/// attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimGrant {
+    /// No other live attachment held the token — the claim is the
+    /// field's sole writer arbitration, as a field owner expects.
+    Exclusive,
+    /// Another live attachment already held the token and keeps writing
+    /// under it: the documented shape for one owner's several
+    /// attachments — or a harness sharing its owner's claim — and the
+    /// signature of two field-owning processes pinned to one token,
+    /// which defeats the single-writer fencing a promotion relies on.
+    /// The grant stands either way; the flag exists so the sharing is
+    /// never silent.
+    Shared,
+}
+
 /// The connection behind [`RemoteDriver`]'s lock: `Some` while the link
 /// is live, `None` after a failed exchange — the next request lazily
 /// re-attaches — plus the re-attach bookkeeping and the link-level
@@ -143,7 +161,12 @@ impl Connection {
         };
         if let Some(owner) = self.owner {
             match exchange(&mut stream, &PlantRequest::EnsureWriter { owner }) {
-                Ok(PlantResponse::Done) => {}
+                // `ClaimedShared` is a grant: the re-armed claim joins a
+                // token another live attachment still holds — possible
+                // while the server has not yet reaped this driver's
+                // own dropped link, or while a genuine second claimant
+                // shares the token.
+                Ok(PlantResponse::Done) | Ok(PlantResponse::ClaimedShared { .. }) => {}
                 Ok(PlantResponse::Error {
                     error: PlantError::Fenced { .. },
                 }) => self.owner = None,
@@ -390,15 +413,22 @@ impl RemoteDriver {
     /// owner. [`release_claim`](Self::release_claim) forgets it — the
     /// demotion path's half of the rule that only the field's owner
     /// re-arms.
-    pub fn claim_writer(&self, owner: u64) -> Result<(), RemoteError> {
-        match self.request(&PlantRequest::ClaimWriter { owner })? {
-            PlantResponse::Done => {
-                self.connection.lock().unwrap().owner = Some(owner);
-                Ok(())
-            }
-            PlantResponse::Error { error } => Err(self.fail(error.into())),
-            _ => Err(self.protocol_violation()),
-        }
+    ///
+    /// The returned [`ClaimGrant`] reports what the field saw: a grant
+    /// answering `claimed_shared` means another live attachment already
+    /// holds the token — expected for a deliberate same-owner
+    /// attachment, but the signature of a second field-owning process
+    /// pinned to the same token, which defeats the single-writer
+    /// fencing promotion relies on.
+    pub fn claim_writer(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let grant = match self.request(&PlantRequest::ClaimWriter { owner })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => return Err(self.fail(error.into())),
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
     }
 
     /// Forgets the recorded writer claim — the demotion counterpart of

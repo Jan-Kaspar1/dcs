@@ -44,10 +44,12 @@
 //!   direction, observed sample, and active fault, ordered by point id.
 //! - `{"op":"claim_writer","owner":7}` — takes the plant's
 //!   field-write ownership for the `owner` token; answers
-//!   `{"result":"done"}`.
+//!   `{"result":"done"}`, or `{"result":"claimed_shared","owner":7}`
+//!   when another live attachment already holds the token.
 //! - `{"op":"ensure_writer","owner":7}` — the conditional re-grant a
 //!   re-attaching owner asserts; answers `done` while the field is
-//!   unclaimed or already claims `owner`, `fenced` while a different
+//!   unclaimed or already claims `owner` — `claimed_shared` when other
+//!   live attachments hold the token — `fenced` while a different
 //!   owner stands.
 //!
 //! ## Field write-ownership fencing
@@ -65,6 +67,17 @@
 //! to fence. Reads, fault injection, and `list_points` stay open to
 //! every attachment. Until the first `claim_writer`, every attachment
 //! writes freely.
+//!
+//! The claim tracks the live connections holding it, so a grant joining
+//! a token another live attachment already holds is flagged
+//! `claimed_shared` — granted, since one owner's several attachments
+//! share a token by design, but reported because the token cannot
+//! distinguish that from a second field-owning *process* reusing it:
+//! two controllers pinned to one `--owner-token` would both write and
+//! step, defeating the arbitration silently. A connection's end drops
+//! only its own hold — the claim itself stands — so the flag reports
+//! sharing among *live* holders and a re-attach after the last holder
+//! died answers plain `done`.
 //!
 //! A restarted server is a new claim lifetime — the `owner` mutex dies
 //! with the process — so `ensure_writer` is the conditional re-grant:
@@ -110,6 +123,6 @@ mod client;
 mod protocol;
 mod server;
 
-pub use client::{RemoteDriver, RemoteError};
+pub use client::{ClaimGrant, RemoteDriver, RemoteError};
 pub use protocol::{MAX_MESSAGE, PlantError, PlantRequest, PlantResponse};
 pub use server::PlantServer;
