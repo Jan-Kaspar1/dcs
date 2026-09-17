@@ -2790,7 +2790,8 @@ function describeEventField(field) {
 // {"role_changed": {from, to}} |
 // {"divergence_detected": {mismatches}} | {"reinitialized": {report}} |
 // {"source_restarted": {was_aligned, resumed_at}} — the tracked
-// stream's generation boundary.
+// stream's generation boundary — | {"run_boundary": {run}} — a new
+// process lifetime's marker on a restarted journal file.
 function describeEvent(event) {
   if ("point_changed" in event) {
     const change = event.point_changed;
@@ -2834,6 +2835,10 @@ function describeEvent(event) {
       (restart.was_aligned === null || restart.was_aligned === undefined
         ? ""
         : " (was aligned to " + restart.was_aligned + ")");
+  }
+  if ("run_boundary" in event) {
+    return "run " + event.run_boundary.run + " began — a new process " +
+      "lifetime; later entries carry its own tick domain";
   }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;

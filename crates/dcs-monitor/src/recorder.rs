@@ -91,6 +91,16 @@ pub(super) struct Recorder {
     /// durable value transitions diff against; absent until the point's
     /// first observed sample.
     values: HashMap<PointId, Value>,
+    /// The replayed journal file's last recorded quality per point —
+    /// the whole record's fold, not just the retained tail's.
+    /// [`observe_standing`](Self::observe_standing) adopts it as the
+    /// diff baseline for a run continuing restored executor state; a
+    /// cold run leaves it unused, its first observations journaling
+    /// `from: None` as designed.
+    replayed_qualities: HashMap<PointId, Quality>,
+    /// The replayed journal file's last recorded value per journaled
+    /// point — adopted under the same rule as `replayed_qualities`.
+    replayed_values: HashMap<PointId, Value>,
     /// The outcome last observed for each receipt in the executor's
     /// log — what the journal diffs against. A locally submitted
     /// command marks its entry at `note_command`; a checkpoint-adopted
@@ -113,6 +123,11 @@ impl Recorder {
     /// run-boundary marker. Replaying a configured file seeds the
     /// journal ring and continues `seq` numbering; a file that cannot
     /// be replayed fails here naming the file and the offending record.
+    /// When the file already records earlier lifetimes, this run's
+    /// marker also journals once as a served `run_boundary` entry — the
+    /// file marker's served form — so a `GET /journal` consumer can
+    /// attribute the entries on either side of the seam to their
+    /// process lifetime.
     pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
@@ -129,15 +144,32 @@ impl Recorder {
         for entry in replay.entries {
             store.push_journal(entry);
         }
-        Ok(Self {
+        let mut recorder = Self {
             store,
             next_seq: replay.next_seq,
             qualities: HashMap::new(),
             values: HashMap::new(),
+            replayed_qualities: replay.qualities,
+            replayed_values: replay.values,
             receipt_outcomes: Vec::new(),
             step_counts: Vec::new(),
             sink,
-        })
+        };
+        // A file that already records earlier lifetimes makes this run
+        // a restart: its boundary journals as an ordinary entry — the
+        // file's first entry of the run, taking the next `seq` like
+        // any event and attributed to the run's start tick. The first
+        // lifetime's marker stays file-only: a record's own beginning
+        // needs no boundary.
+        if replay.runs > 0 {
+            recorder.push(
+                tick,
+                JournalEvent::RunBoundary {
+                    run: replay.runs + 1,
+                },
+            );
+        }
+        Ok(recorder)
     }
 
     /// The publication store the recorded streams live in — the monitor
@@ -233,6 +265,63 @@ impl Recorder {
                 resumed_at: restart.resumed_at,
             },
         );
+    }
+
+    /// Marks the executor's standing state already observed — the
+    /// baseline a `--state-file` restore brings to a fresh recorder,
+    /// adopted at bind before the resumed run's first scan. The
+    /// restored receipt log's outcomes are this run's own audit record
+    /// continuing: a receipt that settled before the restart must not
+    /// re-journal on the first post-restart
+    /// [`record_scan`](Self::record_scan). The image's restored samples
+    /// are likewise already observed, so the first scan diffs only
+    /// genuine changes — a real post-restart transition journals with
+    /// the restored state as `from`, never a phantom `None`.
+    ///
+    /// For the points the image does not carry — field reads — the run
+    /// adopts the replayed journal's fold as its baseline: the file is
+    /// the run's own record, so a point re-observed unchanged across
+    /// the restart is no transition. A cold run keeps the empty
+    /// baseline: its first observations journal `from: None` by design
+    /// — the restart census the report tooling folds on. The
+    /// continuation test — a nonzero tick or a carried receipt — is
+    /// what a checkpoint restore leaves behind; a fresh executor's
+    /// internal-point initials must not seed it, or its first scan
+    /// would lose the designed census.
+    pub(super) fn observe_standing(&mut self, executor: &Executor<'_>) {
+        if executor.tick() == Tick::ZERO && executor.receipts().is_empty() {
+            return;
+        }
+        for (index, receipt) in executor.receipts().iter().enumerate() {
+            self.observe(index, receipt.outcome.clone());
+        }
+        let snapshot = executor.snapshot();
+        let journaled = |point: PointId| {
+            executor
+                .point_map()
+                .get(point)
+                .is_some_and(|spec| spec.journaled)
+        };
+        for telemetry in &snapshot.points {
+            let Some(sample) = telemetry.sample else {
+                continue;
+            };
+            self.qualities.insert(telemetry.point, sample.quality);
+            if journaled(telemetry.point) {
+                self.values.insert(telemetry.point, sample.value);
+            }
+        }
+        self.step_counts = snapshot
+            .components
+            .iter()
+            .map(|diagnostics| diagnostics.step_errors)
+            .collect();
+        for (point, quality) in std::mem::take(&mut self.replayed_qualities) {
+            self.qualities.entry(point).or_insert(quality);
+        }
+        for (point, value) in std::mem::take(&mut self.replayed_values) {
+            self.values.entry(point).or_insert(value);
+        }
     }
 
     /// Records one completed scan attributed to `scan_tick`; see the

@@ -1346,9 +1346,9 @@ fn published_reads_cover_every_execution_mode() {
             assert_published_surfaces(&monitor, &client, Tick(7));
             // The served journal is continuous across the restart:
             // the replayed pre-restart entries stand beside the
-            // post-restart ones in one `seq` domain — the restored
-            // run's adopted receipt re-journals at its applied tick,
-            // and the post-restart command settles at tick 7.
+            // post-restart ones in one `seq` domain — the restart's
+            // served boundary entry separates the lifetimes, and the
+            // post-restart command settles at tick 7.
             let journal = client.journal(0).unwrap();
             assert_eq!(journal[0].seq, 1);
             assert!(

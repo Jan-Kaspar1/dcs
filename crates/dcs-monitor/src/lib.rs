@@ -144,11 +144,16 @@
 //! `--state-file`: the checkpoint resumes the run's state, the journal
 //! preserves the run's record. Startup replays the file into the ring
 //! and continues `seq` numbering where it left off — a run-boundary
-//! marker line separates process lifetimes within the file — so
-//! `GET /journal` answers continuously across a restart; a file that
+//! marker line separates process lifetimes within the file, and a
+//! restart's marker also journals once as a `run_boundary` entry so a
+//! `GET /journal` consumer attributes entries to a process lifetime —
+//! so `GET /journal` answers continuously across a restart; a file that
 //! cannot be replayed fails startup naming the file and the offending
-//! record, and a missing file is a cold start. Point history stays
-//! volatile; only the journal persists.
+//! record, and a missing file is a cold start. A run resumed through
+//! `--state-file` diffs its first scan against the restored executor
+//! state and the replayed record's last observations, so the audit
+//! trail continues rather than re-journaling what it already recorded.
+//! Point history stays volatile; only the journal persists.
 //!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the
@@ -622,7 +627,11 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
-        let recorder = recorder::Recorder::new(config, peer.tick())?;
+        let mut recorder = recorder::Recorder::new(config, peer.tick())?;
+        // A `--state-file`-restored executor already carries the run's
+        // state — the receipt log and the restored image are this run's
+        // own record continuing, not new events to journal.
+        recorder.observe_standing(peer.executor());
         let store = recorder.store();
         // The bind-time read model is the first publication — any
         // journal tail a configured file replayed rides its event

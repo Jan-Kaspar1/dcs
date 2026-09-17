@@ -468,9 +468,8 @@ fn point_changes(journal: &[JournalEntry], point: PointId) -> Vec<(u64, Option<V
 
 /// Asserts `needle`'s `(from, to)` pairs are an in-order subsequence
 /// of `actual`'s — the scripted transitions landing in the order the
-/// script produced them, among the record's other entries (the run-2
-/// restart re-emits every journaled point's carried state as
-/// `from: None`).
+/// script produced them, among the record's other entries (a resumed
+/// run diffs its restored state, re-emitting nothing unchanged).
 fn assert_transitions(
     point: PointId,
     actual: &[(u64, Option<Value>, Value)],
@@ -1205,11 +1204,22 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         )),
         "the resumed run carries the unacknowledged latch"
     );
+    let served = active.journal(0).unwrap();
     assert_eq!(
-        active.journal(0).unwrap(),
-        before_restart,
+        &served[..before_restart.len()],
+        &before_restart[..],
         "the journal replays verbatim"
     );
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: interrupted,
+            event: JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(
         file_boundaries(&journal_active),
         vec![(1, 0), (2, interrupted.0)]
@@ -1541,17 +1551,13 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         &[(Some(b(true)), b(false)), (Some(b(false)), b(true))],
     );
     // The durable lifecycle persisted across the `--journal-file`
-    // restart: the resumed run re-emitted the carried latch state as
-    // `from: None`, and the post-restart ack landed as the same
+    // restart: the carried latch state re-observed unchanged is no
+    // transition, and the post-restart ack landed as the same
     // record's next transition.
     assert_transitions(
         layout.tank_low_alarm.unacknowledged,
         &transitions(layout.tank_low_alarm.unacknowledged),
-        &[
-            (Some(b(false)), b(true)),
-            (None, b(true)),
-            (Some(b(true)), b(false)),
-        ],
+        &[(Some(b(false)), b(true)), (Some(b(true)), b(false))],
     );
     // Beside the attributed receipts, in `seq` order: the mode
     // write's settle precedes the journaled transition it produced.
