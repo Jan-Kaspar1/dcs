@@ -23,18 +23,16 @@
 //! identically.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, IoDriver, JournalEvent, PointId, Quality, QualityReason,
-    Role, StandbySync, SwitchError, TelemetrySnapshot, Value, ValueKind,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Quality,
+    QualityReason, Role, StandbySync, SwitchError, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::path::Path;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, controller_model, image_value, kill, spawn_controller, spawn_plant};
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out, an analog-input scaling
 /// and a PID parameterized for dt 0.1.
@@ -58,125 +56,13 @@ const DT: &str = "0.1";
 const N: u64 = 20;
 /// Ticks after the switch whose outputs must equal the reference run's.
 const M: u64 = 40;
+/// The throwaway token the harness's pre-spawn setpoint seed claims
+/// under — `ensure_writer`, then released — so the seeding leaves no
+/// claim standing against the launched pair's startup claim.
+const SEED: u64 = 499_900;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
-
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared tank-loop model with every device's kind re-pointed at
-/// `sim-tcp` and `parameters.address` set — the remote-sim path through
-/// the assembly driver registry.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
-}
 
 /// One scripted run of the full hot-swap scenario. Returns the valve
 /// command and raw level the shared plant carried after each tick — the
@@ -187,30 +73,53 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
 
     // Two shared plants: the pair's and the reference run's — identical
     // model and dynamics, identical request sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    let reference_model = controller_model(
+        &dir,
+        "reference.json",
+        MODEL_SOURCE,
+        reference_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    // Observers on both shared plants — the fields the scenario asserts
+    // on. The setpoints land before the controllers spawn: the launched
+    // actives' startup claims fence these attachments from boot, so
+    // every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reference_field = RemoteDriver::connect(reference_plant.addr).unwrap();
+    // The fields fail closed while unclaimed: the seeding writes ride a
+    // conditional claim released afterward — the tool's shape.
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+    reference_field.ensure_writer(SEED).unwrap();
+    reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    reference_field.release_writer().unwrap();
 
     // The pair: the active first — the standby's --standby names its
     // monitoring address — then the standby, then the reference run on
     // its own plant.
-    let active_process = spawn_controller(&pair_model, &[]);
+    let active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
-    let reference_process = spawn_controller(&reference_model, &[]);
+    let reference_process = spawn_controller(&reference_model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let reference = MonitorClient::new(reference_process.addr);
-
-    // Observers on both shared plants — the field the scenario asserts
-    // on. The setpoint lands once, as the run's operating point.
-    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
-    let reference_field = RemoteDriver::connect(reference_plant.addr).unwrap();
-    field.write(SETPOINT, Value::Float(50.0)).unwrap();
-    reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Roles are visible on both monitor surfaces before any transfer:
     // the active, and an unsynchronized standby.
@@ -322,7 +231,11 @@ fn run_swap(tag: &str) -> Vec<(Value, Value)> {
     assert_eq!(report.sync, None);
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby);
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted launched active follows its successor's announced \
+         address and reconverges: {report:?}"
+    );
     let (status, body) = standby.request("POST", "/promote", None).unwrap();
     assert_eq!(status, 409, "{body}");
     assert_eq!(
@@ -390,17 +303,178 @@ fn hot_swap_over_the_shared_plant_is_deterministic_across_runs() {
     assert_eq!(first, second);
 }
 
+/// The QA finding's reproduction: a launched active carries no
+/// `--standby` — no option names "active now, but here is my peer for
+/// later" — so a `POST /demote` used to maroon it `unsynchronized`
+/// forever, promotable again only through a restart. The tracking peer
+/// announces its own monitor address on every checkpoint pull
+/// (`GET /checkpoint?peer=`), so the demoted run follows its successor,
+/// reconverges to `tracking`, and a later `POST /promote` fails back —
+/// no process restart, exactly one field writer throughout.
+#[test]
+fn a_demoted_launched_active_follows_its_successor_and_fails_back() {
+    let dir = std::env::temp_dir().join(format!("dcs-hot-swap-failback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    // The observer's setpoint lands before the controllers spawn: the
+    // launched active's startup claim fences this attachment from boot.
+    // The field fails closed while unclaimed, so the seeding write
+    // rides a conditional claim released afterward — the tool's shape.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The reproduction's launch shape: the active names no peer; the
+    // standby tracks it by `--standby`.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Converge the standby — every pull also announces the pulling
+    // monitor's address to the active.
+    for _ in 0..5 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+
+    // The reproduction's bodyless `POST /demote` on the peer that was
+    // never told its peer: it must succeed — the announced source is
+    // already known — and the documented order still holds.
+    let demoted = active.demote().unwrap();
+    assert_eq!(demoted.role, Role::Demoting);
+    let promoted = standby.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+
+    // The demoted run's first tracking cycle pulls its successor's
+    // checkpoint — the announced source — and reconverges: `standby`
+    // and `tracking`, never the permanently `unsynchronized` state the
+    // finding reported.
+    active.advance(1).unwrap();
+    standby.advance(1).unwrap();
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted launched active must reconverge on its successor: {report:?}"
+    );
+
+    // Fail-back without a restart: demote the owner — its configured
+    // `--standby` target is its tracking source — then promote the
+    // reconverged original peer. The gate moves back at the same
+    // request boundaries and exactly one peer keeps writing.
+    let demoted = standby.demote().unwrap();
+    assert_eq!(demoted.role, Role::Demoting);
+    let promoted = active.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+
+    for _ in 0..3 {
+        let owner = active.advance(1).unwrap();
+        let carried = field.read(VALVE).unwrap().value;
+        assert_eq!(
+            carried,
+            image_value(&owner, VALVE),
+            "the field must carry the failed-back owner's write"
+        );
+        standby.advance(1).unwrap();
+    }
+    assert_eq!(active.role().unwrap().role, Role::Active);
+    let report = standby.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the twice-demoted peer must reconverge again: {report:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The refusal half of the same contract: a field owner with no
+/// checkpoint source at all — no configured peer and no peer that ever
+/// announced itself — answers `POST /demote` with `no_tracking_source`
+/// rather than silently marooning the run.
+#[test]
+fn demote_refuses_a_field_owner_with_no_checkpoint_source() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    // A lone active: no `--standby` peer was ever launched, so nothing
+    // ever announced a checkpoint source to it.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let active = MonitorClient::new(active_process.addr);
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    active.advance(2).unwrap();
+
+    let (status, body) = active.request("POST", "/demote", None).unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        serde_json::from_str::<SwitchError>(&body).unwrap(),
+        SwitchError::NoTrackingSource
+    );
+    // The refusal changed nothing: still the field owner, gate open —
+    // its next scan's write still lands.
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    let snapshot = active.advance(1).unwrap();
+    assert_eq!(
+        field.read(VALVE).unwrap().value,
+        image_value(&snapshot, VALVE)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_mid_run_plant_restart_surfaces_named_io_errors() {
     let dir = std::env::temp_dir().join(format!("dcs-hot-swap-restart-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut plant = spawn_plant();
-    let model = controller_model(&dir, "pair.json", plant.addr);
-    let active_process = spawn_controller(&model, &[]);
+    let mut plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+    let active_process = spawn_controller(&model, &[], DT);
     let standby_process = spawn_controller(
         &model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -410,14 +484,24 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
         standby.advance(1).unwrap();
         active.advance(1).unwrap();
     }
-    plant.child.kill().unwrap();
-    plant.child.wait().unwrap();
+    kill(&mut plant);
 
     // The field owner's next requested scan surfaces the dead plant as
     // the documented IoError — the output write fails `disconnected`,
-    // not a silently divergent run.
-    let error = active.advance(1).unwrap_err();
-    assert!(error.to_string().contains("disconnected"), "{error}");
+    // counted in io_health — while the scan itself completes and the
+    // monitor keeps serving: a field outage degrades the run, it does
+    // not end it.
+    let snapshot = active.advance(1).unwrap();
+    let health = &snapshot.io_health;
+    assert!(health.failed_reads > 0, "{health:?}");
+    assert!(health.failed_writes > 0, "{health:?}");
+    assert!(
+        matches!(
+            health.last_error.as_ref().map(|fault| &fault.error),
+            Some(IoError::Disconnected(_))
+        ),
+        "{health:?}"
+    );
 
     // The standby's checkpoint pull still works — the active's monitor
     // is alive — and its quiesced scan completes with the dead field's
@@ -436,13 +520,25 @@ fn a_mid_run_plant_restart_surfaces_named_io_errors() {
         "{level:?}"
     );
 
-    // A restarted plant is a fresh process at initial state; the dead
-    // remote drivers never reconnect, so both peers keep surfacing the
-    // named error rather than resuming against a reset field — the
-    // demoted one's reads stay Bad, the owner's write stays refused.
-    let restarted = spawn_plant();
-    let error = active.advance(1).unwrap_err();
-    assert!(error.to_string().contains("disconnected"), "{error}");
+    // A restarted plant is a fresh process at initial state — and on a
+    // fresh address: the remote drivers re-attach only to the address
+    // their model configured, so both peers keep surfacing the named
+    // error rather than resuming against a reset field — the demoted
+    // one's reads stay Bad, the owner's write stays refused.
+    let restarted = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let snapshot = active.advance(1).unwrap();
+    assert!(
+        matches!(
+            snapshot
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Disconnected(_))
+        ),
+        "{:?}",
+        snapshot.io_health
+    );
     let snapshot = standby.advance(1).unwrap();
     let level = snapshot
         .points

@@ -210,6 +210,10 @@ fn mixed_cyclic_and_pointwise_kinds_assemble_and_scan() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        // The field-facing backends claim the shared field's write
+        // ownership — the fail-closed plant refuses a claim-less
+        // mutation.
+        driver.claim_field_writer(1).unwrap();
 
         // All three kinds resolved: the local `sim` device joined the
         // shared simulated map, the cyclic device carries the
@@ -301,6 +305,7 @@ fn a_missed_cyclic_exchange_degrades_only_the_cyclic_backend() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        driver.claim_field_writer(1).unwrap();
 
         // A failed exchange completes nothing: the staged output image
         // is retained — unpublished while the exchange misses, carried
@@ -399,6 +404,7 @@ fn a_tracking_standby_gate_quiesces_both_backends_field_writes() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        driver.claim_field_writer(1).unwrap();
         // The tracking standby's posture: a closed gate covering the
         // field-facing points — both field backends' writes quiesce,
         // the local simulated backend's pass through.

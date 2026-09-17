@@ -8,17 +8,19 @@
 use dcs_core::{
     ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
     EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent, PointId, Role,
-    Sample, StandbySync, StateMap, Tick, Value, ValueKind,
+    Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Driven, Monitor, MonitorClient};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// The same minimal in-memory driver the other monitor tests use.
 struct StubDriver {
@@ -395,8 +397,9 @@ fn driven_track_cycle_reports_the_refused_self_promotion() {
 }
 
 /// A staged image the applied checkpoint's tick matches still runs the
-/// divergence check on the driven path, and the transition drains into
-/// the journal at the compared tick.
+/// divergence check on the driven path, and both transitions drain into
+/// the journal at the compared tick — the detection with its mismatches,
+/// the resync's resolution with the compared-point evidence.
 #[test]
 fn driven_track_cycle_journals_the_divergence_transition() {
     let (standby, active) = DrivenStandby::start(None);
@@ -443,6 +446,329 @@ fn driven_track_cycle_journals_the_divergence_transition() {
         )),
         "the driven cycle journaled the divergence at the compared tick: {journal:?}"
     );
+
+    // The field carries what the standby stages again: the next pull's
+    // same-tick compare is the resync, and the journal records the
+    // resolution — the diverged → tracking transition that reopens the
+    // promote gate — at the compared tick with its compared points.
+    standby
+        .standby_driver
+        .write(PointId(20), Value::Float(6.0))
+        .unwrap();
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(
+        report.sync,
+        Some(StandbySync::Tracking { aligned: Tick(5) }),
+        "the clean compare resyncs: {report:?}"
+    );
+    let journal = standby.standby.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::DivergenceResolved { compared }
+                if *compared
+                    == vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(6.0),
+                        field: Value::Float(6.0),
+                    }]
+                && entry.tick == Tick(5)
+        )),
+        "the driven cycle journaled the resolution at the compared tick: {journal:?}"
+    );
+}
+
+/// The QA finding `diverged-clears-without-valid-field-comparison` on
+/// the driven path: a diverged standby whose tracking source stalls
+/// keeps pulling the same stale checkpoint — an apply that matches no
+/// staged image's tick runs zero field reads and must leave the verdict
+/// standing, `POST /promote` staying refused — until a fresh same-tick
+/// comparison reads the field and matches, clearing the verdict and
+/// journaling the named `divergence_resolved` event.
+#[test]
+fn driven_stale_apply_leaves_the_standby_diverged() {
+    let (standby, active) = DrivenStandby::start(None);
+
+    active.client.advance(3).unwrap();
+    // Converge on ckpt@3; the scan stages the tick-4 `Out` image.
+    standby.standby.client.advance(1).unwrap();
+
+    // Diverge: the private field's Out point no longer carries what the
+    // staged image describes — the next same-tick compare reports it.
+    standby
+        .standby_driver
+        .write(PointId(20), Value::Float(99.0))
+        .unwrap();
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    let Some(diverged @ StandbySync::Diverged { .. }) = &report.sync else {
+        panic!("the same-tick compare must report diverged: {report:?}");
+    };
+    let diverged = diverged.clone();
+
+    // The frozen source keeps serving its tick-4 checkpoint: the
+    // re-apply matches no staged image's tick and performs zero field
+    // reads — the verdict stands and promotion stays refused.
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(report.sync.as_ref(), Some(&diverged));
+    let (status, body) = standby
+        .standby
+        .client
+        .request("POST", "/promote", None)
+        .unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        serde_json::from_str::<SwitchError>(&body).unwrap(),
+        SwitchError::NotConverged {
+            sync: diverged.clone()
+        }
+    );
+
+    // A fresh same-tick comparison that read the field and matched is
+    // the resync: the verdict clears, the journal carries the named
+    // resolution at the compared tick, and the promote gate reopens.
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let report = standby.standby.client.role().unwrap();
+    assert_eq!(
+        report.sync,
+        Some(StandbySync::Tracking { aligned: Tick(5) })
+    );
+    let journal = standby.standby.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::DivergenceResolved { compared }
+                if compared.len() == 1
+                    && compared[0].point == PointId(20)
+                    && compared[0].staged == compared[0].field
+                    && entry.tick == Tick(5)
+        )),
+        "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
+    );
+    let promoted = standby.standby.client.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+}
+
+/// The paced-standby reproduction of the QA finding
+/// `monitor-requests-blocked-by-dead-peer-pull`: while the tracking
+/// pull stalls on a dead active, `GET /role` and `GET /snapshot` must
+/// stay far below the fetch's own wait — the fetch runs on the pull
+/// worker's thread, and the per-scan `track_cycle` consumes it
+/// non-blockingly outside the request-serving lock — and the paced
+/// scan cadence the failover miss budget counts in must not inflate
+/// toward the fetch's stall.
+fn assert_dead_peer_pull_stays_off_the_request_path(dead: SocketAddr) {
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_paced_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+
+    // The paced loop, shaped like dcs-controller's: one tracking cycle
+    // consuming the fetch worker's latest pull, then one paced scan.
+    let mut puller = CheckpointPuller::new(dead, None);
+    let pacing = Arc::clone(&standby.monitor);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let pacer = thread::spawn(move || {
+        while !stopping.load(Ordering::Relaxed) {
+            pacing.track_cycle(|| puller.poll());
+            let _ = pacing.paced_scan();
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    // Every monitor read stays far under the pull's own stall, and the
+    // degraded heartbeat reports — the dead peer is exactly when the
+    // operator needs the endpoints.
+    for _ in 0..20 {
+        let started = Instant::now();
+        standby.client.role().unwrap();
+        let role_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby.client.snapshot().unwrap();
+        let snapshot_elapsed = started.elapsed();
+        assert!(
+            role_elapsed < Duration::from_millis(500)
+                && snapshot_elapsed < Duration::from_millis(500),
+            "monitor requests serialized behind the dead peer's pull: \
+             /role took {role_elapsed:?}, /snapshot took {snapshot_elapsed:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let report = standby.client.role().unwrap();
+    assert!(
+        matches!(&report.sync, Some(StandbySync::Degraded { .. })),
+        "the failed pulls report the degraded heartbeat: {report:?}"
+    );
+    let first = report.tick;
+    thread::sleep(Duration::from_millis(400));
+    let later = standby.client.role().unwrap().tick;
+    assert!(
+        later.0 - first.0 >= 10,
+        "the paced scan cadence held while the pull stalled: {first:?} -> {later:?}"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    pacer.join().unwrap();
+}
+
+/// The reproduction's literal case: the active's address is unroutable
+/// (TEST-NET-1, RFC 5737), so each pull stalls on the connect until
+/// the dedicated pull bound.
+#[test]
+fn unroutable_active_pull_keeps_the_monitor_responsive() {
+    assert_dead_peer_pull_stays_off_the_request_path("192.0.2.1:8080".parse().unwrap());
+}
+
+/// The guaranteed-stalled case: a listener that accepts connections
+/// but never answers, so every pull sits in flight until the pull
+/// bound — requests must not wait on it.
+#[test]
+fn silent_active_pull_keeps_the_monitor_responsive() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert_dead_peer_pull_stays_off_the_request_path(silent.local_addr().unwrap());
+}
+
+/// The driven-surface half of the dead-source starvation finding
+/// (`driven-scan-batch-pins-control-plane`): a `POST /scan` batch
+/// whose every per-scan pull waits out the fetch bound on an
+/// unreachable tracking source must not starve the other endpoints —
+/// each pull runs outside the request-serving lock on the batch's own
+/// worker, so `GET /role`, `GET /snapshot`, and `POST /command` answer
+/// while the batch is still walking its scans. The batch itself stays
+/// slow — its scans each owe the pull — but its slowness no longer
+/// reaches the lock or the request queue.
+#[test]
+fn driven_scan_batch_on_a_dead_source_does_not_starve_the_endpoints() {
+    // A listener that accepts but never answers: every pull sits in
+    // flight until the dedicated pull bound — a deterministic stall,
+    // unlike an unroutable address whose connect may fail fast.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = silent.local_addr().unwrap();
+
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dead),
+            after_scan: None,
+        }),
+    );
+
+    // The batch runs on its own connection from a second thread: six
+    // stalled pulls at the one-second fetch bound keep it in flight
+    // far past the request bound asserted below.
+    let batch_addr = standby.monitor.local_addr();
+    let batch = thread::spawn(move || MonitorClient::new(batch_addr).advance(6));
+
+    // While the batch walks its stalled pulls, the read and
+    // control-plane endpoints answer promptly — on a standby the
+    // command refuses with a receipt, which is still an answer.
+    for _ in 0..10 {
+        let started = Instant::now();
+        standby.client.role().unwrap();
+        let role_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby.client.snapshot().unwrap();
+        let snapshot_elapsed = started.elapsed();
+        let started = Instant::now();
+        standby
+            .client
+            .command(&dcs_core::Command::WriteValue {
+                point: PointId(10),
+                kind: ValueKind::Float,
+                value: Value::Float(1.0),
+            })
+            .unwrap();
+        let command_elapsed = started.elapsed();
+        assert!(
+            role_elapsed < Duration::from_millis(500)
+                && snapshot_elapsed < Duration::from_millis(500)
+                && command_elapsed < Duration::from_millis(500),
+            "monitor requests serialized behind the scan batch's stalled \
+             pulls: /role took {role_elapsed:?}, /snapshot took \
+             {snapshot_elapsed:?}, /command took {command_elapsed:?}"
+        );
+    }
+    // The batch still completed its requested scans — the tracking
+    // misses are the named degraded state, not a request failure.
+    batch.join().unwrap().unwrap();
+    let report = standby.client.role().unwrap();
+    assert!(
+        matches!(&report.sync, Some(StandbySync::Degraded { .. })),
+        "the stalled pulls report the degraded heartbeat: {report:?}"
+    );
+}
+
+/// The lock property behind the reproduction's fix, without any
+/// network timing: `track_cycle` invokes its `pull` outside the
+/// request-serving lock, so even a deliberately slow pull cannot make
+/// a request wait on it.
+#[test]
+fn track_cycles_pull_does_not_hold_the_request_serving_lock() {
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_paced_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+
+    let pacing = Arc::clone(&standby.monitor);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let pacer = thread::spawn(move || {
+        while !stopping.load(Ordering::Relaxed) {
+            // A pull that stalls well past the asserted request bound.
+            pacing.track_cycle(|| {
+                thread::sleep(Duration::from_millis(400));
+                Err("fetch from 192.0.2.1:8080: stalled".to_string())
+            });
+            let _ = pacing.paced_scan();
+        }
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let started = Instant::now();
+    standby.client.role().unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "GET /role waited on the in-flight pull: {elapsed:?}"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    pacer.join().unwrap();
 }
 
 /// Emit-identical parity at the served surface: the tracking peer

@@ -84,6 +84,7 @@ fn registry() -> ComponentRegistry {
                 spec.require("backup")?,
                 spec.require("out")?,
                 spec.require("backup_active")?,
+                spec.get("backup_unhealthy"),
                 spec.parameters,
             ))
         })

@@ -11,7 +11,11 @@ action ctx['restart_controller'] carries and reads the per-controller
 model-revision scenario likewise triggers ctx['start_revised'] — the
 runner action that derives the recipe's revised model and launches the
 run's third controller on it — and reads field-side truth off the
-simulated plant's sim-net service at ctx['plant']. The link-loss
+simulated plant's sim-net service at ctx['plant']. The
+checkpoint-negotiation scenario triggers ctx['start_foreign'] — the
+same derivation launched --standby <active> WITHOUT --revised so the
+fingerprint gate must refuse it — and removes the peer through
+ctx['stop_foreign']. The link-loss
 scenario drives the runner-owned plant stop/start actions
 ctx['stop_plant']/ctx['start_plant'] carry and probes the run's plant
 server directly on ctx['plant'] — the field's own fencing evidence.
@@ -114,6 +118,21 @@ def _point_value(snapshot, point):
                 return next(iter(value.values()), None)
             return value
     return None
+
+
+def _history_qualities(payload, point):
+    """One point's served history as (seq, quality-key, tick) triples out
+    of a `/history` answer — the record the stale interval must survive
+    in."""
+    if isinstance(payload, list):
+        for entry in payload:
+            if entry.get('point') == point:
+                return [(sample.get('seq'),
+                         _quality_key(
+                             (sample.get('sample') or {}).get('quality')),
+                         (sample.get('sample') or {}).get('tick'))
+                        for sample in entry.get('samples', [])]
+    return []
 
 
 def _receipt_list(payload):
@@ -1001,6 +1020,662 @@ def scenario_model_revision(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# The rolling-revision refusal half: WW-LCM-001's deployment-update
+# clause requires the carryover rule to refuse a revision that retypes
+# a carried point — never silently loading the incompatible document.
+# The case derives the recipe's revised document exactly as the
+# compatible roll does, then applies the checked-in post-derivation
+# step (qa_lane/revision-incompatible.json) that retypes one carried
+# writable internal point bool->int, so every pulled checkpoint fails
+# with the named InternalKindMismatch and the peer settles degraded —
+# distinguishably from the foreign-fingerprint degrade an unarmed
+# standby reports — refuses POST /promote with the not_converged
+# SwitchError carrying the same detail, and leaves the field writer
+# undisturbed. The control half relaunches the same slot on the same
+# document minus the retype and must converge reinitialized — proving
+# the refusal names the carryover violation rather than a rig defect.
+# The scenario sits immediately ahead of scenario_model_revision in
+# the schedule: it never promotes, so the field writer is unchanged
+# and the compatible case behind it relaunches the third slot and
+# performs the control's promote leg in the same run.
+
+
+def scenario_incompatible_revision(ctx):
+    """A --revised peer on a carryover-breaking document is refused."""
+    case = Case('incompatible-revision',
+                'Incompatible model revision meets the named refusal',
+                'a third controller launched --standby <active> '
+                '--revised on the recipe-derived document plus the '
+                'checked-in incompatible retype settles standby '
+                'reporting sync degraded with the detail naming the '
+                'carryover refusal and the retyped point — not the '
+                'foreign-fingerprint degrade — POST /promote answers '
+                '409 not_converged carrying the same degraded detail, '
+                'the active\'s field writes, receipts, and journal '
+                'stay undisturbed across the observation window, and '
+                'the same document minus the retype converges '
+                'reinitialized as the control half')
+    try:
+        start = ctx.get('start_revised')
+        revised = ctx.get('revised')
+        if start is None or revised is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no model-revision action or '
+                               'revised endpoint')
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        if active not in ('active', 'standby'):
+            return case.finish('inconclusive', 'the field writer is '
+                               'already the revised peer — the '
+                               'incompatible variant has no pair '
+                               'member to stand by on')
+        base = ctx[active]
+        case.observe('field writer: ' + active + ' (' + base + ')')
+
+        # The audit positions the refusal must leave untouched: the
+        # active's receipt log, its durable journal file, and one
+        # field output its scan keeps writing.
+        _, body = http_json('GET', base + '/receipts')
+        receipts0 = _receipt_list(body)
+        commands0 = [(r.get('command'), r.get('actor'))
+                     for r in receipts0]
+        journals = ctx.get('journal_files') or {}
+        journal_path = journals.get(active)
+        journal0 = None
+        if journal_path:
+            try:
+                journal0 = _journal_entries(journal_path)
+            except (OSError, ValueError) as exc:
+                return case.finish('inconclusive', 'the active\'s '
+                                   'journal file is unreadable: '
+                                   + str(exc))
+        try:
+            field_points = _field_out_points(ctx)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'is unreachable: ' + str(exc)[:200])
+        if not field_points:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'serves no field output to watch')
+        watch = min(field_points)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'incompatible-revision-before.json',
+            {'active': active, 'receipts': len(receipts0),
+             'journal_records': len(journal0 or []),
+             'field': {str(p): _field_sample(ctx, p)
+                       for p in field_points}})
+        case.evidence('file', ref, 'the pre-refusal audit positions')
+
+        # The runner-owned action on the refusal half: the additive
+        # recipe derives the revised document first, then the
+        # checked-in step retypes a carried point so the carryover
+        # crossing — not the document's load — is what fails.
+        try:
+            info = start(active, incompatible=True)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the incompatible '
+                               'model-revision action never '
+                               'completed: ' + str(exc)[:300])
+        retyped = info.get('retyped_point')
+        if not isinstance(retyped, int):
+            return case.finish('inconclusive', 'the incompatible '
+                               'derivation did not name the retyped '
+                               'point: ' + json.dumps(info)[:200])
+        case.observe('revised peer ' + str(info.get('container'))
+                     + ' launched on the incompatible document — '
+                     'retyped point ' + str(retyped))
+        document = json.loads(Path(info['document']).read_text())
+        ref = save_evidence(ctx['evidence_dir'],
+                            'incompatible-revision-document.json',
+                            document)
+        case.evidence('file', ref, 'the incompatible derived model '
+                      'document')
+
+        # The refusal: every pulled checkpoint crosses into the
+        # carryover rule and fails it, so the peer settles degraded
+        # permanently — not the transient degrade of a fetch failure —
+        # with the detail naming the carryover error and the retyped
+        # point. A `reinitialized` report here would mean the
+        # incompatible document silently crossed: the contract break
+        # this case exists to catch.
+        last = {}
+
+        def refusal_report():
+            role = _try_role(ctx, revised)
+            if role is None:
+                return None
+            last['role'] = role
+            sync = role.get('sync')
+            if not isinstance(sync, dict):
+                return None
+            if 'reinitialized' in sync:
+                return role
+            detail = str((sync.get('degraded') or {}).get('detail'))
+            if 'internal point ' + str(retyped) in detail \
+                    and 'retype must rename' in detail:
+                return role
+            return None
+
+        settled = wait_for(refusal_report,
+                           time.monotonic() + REVISION_CONVERGE_DEADLINE,
+                           interval=REVISION_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'incompatible-revision-role.json',
+                            last.get('role') or {})
+        case.evidence('file', ref, 'the incompatible peer\'s role '
+                      'report')
+        sync = ((settled or last.get('role') or {}).get('sync'))
+        if isinstance(sync, dict) and 'reinitialized' in sync:
+            return case.finish('failed', 'the incompatible document '
+                               'converged reinitialized — the '
+                               'carryover rule did not refuse the '
+                               'retype of point ' + str(retyped))
+        if settled is None:
+            if isinstance(sync, dict) and 'degraded' in sync:
+                return case.finish('failed', 'the peer degraded but '
+                                   'not on the named carryover '
+                                   'refusal: ' + json.dumps(sync)[:300])
+            return case.finish('inconclusive', 'the incompatible '
+                               'peer never reported a checkpoint '
+                               'crossing: ' + json.dumps(sync)[:300])
+        detail = str((sync.get('degraded') or {}).get('detail'))
+        if 'fingerprint' in detail:
+            return case.finish('failed', 'the degrade is a '
+                               'fingerprint rejection, not the '
+                               'carryover refusal: ' + detail[:300])
+        if settled.get('role') != 'standby':
+            return case.finish('failed', 'the refused peer reports '
+                               'role ' + str(settled.get('role')))
+        case.observe('degraded on the named refusal: ' + detail)
+
+        # The named refusal on the switch path: POST /promote meets
+        # the degraded peer's convergence gate — HTTP 409 carrying the
+        # not_converged SwitchError whose embedded sync repeats the
+        # carryover detail.
+        try:
+            status, refusal = http_json('POST', revised + '/promote')
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                refusal = json.loads(exc.read() or b'null')
+            except ValueError:
+                refusal = None
+            finally:
+                exc.close()
+        ref = save_evidence(ctx['evidence_dir'],
+                            'incompatible-revision-refusal.json',
+                            {'status': status, 'body': refusal})
+        case.evidence('file', ref, 'the refused promotion')
+        if status != 409:
+            return case.finish('failed', 'POST /promote answered '
+                               + str(status) + ' — the degraded peer '
+                               'must refuse with 409: '
+                               + json.dumps(refusal)[:300])
+        refusal_sync = (((refusal or {}).get('not_converged') or {})
+                        .get('sync'))
+        refusal_detail = str((refusal_sync.get('degraded') or {})
+                             .get('detail')) \
+            if isinstance(refusal_sync, dict) else ''
+        if 'internal point ' + str(retyped) not in refusal_detail \
+                or 'retype must rename' not in refusal_detail:
+            return case.finish('failed', 'the promotion refusal does '
+                               'not carry the named carryover '
+                               'failure: ' + json.dumps(refusal)[:400])
+        case.observe('promotion refused: ' + refusal_detail)
+
+        # The undisturbed active: across the observation window the
+        # field keeps following the active's staged image (one scan of
+        # lag allowed), the receipt log keeps its exact contents, and
+        # the durable journal file records nothing new — the refused
+        # peer never wrote, never promoted, never touched the run's
+        # audit trail.
+        trace = []
+        consecutive = 0
+        for _ in range(REVISION_FIELD_ROUNDS):
+            sample = _field_sample(ctx, watch)
+            staged = _point_value(_try_snapshot(ctx, base) or {},
+                                  watch)
+            value = (sample or {}).get('value')
+            if isinstance(value, dict):
+                value = next(iter(value.values()), None)
+            trace.append({'field': value, 'active_staged': staged})
+            if value is not None and staged is not None \
+                    and value != staged:
+                consecutive += 1
+            else:
+                consecutive = 0
+            time.sleep(REVISION_POLL)
+        _, body = http_json('GET', base + '/receipts')
+        receipts1 = _receipt_list(body)
+        commands1 = [(r.get('command'), r.get('actor'))
+                     for r in receipts1]
+        journal1 = None
+        journal_error = None
+        if journal_path:
+            try:
+                journal1 = _journal_entries(journal_path)
+            except (OSError, ValueError) as exc:
+                journal_error = str(exc)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'incompatible-revision-field.json',
+            {'watch': watch, 'trace': trace,
+             'receipts': [len(receipts0), len(receipts1)],
+             'journal_records': [len(journal0 or []),
+                                 None if journal1 is None
+                                 else len(journal1)]})
+        case.evidence('file', ref, 'the active across the refusal '
+                      'window')
+        if consecutive >= 2:
+            return case.finish('failed', 'the field stopped following '
+                               'the still-active peer\'s image during '
+                               'the refusal: '
+                               + json.dumps(trace[-3:])[:400])
+        if commands1 != commands0:
+            return case.finish('failed', 'the active\'s receipt log '
+                               'changed across the refusal window: '
+                               + str(len(receipts0)) + ' -> '
+                               + str(len(receipts1)))
+        if journal_error:
+            return case.finish('inconclusive', 'the active\'s '
+                               'journal file turned unreadable: '
+                               + journal_error)
+        if journal0 is not None and journal1 != journal0:
+            return case.finish('failed', 'the active\'s journal file '
+                               'gained records across the refusal '
+                               'window: ' + str(len(journal0)) + ' -> '
+                               + str(len(journal1)))
+
+        # The control half: the same recipe-derived document minus the
+        # retype must converge reinitialized — the refusal above named
+        # the carryover violation, not a rig defect. The relaunch also
+        # exercises the action's third-slot replacement over the
+        # degraded peer. The promote leg belongs to the sibling
+        # model-revision case scheduled immediately behind, which
+        # relaunches the slot and performs the demote-then-promote.
+        try:
+            control = start(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the control '
+                               'relaunch never completed: '
+                               + str(exc)[:300])
+        document = json.loads(Path(control['document']).read_text())
+        ref = save_evidence(ctx['evidence_dir'],
+                            'incompatible-revision-control.json',
+                            document)
+        case.evidence('file', ref, 'the control document — the same '
+                      'revision minus the retype')
+        last.clear()
+
+        def control_converged():
+            role = _try_role(ctx, revised)
+            if role is None:
+                return None
+            last['role'] = role
+            sync = role.get('sync')
+            if isinstance(sync, dict) and 'reinitialized' in sync:
+                return role
+            return None
+
+        converged = wait_for(control_converged,
+                             time.monotonic()
+                             + REVISION_CONVERGE_DEADLINE,
+                             interval=REVISION_POLL)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'incompatible-revision-control-role.json',
+                            last.get('role') or {})
+        case.evidence('file', ref, 'the control peer\'s convergence')
+        if converged is None:
+            sync = (last.get('role') or {}).get('sync')
+            return case.finish('failed', 'the control half did not '
+                               'converge reinitialized — the refusal '
+                               'may name a rig defect rather than the '
+                               'retype: ' + json.dumps(sync)[:300])
+        report = ((converged.get('sync') or {})
+                  .get('reinitialized') or {}).get('report') or {}
+        carried = report.get('carried') or []
+        if not any(c.get('point') == retyped
+                   and isinstance(c.get('value'), dict)
+                   and set(c['value']) == {'bool'}
+                   for c in carried):
+            return case.finish('failed', 'the control crossing did '
+                               'not carry the retyped point as its '
+                               'old kind: carried '
+                               + json.dumps(carried)[:300])
+        case.observe('control half converged reinitialized — point '
+                     + str(retyped) + ' carried under its declared '
+                     'bool kind')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The named rejection of incompatible state — WW-LCM-001's
+# checkpoint-negotiation clause: a third controller launched
+# --standby <active> on a document whose model fingerprint differs
+# from the pair's (the recipe-derived revised model WITHOUT the
+# --revised opt-in) must never converge — every pulled checkpoint meets
+# the fingerprint gate's named refusal, the peer reports degraded for
+# the observation window, and POST /promote answers the named
+# not_converged refusal — while the active peer's ticks, field writes,
+# and receipt log continue undisturbed. The case then removes the
+# foreign container so later cases — the model-revision launch above
+# all — see a clean rig. It runs while the pair still runs the mounted
+# model: after the revision roll the same document would no longer be
+# foreign.
+
+NEGOTIATION_DEADLINE = 60   # bound on the named degraded report
+NEGOTIATION_ROUNDS = 6      # observation-window polls once degraded
+NEGOTIATION_POLL = 0.5      # cadence watching the foreign peer
+
+
+def scenario_checkpoint_negotiation(ctx):
+    """A foreign-fingerprint standby never converges and refuses
+    promotion."""
+    case = Case('checkpoint-negotiation',
+                'Foreign-model standby refuses checkpoint negotiation',
+                'a third controller launched --standby <active> on the '
+                'recipe-derived foreign-fingerprint document without '
+                '--revised reports the named degraded negotiation '
+                'failure for the observation window, POST /promote '
+                'answers the named not_converged refusal, the active '
+                'peer\'s ticks, field writes, and receipts continue '
+                'undisturbed, and the case removes the foreign '
+                'container afterward')
+    start = ctx.get('start_foreign')
+    stop = ctx.get('stop_foreign')
+    foreign = ctx.get('foreign')
+    if start is None or stop is None or foreign is None:
+        return case.finish('inconclusive', 'the run context carries '
+                           'no checkpoint-negotiation launch action, '
+                           'teardown action, or foreign endpoint')
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        case.observe('field writer: ' + active + ' (' + base + ')')
+
+        # The audit positions the refusal must leave untouched: the
+        # pair's model fingerprint, the active's advancing tick, its
+        # receipt log, and the field output it keeps writing.
+        _, checkpoint = http_json('GET', base + '/checkpoint')
+        pair_fp = checkpoint.get('model_fingerprint')
+        if pair_fp is None:
+            return case.finish('failed', 'the active peer serves no '
+                               'model fingerprint')
+        tick0 = (_try_snapshot(ctx, base) or {}).get('tick')
+        _, body = http_json('GET', base + '/receipts')
+        commands0 = [(r.get('command'), r.get('actor'))
+                     for r in _receipt_list(body)]
+        try:
+            field_points = _field_out_points(ctx)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'is unreachable: ' + str(exc)[:200])
+        if not field_points:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'serves no field output to watch')
+        watch = min(field_points)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'negotiation-before.json',
+            {'active': active, 'model_fingerprint': pair_fp,
+             'tick': tick0, 'receipts': len(commands0),
+             'field': {str(p): _field_sample(ctx, p)
+                       for p in field_points}})
+        case.evidence('file', ref, 'the pre-launch audit positions')
+        case.observe('baseline: fingerprint ' + str(pair_fp)
+                     + ', tick ' + str(tick0) + ', '
+                     + str(len(commands0)) + ' receipts, watching '
+                     'field point ' + str(watch))
+
+        # The runner-owned action: derive the foreign document through
+        # the checked-in recipe and launch the third labeled controller
+        # on it as --standby <active> without --revised, so its
+        # fingerprint gate refuses every checkpoint it pulls.
+        try:
+            info = start(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the checkpoint-'
+                               'negotiation action never completed: '
+                               + str(exc)[:300])
+        container = str(info.get('container'))
+        case.observe('foreign peer ' + container + ' launched on the '
+                     'derived document without --revised')
+
+        def attempt():
+            """Everything the case asserts while the foreign peer is
+            up — the refusal report, the observation window, the
+            promote refusal, and the undisturbed-active checks."""
+            document = json.loads(Path(info['document']).read_text())
+            ref = save_evidence(ctx['evidence_dir'],
+                                'negotiation-document.json', document)
+            case.evidence('file', ref, 'the foreign-fingerprint model '
+                          'document')
+
+            # The named negotiation refusal: the foreign peer's pulls
+            # land — the active serves — but every apply meets the
+            # fingerprint gate, so the peer reports degraded naming the
+            # mismatch and never converges. A converged report is an
+            # outright contract violation; a peer still unsynchronized
+            # or fetch-failing at the deadline never exercised the
+            # negotiation — inconclusive.
+            last = {}
+
+            def verdict():
+                role = _try_role(ctx, foreign)
+                if role is None:
+                    return None
+                last['role'] = role
+                sync = role.get('sync')
+                if not isinstance(sync, dict):
+                    return None
+                if set(sync) & {'tracking', 'reinitialized',
+                                'diverged'}:
+                    return role
+                detail = (sync.get('degraded') or {}).get('detail')
+                if isinstance(detail, str) and 'fingerprint' in detail:
+                    return role
+                return None
+
+            settled = wait_for(verdict,
+                               time.monotonic() + NEGOTIATION_DEADLINE,
+                               interval=NEGOTIATION_POLL)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'negotiation-role.json',
+                                last.get('role') or {})
+            case.evidence('file', ref, 'the foreign peer\'s '
+                          'negotiation state report')
+            if settled is None:
+                sync = (last.get('role') or {}).get('sync')
+                detail = ((sync or {}).get('degraded') or {}) \
+                    .get('detail') if isinstance(sync, dict) else None
+                if isinstance(detail, str) and detail \
+                        and 'fetch' not in detail:
+                    return case.finish('failed', 'the foreign peer\'s '
+                                       'refusal never named the '
+                                       'fingerprint negotiation: '
+                                       + detail[:300])
+                return case.finish('inconclusive', 'the foreign peer '
+                                   'never reached a negotiation '
+                                   'verdict: ' + json.dumps(sync)[:300])
+            sync = settled.get('sync') or {}
+            if 'degraded' not in sync:
+                return case.finish('failed', 'the foreign-fingerprint '
+                                   'peer reports a converged state — '
+                                   'the negotiation was not refused: '
+                                   + json.dumps(sync)[:400])
+            detail = str(sync['degraded'].get('detail'))
+            case.observe('negotiation refused: ' + detail[:200])
+            if isinstance(pair_fp, int) \
+                    and format(pair_fp, '016x') not in detail:
+                return case.finish('failed', 'the degraded report does '
+                                   'not name the pair\'s fingerprint '
+                                   + format(pair_fp, '016x') + ': '
+                                   + detail[:300])
+
+            # The observation window: the refusal must hold — every
+            # poll keeps reporting standby+degraded — while the active
+            # peer's tick keeps advancing and its field writes keep
+            # landing.
+            window = []
+            last_tick = tick0
+            field_tick = None
+            mismatch = 0
+            violation = None
+            for _ in range(NEGOTIATION_ROUNDS):
+                role = _try_role(ctx, foreign)
+                snap = _try_snapshot(ctx, base)
+                sample = _field_sample(ctx, watch)
+                staged = _point_value(snap or {}, watch)
+                tick = (snap or {}).get('tick')
+                value = (sample or {}).get('value')
+                if isinstance(value, dict):
+                    value = next(iter(value.values()), None)
+                ftick = (sample or {}).get('tick')
+                window.append({'role': role, 'tick': tick,
+                               'staged': staged, 'field': value,
+                               'field_tick': ftick})
+                sync = (role or {}).get('sync')
+                if not (isinstance(role, dict)
+                        and role.get('role') == 'standby'
+                        and isinstance(sync, dict)
+                        and 'degraded' in sync):
+                    violation = ('the foreign peer left the refused '
+                                 'state mid-window: '
+                                 + json.dumps(role)[:300])
+                if tick is not None and last_tick is not None \
+                        and tick <= last_tick:
+                    violation = ('the active peer\'s tick stalled at '
+                                 + str(tick))
+                if tick is not None:
+                    last_tick = tick
+                if ftick is not None and field_tick is not None \
+                        and ftick <= field_tick:
+                    violation = ('the field stopped receiving the '
+                                 'active\'s writes at tick '
+                                 + str(ftick))
+                if ftick is not None:
+                    field_tick = ftick
+                if value is not None and staged is not None \
+                        and value != staged:
+                    mismatch += 1
+                else:
+                    mismatch = 0
+                if violation:
+                    break
+                time.sleep(NEGOTIATION_POLL)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'negotiation-window.json',
+                                {'watch': watch, 'window': window})
+            case.evidence('file', ref, 'the observation window: '
+                          'foreign reports, active ticks, field reads')
+            if violation:
+                return case.finish('failed', violation)
+            if mismatch >= 2:
+                return case.finish('failed', 'the active peer\'s field '
+                                   'writes stopped landing during the '
+                                   'attempt: '
+                                   + json.dumps(window[-3:])[:400])
+            if not any(isinstance(w.get('role'), dict)
+                       for w in window):
+                return case.finish('inconclusive', 'the observation '
+                                   'window saw no foreign report')
+            case.observe('the refusal held across '
+                         + str(len(window)) + ' polls; the active '
+                         'peer\'s tick reached ' + str(last_tick))
+
+            # The promotion gate: a never-converged peer must answer
+            # the named not_converged refusal carrying its degraded
+            # negotiation state — never a promotion.
+            try:
+                status, refusal = http_json('POST',
+                                            foreign + '/promote')
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                try:
+                    refusal = json.loads(exc.read() or b'null')
+                except ValueError:
+                    refusal = None
+                finally:
+                    exc.close()
+            ref = save_evidence(ctx['evidence_dir'],
+                                'negotiation-refusal.json',
+                                {'status': status, 'body': refusal})
+            case.evidence('file', ref, 'POST /promote\'s answer')
+            named = refusal.get('not_converged') \
+                if isinstance(refusal, dict) else None
+            if status != 409 or not isinstance(named, dict):
+                return case.finish('failed', 'promote did not answer '
+                                   'the named not_converged refusal: '
+                                   'HTTP ' + str(status) + ' '
+                                   + json.dumps(refusal)[:300])
+            refused_sync = named.get('sync')
+            if not isinstance(refused_sync, dict) \
+                    or 'degraded' not in refused_sync:
+                return case.finish('failed', 'the not_converged '
+                                   'refusal does not carry the '
+                                   'degraded negotiation state: '
+                                   + json.dumps(refusal)[:300])
+            case.observe('promote refused not_converged carrying '
+                         + json.dumps(refused_sync)[:200])
+
+            # The attempt touched nothing: the receipt log is exactly
+            # the baseline's, the active's tick kept advancing, and its
+            # writes still reach the field.
+            _, body = http_json('GET', base + '/receipts')
+            commands1 = [(r.get('command'), r.get('actor'))
+                         for r in _receipt_list(body)]
+            snap1 = _try_snapshot(ctx, base) or {}
+            sample1 = _field_sample(ctx, watch)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'negotiation-after.json',
+                                {'tick': snap1.get('tick'),
+                                 'receipts': len(commands1),
+                                 'field': sample1})
+            case.evidence('file', ref, 'the post-attempt audit '
+                          'positions')
+            if commands1 != commands0:
+                return case.finish('failed', 'the active peer\'s '
+                                   'receipt log changed across the '
+                                   'attempt')
+            if tick0 is not None and snap1.get('tick') is not None \
+                    and snap1['tick'] <= tick0:
+                return case.finish('failed', 'the active peer\'s tick '
+                                   'did not advance through the '
+                                   'attempt')
+            if sample1 is None:
+                return case.finish('inconclusive', 'the field stopped '
+                                   'answering after the attempt')
+            return case.finish('passed')
+
+        try:
+            record = attempt()
+        except Exception as exc:
+            record = case.finish('inconclusive', str(exc))
+        # Teardown is unconditional once the peer is up: later cases —
+        # the model-revision launch above all — need a clean rig. A
+        # teardown that fails leaves that rig dirty, so a case that
+        # otherwise passed cannot claim the contract held end to end.
+        try:
+            stop()
+            case.observe('foreign peer ' + container + ' removed — '
+                         'later cases see a clean rig')
+        except Exception as exc:
+            case.observe('the foreign peer teardown failed: '
+                         + str(exc)[:200])
+            if record['outcome'] == 'passed':
+                record['outcome'] = 'inconclusive'
+                record['detail'] = ('the foreign peer was never '
+                                    'removed: ' + str(exc)[:300])
+        return record
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
 def scenario_parameter_tune_carryover(ctx):
     """A descriptor-declared Float parameter retuned through the
     receipted path survives the pair's promotion."""
@@ -1652,6 +2327,365 @@ def scenario_controller_restart(ctx):
 
 
 # --------------------------------------------------------------------
+# The declared freshness budget (WW-OPS-003's stale-data surface,
+# WW-ALM-003's rule that stale data never presents as a healthy
+# last-known value): the rig model's `net-flow` field input carries a
+# declared `stale_after_ticks` — a per-point declaration, not a global
+# rule. Stopping the writer-holding controller freezes the shared
+# plant's stepping (the sim-net single-writer claim means no surviving
+# peer steps it), so the tracking standby's scans outrun the frozen
+# driver stamps: the budgeted point must present Uncertain(Stale) while
+# the undeclared `level-primary` keeps reporting Good. The outage is
+# bounded by the standby's armed failover budget — the writer's restart
+# lands inside it, the resumed checkpoint stream realigns the tracking
+# peer's tick domain to the plant's, and the budgeted point returns
+# Good. Should the restart ever land late, the armed self-promotion is
+# the documented bound: the promoted peer reclaims the writer and
+# resumes stepping, and the case reports whether the point recovers on
+# that path instead. `GET /history` preserves the stale interval either
+# way — the durable evidence when live polling lands late.
+
+STALE_FRESHNESS_POLL = 0.2   # cadence polling the surviving peer mid-freeze
+STALE_HOLD_TICKS = 10        # keep sampling past first stale — the relapse check
+FREEZE_MAX_TICKS = 60        # hard bound on the outage, under the armed failover budget
+STALE_WALL_DEADLINE = 20     # backstop when the peer's tick stops serving
+STALE_RECOVER_DEADLINE = 45  # bound on the point returning Good after the restart
+STALE_RETURN_DEADLINE = 45   # bound on the restarted writer's monitor returning
+
+# The probe pair out of the served SignalIndex: the model's one declared
+# stale_after_ticks point, and an undeclared field input sharing the
+# same frozen driver — the per-point-contract contrast.
+STALE_BUDGETED_NAME = 'net-flow'
+STALE_COMPARISON_NAME = 'level-primary'
+
+
+def scenario_stale_freshness(ctx):
+    """Freeze the shared plant's stepping by stopping the writer-holding
+    controller: the declared-budget input presents Uncertain(Stale) on
+    the surviving standby while an undeclared field input keeps Good;
+    the writer's restart realigns the tracking peer inside the armed
+    failover bound and the point returns Good — /history preserving the
+    stale interval."""
+    case = Case('stale-freshness',
+                'Declared freshness budget presents stale on writer loss',
+                'stopping the writer-holding controller freezes the '
+                'shared plant\'s stepping, so the field input carrying '
+                'the declared stale_after_ticks presents Uncertain(Stale) '
+                'on the surviving standby while an undeclared field input '
+                'keeps Good; the writer\'s restart lands inside the armed '
+                'failover bound, the resumed checkpoints realign the '
+                'tracking peer, and the point returns Good — with the '
+                '/history record preserving the stale interval')
+    try:
+        stop = ctx.get('stop_controller')
+        start = ctx.get('start_controller')
+        if stop is None or start is None:
+            return case.finish('inconclusive', 'the run context carries '
+                               'no controller stop/start action — the '
+                               'writer-loss induction has no documented '
+                               'seam')
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        base, peer_base = ctx[active], ctx[peer]
+        budget = ctx.get('failover_misses')
+        case.observe('seam=writer-stop: stop ' + active + ' (' + base
+                     + '), observe ' + peer + ' (' + peer_base + ')'
+                     + (', failover budget ' + str(budget) + ' misses'
+                        if budget else ''))
+
+        # The probe pair out of the served index. The freshness budget
+        # itself is model data — the index names the declared point by
+        # its signal name.
+        _, signals = http_json('GET', peer_base + '/signals')
+        named = {entry.get('name'): entry
+                 for entry in signals.get('points', [])}
+        budgeted = named.get(STALE_BUDGETED_NAME)
+        comparison = named.get(STALE_COMPARISON_NAME)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'stale-freshness-signals.json',
+                            {'budgeted': budgeted,
+                             'comparison': comparison})
+        case.evidence('file', ref, 'the probe points\' served entries')
+        if budgeted is None or comparison is None:
+            return case.finish('inconclusive', 'the rig model declares '
+                               'no ' + STALE_BUDGETED_NAME + '/'
+                               + STALE_COMPARISON_NAME
+                               + ' field input — the freshness probe is '
+                               'not declared')
+        b_point, c_point = budgeted['point'], comparison['point']
+        case.observe('budgeted probe: ' + STALE_BUDGETED_NAME
+                     + ' point ' + str(b_point) + '; comparison: '
+                     + STALE_COMPARISON_NAME + ' point ' + str(c_point))
+
+        # The pre-freeze baseline: the surviving peer a tracking
+        # standby, both probes Good.
+        def tracking():
+            try:
+                report = _role(ctx, peer_base)
+            except Exception:
+                return None
+            return report if report.get('role') == 'standby' \
+                and 'tracking' in (report.get('sync') or {}) else None
+
+        if wait_for(tracking, time.monotonic() + 45,
+                    interval=STALE_FRESHNESS_POLL) is None:
+            return case.finish('inconclusive', 'the surviving peer is '
+                               'not a tracking standby — the writer-loss '
+                               'induction has no observation point')
+        baseline = _snapshot(ctx, peer_base)
+        baseline_q = {p: _sample_quality(baseline, p)
+                      for p in (b_point, c_point)}
+        case.observe('baseline qualities: ' + STALE_BUDGETED_NAME + '='
+                     + str(baseline_q[b_point]) + ' '
+                     + STALE_COMPARISON_NAME + '='
+                     + str(baseline_q[c_point]))
+        if baseline_q[b_point] != 'good':
+            return case.finish('failed', 'the budgeted point presents '
+                               + str(baseline_q[b_point])
+                               + ' before any induction — the declared '
+                               'budget misfires on a healthy rig')
+        if baseline_q[c_point] != 'good':
+            return case.finish('inconclusive', 'the comparison point '
+                               'presents ' + str(baseline_q[c_point])
+                               + ' before the freeze — no healthy '
+                               'baseline to contrast against')
+
+        # Induce: stop the writer. The shared plant's stamps freeze;
+        # the tracking peer's scans outrun them while its checkpoint
+        # pulls miss. The freeze is tick-bounded — the peer's own scan
+        # tick paces the miss cadence — and capped under the armed
+        # failover budget so the restart lands first.
+        try:
+            stop(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the writer-stop '
+                               'induction never completed: '
+                               + str(exc)[:300])
+        case.observe('writer stopped — polling ' + peer)
+
+        tick0 = None
+        stale_tick = None
+        freeze_obs = []
+        degraded = False
+        promoted = False
+        relapse = None
+        comparison_seen = set()
+        wall = time.monotonic() + STALE_WALL_DEADLINE
+        while time.monotonic() < wall:
+            try:
+                report = _role(ctx, peer_base)
+                snap = _snapshot(ctx, peer_base)
+            except Exception:
+                time.sleep(STALE_FRESHNESS_POLL)
+                continue
+            tick = snap.get('tick') or 0
+            if tick0 is None:
+                tick0 = tick
+            sync = report.get('sync') or {}
+            sync_key = next(iter(sync), None)
+            if sync_key == 'degraded':
+                degraded = True
+            if report.get('role') in ('promoting', 'active'):
+                promoted = True
+            qb = _sample_quality(snap, b_point)
+            qc = _sample_quality(snap, c_point)
+            freeze_obs.append({'tick': tick, 'budgeted': qb,
+                               'comparison': qc,
+                               'role': report.get('role'),
+                               'sync': sync_key})
+            if qc is not None:
+                comparison_seen.add(qc)
+            if qb == 'uncertain:stale' and stale_tick is None:
+                stale_tick = tick
+            elif stale_tick is not None and qb == 'good':
+                relapse = {'tick': tick}
+            if promoted or relapse:
+                break
+            if stale_tick is not None \
+                    and tick - stale_tick >= STALE_HOLD_TICKS:
+                break
+            if tick - tick0 >= FREEZE_MAX_TICKS:
+                break
+            time.sleep(STALE_FRESHNESS_POLL)
+        case.observe('freeze: ' + str(len(freeze_obs))
+                     + ' polls over ' + str((freeze_obs[-1]['tick']
+                                             - tick0)
+                                            if freeze_obs and tick0
+                                            is not None else 0)
+                     + ' peer ticks; stale first seen '
+                     + ('at tick ' + str(stale_tick) if stale_tick
+                        is not None else 'never')
+                     + (', peer promoted' if promoted else ''))
+
+        # End the outage inside the failover bound: the restarted writer
+        # resumes its persisted run, reclaims the plant, and its
+        # checkpoint stream realigns the tracking peer — the documented
+        # recovery path. (If the peer already promoted, the freeze ended
+        # at the armed failover bound instead; the restart is then
+        # fenced out of the field and the promoted peer is the writer —
+        # the recovery check below reads that path's result either way.)
+        try:
+            start(active)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the writer restart '
+                               'never completed: ' + str(exc)[:300])
+        case.observe('writer restart issued')
+
+        # Recovery on the observing peer: the budgeted point back to
+        # Good. On the restart path the resumed checkpoints rewind the
+        # tracking peer's tick to the plant's — the lag closes and the
+        # declared budget clears.
+        def back_to_good():
+            try:
+                report = _role(ctx, peer_base)
+                snap = _snapshot(ctx, peer_base)
+            except Exception:
+                return None
+            if _sample_quality(snap, b_point) != 'good':
+                return None
+            return {'role': report.get('role'), 'tick': snap.get('tick')}
+
+        recovered = wait_for(back_to_good,
+                             time.monotonic() + STALE_RECOVER_DEADLINE,
+                             interval=STALE_FRESHNESS_POLL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'stale-freshness-freeze.json',
+            {'seam': 'writer-stop', 'promoted': promoted,
+             'observations': freeze_obs,
+             'recovery': recovered})
+        case.evidence('file', ref, 'per-poll qualities through the '
+                      'freeze and the recovery read')
+
+        # The durable record: the peer's /history must preserve the
+        # stale interval even where live polling landed late, bracketed
+        # by Good — never interrupted by a healthy last-known value.
+        _, history_body = http_json(
+            'GET', peer_base + '/history?point=' + str(b_point)
+            + '&point=' + str(c_point) + '&since=0')
+        b_hist = _history_qualities(history_body, b_point)
+        c_hist = _history_qualities(history_body, c_point)
+        stale_pos = [i for i, (_s, q, _t) in enumerate(b_hist)
+                     if q == 'uncertain:stale']
+        c_stale = [s for s, q, _t in c_hist if q == 'uncertain:stale']
+        interval = None
+        if stale_pos:
+            first, last = stale_pos[0], stale_pos[-1]
+            interval = {
+                'first_seq': b_hist[first][0],
+                'last_seq': b_hist[last][0],
+                'ticks': [t for _s, _q, t in b_hist[first:last + 1]],
+                'bracket': [{'seq': s, 'quality': q, 'tick': t}
+                            for s, q, t in b_hist[max(0, first - 1):
+                                                  last + 2]],
+                'good_inside': any(q == 'good'
+                                   for _s, q, _t
+                                   in b_hist[first:last + 1]),
+                'recovered': any(q == 'good'
+                                 for _s, q, _t in b_hist[last + 1:]),
+            }
+        ref = save_evidence(
+            ctx['evidence_dir'], 'stale-freshness-history.json',
+            {'budgeted': {'point': b_point, 'interval': interval,
+                          'samples': len(b_hist)},
+             'comparison': {'point': c_point, 'stale_seqs': c_stale}})
+        case.evidence('file', ref, 'the stale interval in the peer\'s '
+                      'served history')
+
+        # Verdicts, in contract order: an induction that never took
+        # effect is inconclusive; everything else names the broken
+        # clause.
+        freeze_proven = degraded or promoted or stale_tick is not None \
+            or 'uncertain:stale' in comparison_seen
+        if not freeze_proven:
+            return case.finish('inconclusive', 'the writer-stop '
+                               'induction never took effect — the peer '
+                               'kept tracking and no stamp froze, so no '
+                               'staleness absence can be attributed')
+        if 'uncertain:stale' in comparison_seen or c_stale:
+            return case.finish('failed', 'the undeclared comparison '
+                               'point presented stale — the budget '
+                               'leaked past its declaration')
+        if comparison_seen - {'good'}:
+            return case.finish('failed', 'the undeclared comparison '
+                               'point presented '
+                               + str(sorted(comparison_seen - {'good'}))
+                               + ' during the freeze — expected Good '
+                               'throughout')
+        if relapse:
+            return case.finish('failed', 'the stale interval reverted '
+                               'to a healthy last-known value at tick '
+                               + str(relapse['tick'])
+                               + ' while the plant stayed frozen')
+        if stale_tick is None and not stale_pos:
+            return case.finish('failed', 'the budgeted point never '
+                               'presented Uncertain(Stale) while the '
+                               'plant\'s stepping was frozen')
+        if recovered is None:
+            note = 'the point did not return Good after the writer '
+            if promoted:
+                note += ('lost the field to the peer\'s failover-budget '
+                         'self-promotion — the promoted run resumes '
+                         'stepping but its scan ticks lead the frozen '
+                         'stamps by the outage length, so the lag never '
+                         'closes')
+            else:
+                note += ('resumed stepping — the tracking peer never '
+                         'realigned inside ' + str(STALE_RECOVER_DEADLINE)
+                         + 's')
+            return case.finish('failed', note)
+        if not stale_pos:
+            return case.finish('failed', 'the /history record does not '
+                               'preserve the stale interval live '
+                               'polling observed')
+        if interval['good_inside']:
+            return case.finish('failed', 'a healthy last-known value '
+                               'sits inside the recorded stale interval')
+        if not interval['recovered']:
+            return case.finish('failed', 'the /history record never '
+                               'shows the interval closing — no Good '
+                               'after the last stale sample')
+        case.observe('stale interval: seqs '
+                     + str(interval['first_seq']) + '..'
+                     + str(interval['last_seq']) + ', '
+                     + str(len(stale_pos)) + ' samples, bracketed by '
+                     'Good in history')
+        if promoted:
+            case.observe('the peer\'s failover-budget self-promotion '
+                         'reclaimed the writer and the point recovered '
+                         'on the promoted run')
+        else:
+            case.observe('the restarted writer\'s checkpoints realigned '
+                         'the tracking peer — the point returned Good '
+                         'inside the failover bound')
+
+        # Leave the rig the way the suite expects it: the restarted
+        # endpoint serving again. Only meaningful when no promotion
+        # happened — a promoted peer owns the field and the restarted
+        # container stays fenced out.
+        if not promoted:
+            def serving_again():
+                try:
+                    report = _role(ctx, base)
+                except Exception:
+                    return None
+                return report if report.get('role') == 'active' else None
+
+            back = wait_for(serving_again,
+                            time.monotonic() + STALE_RETURN_DEADLINE,
+                            interval=STALE_FRESHNESS_POLL)
+            if back is None:
+                return case.finish('inconclusive', 'the restarted '
+                                   'writer never returned')
+            case.observe('the restarted writer is serving as active '
+                         'at tick ' + str(back.get('tick')))
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+# --------------------------------------------------------------------
 # The plant-link boundary (WW-OPS-003's communication confidence and
 # WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss
 # checks): the runner-owned plant stop/start action severs both
@@ -1691,8 +2725,10 @@ def _plant_probe(ctx, request, timeout=5):
     the field's own evidence: `list_points` is the census of points the
     boundary fails at once, and a `step` mutation is the fencing probe
     — answered `fenced` while any attachment holds the plant's
-    single-writer claim, `stepped` while nobody does. Each probe takes
-    a new connection because the outage it watches is exactly a dead
+    single-writer claim, `unclaimed` while none does: the field fails
+    closed across a restart, so `unclaimed` means "waiting on the
+    owner's re-arm", not an open window. Each probe takes a new
+    connection because the outage it watches is exactly a dead
     listener; the probe never sends `claim_writer` — claiming from
     here would preempt the field owner it is checking for."""
     stream = _plant_connect(ctx, timeout=timeout)
@@ -4157,6 +5193,22 @@ def scenario_dcs_ctl(ctx):
         case.observe('picked command: ' + str(component) + ' '
                      + str(spec.get('name')) + ' -> dcs-ctl '
                      + ' '.join(argv) + ' --actor ' + CTL_ACTOR)
+
+        # The journal cursor ahead of the submission: earlier legs
+        # already settled identical commands into the ring — the
+        # served-interface case picks from the same selection logic
+        # and submits under its own actor — so the settlement read
+        # below starts above the high-water seq and never matches a
+        # prior leg's entry.
+        rc, prior, err = ctl(base, 'journal', '--since', '0')
+        if rc != 0 or not isinstance(prior, list):
+            return done('failed', 'dcs-ctl journal failed ahead of the '
+                        'submission: exit ' + str(rc) + ' '
+                        + str(err)[:200])
+        floor = max((entry.get('seq') or 0
+                     for entry in prior if isinstance(entry, dict)),
+                    default=0)
+
         rc, receipt, err = ctl(base, *argv, '--actor', CTL_ACTOR)
         ref = save_evidence(
             ctx['evidence_dir'], 'dcs-ctl-invoke.json',
@@ -4172,26 +5224,47 @@ def scenario_dcs_ctl(ctx):
                         'receipt: exit ' + str(rc) + ' '
                         + json.dumps(receipt)[:300] + ' '
                         + str(err)[:200])
+        if receipt.get('actor') != CTL_ACTOR:
+            return done('failed', 'the printed receipt dropped the '
+                        'declared --actor: actor='
+                        + json.dumps(receipt.get('actor')))
         case.observe('receipt outcome: '
                      + json.dumps(outcome, sort_keys=True))
 
         # The attributed CommandSettled in the served journal, read
         # through `dcs-ctl journal` — GET /journal through the shipped
-        # consumer.
+        # consumer — above the pre-submission cursor. The cursor alone
+        # cannot name this leg's settlement: a checkpoint-adopted
+        # receipt re-journals on the observing peer — the pair's one
+        # command audit trail — so an earlier leg's identical command
+        # under its own actor can land above the floor, as the lenovo
+        # run's actor="qa-lane" carryover did. The receipt identity is
+        # the match: only this leg declares CTL_ACTOR, so a settled
+        # entry carrying it for this command is this submission's
+        # echo — while a same-command entry under a foreign actor is
+        # recorded for the failure detail, not matched.
         observed = {}
 
         def journaled():
-            rc, journal, _err = ctl(base, 'journal', '--since', '0')
+            rc, journal, _err = ctl(base, 'journal', '--since',
+                                    str(floor))
             if rc != 0 or not isinstance(journal, list):
                 return None
             observed['journal_len'] = len(journal)
             for entry in journal:
-                settled = ((entry or {}).get('event') or {}) \
-                    .get('command_settled') or {}
-                if (settled.get('receipt') or {}).get('command') \
-                        == command:
+                settled = (((entry or {}).get('event') or {})
+                           .get('command_settled') or {}) \
+                           .get('receipt') or {}
+                if settled.get('command') != command:
+                    continue
+                settled_outcome = settled.get('outcome') or {}
+                if 'applied' not in settled_outcome \
+                        and 'rejected' not in settled_outcome:
+                    continue
+                if settled.get('actor') == CTL_ACTOR:
                     observed['entry'] = entry
                     return True
+                observed.setdefault('foreign', entry)
             return None
 
         covered = wait_for(journaled,
@@ -4199,10 +5272,19 @@ def scenario_dcs_ctl(ctx):
         ref = save_evidence(
             ctx['evidence_dir'], 'dcs-ctl-journal.json',
             {'entry': observed.get('entry'),
+             'foreign': observed.get('foreign'),
              'journal_len': observed.get('journal_len')})
         case.evidence('file', ref, 'the CLI-read journal covering the '
                       'command\'s settlement')
         if not covered:
+            foreign = (((observed.get('foreign') or {})
+                        .get('event') or {})
+                       .get('command_settled') or {}) \
+                       .get('receipt') or {}
+            if foreign:
+                return done('failed', 'the journaled receipt is '
+                            'unattributed: actor='
+                            + json.dumps(foreign.get('actor')))
             return done('failed', 'the served journal never recorded '
                         'the command\'s CommandSettled')
         settled = (observed['entry'].get('event') or {}) \
@@ -4338,11 +5420,19 @@ def scenario_dcs_ctl(ctx):
 # so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
 # and the promotion it performs is the run's one a->b switch — the
 # failover leg behind it demotes whichever peer reports settled active
-# and promotes the converged one back. The model-revision case runs
+# and promotes the converged one back. The checkpoint-negotiation case
+# sits between them and the model-revision case: it needs the pair
+# still on the mounted fingerprint so the recipe-derived document is
+# foreign, and it removes its foreign peer before the revision launch
+# takes the third-controller seat. The model-revision case runs
 # behind the failover: whichever peer holds the field then is the one
 # its third --revised controller stands by on and supersedes, so every
 # case after it already exercises the revised model document. The
-# plant-link-loss case
+# incompatible-revision case sits immediately ahead of it: its
+# carryover-breaking peer never promotes, so the field writer is
+# unchanged, and the compatible case's launch replaces the degraded
+# third container and performs the control's promote leg in the same
+# run. The plant-link-loss case
 # follows later in the schedule: its plant container cycling cannot
 # contaminate an earlier case, and whichever endpoint owns the field
 # by then keeps it through the outage and recovery the scenario
@@ -4353,8 +5443,10 @@ def scenario_dcs_ctl(ctx):
 # established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
+             scenario_stale_freshness,
              scenario_parameter_tune_carryover, scenario_failover,
-             scenario_model_revision,
+             scenario_checkpoint_negotiation,
+             scenario_incompatible_revision, scenario_model_revision,
              scenario_evidence_capture, scenario_served_interface,
              scenario_force_release, scenario_consumer_schedule,
              scenario_command_admission, scenario_plant_link_loss,

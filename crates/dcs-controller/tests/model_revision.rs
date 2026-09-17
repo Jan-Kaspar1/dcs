@@ -25,18 +25,18 @@
 
 use dcs_core::{
     CarryoverReport, Command, DroppedElement, IoDriver, JournalEvent, PointId, Role, StandbySync,
-    SwitchError, TelemetrySnapshot, Value, ValueKind,
+    SwitchError, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -66,116 +66,13 @@ const NEW_KNOB: PointId = PointId(32);
 /// The operator setpoint value the run carries across the boundary.
 const OPERATING_POINT: f64 = 33.5;
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// Writes `document` — a model JSON — under `dir` and loads it once so
-/// the caller can compare fingerprints.
-fn write_model(dir: &Path, name: &str, document: &serde_json::Value) -> (PathBuf, PlantModel) {
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(document).unwrap()).unwrap();
-    let model = PlantModel::load(&serde_json::to_string(document).unwrap()).unwrap();
-    (path, model)
-}
-
 /// The base controller-side document: the tank loop with its devices
 /// re-pointed at `sim-tcp` carrying the plant's address, the setpoint
 /// point 11 moved image-side — an internal writable `In` point, the
 /// operator value the carryover rule is about — and a second held
 /// operator value at point 31.
 fn base_model(plant: SocketAddr) -> serde_json::Value {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
+    let mut document = sim_tcp_document(MODEL_SOURCE, plant, SimTcp::PerDevice);
     let points = document["io_points"].as_array_mut().unwrap();
     let setpoint = points
         .iter_mut()
@@ -261,23 +158,9 @@ fn broken_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
             connection["from"]["point"] = 14.into();
         }
     }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     // The broken revision is still a valid model — it must fail at the
     // carryover rule, not at load.
-    PlantModel::load(&serde_json::to_string(&document).unwrap()).unwrap();
-    path
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
+    write_model(dir, name, &document).0
 }
 
 /// The report the peer's sync state carries, or a panic naming what it
@@ -300,7 +183,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("dcs-revision-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, v1) = v1_model(&dir, "v1.json", plant.addr);
     let (v2_path, v2) = v2_model(&dir, "v2.json", plant.addr);
     assert_ne!(
@@ -309,7 +192,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
         "the revision must fingerprint differently by design"
     );
 
-    let active_process = spawn_controller(&v1_path, &[]);
+    let active_process = spawn_controller(&v1_path, &[], DT);
     let standby_process = spawn_controller(
         &v2_path,
         &[
@@ -317,6 +200,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
             active_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -444,15 +328,20 @@ fn run_roll(tag: &str) -> serde_json::Value {
     }
 
     // Roles settled on both surfaces: the revised model owns the field;
-    // the old peer is a quiesced standby — it was never a tracking peer
-    // of the new active (it started without `--standby`), so it reports
-    // unsynchronized rather than converging onto foreign checkpoints.
+    // the old peer is a quiesced standby that follows the new active —
+    // the announced-source tracking a demotion falls back to — and its
+    // pulls of foreign-fingerprint checkpoints are refused by the
+    // fingerprint gate it never opted out of, so it reports `degraded`
+    // naming the mismatch rather than converging onto them.
     let role = standby.role().unwrap();
     assert_eq!(role.role, Role::Active);
     assert_eq!(role.sync, None);
     let role = active.role().unwrap();
     assert_eq!(role.role, Role::Standby);
-    assert_eq!(role.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(role.sync, Some(StandbySync::Degraded { .. })),
+        "foreign-fingerprint pulls must degrade, not silently converge: {role:?}"
+    );
     // The carried operator value is still the revised run's setpoint.
     let snapshot = standby.snapshot().unwrap();
     assert_eq!(
@@ -508,11 +397,11 @@ fn breaking_revision_is_rejected_before_promotion() {
     let dir = std::env::temp_dir().join(format!("dcs-revision-broken-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, _v1) = v1_model(&dir, "v1.json", plant.addr);
     let broken_path = broken_model(&dir, "broken.json", plant.addr);
 
-    let active_process = spawn_controller(&v1_path, &[]);
+    let active_process = spawn_controller(&v1_path, &[], DT);
     let standby_process = spawn_controller(
         &broken_path,
         &[
@@ -520,6 +409,7 @@ fn breaking_revision_is_rejected_before_promotion() {
             active_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);

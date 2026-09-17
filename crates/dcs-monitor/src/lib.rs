@@ -1,10 +1,14 @@
 //! HTTP+JSON monitoring access to a running executor.
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
-//! small synchronous HTTP server, so no async runtime is involved and every
-//! request is handled one at a time. The executor lives behind a [`Mutex`]
+//! small synchronous HTTP server, so no async runtime is involved.
+//! Requests dispatch across a small worker pool so a request whose
+//! handling legitimately waits on the network — a driven `POST /scan`
+//! batch's per-scan checkpoint pull, a promotion's final-sync fetch —
+//! stalls only its own worker instead of head-of-line blocking every
+//! endpoint behind it. The executor lives behind a [`Mutex`]
 //! the control-plane endpoints and the scan loop share — scans, commands,
-//! checkpoints, and role changes hold it for their whole handling, so a
+//! checkpoints, and role changes hold it for their mutation, so a
 //! snapshot can never observe a half-run scan and commands always
 //! interleave between scans, where the executor's documented boundary
 //! applies them. The read endpoints do not touch it: after each completed
@@ -33,7 +37,13 @@
 //!   `kind:id` diagnostic name the descriptor reports
 //! - `GET /receipts` → `200` `Vec<`[`CommandReceipt`]`>` — the receipt
 //!   log's published mirror, refreshed wherever the control-plane lock
-//!   changes it, so a submission between scans is immediately visible
+//!   changes it, so a submission between scans is immediately visible.
+//!   The log is a bounded tail
+//!   ([`Executor::with_receipt_log_capacity`](dcs_runtime::Executor::with_receipt_log_capacity)):
+//!   settled receipts evict oldest-first while pending ones never do,
+//!   and the evicted count reads off the snapshot's
+//!   `command_queue.attempts` minus the served length — the same
+//!   numbering-gap convention the history and journal streams use
 //! - `GET /history` → `200` `Vec<`[`PointHistory`]`>` — each mapped
 //!   point's retained samples in tick order from the store's bounded
 //!   rings; `?point=<id>` (repeatable) selects points and
@@ -102,7 +112,12 @@
 //!   arriving while the queue is full is refused with a
 //!   [`CommandError::QueueFull`] rejection receipt — admission is
 //!   receipted, never fire-and-forget — and the queue's admission
-//!   metrics ride the snapshot's `command_queue` section
+//!   metrics ride the snapshot's `command_queue` section. With a
+//!   [`CommandPersist`] installed ([`Monitor::with_command_persist`],
+//!   the controller's `--state-file` wiring), an accepted admission is
+//!   persisted before the `200` answers, so a restart between admission
+//!   and the applying scan re-queues the carried receipt rather than
+//!   losing the command unaudited
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
 //!   refused with `409` on a paced monitor (see below)
@@ -139,11 +154,16 @@
 //! `--state-file`: the checkpoint resumes the run's state, the journal
 //! preserves the run's record. Startup replays the file into the ring
 //! and continues `seq` numbering where it left off — a run-boundary
-//! marker line separates process lifetimes within the file — so
-//! `GET /journal` answers continuously across a restart; a file that
+//! marker line separates process lifetimes within the file, and a
+//! restart's marker also journals once as a `run_boundary` entry so a
+//! `GET /journal` consumer attributes entries to a process lifetime —
+//! so `GET /journal` answers continuously across a restart; a file that
 //! cannot be replayed fails startup naming the file and the offending
-//! record, and a missing file is a cold start. Point history stays
-//! volatile; only the journal persists.
+//! record, and a missing file is a cold start. A run resumed through
+//! `--state-file` diffs its first scan against the restored executor
+//! state and the replayed record's last observations, so the audit
+//! trail continues rather than re-journaling what it already recorded.
+//! Point history stays volatile; only the journal persists.
 //!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the
@@ -294,13 +314,18 @@
 //! reporting `active`, so the point listing, trends, and journal are the
 //! one logical controller's, while the pair section renders per-peer
 //! role, convergence, and reachability — an unreachable peer is a named
-//! redundancy fault, not a plant fault. Commands submit only to the
+//! redundancy fault, not a plant fault. Two peers reporting `active` at
+//! once is the dual-active split-brain that contract makes impossible:
+//! the pair summary names it as a redundancy fault rather than rendering
+//! the pair healthy, and commands find no unique target — nothing is
+//! sent while the fault stands. Commands submit only to the
 //! settled-active peer; a `not_active` rejection — the command landed
 //! mid-transition — triggers a role re-poll and one retry. The contract
 //! endpoints answer cross-origin reads (`Access-Control-Allow-Origin: *`)
 //! so the page can reach a peer on another host. [`PairClient`] is the
 //! same pair view for in-process consumers — tests and tooling — and
-//! carries the testable half of the routing rules.
+//! carries the testable half of the routing rules, including the
+//! dual-active verdict through [`PairClient::health`].
 //!
 //! ## The plant overview
 //!
@@ -354,20 +379,22 @@ mod store;
 
 use crate::store::Store;
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
-pub use pair::{PairClient, PairError, PeerStatus, PeerView};
+pub use pair::{CONVERGENCE_GRACE, PairClient, PairError, PairHealth, PeerStatus, PeerView};
 pub use recorder::MonitorConfig;
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    PublicationHealth, ResourceView, RoleReport, SchemaView, TelemetrySnapshot, Tick,
+    PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Request body of `POST /scan`: how many scans the executor should run.
@@ -406,12 +433,49 @@ pub const PAGE: &str = include_str!("page.html");
 const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock time by this \
      controller; externally requested scans would inject ticks outside the schedule";
 
+/// The dedicated bound on one peer checkpoint fetch — the connect and
+/// I/O budget [`CheckpointPuller`]'s pulls, the driven `POST /scan`
+/// tracking pull, and the promotion boundary's `final_sync` fetch all
+/// carry. An unreachable or wedged active must never stall request
+/// serving or the scan cadence on its own network wait: a fetch
+/// exceeding the bound simply fails like any refused pull, and a
+/// tracking cycle whose pull is still in flight already counts its
+/// heartbeat miss.
+const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The worker count [`Monitor::serve`] dispatches requests across.
+/// tiny_http queues accepted requests internally; each worker pops one
+/// and handles it end to end. The pool exists so a request whose work
+/// legitimately waits on the network — a driven `POST /scan` batch's
+/// per-scan checkpoint pull, a promotion's final-sync fetch — stalls
+/// only its own worker while every other endpoint keeps answering;
+/// control-plane mutations still serialize on the shared lock, the
+/// pool only choosing which request waits on it next.
+const SERVE_WORKERS: usize = 4;
+
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
 /// ownership decides the step), and the checkpoint a state-file run
 /// persists at that boundary. A failure fails the request like a scan
 /// failure.
 pub type AfterScan<'d> = Box<dyn Fn(&Peer<'d>) -> Result<(), String> + Send + Sync + 'd>;
+
+/// Runs at a command's admission boundary — inside `POST /command`,
+/// after the accepted receipt lands in the executor's log and before
+/// the request answers — receiving the run's just-captured
+/// [`Checkpoint`]. A `--state-file` run installs its persist here so an
+/// accepted command is durable before its `200` receipt is promised:
+/// the checkpoint's receipt log carries the admission and a resume
+/// re-queues it, so a restart between admission and the applying scan
+/// re-applies the command instead of losing it unaudited — the same
+/// takeover guarantee the checkpoint contract gives a promoted standby.
+/// The call runs under the shared lock, serializing with the cycle-end
+/// persist a paced or driven run performs through
+/// [`persist_state`](Monitor::persist_state), so the two writes can
+/// never interleave into a stale overwrite. A failure is fatal — the
+/// run dies naming it rather than answering a receipt it cannot
+/// recover, the same rule the journal-file sink applies.
+pub type CommandPersist = Box<dyn Fn(&Checkpoint) -> Result<(), String> + Send + Sync>;
 
 /// The wiring an unpaced [`Monitor`]'s `POST /scan` runs around each
 /// requested scan — see [`Monitor::driven`].
@@ -459,13 +523,24 @@ pub struct Monitor<'d> {
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
+    /// The persist a `--state-file` run performs at a command's
+    /// admission boundary — see [`with_command_persist`](Self::with_command_persist).
+    command_persist: Option<CommandPersist>,
     /// The tracking source a standby pulls checkpoints from — the
-    /// `--standby` target on a paced standby's monitor, or `Driven`'s
-    /// `track` on a driven one. `POST /promote` runs one final pull
-    /// against it before the gate lifts ([`Peer::final_sync`]), so a
-    /// command the active admitted up to the promote request is carried
-    /// into the promoted run.
+    /// `--standby` target on a paced standby's monitor, `--peer` on a
+    /// launched active's, or `Driven`'s `track` on a driven one.
+    /// `POST /promote` runs one final pull against it before the gate
+    /// lifts ([`Peer::final_sync`]), so a command the active admitted up
+    /// to the promote request is carried into the promoted run.
     standby_source: Option<SocketAddr>,
+    /// The monitor address a tracking peer announced through its
+    /// `GET /checkpoint?peer=` pulls — the follow-peer half of the
+    /// tracking-source contract: a peer with no configured source that
+    /// is later demoted tracks its successor here, so a launched active
+    /// demoted mid-run reconverges and stays promotable instead of
+    /// stranding `unsynchronized` forever. Outside `shared`: the value
+    /// is request-path bookkeeping, never part of a scan's state.
+    announced: Mutex<Option<SocketAddr>>,
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
@@ -562,7 +637,11 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
-        let recorder = recorder::Recorder::new(config, peer.tick())?;
+        let mut recorder = recorder::Recorder::new(config, peer.tick())?;
+        // A `--state-file`-restored executor already carries the run's
+        // state — the receipt log and the restored image are this run's
+        // own record continuing, not new events to journal.
+        recorder.observe_standing(peer.executor());
         let store = recorder.store();
         // The bind-time read model is the first publication — any
         // journal tail a configured file replayed rides its event
@@ -576,7 +655,9 @@ impl<'d> Monitor<'d> {
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
             driven: Driven::default(),
+            command_persist: None,
             standby_source: None,
+            announced: Mutex::new(None),
         })
     }
 
@@ -590,6 +671,20 @@ impl<'d> Monitor<'d> {
         self
     }
 
+    /// Installs the persist a `--state-file` run performs at a command's
+    /// admission boundary: `POST /command` invokes it with the
+    /// just-captured checkpoint after an accepted receipt lands in the
+    /// executor's log and before the request answers — the admission is
+    /// durable before its `200` receipt is promised, so a restart before
+    /// the applying scan re-queues the carried `Accepted` receipt
+    /// instead of losing the command with no audit trace. Only an
+    /// `Accepted` admission invokes it — a refused command settles at
+    /// submission and is already journaled. See [`CommandPersist`].
+    pub fn with_command_persist(mut self, persist: CommandPersist) -> Self {
+        self.command_persist = Some(persist);
+        self
+    }
+
     /// Records the address a tracking standby pulls checkpoints from —
     /// a paced `--standby` run's target, which the pacing loop owns and
     /// `Driven` never sees. `POST /promote` runs one final pull against
@@ -598,6 +693,21 @@ impl<'d> Monitor<'d> {
     pub fn with_standby_source(mut self, source: SocketAddr) -> Self {
         self.standby_source = Some(source);
         self
+    }
+
+    /// The checkpoint address this peer tracks — `Driven`'s `track` or
+    /// the configured [`with_standby_source`](Self::with_standby_source)
+    /// when set, else the monitor address a tracking peer announced
+    /// through its `GET /checkpoint?peer=` pulls. The announced fallback
+    /// is the follow-peer half of the tracking-source contract: a peer
+    /// launched without a source — an active never told its peer — that
+    /// is later demoted tracks its successor here and reconverges
+    /// instead of stranding `unsynchronized` and unpromotable.
+    pub fn tracking_source(&self) -> Option<SocketAddr> {
+        self.driven
+            .track
+            .or(self.standby_source)
+            .or_else(|| *self.announced.lock().unwrap())
     }
 
     /// The address the listener is bound to.
@@ -610,18 +720,36 @@ impl<'d> Monitor<'d> {
 
     /// Serves requests until [`shutdown`](Self::shutdown).
     ///
-    /// Blocking: run this on a dedicated thread. Requests are handled
-    /// serially — one at a time, in arrival order — which keeps the
-    /// executor's command/scan interleaving deterministic.
+    /// Blocking: run this on a dedicated thread. Requests dispatch
+    /// across a pool of [`SERVE_WORKERS`] workers rather than one at a
+    /// time: a request whose handling legitimately waits — a driven
+    /// `POST /scan` batch walking its per-scan pulls, a promotion's
+    /// final-sync fetch — occupies only its own worker and never
+    /// head-of-line blocks the reads and control-plane requests queued
+    /// behind it. The executor's command/scan interleaving stays
+    /// deterministic because the pool only decides which request waits
+    /// on the shared lock next: scans, commands, checkpoints, and role
+    /// changes still serialize on it.
     pub fn serve(&self) {
-        for request in self.server.incoming_requests() {
-            self.handle(request);
-        }
+        std::thread::scope(|scope| {
+            for _ in 0..SERVE_WORKERS {
+                scope.spawn(|| {
+                    while let Ok(request) = self.server.recv() {
+                        self.handle(request);
+                    }
+                });
+            }
+        });
     }
 
     /// Stops a [`serve`](Self::serve) loop running on another thread.
     pub fn shutdown(&self) {
-        self.server.unblock();
+        // Each queued `Unblock` ends one worker's `recv` loop — a
+        // worker mid-request consumes it on its next pop — so the pool
+        // drains on one per worker.
+        for _ in 0..SERVE_WORKERS {
+            self.server.unblock();
+        }
     }
 
     /// Runs one executor scan through the shared lock, records it, and
@@ -696,10 +824,24 @@ impl<'d> Monitor<'d> {
 
     /// The executor's current transferable state, taken under the lock —
     /// the same between-scans [`Checkpoint`] `GET /checkpoint` serves.
-    /// A paced loop uses it to persist the run's state file at its
-    /// documented per-cycle boundary.
     pub fn checkpoint(&self) -> Checkpoint {
         self.shared.lock().unwrap().peer.checkpoint()
+    }
+
+    /// Captures the run's checkpoint under the shared lock and hands it
+    /// to `persist` still held — the serialization point every
+    /// `--state-file` write goes through: a pacing loop's end-of-cycle
+    /// write and a command's admission-boundary write
+    /// ([`with_command_persist`](Self::with_command_persist)) order
+    /// against each other at a scan boundary, so a persist slow on its
+    /// own I/O can never overwrite a newer admission's file with an
+    /// older capture.
+    pub fn persist_state(
+        &self,
+        persist: impl FnOnce(&Checkpoint) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let shared = self.shared.lock().unwrap();
+        persist(&shared.peer.checkpoint())
     }
 
     /// The executor's current virtual tick.
@@ -737,6 +879,12 @@ impl<'d> Monitor<'d> {
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
         }
+        for resolution in peer.take_resolutions() {
+            recorder.note_resolution(resolution);
+        }
+        for restart in peer.take_source_restarts() {
+            recorder.note_source_restart(restart);
+        }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
         // before the next scan publishes.
@@ -760,8 +908,14 @@ impl<'d> Monitor<'d> {
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
         }
+        for resolution in peer.take_resolutions() {
+            recorder.note_resolution(resolution);
+        }
         for report in peer.take_reinitializations() {
             recorder.note_reinitialized(report);
+        }
+        for restart in peer.take_source_restarts() {
+            recorder.note_source_restart(restart);
         }
         self.store.sync_receipts(peer.receipts());
         result
@@ -778,17 +932,33 @@ impl<'d> Monitor<'d> {
             .note_transfer_failed(detail);
     }
 
-    /// Runs the standby's per-scan tracking cycle under the shared lock
-    /// — the paced loop's pre-scan half: `pull` fetches the active's
-    /// checkpoint once, routed through
+    /// Runs the standby's per-scan tracking cycle — the paced loop's
+    /// pre-scan half: `pull` fetches the active's checkpoint once,
+    /// routed through
     /// [`Peer::track_once`](dcs_runtime::Peer::track_once)'s owns-field
     /// gate, miss accounting, and promote-on-budget sequence — and the
     /// transitions it queued (divergence detections, reinitialization
     /// reports, the role change a self-promotion reported) drain into
     /// the recorder. The returned [`TrackReport`] is the caller's to
     /// present; the journal already holds its transitions.
+    ///
+    /// The fetch itself runs *outside* the shared lock — an
+    /// unreachable or slow active must not serialize request serving
+    /// behind the pull's network wait. The owns-field gate is checked
+    /// under the lock first (a field owner pulls nothing), `pull` runs
+    /// unlocked, and its result is consumed under the lock, where
+    /// `track_once` re-applies the gate: a checkpoint fetched while a
+    /// promotion landed is discarded. Callers should still keep `pull`
+    /// cheap — e.g. a [`CheckpointPuller::poll`] consuming a fetch
+    /// worker's completed pull — since the cycle itself waits on it.
     pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
-        track_and_record(&mut self.shared.lock().unwrap(), &self.store, pull)
+        if self.shared.lock().unwrap().peer.owns_field() {
+            return TrackReport::OwnsField;
+        }
+        let pulled = pull();
+        track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
+            pulled
+        })
     }
 
     /// Whether the heartbeat's consecutive failed pulls have reached the
@@ -834,6 +1004,13 @@ impl<'d> Monitor<'d> {
             },
             (Method::Get, "/receipts") => json(200, &*self.store.receipts()),
             (Method::Get, "/checkpoint") => {
+                // The follow-peer half of the tracking-source
+                // contract: a tracking peer announces its own monitor
+                // address on the pull, so this instance knows where to
+                // track if it is later demoted.
+                if let Some(announced) = checkpoint_peer(query) {
+                    *self.announced.lock().unwrap() = Some(announced);
+                }
                 json(200, &self.shared.lock().unwrap().peer.checkpoint())
             }
             (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
@@ -879,9 +1056,31 @@ impl<'d> Monitor<'d> {
                     // receipt — the settled entry the journal echoes.
                     let receipt = if peer.accepts_commands() {
                         let receipt = peer.submit_command_as(command, actor);
-                        let index = peer.receipts().len() - 1;
+                        // The journal diff keys on the receipt's
+                        // absolute submission index — the bounded log's
+                        // evictions shift positions, the index does not.
+                        // `base + len` is `attempts` — the submission's
+                        // own index is one below — and the subtraction
+                        // saturates so a `capacity = 0` log that already
+                        // evicted this receipt cannot underflow it.
+                        let index =
+                            (peer.receipt_base() + peer.receipts().len() as u64).saturating_sub(1);
                         let tick = peer.tick();
                         recorder.note_command(index, receipt.clone(), tick);
+                        // An accepted admission is owed durability
+                        // before its receipt answers: a `--state-file`
+                        // run persists the just-captured checkpoint —
+                        // receipt log included — at this boundary, so a
+                        // restart before the applying scan re-queues the
+                        // carried receipt rather than losing the command
+                        // unaudited. The write rides the shared lock
+                        // like the cycle-end persist, so the two never
+                        // interleave into a stale overwrite.
+                        if matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+                            && let Some(persist) = &self.command_persist
+                        {
+                            persist(&peer.checkpoint()).unwrap_or_else(|error| panic!("{error}"));
+                        }
                         // Refresh the store's mirror so `GET /receipts`
                         // answers the just-submitted receipt before its
                         // scan boundary settles it.
@@ -908,7 +1107,6 @@ impl<'d> Monitor<'d> {
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
                 Ok(_) if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
                 Ok(body) => {
-                    let mut shared = self.shared.lock().unwrap();
                     let mut failure = None;
                     for _ in 0..body.scans {
                         // A tracking standby resynchronizes once per scan
@@ -919,13 +1117,27 @@ impl<'d> Monitor<'d> {
                         // promotion — reports through the peer's named
                         // sync state, which `GET /role` serves; the scan
                         // still runs on its last-known state.
-                        if let Some(active) = self.driven.track {
-                            track_and_record(&mut shared, &self.store, || {
-                                MonitorClient::new(active)
-                                    .checkpoint()
+                        //
+                        // `track_cycle` runs the fetch outside the
+                        // shared lock — a slow or unreachable tracking
+                        // source stalls only this request's worker,
+                        // never the lock the other endpoints queue on —
+                        // and consumes the result under it, re-applying
+                        // the owns-field gate.
+                        if let Some(active) = self.tracking_source() {
+                            let own = self.local_addr();
+                            self.track_cycle(|| {
+                                MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
+                                    .checkpoint_announcing(own)
                                     .map_err(|error| format!("fetch from {active}: {error}"))
                             });
                         }
+                        // Each scan takes the lock fresh and releases
+                        // it at the boundary, so a request queued
+                        // mid-batch — a command, a role poll — lands
+                        // between scans instead of waiting the batch
+                        // out.
+                        let mut shared = self.shared.lock().unwrap();
                         if let Err(error) = scan_and_record(&mut shared, &self.store) {
                             failure = Some(error.to_string());
                             break;
@@ -942,13 +1154,10 @@ impl<'d> Monitor<'d> {
                         // The last scan already published its read model —
                         // answer with that immutable copy, released from
                         // the executor lock before serialization.
-                        None => {
-                            drop(shared);
-                            match self.store.latest() {
-                                Some(publication) => json(200, &publication.snapshot),
-                                None => json(503, "no publication yet"),
-                            }
-                        }
+                        None => match self.store.latest() {
+                            Some(publication) => json(200, &publication.snapshot),
+                            None => json(503, "no publication yet"),
+                        },
                     }
                 }
                 Err(response) => response,
@@ -971,28 +1180,55 @@ impl<'d> Monitor<'d> {
     /// tracking source first ([`Peer::final_sync`]): a command the
     /// active admitted after the standby's last tracking pull — still
     /// `Accepted`, riding the checkpoint's receipt log — carries into
-    /// the promoted run and settles at its next boundary. A failed or
-    /// stale pull leaves the standing convergence to decide, exactly as
-    /// an unpulled promote would.
+    /// the promoted run and settles at its next boundary, even when the
+    /// serving checkpoint's tick is older than the standby's own (the
+    /// driven cadence's resting shape) and its state cannot land. A
+    /// failed pull leaves the standing convergence to decide, exactly
+    /// as an unpulled promote would.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
+        // The final-sync fetch runs outside the shared lock under the
+        // dedicated pull bound — like the tracking pull it can wait on
+        // an unreachable peer, and that wait must stall only this
+        // request, never the lock's hold or the paced scan. A peer
+        // already owning the field has no source to sync from — the
+        // gate `Peer::final_sync` itself applies — so it fetches
+        // nothing; the consume below re-applies the gate, discarding a
+        // checkpoint fetched while a concurrent promotion landed.
+        let pulled = match self.tracking_source() {
+            Some(source) if promote && !self.shared.lock().unwrap().peer.owns_field() => Some(
+                MonitorClient::with_timeout(source, CHECKPOINT_PULL_TIMEOUT)
+                    .checkpoint_announcing(self.local_addr())
+                    .map_err(|error| format!("fetch from {source}: {error}")),
+            ),
+            _ => None,
+        };
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;
         let result = if promote {
-            if let Some(source) = self.standby_source {
-                peer.final_sync(|| {
-                    MonitorClient::new(source)
-                        .checkpoint()
-                        .map_err(|error| format!("fetch from {source}: {error}"))
-                });
+            if let Some(pulled) = pulled {
+                peer.final_sync(|| pulled);
                 for divergence in peer.take_divergences() {
                     recorder.note_divergence(divergence.tick, divergence.mismatches);
+                }
+                for resolution in peer.take_resolutions() {
+                    recorder.note_resolution(resolution);
                 }
                 for report in peer.take_reinitializations() {
                     recorder.note_reinitialized(report);
                 }
+                for restart in peer.take_source_restarts() {
+                    recorder.note_source_restart(restart);
+                }
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
+        } else if peer.owns_field() && self.tracking_source().is_none() {
+            // A field owner with no tracking source — nothing
+            // configured and no standby that announced itself — would
+            // demote into a permanently unsynchronized standby that no
+            // pull can ever reconverge; refuse up front rather than
+            // silently marooning the instance.
+            Err(SwitchError::NoTrackingSource)
         } else {
             peer.demote()
         };
@@ -1009,13 +1245,17 @@ impl<'d> Monitor<'d> {
 }
 
 /// One standby tracking cycle plus its journal recording — the body
-/// `track_cycle` and `POST /scan` share: `Peer::track_once` runs the
+/// `track_cycle` runs, and `POST /scan` reaches through it:
+/// `Peer::track_once` runs the
 /// owns-field gate, the pull routing, the miss accounting, and the
 /// promote-on-budget sequence, then the queues it filled — divergence
 /// detections, reinitialization reports, the role change a
 /// self-promotion reported — drain into the recorder in report order.
 /// An applied checkpoint adopts the peer's receipt log, so the store's
-/// mirror refreshes before the next scan publishes.
+/// mirror refreshes before the next scan publishes. Only the consume
+/// half belongs under the lock — `track_cycle` runs its fetch before
+/// taking it, and `POST /scan`'s in-request pull carries the dedicated
+/// [`CHECKPOINT_PULL_TIMEOUT`] bound.
 fn track_and_record(
     shared: &mut Shared<'_>,
     store: &Store,
@@ -1026,8 +1266,14 @@ fn track_and_record(
     for divergence in peer.take_divergences() {
         recorder.note_divergence(divergence.tick, divergence.mismatches);
     }
+    for resolution in peer.take_resolutions() {
+        recorder.note_resolution(resolution);
+    }
     for report in peer.take_reinitializations() {
         recorder.note_reinitialized(report);
+    }
+    for restart in peer.take_source_restarts() {
+        recorder.note_source_restart(restart);
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
@@ -1052,12 +1298,28 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
             // it — but its boundary already counted the I/O faults
             // into `io_health`: publish the faulted boundary's state
             // so the served read model reports the fault rather than
-            // sitting on the last healthy scan.
+            // sitting on the last healthy scan. A fenced write on a
+            // peer that cannot quiesce it — no gate — still lands here
+            // carrying its claim-loss report, which journals the same
+            // way: the event belongs to the run's audit trail, not only
+            // the exit cause.
+            for loss in peer.take_fencing_losses() {
+                recorder.note_field_claim_lost(loss.tick, loss.point);
+            }
             store.publish(peer.tick(), peer.snapshot(), peer.receipts());
             return Err(error);
         }
     };
     let snapshot = recorder.record_scan(peer.executor(), tick);
+    // A field write the plant fenced — the claim this owner held was
+    // preempted — completed the scan degraded and demoted the peer
+    // inside it rather than failing it: the claim loss and the role
+    // transition it drove journal beside the scan's own events, cause
+    // before effect, beside the `io_health` fault the boundary
+    // already counted.
+    for loss in peer.take_fencing_losses() {
+        recorder.note_field_claim_lost(loss.tick, loss.point);
+    }
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
     }
@@ -1096,6 +1358,21 @@ fn history_query(query: &str) -> Result<(Vec<PointId>, u64), String> {
         }
     }
     Ok((points, since))
+}
+
+/// The `/checkpoint` query's `peer` key — the pulling monitor's own
+/// address, announced so this instance knows where to track after a
+/// demotion. An absent or unparseable value simply announces nothing:
+/// the checkpoint itself is still served, keeping older pullers and
+/// plain `GET /checkpoint` readers compatible.
+fn checkpoint_peer(query: &str) -> Option<SocketAddr> {
+    query_pairs(query).find_map(|(key, value)| {
+        if key == "peer" {
+            value.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// The `/journal` query: `since` keeps only entries with a higher `seq`.
@@ -1184,6 +1461,130 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
         )
 }
 
+/// A tracking standby's checkpoint-fetch worker: performs the
+/// pull-per-scan-cycle resync on its own thread so the network wait —
+/// connect, transfer, or a peer that never answers — is never part of
+/// the scan cycle's or the monitor lock's critical path.
+///
+/// The worker runs one fetch at a time against the active's monitor,
+/// each bounded by [`CHECKPOINT_PULL_TIMEOUT`], and only when a scan
+/// cycle asked for one — the documented cadence stays one pull per
+/// cycle, never a free-running poll hammering the serving peer. A
+/// cycle calls [`poll`](Self::poll) exactly once as its tracking pull:
+/// non-blocking, it consumes the latest completed fetch and requests
+/// the next, answering `Ok(checkpoint)` when a fetch produced one
+/// since the previous poll and `Err` otherwise — the fetch's own
+/// error detail, or the still-in-flight state while it runs. A cycle
+/// whose pull has not yet produced a checkpoint is a heartbeat miss
+/// exactly like a refused one, so the failover budget keeps measuring
+/// wall time — budget × scan period — instead of fetch latency: an
+/// active that cannot serve a checkpoint within the window is declared
+/// lost on the same cadence a refused connect would be.
+///
+/// Feed `poll` to [`Monitor::track_cycle`] or
+/// [`Peer::track_once`](dcs_runtime::Peer::track_once) as the `pull`.
+/// A field-owning peer's cycle never invokes it, so fetching idles on
+/// promotion and resumes on demotion; dropping the puller ends the
+/// worker thread once its in-flight fetch resolves.
+pub struct CheckpointPuller {
+    /// The pull target — the active's monitor address.
+    active: SocketAddr,
+    /// Wakes the worker for one fetch; a send arms `pending`.
+    requests: mpsc::Sender<()>,
+    /// Completed fetches with their completion instant, consumed by
+    /// [`poll`](Self::poll).
+    results: mpsc::Receiver<(Instant, Result<Checkpoint, String>)>,
+    /// A fetch request is outstanding — sent and not yet consumed.
+    pending: bool,
+    /// The last completed fetch's error, kept so a cycle polling while
+    /// a fetch is still in flight reports the most recent real detail
+    /// rather than only the in-flight state.
+    last_error: Option<String>,
+}
+
+impl CheckpointPuller {
+    /// Spawns the fetch worker for a standby tracking the active at
+    /// `active` — its monitor address, the same `--standby` target.
+    /// `announce`, when set, is this monitor's own address carried on
+    /// each fetch as `?peer=` — the announcement that gives the serving
+    /// peer somewhere to track if it is demoted later.
+    pub fn new(active: SocketAddr, announce: Option<SocketAddr>) -> Self {
+        let (requests, request_rx) = mpsc::channel::<()>();
+        let (result_tx, results) = mpsc::channel();
+        std::thread::spawn(move || {
+            let client = MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT);
+            // One fetch per request; the channels closing — the puller
+            // dropped — ends the loop.
+            while request_rx.recv().is_ok() {
+                let pulled = match announce {
+                    Some(own) => client.checkpoint_announcing(own),
+                    None => client.checkpoint(),
+                }
+                .map_err(|error| format!("fetch from {active}: {error}"));
+                if result_tx.send((Instant::now(), pulled)).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            active,
+            requests,
+            results,
+            pending: false,
+            last_error: None,
+        }
+    }
+
+    /// The tracking cycle's pull, once per scan: consumes the latest
+    /// completed fetch — `Ok` applies it, `Err` counts the cycle's
+    /// heartbeat miss — and requests the next when none is
+    /// outstanding. A fetch still in flight answers `Err` carrying the
+    /// last completed fetch's error, or the in-flight state when no
+    /// fetch has finished yet; the miss is honest either way — this
+    /// cycle produced no checkpoint.
+    ///
+    /// A completed result older than [`CHECKPOINT_PULL_TIMEOUT`] is
+    /// discarded as stale rather than applied: polls pause while the
+    /// peer owns the field, and a checkpoint captured before a
+    /// promotion would otherwise land long after its fetch — rewinding
+    /// the run to a tick it already passed. Discarding it simply
+    /// counts the cycle's miss; the next fetch reconverges fresh.
+    pub fn poll(&mut self) -> Result<Checkpoint, String> {
+        let mut latest = None;
+        while let Ok(result) = self.results.try_recv() {
+            self.pending = false;
+            if let Err(detail) = &result.1 {
+                self.last_error = Some(detail.clone());
+            }
+            latest = Some(result);
+        }
+        // A result is fresh only while its fetch could still have
+        // completed inside the pull bound.
+        if let Some((completed, _)) = &latest
+            && completed.elapsed() > CHECKPOINT_PULL_TIMEOUT
+        {
+            latest = None;
+        }
+        if !self.pending {
+            if self.requests.send(()).is_err() {
+                return Err(format!(
+                    "fetch from {}: the pull worker is gone",
+                    self.active
+                ));
+            }
+            self.pending = true;
+        }
+        latest.map(|(_, result)| result).unwrap_or_else(|| {
+            Err(self.last_error.clone().unwrap_or_else(|| {
+                format!(
+                    "fetch from {}: checkpoint pull still in flight",
+                    self.active
+                )
+            }))
+        })
+    }
+}
+
 /// A lightweight in-process client for the [`Monitor`] endpoints.
 ///
 /// One request per call over a fresh `TcpStream`; responses are decoded
@@ -1191,13 +1592,31 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
 /// [`io::Error`] carrying the response body.
 pub struct MonitorClient {
     addr: SocketAddr,
+    /// When set — [`with_timeout`](Self::with_timeout) — the connect,
+    /// read, and write bound every request carries.
+    timeout: Option<Duration>,
 }
 
 impl MonitorClient {
     /// A client for the monitor bound at `addr` (see
     /// [`Monitor::local_addr`]).
     pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
+        Self {
+            addr,
+            timeout: None,
+        }
+    }
+
+    /// As [`new`](Self::new) with `timeout` bounding every request's
+    /// connect, read, and write — the client a caller reaches for when
+    /// the wait itself must stay bounded, like a peer checkpoint fetch
+    /// that must never stall the serving or scan side on an
+    /// unreachable peer.
+    pub fn with_timeout(addr: SocketAddr, timeout: Duration) -> Self {
+        Self {
+            addr,
+            timeout: Some(timeout),
+        }
     }
 
     /// `GET /`: the monitoring page's HTML source.
@@ -1219,7 +1638,8 @@ impl MonitorClient {
         self.get_json("/snapshot")
     }
 
-    /// `GET /receipts`: the executor's full receipt log.
+    /// `GET /receipts`: the executor's receipt log — the bounded tail
+    /// of retained receipts, pending ones included.
     pub fn receipts(&self) -> io::Result<Vec<CommandReceipt>> {
         self.get_json("/receipts")
     }
@@ -1229,6 +1649,14 @@ impl MonitorClient {
     /// peer-transport decision.
     pub fn checkpoint(&self) -> io::Result<Checkpoint> {
         self.get_json("/checkpoint")
+    }
+
+    /// `GET /checkpoint?peer=<addr>`: the tracking pull — the
+    /// checkpoint fetch plus the follow-peer announcement: `peer`
+    /// names this client's own monitor address, which the serving
+    /// monitor records as its tracking source for a later demotion.
+    pub fn checkpoint_announcing(&self, peer: SocketAddr) -> io::Result<Checkpoint> {
+        self.get_json(&format!("/checkpoint?peer={peer}"))
     }
 
     /// `GET /role`: the instance's reported redundancy role and standby
@@ -1348,7 +1776,14 @@ impl MonitorClient {
         path: &str,
         body: Option<&str>,
     ) -> io::Result<(u16, String)> {
-        let mut stream = TcpStream::connect(self.addr)?;
+        let mut stream = match self.timeout {
+            Some(timeout) => TcpStream::connect_timeout(&self.addr, timeout)?,
+            None => TcpStream::connect(self.addr)?,
+        };
+        if let Some(timeout) = self.timeout {
+            stream.set_read_timeout(Some(timeout))?;
+            stream.set_write_timeout(Some(timeout))?;
+        }
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n",
             self.addr

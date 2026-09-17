@@ -86,41 +86,69 @@ fn image_valve(snapshot: &dcs_core::TelemetrySnapshot) -> Value {
 fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
 
-    // The active: a remote driver behind a gate `Peer::active` opens —
-    // the gate a later demotion re-closes — serving the monitor the
-    // standby pulls checkpoints from.
-    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
-    let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
-        assemble(&model, &registry, &active_gate).unwrap(),
-        Some(&active_gate),
-    );
-    let active_monitor =
-        Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
-    let active_client = MonitorClient::new(active_monitor.local_addr());
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     // The standby: a second remote attachment behind a closed gate, its
-    // own monitor serving `/role` and `/promote`.
+    // own monitor serving `/role` and `/promote` — its promotion takes
+    // the same claim under its own token.
     let standby_driver = RemoteDriver::connect(plant_addr).unwrap();
     let standby_gate = WriteGate::closed(&standby_driver);
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
     let standby_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
 
+    // The active: a remote driver behind a gate `activate` lifts only
+    // after taking the plant's write-ownership claim — the startup
+    // claim a launched active runs — serving the monitor the standby
+    // pulls checkpoints from. The monitor names the standby as the
+    // tracking source — the configured `--peer` half of the follow-peer
+    // contract — so the demotion below has somewhere to track.
+    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let active_gate = WriteGate::closed(&active_driver);
+    let mut active = Peer::active(
+        assemble(&model, &registry, &active_gate).unwrap(),
+        Some(&active_gate),
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
+    let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
+        .unwrap()
+        .with_standby_source(standby_monitor.local_addr());
+    let active_client = MonitorClient::new(active_monitor.local_addr());
+
     thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -305,4 +333,6 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
             ]
         );
     });
+    drop(_plant);
+    serving.join().unwrap();
 }

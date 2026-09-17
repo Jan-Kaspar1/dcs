@@ -370,14 +370,19 @@ impl fmt::Display for WiringError {
 
 impl std::error::Error for WiringError {}
 
-/// Why a scan failed after the step phase.
+/// Why a scan failed.
 ///
-/// Component `step` errors never fail a scan — they are counted per
-/// component in [`Executor::component_statuses`]. `ScanError` covers the
-/// driver boundary: the output image could not be delivered to the field.
+/// No scan phase currently produces one: component `step` errors are
+/// counted per component in [`Executor::component_statuses`], and
+/// driver-boundary failures — reads, writes, the cyclic exchange —
+/// degrade into [`IoHealth`](dcs_core::IoHealth) counters and held
+/// samples rather than aborting the scan. The variant set is retained
+/// for the [`Executor::scan`]/[`Peer`](crate::Peer)/monitor `Result`
+/// contract the callers write against.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanError {
-    /// Writing the output image to the driver failed.
+    /// A driver-boundary failure ended the scan — kept for contract
+    /// compatibility; the executor's field faults now degrade instead.
     Io(IoError),
 }
 
@@ -546,6 +551,30 @@ enum Resolved {
 /// [`Executor::with_command_queue_capacity`].
 pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 
+/// The default bound on the retained command receipt log — how many of
+/// the most recent receipts the executor keeps serving once settled
+/// receipts ahead of them have evicted.
+///
+/// The log is the run's command audit, and like every other served
+/// stream — history rings, the journal, the publication window — it is
+/// bounded so a long-lived run's checkpoint pulls, state-file writes,
+/// and `GET /receipts` answers stay flat in lifetime command count.
+/// Eviction is oldest-settled-first: a receipt still
+/// [`CommandOutcome::Accepted`] — queued for a boundary it has not met
+/// — is never evicted, so the log may exceed the bound only by the
+/// pending depth it is protecting. Evictions are visible rather than
+/// silent: the snapshot's `command_queue.attempts` counts every
+/// lifetime submission, so `attempts - receipts().len()` is the count
+/// of evicted receipts and [`Executor::receipt_base`] reports the
+/// absolute index the retained log starts at — the same seq-gap
+/// convention the other bounded streams use.
+///
+/// 1024 matches the monitor's history and journal defaults: a roomy
+/// audit tail at ~116 bytes a receipt while staying a hard bound.
+/// Declare a different bound at construction through
+/// [`Executor::with_receipt_log_capacity`].
+pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
+
 /// A deterministic fixed-step executor over registered components.
 ///
 /// The scan order is the order `components` were registered in — explicit
@@ -590,11 +619,14 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 ///    probe answer never refuses, applies, or alters a command;
 /// 7. writes the image's field `Out` points to the driver — points a
 ///    component never wrote keep their last output, so a failed step
-///    holds outputs. Under the cyclic contract each write stages the
+///    holds outputs, and a failed write is counted and attributed like
+///    a failed read rather than aborting the scan: a field outage must
+///    degrade the run's telemetry, not end the run that reports it.
+///    Under the cyclic contract each write stages the
 ///    pending output image, publishing on the next scan's exchange —
 ///    the contract's one-scan actuation delay.
 ///
-/// The driver-boundary failures of phases 3, 4, and 6 are also counted
+/// The driver-boundary failures of phases 3, 4, and 7 are also counted
 /// into
 /// the snapshot's [`IoHealth`](dcs_core::IoHealth) section: each failed
 /// read, write, or exchange increments its named counter and the
@@ -674,6 +706,20 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// drains. The queue's admission metrics ride
 /// [`snapshot`](Executor::snapshot)'s `command_queue` section.
 ///
+/// The receipt log the submissions produce is bounded too — retention,
+/// not admission: past `receipt_capacity` (default
+/// [`DEFAULT_RECEIPT_LOG_CAPACITY`], declared through
+/// [`with_receipt_log_capacity`](Executor::with_receipt_log_capacity))
+/// the leading settled entries evict oldest-first while a receipt
+/// still `Accepted` — pending command state — never evicts. The run's
+/// audit thereby stays flat in lifetime command count on every hot
+/// path it rides: the checkpoint a standby pulls each cycle, the
+/// `--state-file` write, and `GET /receipts`. Eviction stays visible:
+/// `attempts` counts every lifetime submission, so the gap between it
+/// and the retained length — reported as
+/// [`receipt_base`](Executor::receipt_base) — names exactly what aged
+/// out.
+///
 /// The forcing pair — [`Command::ForcePoint`] /
 /// [`Command::UnforcePoint`] — is the persistent sibling of a write:
 /// it targets the same writable `In` surface and applies at the same
@@ -687,7 +733,11 @@ pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// reaches the driver — the force overrides the image, not the field —
 /// so the release observes whatever the field then carries. Release is
 /// the same boundary in reverse: the applying scan's input phase reads
-/// the driver again. Forces are run state — listed in
+/// the driver again for a field point, while a held internal point's
+/// image — left with the force's last `Substituted` stamp — is
+/// re-stamped `Good`, resuming the held-value rule as the same
+/// observable state a `WriteValue` of that value produces. Forces are
+/// run state — listed in
 /// [`snapshot`](Executor::snapshot)'s `forces` section and carried in
 /// [`checkpoint`](Executor::checkpoint) so a standby preserves them.
 ///
@@ -721,8 +771,22 @@ pub struct Executor<'d> {
     /// The queue's admission counters, reported through the snapshot's
     /// `command_queue` section and carried in checkpoints beside the
     /// receipt log they measure — the pair's one command-ingress audit.
+    /// `attempts` doubles as the log's absolute high-water mark: every
+    /// submission produced exactly one receipt, so the entry at
+    /// position `i` carries submission index `receipt_base + i`.
     command_admission: CommandAdmissionCounts,
+    /// The retained tail of the run's receipt log, in submission order.
+    /// Bounded by `receipt_capacity`: once the log outgrows the bound
+    /// the leading settled entries evict oldest-first — a receipt still
+    /// `Accepted` is pending command state and never evicts, so the
+    /// log holds at most `capacity + pending` entries. The count of
+    /// evicted entries is [`receipt_base`](Executor::receipt_base) —
+    /// `attempts` minus the retained length.
     receipts: Vec<CommandReceipt>,
+    /// The declared receipt-log bound — construction configuration set
+    /// through [`with_receipt_log_capacity`](Executor::with_receipt_log_capacity),
+    /// not run state: checkpoints do not carry it.
+    receipt_capacity: usize,
     /// The events components emitted during the most recent scan —
     /// drained per component after its `step`, in scan and emission
     /// order — awaiting the scan's recording. Cleared when the next
@@ -744,6 +808,14 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// The first point whose output write the shared field fenced —
+    /// answered [`IoError::Fenced`] — during the most recent scan:
+    /// `None` before the first scan and on scans with no fenced write.
+    /// A scan product like `emitted`: cleared when the next scan starts
+    /// and by a checkpoint apply, which converges the run to a line that
+    /// did not see the abandoned scan's fencing. [`Peer`](crate::Peer)
+    /// reads it to journal the claim loss a degraded scan still carries.
+    fenced_write: Option<PointId>,
     /// The fingerprint of the model this run was assembled from, when
     /// the assembling layer supplied one: stamped into every checkpoint
     /// and the value a restored checkpoint's fingerprint must equal.
@@ -868,10 +940,12 @@ impl<'d> Executor<'d> {
             command_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
+            receipt_capacity: DEFAULT_RECEIPT_LOG_CAPACITY,
             emitted: Vec::new(),
             command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
+            fenced_write: None,
             model_fingerprint: None,
             tick: Tick::ZERO,
         })
@@ -916,6 +990,48 @@ impl<'d> Executor<'d> {
         self.command_capacity
     }
 
+    /// Declares the receipt log's retention bound — how many of the
+    /// most recent receipts the log keeps once the settled prefix
+    /// evicts oldest-first. The default is
+    /// [`DEFAULT_RECEIPT_LOG_CAPACITY`]; `0` retains only receipts
+    /// still `Accepted` — pending command state never evicts, so the
+    /// log holds at most `capacity + pending` entries either way.
+    ///
+    /// The bound is construction configuration, not run state: a
+    /// checkpoint does not carry it, so an [`Executor::restore`]d or
+    /// reconfigured run re-declares it through this method. A log
+    /// adopted from a checkpoint is trimmed to this run's own bound on
+    /// adoption, so a checkpoint captured under a looser bound cannot
+    /// grow this log past it.
+    pub fn with_receipt_log_capacity(mut self, capacity: usize) -> Self {
+        self.receipt_capacity = capacity;
+        self
+    }
+
+    /// The declared receipt-log bound — what
+    /// [`with_receipt_log_capacity`](Self::with_receipt_log_capacity)
+    /// set, or [`DEFAULT_RECEIPT_LOG_CAPACITY`].
+    pub fn receipt_log_capacity(&self) -> usize {
+        self.receipt_capacity
+    }
+
+    /// The absolute submission index of `receipts()[0]` — equivalently,
+    /// the count of settled receipts the log has already evicted.
+    ///
+    /// Every submission produced exactly one receipt, so the log is a
+    /// contiguous window over the run's submission sequence:
+    /// `receipts()[i]` is submission `receipt_base() + i`, and the
+    /// admission counter `attempts` is the window's high-water mark
+    /// (`receipt_base() + receipts().len()`). A consumer comparing its
+    /// last-known index against `receipt_base` reads evictions as a
+    /// numbering gap — the same convention the history, journal, and
+    /// publication streams use.
+    pub fn receipt_base(&self) -> u64 {
+        self.command_admission
+            .attempts
+            .saturating_sub(self.receipts.len() as u64)
+    }
+
     /// The fingerprint this run was assembled with — the value
     /// [`with_model_fingerprint`](Self::with_model_fingerprint) recorded.
     pub fn model_fingerprint(&self) -> Option<ModelFingerprint> {
@@ -926,6 +1042,16 @@ impl<'d> Executor<'d> {
     /// scan, thereafter the tick the last scan ran at.
     pub fn tick(&self) -> Tick {
         self.tick
+    }
+
+    /// The first point the last scan's output phase saw the shared field
+    /// fence — the write answered [`IoError::Fenced`], meaning the claim
+    /// this run held was preempted — or `None` when no write was fenced.
+    /// The scan degrades and completes either way; this marker is how a
+    /// field-owning [`Peer`](crate::Peer) tells the claim loss apart from
+    /// ordinary field trouble so it can journal it once per held claim.
+    pub fn fenced_write(&self) -> Option<PointId> {
+        self.fenced_write
     }
 
     /// Diagnostics for each registered component, in scan order.
@@ -1136,6 +1262,11 @@ impl<'d> Executor<'d> {
     /// `Rejected` when the driver refuses the write or the component
     /// refuses the tuned value — exactly one receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
+    /// The log is bounded — settled receipts evict oldest-first past
+    /// [`receipt_log_capacity`](Executor::receipt_log_capacity), a
+    /// pending receipt never evicts — so an old receipt's place in the
+    /// audit expires while the command's settlement itself is already
+    /// durable in the journal's `CommandSettled` stream.
     ///
     /// Admission is bounded: a validated command submitted while
     /// `command_capacity` commands are already queued is refused with a
@@ -1195,11 +1326,47 @@ impl<'d> Executor<'d> {
                 .high_water
                 .max(self.pending_commands.len());
         }
+        self.trim_receipts();
         receipt
     }
 
-    /// The receipt log: one receipt per submitted command, in submission
-    /// order.
+    /// Evicts the log's settled prefix past `receipt_capacity` — the
+    /// bounded-retention rule [`DEFAULT_RECEIPT_LOG_CAPACITY`]
+    /// documents — and returns the count evicted.
+    ///
+    /// Pending receipts form the log's suffix: a receipt still
+    /// `Accepted` is the pending queue's payload, never evictable, so
+    /// the leading run of settled entries is all the trim may take.
+    /// Pending-queue entries index into `receipts`, so a drain shifts
+    /// each by the evicted count; the evicted prefix holds only settled
+    /// entries, so no pending index underflows.
+    fn trim_receipts(&mut self) -> usize {
+        let excess = self.receipts.len().saturating_sub(self.receipt_capacity);
+        if excess == 0 {
+            return 0;
+        }
+        let settled = self
+            .receipts
+            .iter()
+            .position(|receipt| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+            .unwrap_or(self.receipts.len());
+        let evicted = excess.min(settled);
+        if evicted == 0 {
+            return 0;
+        }
+        self.receipts.drain(..evicted);
+        for index in &mut self.pending_commands {
+            *index -= evicted;
+        }
+        evicted
+    }
+
+    /// The receipt log's retained tail: the most recent receipts in
+    /// submission order, bounded by
+    /// [`receipt_log_capacity`](Executor::receipt_log_capacity) — see
+    /// [`DEFAULT_RECEIPT_LOG_CAPACITY`] for the eviction rule and its
+    /// visibility through `command_queue.attempts` and
+    /// [`receipt_base`](Executor::receipt_base).
     ///
     /// A queued command's entry reads [`CommandOutcome::Accepted`] until
     /// the scan boundary updates it to `Applied` or `Rejected`, so the
@@ -1256,12 +1423,13 @@ impl<'d> Executor<'d> {
         let tick = self.tick;
 
         self.emitted.clear();
+        self.fenced_write = None;
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
         self.probe_command_verdicts();
-        self.write_outputs()?;
+        self.write_outputs();
         Ok(tick)
     }
 
@@ -1273,7 +1441,8 @@ impl<'d> Executor<'d> {
     /// implements the contract, the image-carried point samples: the
     /// `Out` samples — the last written output values — plus the internal
     /// `In` samples, so held operator values and link carriers transfer,
-    /// and the command receipt log — the run's audit — so `GET /receipts`
+    /// and the command receipt log's retained tail — the bounded audit
+    /// [`DEFAULT_RECEIPT_LOG_CAPACITY`] describes — so `GET /receipts`
     /// answers identically on a peer that adopted the checkpoint. It is
     /// serde-serializable, so an active
     /// controller can ship it to a standby over the same JSON channel the
@@ -1477,21 +1646,34 @@ impl<'d> Executor<'d> {
         // component state.
         self.emitted.clear();
         self.command_verdicts.clear();
+        self.fenced_write = None;
         self.adopt_receipts(checkpoint);
         Ok(())
     }
 
-    /// Adopts a checkpoint's receipt log verbatim — the pair's one
-    /// command audit, converging `GET /receipts` on every peer — and
-    /// re-queues the entries still `Accepted` at capture. A command
-    /// taken over between its submission boundary and its applying scan
-    /// is run state like the image's: the restoring run applies it at
-    /// its own next boundary, so a switchover mid-flight never drops it.
-    /// The admission counters converge with the audit they measure, so
-    /// the pair's `command_queue` telemetry section answers identically.
+    /// Adopts a checkpoint's receipt log — the pair's one command
+    /// audit, converging `GET /receipts` on every peer — and re-queues
+    /// the entries still `Accepted` at capture. The adopted window is
+    /// re-trimmed to this run's own `receipt_capacity` — settled
+    /// prefix first, pending entries never — so a checkpoint captured
+    /// under a looser bound cannot grow this log past its own. A
+    /// command taken over between its submission boundary and its
+    /// applying scan is run state like the image's: the restoring run
+    /// applies it at its own next boundary, so a switchover mid-flight
+    /// never drops it. The admission counters converge with the audit
+    /// they measure, so the pair's `command_queue` telemetry section
+    /// answers identically.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
         self.receipts.clone_from(&checkpoint.receipts);
-        self.pending_commands = checkpoint
+        // The adopted log is re-trimmed to this run's own bound: a
+        // checkpoint captured under a looser capacity cannot grow this
+        // log past it, and the pending queue rebuilds over the trimmed
+        // log's own indices. The stale queue clears first — its indices
+        // addressed the abandoned log.
+        self.pending_commands.clear();
+        self.command_admission = checkpoint.command_admission;
+        self.trim_receipts();
+        self.pending_commands = self
             .receipts
             .iter()
             .enumerate()
@@ -1503,7 +1685,64 @@ impl<'d> Executor<'d> {
         // capacity still settles them at their boundaries while refusing
         // new submissions until a scan drains it. The adoption is real
         // depth and joins the high-water record.
+        self.command_admission.high_water = self
+            .command_admission
+            .high_water
+            .max(self.pending_commands.len());
+    }
+
+    /// Adopts the admissions a checkpoint's receipt log carries past
+    /// this run's own — the promote boundary's stale-tick path
+    /// ([`Peer::final_sync`](crate::Peer::final_sync)): a checkpoint
+    /// older than the run's tick cannot [`apply`](Self::apply) without
+    /// rewinding scans the peer already ran — replaying their commands
+    /// and re-emitting their events — but the commands the tracked
+    /// active admitted since this run's last alignment still must not
+    /// be lost.
+    ///
+    /// The receipt log is a contiguous window over the line's
+    /// submission sequence — entry `i` carries index
+    /// `receipt_base + i`, and the window's end is the admission
+    /// high-water — so the receipts the checkpoint holds beyond this
+    /// window's end are exactly the submissions this run never saw.
+    /// Each lands verbatim — the pair's one command audit — and the
+    /// entries still [`CommandOutcome::Accepted`] queue for this run's
+    /// next boundary, settling there like any adopted pending command,
+    /// past the admission bound just as under [`apply`](Self::apply).
+    /// The overlapping stretch is this run's log already — settlements
+    /// included — and stays untouched: a command this line settled is
+    /// never re-queued, so nothing applies twice. Entries the source
+    /// already evicted below its own window stay evicted here too — a
+    /// numbering gap the `attempts` counters report, not a recoverable
+    /// stretch. The admission counters measuring the adopted log
+    /// converge with it.
+    pub fn carry_pending_commands(&mut self, checkpoint: &Checkpoint) {
+        let self_end = self.receipt_base() + self.receipts.len() as u64;
+        let checkpoint_base = checkpoint.receipt_base();
+        let checkpoint_end = checkpoint_base + checkpoint.receipts.len() as u64;
+        if checkpoint_end <= self_end {
+            return;
+        }
+        let tail = self_end.max(checkpoint_base);
+        let skipped = (tail - checkpoint_base) as usize;
+        let base_len = self.receipts.len();
+        self.receipts
+            .extend(checkpoint.receipts[skipped..].iter().cloned());
         self.command_admission = checkpoint.command_admission;
+        // Bound the union before the adopted `Accepted` entries queue:
+        // the trim may reach into the tail's own settled prefix, so the
+        // surviving adopted entries start at `base_len - evicted`.
+        let evicted = self.trim_receipts();
+        for (index, receipt) in self
+            .receipts
+            .iter()
+            .enumerate()
+            .skip(base_len.saturating_sub(evicted))
+        {
+            if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                self.pending_commands.push_back(index);
+            }
+        }
         self.command_admission.high_water = self
             .command_admission
             .high_water
@@ -1634,6 +1873,7 @@ impl<'d> Executor<'d> {
         self.tick = checkpoint.tick;
         self.emitted.clear();
         self.command_verdicts.clear();
+        self.fenced_write = None;
         self.adopt_receipts(checkpoint);
 
         let initialized = self
@@ -1965,7 +2205,10 @@ impl<'d> Executor<'d> {
     /// A `ForcePoint` records the force — this scan's input phase already
     /// substitutes the value at `Substituted` quality — and an
     /// `UnforcePoint` lifts it, so the same scan reads the driver again
-    /// for a field point. The pair never touches the driver, so both
+    /// for a field point, while a held internal point's image — left with
+    /// the force's last `Substituted` stamp — is re-stamped `Good` here:
+    /// the held-value rule resuming as the observable state a same-value
+    /// `WriteValue` produces. The pair never touches the driver, so both
     /// settle `Applied` here.
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
@@ -2012,7 +2255,26 @@ impl<'d> Executor<'d> {
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Unforce { point }) => {
-                    self.forces.remove(&point);
+                    if self.forces.remove(&point).is_some()
+                        && self
+                            .map
+                            .get(point)
+                            .is_some_and(|spec| spec.internal.is_some())
+                    {
+                        // No channel rewrites a held internal point, so
+                        // the lifted force's last `Substituted` stamp
+                        // would stand forever — re-stamp the held value
+                        // `Good`: the observable state a same-value
+                        // `WriteValue` produces. A field point needs
+                        // nothing here; this scan's input phase reads
+                        // the driver again.
+                        let held = self.image.borrow().get(&point).copied();
+                        if let Some(sample) = held {
+                            self.image
+                                .borrow_mut()
+                                .insert(point, Sample::good(sample.value, tick));
+                        }
+                    }
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Invoke {
@@ -2034,6 +2296,44 @@ impl<'d> Executor<'d> {
                 },
             };
         }
+        // Settlements landed: the entries the boundary just resolved
+        // rejoin the evictable prefix, so the trim runs here too —
+        // the log returns to its bound at the boundary rather than
+        // waiting for a later submission to shrink it.
+        self.trim_receipts();
+    }
+
+    /// Reconciles the commands a superseded run must not report applied.
+    ///
+    /// [`Peer`](crate::Peer) runs this on the scan that discovered the
+    /// lost field claim: the boundary settled the run's queued commands
+    /// onto an image the field will never see — the claim already
+    /// belonged to another attachment — so `Applied` would overstate
+    /// what an auditing operator reads as "took effect". Every receipt
+    /// still `Accepted` in the pending queue, and every receipt the
+    /// boundary at `tick` settled `Applied`, is rewritten `Rejected`
+    /// carrying [`CommandError::Superseded`]. Settlements of earlier
+    /// boundaries — applied while the run still owned the field — stand,
+    /// as do the boundary's own refusals (a field-point write the fence
+    /// already answered `DriverRejected`).
+    pub fn supersede_commands(&mut self, tick: Tick) {
+        while let Some(index) = self.pending_commands.pop_front() {
+            self.receipts[index].outcome = CommandOutcome::Rejected {
+                reason: CommandError::Superseded {
+                    point: self.receipts[index].command.point(),
+                },
+            };
+        }
+        for receipt in &mut self.receipts {
+            if receipt.outcome == (CommandOutcome::Applied { tick }) {
+                receipt.outcome = CommandOutcome::Rejected {
+                    reason: CommandError::Superseded {
+                        point: receipt.command.point(),
+                    },
+                };
+            }
+        }
+        self.trim_receipts();
     }
 
     /// The cyclic exchange at the read boundary: when the driver
@@ -2233,7 +2533,13 @@ impl<'d> Executor<'d> {
     /// Points a component never wrote keep no image entry and are left
     /// untouched; internal `Out` points are image-carried for monitoring
     /// and never reach the driver.
-    fn write_outputs(&mut self) -> Result<(), ScanError> {
+    ///
+    /// A failed write is the read boundary's mirror: counted under
+    /// `failed_writes`, attributed as `last_error`, and the scan
+    /// continues — the image still records the intended output, the
+    /// field holds its last written value, and a dead link must never
+    /// take the controller and its telemetry down with it.
+    fn write_outputs(&mut self) {
         let image = self.image.borrow();
         for (point, spec) in self.map.iter() {
             if spec.direction != Direction::Out || spec.internal.is_some() {
@@ -2245,6 +2551,11 @@ impl<'d> Executor<'d> {
             match self.driver.write(point, sample.value) {
                 Ok(()) => self.io_health.consecutive_failures = 0,
                 Err(error) => {
+                    if self.fenced_write.is_none()
+                        && let IoError::Fenced(point) = error
+                    {
+                        self.fenced_write = Some(point);
+                    }
                     self.io_health.failed_writes += 1;
                     self.io_health.consecutive_failures += 1;
                     self.io_health.last_error = Some(IoFault {
@@ -2253,11 +2564,9 @@ impl<'d> Executor<'d> {
                         direction: Direction::Out,
                         error,
                     });
-                    return Err(error.into());
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -3233,12 +3542,10 @@ mod tests {
         executor.scan().unwrap();
         driver.faults.lock().unwrap().insert(PointId(20));
 
-        // The documented write behavior continues — the scan fails with
-        // ScanError — and the failure is counted and attributed.
-        assert_eq!(
-            executor.scan(),
-            Err(ScanError::Io(IoError::Disconnected(PointId(20))))
-        );
+        // The write boundary's degrade rule — the same one reads carry:
+        // the failure is counted and attributed while the scan completes.
+        executor.scan().unwrap();
+        assert_eq!(executor.tick(), Tick(2));
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_writes, 1);
         assert_eq!(health.failed_reads, 0);
@@ -4025,12 +4332,65 @@ mod tests {
         executor.submit_command(Command::UnforcePoint { point: PointId(10) });
         executor.scan().unwrap();
         // Release resumes the held-value rule: the image keeps the last
-        // sample — the forced value as last stamped while forced.
+        // sample's value — the forced value as last stamped while
+        // forced — re-stamped `Good` at the release boundary rather than
+        // left claiming substituted data.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
+        assert!(executor.snapshot().forces.is_empty());
+    }
+
+    #[test]
+    fn unforce_restamps_an_internal_held_value_good() {
+        // The release of a forced internal writable point leaves the
+        // held value stamped `Good` at the release boundary — not the
+        // force's `Substituted` mark, which claims a substitution no
+        // longer standing — and a same-value `WriteValue` produces the
+        // identical observable state.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        executor.run(2).unwrap();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(8.0), 2))
         );
+
+        executor.submit_command(unforce_point(10));
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
         assert!(executor.snapshot().forces.is_empty());
+        // The release boundary's image — the held point and the
+        // downstream internal `Out` the component derived from it.
+        let released = [PointId(10), PointId(20)].map(|point| executor.sample(point));
+
+        // The restamp is the held value now: later scans leave it
+        // untouched rather than re-substituting.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(3)))
+        );
+
+        // A parallel run writing the same value at the same boundary
+        // lands on the identical image.
+        let written_driver = StubDriver::new(&[], &[]);
+        let mut written = internal_rig(&written_driver);
+        written.run(2).unwrap();
+        written.submit_command(write_value(10, ValueKind::Float, Value::Float(8.0)));
+        written.scan().unwrap();
+        for (sample, point) in released.into_iter().zip([PointId(10), PointId(20)]) {
+            assert_eq!(written.sample(point), sample, "point {point:?}");
+        }
     }
 
     #[test]
@@ -4400,6 +4760,152 @@ mod tests {
                 apply_tick: Tick(2)
             }
         );
+    }
+
+    #[test]
+    fn the_receipt_log_evicts_oldest_settled_entries_at_its_bound() {
+        // The bounded audit: past the declared capacity the leading
+        // settled receipts evict oldest-first — the log, the checkpoint
+        // section it rides, and the served `GET /receipts` answer all
+        // stay flat in lifetime command count, while `attempts` keeps
+        // the lifetime count the eviction gap reads from.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver).with_receipt_log_capacity(4);
+        assert_eq!(executor.receipt_log_capacity(), 4);
+
+        for _ in 0..6 {
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+            executor.scan().unwrap();
+        }
+
+        // Six submissions, four retained — the newest four, settled at
+        // their own ticks.
+        assert_eq!(executor.receipts().len(), 4);
+        assert_eq!(executor.receipt_base(), 2);
+        assert_eq!(executor.snapshot().command_queue.attempts, 6);
+        for (offset, receipt) in executor.receipts().iter().enumerate() {
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Applied {
+                    tick: Tick(3 + offset as u64)
+                }
+            );
+        }
+
+        // The checkpoint carries the bounded window — its serialized
+        // size stays flat in lifetime command count. (Same-width ticks
+        // either side keep the comparison honest: every field that can
+        // still change digits — tick, attempts, sample stamps — does so
+        // within one width here.)
+        for _ in 0..100 {
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+            executor.scan().unwrap();
+        }
+        let first = serde_json::to_string(&executor.checkpoint()).unwrap().len();
+        for _ in 0..4 {
+            executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
+            executor.scan().unwrap();
+        }
+        assert_eq!(executor.receipts().len(), 4);
+        assert_eq!(executor.receipt_base(), 106);
+        assert_eq!(executor.snapshot().command_queue.attempts, 110);
+        let checkpoint = executor.checkpoint();
+        assert_eq!(checkpoint.receipts.len(), 4);
+        assert_eq!(checkpoint.receipt_base(), 106);
+        assert_eq!(serde_json::to_string(&checkpoint).unwrap().len(), first);
+    }
+
+    #[test]
+    fn pending_receipts_are_never_evicted() {
+        // Pending commands are run state, not retention: a log past its
+        // bound holding `Accepted` entries keeps every one, and they
+        // still settle at their boundary — eviction resumes on the
+        // settled prefix once they do.
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = setpoint_rig(&driver)
+            .with_command_queue_capacity(6)
+            .with_receipt_log_capacity(2);
+
+        for value in 0..6 {
+            let receipt = executor.submit_command(write_value(
+                10,
+                ValueKind::Float,
+                Value::Float(value as f64),
+            ));
+            assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        }
+        // Six pending past the bound of two — all retained, none evicted.
+        assert_eq!(executor.receipts().len(), 6);
+        assert_eq!(executor.receipt_base(), 0);
+
+        executor.scan().unwrap();
+        for receipt in executor.receipts() {
+            assert_eq!(receipt.outcome, CommandOutcome::Applied { tick: Tick(1) });
+        }
+        assert_eq!(driver_value(&driver, 10), Value::Float(5.0));
+
+        // Settled now: the next submission evicts the settled prefix to
+        // the bound — five evict, leaving one settled plus the pending.
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(9.0)));
+        assert_eq!(executor.receipts().len(), 2);
+        assert_eq!(executor.receipt_base(), 5);
+
+        // The pending entry still indexes the log correctly through the
+        // drain: it settles at its boundary, applied like the rest.
+        executor.scan().unwrap();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(driver_value(&driver, 10), Value::Float(9.0));
+    }
+
+    #[test]
+    fn carry_pending_commands_uses_absolute_indices_across_evicted_windows() {
+        // Both peers' logs evict: the stale-checkpoint carry overlaps by
+        // absolute submission index, so only the genuinely-new tail
+        // lands — entries the source already evicted stay evicted — and
+        // its `Accepted` entries re-queue for the next boundary.
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = setpoint_rig(&active_driver).with_receipt_log_capacity(4);
+        for value in [1.0, 2.0] {
+            active.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
+            active.scan().unwrap();
+        }
+        let early = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = setpoint_rig(&standby_driver).with_receipt_log_capacity(4);
+        standby.apply(&early).unwrap();
+        assert_eq!(standby.receipts().len(), 2);
+
+        // The active runs on: four more submissions evict its first two
+        // receipts, the last checkpointed still `Accepted`.
+        for value in [3.0, 4.0, 5.0] {
+            active.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
+            active.scan().unwrap();
+        }
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
+        let checkpoint = active.checkpoint();
+        assert_eq!(checkpoint.receipts.len(), 4);
+        assert_eq!(checkpoint.receipt_base(), 2);
+
+        standby.carry_pending_commands(&checkpoint);
+        // The union — this run's [0,2) plus the checkpoint's [2,6) —
+        // trims to the bound, converging the window exactly.
+        assert_eq!(standby.receipts().len(), 4);
+        assert_eq!(standby.receipt_base(), 2);
+        assert_eq!(standby.receipts(), checkpoint.receipts.as_slice());
+
+        // The adopted `Accepted` entry queued past the admission bound
+        // and settles at the standby's own next boundary.
+        assert_eq!(standby.snapshot().command_queue.depth, 1);
+        standby.scan().unwrap();
+        assert_eq!(
+            standby.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(driver_value(&standby_driver, 10), Value::Float(6.0));
     }
 
     #[test]

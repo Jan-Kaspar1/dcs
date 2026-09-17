@@ -581,7 +581,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -594,6 +594,12 @@ A factory returns one of two `DeviceDriver` contributions:
   plant server's claim, and a field-facing kind that cannot arbitrate
   leaves it `None`, which keeps automatic failover off for models built
   on it (`FanoutDriver::unfenced_field_devices` names such devices).
+  `release` is an optional `ReleaseHook` (`Fn()`) — the demotion
+  counterpart of `claim`: `FanoutDriver::release_field_claims` runs it
+  when the peer gives up ownership so the backend forgets any recorded
+  claim token it would otherwise re-assert on a reconnect. `sim-tcp`
+  installs `RemoteDriver::release_claim` for exactly that — a demoted
+  attachment must not race the new owner back onto a restarted plant.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -776,6 +782,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         }),
         step: None,
         claim: None,
+        release: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1245,6 +1252,7 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         io: bus,
         step: None,
         claim: None,
+        release: None,
         inspect: Some(inspect),
         field_facing: true,
     }))

@@ -268,13 +268,25 @@ impl PeerRig {
     /// `None`: this test exercises the role surface, not field
     /// quiescence — and serves its monitor on a spawned thread.
     fn start(role: Role) -> Self {
+        Self::start_tracking(role, None)
+    }
+
+    /// [`start`](Self::start) with `source` recorded as the monitor's
+    /// tracking source — the configured `--peer`/`--standby` half of
+    /// the follow-peer contract a demotion tracks.
+    fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(field_driver()));
         let executor = Executor::new(driver, point_map(), components()).unwrap();
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
         };
-        let monitor = Arc::new(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
+        let monitor = match source {
+            Some(source) => monitor.with_standby_source(source),
+            None => monitor,
+        };
+        let monitor = Arc::new(monitor);
         let addr = monitor.local_addr();
         let client = MonitorClient::new(addr);
         let serving = Arc::clone(&monitor);
@@ -1243,7 +1255,9 @@ fn an_unattributed_submission_journals_unattributed() {
 #[test]
 fn promote_and_demote_print_role_reports_and_named_refusals() {
     let active = PeerRig::start(Role::Active);
-    let standby = PeerRig::start(Role::Standby);
+    // The standby names its tracking source — the configured peer its
+    // later demotion follows back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
 
     // `role` on the standby reports its convergence.
     let report: RoleReport = serde_json::from_value(ctl_ok(standby.addr, &["role"])).unwrap();
@@ -1261,6 +1275,17 @@ fn promote_and_demote_print_role_reports_and_named_refusals() {
     let output = ctl(standby.addr, &["demote"]);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("not_active"), "{output:?}");
+    // And demoting a field owner with no checkpoint source — nothing
+    // configured, no peer that ever announced itself — is refused up
+    // front rather than stranding the peer permanently unsynchronized.
+    // A rig of its own: this pair's standby already announced its
+    // address through the premature `promote`'s final-sync pull, so
+    // `active` legitimately holds a tracking source.
+    let lonely = PeerRig::start(Role::Active);
+    let output = ctl(lonely.addr, &["demote"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("no_tracking_source"), "{output:?}");
+    lonely.stop();
 
     // A command on a non-active peer answers the not_active rejection
     // through the ordinary receipted path — invoke included.

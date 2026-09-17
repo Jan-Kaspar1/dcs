@@ -131,6 +131,21 @@ pub enum JournalEvent {
         /// The mismatched field `Out` points.
         mismatches: Vec<Divergence>,
     },
+    /// A diverged peer returned to
+    /// [`StandbySync::Tracking`](crate::StandbySync) — the resolution of
+    /// the divergence the matching [`DivergenceDetected`](Self::DivergenceDetected)
+    /// opened, and the sync-state change that reopens the promote gate.
+    /// The entry's `tick` attributes it to the applied checkpoint's
+    /// tick — the compared staged image's tick. `compared` carries every
+    /// staged field `Out` point the clearing comparison verified, with
+    /// both sides' values, in point order: `Diverged` clears only on
+    /// that positive evidence — a same-tick comparison whose field
+    /// reads all succeeded and matched — so the audit trail names the
+    /// proof the gate reopened on.
+    DivergenceResolved {
+        /// The compared field `Out` points — the resolution's evidence.
+        compared: Vec<Divergence>,
+    },
     /// A revision-armed peer consumed a checkpoint captured under a
     /// different model — the transition into
     /// [`StandbySync::Reinitialized`](crate::StandbySync) of the rolling
@@ -141,6 +156,26 @@ pub enum JournalEvent {
     Reinitialized {
         /// The crossing's carryover record.
         report: CarryoverReport,
+    },
+    /// A tracking peer's checkpoint source restarted or was replaced:
+    /// the stream's tick fell below the run's last alignment — or,
+    /// before any alignment stood, below the run's own tick — a new
+    /// tick generation, not a continuation of the tracked line. The
+    /// peer adopted the checkpoint's state without rewinding its run
+    /// tick: the entry's `tick` is the run tick the resync landed at,
+    /// `was_aligned` the alignment the regression broke, and
+    /// `resumed_at` the regressed checkpoint's own tick — where the new
+    /// generation's stream resumed. The redundant pair's audit record
+    /// of a generation boundary the checkpoint protocol cannot name on
+    /// its own.
+    SourceRestarted {
+        /// The last applied checkpoint's tick before the regression —
+        /// `None` when the run had never aligned, the regression then
+        /// measured against the run's own tick.
+        was_aligned: Option<Tick>,
+        /// The regressed checkpoint's own tick — where the new
+        /// generation's stream resumed.
+        resumed_at: Tick,
     },
     /// A component emitted a kind-declared event — the durable record
     /// of a [`Declared`](crate::AdaptedEvent::Declared)-provenance
@@ -158,6 +193,32 @@ pub enum JournalEvent {
     EventEmitted {
         /// The emitted event record.
         event: EmittedEvent,
+    },
+    /// The field's single-writer claim was preempted while this
+    /// instance owned the field — the shared field fenced a write,
+    /// meaning another attachment now holds the claim. The redundant
+    /// pair's audit record that the owner lost the arbitration the
+    /// switchover semantics rely on: one entry per held claim, not one
+    /// per fenced write.
+    FieldClaimLost {
+        /// The point whose write the field fenced.
+        point: PointId,
+    },
+    /// A new process lifetime began — the served form of the journal
+    /// file's run-boundary marker. A monitor bound over a journal file
+    /// that already records earlier lifetimes journals it once at
+    /// bind, before the resumed run's first scan: entries before it
+    /// belong to earlier process lifetimes, entries after it to the
+    /// run it opens. The entry's `tick` is the tick that run starts at
+    /// — `0` cold, the restored tick under `--state-file` — so a
+    /// `GET /journal` consumer can attribute each entry to a process
+    /// lifetime and read the backward tick seam a restart leaves as a
+    /// new run's own tick domain, not time travel. `run` counts the
+    /// file's lifetimes from 1, so a served boundary is always
+    /// `run >= 2`: a fresh record's first run needs no marker.
+    RunBoundary {
+        /// Which lifetime begins — the file counts runs from 1.
+        run: u64,
     },
 }
 
@@ -298,6 +359,17 @@ mod tests {
             },
             JournalEntry {
                 seq: 9,
+                tick: Tick(10),
+                event: JournalEvent::DivergenceResolved {
+                    compared: vec![Divergence {
+                        point: PointId(20),
+                        staged: Value::Float(4.5),
+                        field: Value::Float(4.5),
+                    }],
+                },
+            },
+            JournalEntry {
+                seq: 10,
                 tick: Tick(12),
                 event: JournalEvent::Reinitialized {
                     report: CarryoverReport {
@@ -320,7 +392,12 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 10,
+                seq: 11,
+                tick: Tick(13),
+                event: JournalEvent::FieldClaimLost { point: PointId(20) },
+            },
+            JournalEntry {
+                seq: 12,
                 tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
@@ -335,6 +412,27 @@ mod tests {
                     },
                 },
             },
+            JournalEntry {
+                seq: 13,
+                tick: Tick(15),
+                event: JournalEvent::SourceRestarted {
+                    was_aligned: Some(Tick(14)),
+                    resumed_at: Tick(1),
+                },
+            },
+            JournalEntry {
+                seq: 14,
+                tick: Tick(20),
+                event: JournalEvent::SourceRestarted {
+                    was_aligned: None,
+                    resumed_at: Tick(2),
+                },
+            },
+            JournalEntry {
+                seq: 15,
+                tick: Tick(20),
+                event: JournalEvent::RunBoundary { run: 2 },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -348,8 +446,12 @@ mod tests {
         assert!(json.contains("\"step_failed\""), "{json}");
         assert!(json.contains("\"role_changed\""), "{json}");
         assert!(json.contains("\"divergence_detected\""), "{json}");
+        assert!(json.contains("\"divergence_resolved\""), "{json}");
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
+        assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"source_restarted\""), "{json}");
+        assert!(json.contains("\"run_boundary\""), "{json}");
     }
 
     #[test]

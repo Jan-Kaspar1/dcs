@@ -22,18 +22,21 @@
 //! reach the field.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, IoDriver, PointId, Quality, QualityReason, Role,
-    StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, PointId, Quality, QualityReason,
+    Role, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_bus::{BusDriver, BusRequest, BusResponse, ExchangeOutcome, PointRegister};
-use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::time::Duration;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    Spawned, image_sample as sample, serving_device, spawn, spawn_controller, workspace_binary,
+};
+
 /// The model the rig runs — the shared tank-loop document whose
 /// devices [`cyclic_model`] re-points at `sim-cyclic`.
 const MODEL_SOURCE: &str = include_str!("../../dcs-plant/fixtures/tank_loop.json");
@@ -83,83 +86,12 @@ const AO_POINTS: &[PointRegister] = &[PointRegister {
     kind: ValueKind::Float,
 }];
 
-/// A workspace binary next to the controller under test — workspace
-/// builds produce every member's binaries side by side.
-fn sibling(name: &str) -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the line it
-/// reports on stderr once listening, stderr held open so a later
-/// diagnostic write never meets a closed pipe, and a kill on drop so a
-/// panicking test leaves no stray processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its first stderr line, and extracts the bound
-/// address with `parse`.
-fn spawn(binary: &Path, args: &[String], parse: impl FnOnce(&str) -> SocketAddr) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    Spawned {
-        child,
-        addr: parse(line.trim()),
-        _stderr: stderr,
-    }
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args, |line| {
-        line.strip_prefix("listening on ")
-            .unwrap_or_else(|| {
-                panic!("expected a `listening on` line from dcs-controller, found {line:?}")
-            })
-            .parse()
-            .unwrap()
-    })
-}
-
 /// A `dcs-sim-bus-device` process serving `model`'s declared `device`
 /// on an ephemeral port: it announces `serving device <id> on <addr>
 /// (declared <listen>)` once bound.
 fn spawn_device(model: &Path, device: u64) -> Spawned {
     spawn(
-        &sibling("dcs-sim-bus-device"),
+        &workspace_binary("dcs-sim-bus-device"),
         &[
             model.to_str().unwrap().to_string(),
             "--device".to_string(),
@@ -167,18 +99,7 @@ fn spawn_device(model: &Path, device: u64) -> Spawned {
             "--listen".to_string(),
             "127.0.0.1:0".to_string(),
         ],
-        |line| {
-            let prefix = format!("serving device {device} on ");
-            line.strip_prefix(&prefix)
-                .and_then(|rest| rest.split_whitespace().next())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected a `{prefix}<addr>` line from dcs-sim-bus-device, found {line:?}"
-                    )
-                })
-                .parse()
-                .unwrap()
-        },
+        serving_device(device),
     )
 }
 
@@ -259,16 +180,6 @@ fn register(driver: &BusDriver, point: PointId) -> Value {
     driver.read(point).unwrap().value
 }
 
-/// The image sample `snapshot` reports for `point`.
-fn sample(snapshot: &dcs_core::TelemetrySnapshot, point: PointId) -> dcs_core::Sample {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-}
-
 /// The rig's workspace directory.
 fn rig_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dcs-cyclic-bus-{}-{tag}", std::process::id()));
@@ -299,7 +210,7 @@ fn the_driven_controller_steps_the_field_through_the_boundary_exchange() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let active_process = spawn_controller(&model, &[]);
+    let active_process = spawn_controller(&model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
 
     // Two converged scans: each boundary's exchange latched the census
@@ -418,7 +329,7 @@ fn short_exchanges_degrade_their_station_end_to_end() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let active_process = spawn_controller(&model, &[]);
+    let active_process = spawn_controller(&model, &[], DT);
     let active = MonitorClient::new(active_process.addr);
     active.advance(1).unwrap();
 
@@ -501,10 +412,11 @@ fn the_tracking_standby_latches_inputs_while_its_writes_never_stage() {
     ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     ai.write(LEVEL, Value::Float(7.0)).unwrap();
 
-    let mut active_process = spawn_controller(&model, &[]);
+    let mut active_process = spawn_controller(&model, &[], DT);
     let standby_process = spawn_controller(
         &model,
         &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -567,11 +479,28 @@ fn the_tracking_standby_latches_inputs_while_its_writes_never_stage() {
     let frozen = register(&ao, VALVE);
     active_process.child.kill().unwrap();
     active_process.child.wait().unwrap();
-    // The field moves under the orphaned pair — the observer's write is
-    // unfenced while no claim is held: the standby's next exchange must
-    // latch it, and its run's computed valve must move off the frozen
+    // The field moves under the orphaned pair — the dead owner's claim
+    // released with its connection, the observer's write is unfenced
+    // once the release lands: the standby's next exchange must latch
+    // it, and its run's computed valve must move off the frozen
     // register without the field following.
-    ai.write(LEVEL, Value::Float(19.0)).unwrap();
+    let mut released = false;
+    for _ in 0..100 {
+        match ai.write(LEVEL, Value::Float(19.0)) {
+            Ok(_) => {
+                released = true;
+                break;
+            }
+            Err(IoError::Fenced(_)) => std::thread::sleep(Duration::from_millis(20)),
+            other => {
+                other.unwrap();
+            }
+        }
+    }
+    assert!(
+        released,
+        "the dead owner's claim must release with its connection"
+    );
     for _ in 0..4 {
         standby.advance(1).unwrap();
     }

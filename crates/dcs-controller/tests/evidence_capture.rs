@@ -85,21 +85,40 @@ fn settlements(client: &MonitorClient, command: &Command) -> Vec<CommandReceipt>
 fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
+
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     // The active: field-owning from the start, its driven monitor
     // stepping the shared plant inside each requested scan.
     let active_driver = RemoteDriver::connect(plant_addr).unwrap();
     let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
+    let mut active = Peer::active(
         assemble(&model, &registry, &active_gate).unwrap(),
         Some(&active_gate),
-    );
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
     let active_step = &active_driver;
     let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
         .unwrap()
@@ -125,7 +144,13 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
     let standby_step = &standby_driver;
     let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
         .unwrap()
@@ -145,8 +170,6 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
 
     thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -218,8 +241,9 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
         active_client.advance(1).unwrap();
 
         // The promoted peer — the endpoint the reproduction read —
-        // still serves the run's full receipt log, its journal carrying
-        // the command's settlement and the role changes of the switch.
+        // still serves the run's retained receipt log, its journal
+        // carrying the command's settlement and the role changes of the
+        // switch.
         assert_eq!(
             standby_client.receipts().unwrap(),
             active_client.receipts().unwrap()
@@ -256,4 +280,6 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
         );
         assert!(!settlements(&active_client, &command).is_empty());
     });
+    drop(_plant);
+    serving.join().unwrap();
 }

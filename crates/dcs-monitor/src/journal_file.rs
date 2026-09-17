@@ -21,7 +21,10 @@
 //!   `run` counts the file's lifetimes from 1; `tick` is the tick the
 //!   run starts at — `0` on a cold start, the restored tick when the
 //!   run resumes through `--state-file`, so the marker records the tick
-//!   domain the following entries belong to.
+//!   domain the following entries belong to. A restart's marker also
+//!   journals once as a `run_boundary` entry — the marker's served
+//!   form — so a `GET /journal` consumer attributes entries to a
+//!   process lifetime the same way the file's readers do.
 //! - `{"entry":{...}}` — a [`JournalEntry`] verbatim, in append order.
 //!
 //! The file stays separate from the `--state-file` checkpoint on
@@ -35,9 +38,9 @@
 //! file is a cold start. Point history stays volatile: only the
 //! journal persists.
 
-use dcs_core::{JournalEntry, Tick};
+use dcs_core::{JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -155,8 +158,12 @@ pub(super) enum JournalRecord {
 }
 
 /// What a replayed file yields: the retained journal tail for the
-/// in-memory ring, the `seq` the next appended entry takes, and the
-/// number of process lifetimes the file already records. The default
+/// in-memory ring, the `seq` the next appended entry takes, the number
+/// of process lifetimes the file already records, and the file's last
+/// recorded observation per point — the whole record's fold, not just
+/// the retained tail's, so a resumed run's recorder can diff its first
+/// scan against the state the journal itself last carried instead of
+/// re-recording the standing census as first observations. The default
 /// is the cold start: no entries, `seq` numbering from 1.
 #[derive(Debug)]
 pub(super) struct Replay {
@@ -166,6 +173,10 @@ pub(super) struct Replay {
     pub next_seq: u64,
     /// Run-boundary markers the file already holds.
     pub runs: u64,
+    /// The last quality each point's journaled transitions recorded.
+    pub qualities: HashMap<PointId, Quality>,
+    /// The last value each journaled point's transitions recorded.
+    pub values: HashMap<PointId, Value>,
 }
 
 impl Default for Replay {
@@ -174,6 +185,8 @@ impl Default for Replay {
             entries: VecDeque::new(),
             next_seq: 1,
             runs: 0,
+            qualities: HashMap::new(),
+            values: HashMap::new(),
         }
     }
 }
@@ -270,6 +283,19 @@ fn replay(file: File, path: &Path, capacity: usize) -> io::Result<Replay> {
                     ));
                 }
                 replayed.next_seq = entry.seq + 1;
+                // The last-observed fold runs over every record, not
+                // just the retained tail: an evicted entry still said
+                // what the point's recorded state became, and a later
+                // entry simply overwrites it.
+                match &entry.event {
+                    JournalEvent::QualityChanged { point, to, .. } => {
+                        replayed.qualities.insert(*point, *to);
+                    }
+                    JournalEvent::PointChanged { point, to, .. } => {
+                        replayed.values.insert(*point, *to);
+                    }
+                    _ => {}
+                }
                 replayed.entries.push_back(entry);
                 while replayed.entries.len() > capacity {
                     replayed.entries.pop_front();
@@ -367,23 +393,44 @@ mod tests {
         drop(recorder);
 
         // Second lifetime: the replayed entries are served with their
-        // seqs, the boundary marker separates the runs in the file, and
-        // new entries continue the numbering.
+        // seqs, the boundary marker separates the runs in the file —
+        // and journals once as the restart's served boundary entry —
+        // and new entries continue the numbering.
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
                 .iter()
-                .map(|entry| entry.seq)
+                .map(|entry| (entry.seq, entry.tick, entry.event.clone()))
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![
+                (
+                    1,
+                    Tick(1),
+                    dcs_core::JournalEvent::CommandSettled {
+                        receipt: receipt(10, 1),
+                    }
+                ),
+                (
+                    2,
+                    Tick(2),
+                    dcs_core::JournalEvent::CommandSettled {
+                        receipt: receipt(11, 2),
+                    }
+                ),
+                (
+                    3,
+                    Tick::ZERO,
+                    dcs_core::JournalEvent::RunBoundary { run: 2 }
+                ),
+            ]
         );
         recorder.note_settled(receipt(12, 1), Tick(1));
         let entries = recorder.journal(0);
-        assert_eq!(entries.last().unwrap().seq, 3);
+        assert_eq!(entries.last().unwrap().seq, 4);
 
         let file = records(&path);
-        assert_eq!(file.len(), 5);
+        assert_eq!(file.len(), 6);
         assert_eq!(
             file[3],
             JournalRecord::RunBoundary {
@@ -399,7 +446,7 @@ mod tests {
                     JournalRecord::RunBoundary { .. } => unreachable!(),
                 })
                 .collect::<Vec<_>>(),
-            vec![3]
+            vec![3, 4]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -432,7 +479,8 @@ mod tests {
         drop(recorder);
 
         // Second lifetime: the `point_changed` entries replay with
-        // their seqs and the next entry continues the numbering.
+        // their seqs behind the restart's served boundary entry, and
+        // the next entry continues the numbering.
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
         assert_eq!(
             recorder
@@ -440,7 +488,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.seq)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3]
         );
         recorder.push(
             Tick(3),
@@ -450,7 +498,7 @@ mod tests {
                 to: Value::Bool(true),
             },
         );
-        assert_eq!(recorder.journal(0).last().unwrap().seq, 3);
+        assert_eq!(recorder.journal(0).last().unwrap().seq, 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -468,7 +516,8 @@ mod tests {
         // Capacity 2 retains only the tail; the seq numbering still
         // continues from the file's last entry, and the run's restored
         // tick is recorded in the boundary marker — the --state-file
-        // resume case.
+        // resume case. The restart's served boundary entry takes the
+        // next `seq` and evicts the oldest retained entry.
         let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick(40)).unwrap();
         assert_eq!(
             recorder
@@ -476,10 +525,10 @@ mod tests {
                 .iter()
                 .map(|entry| entry.seq)
                 .collect::<Vec<_>>(),
-            vec![2, 3]
+            vec![3, 4]
         );
         recorder.note_settled(receipt(10, 41), Tick(41));
-        assert_eq!(recorder.journal(3).last().unwrap().seq, 4);
+        assert_eq!(recorder.journal(3).last().unwrap().seq, 5);
         assert_eq!(
             records(&path)[4],
             JournalRecord::RunBoundary {
@@ -573,15 +622,22 @@ mod tests {
         let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
         assert_eq!(
             recorder.journal(0),
-            vec![JournalEntry {
-                seq: 1,
-                tick: Tick(1),
-                event: dcs_core::JournalEvent::QualityChanged {
-                    point: PointId(10),
-                    from: None,
-                    to: Quality::Good,
+            vec![
+                JournalEntry {
+                    seq: 1,
+                    tick: Tick(1),
+                    event: dcs_core::JournalEvent::QualityChanged {
+                        point: PointId(10),
+                        from: None,
+                        to: Quality::Good,
+                    },
                 },
-            }]
+                JournalEntry {
+                    seq: 2,
+                    tick: Tick::ZERO,
+                    event: dcs_core::JournalEvent::RunBoundary { run: 2 },
+                },
+            ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

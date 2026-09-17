@@ -55,6 +55,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+mod support;
+
+use support::image_value;
+
 const TANK_LOOP: &str = include_str!("../../dcs-assembly/fixtures/tank_loop.json");
 
 /// The process time the shared plant advances per scan — the fixture's
@@ -189,11 +193,20 @@ impl CheckpointFixture {
             }
         }
         let request = String::from_utf8_lossy(&head);
-        let (status, body) = if !request.starts_with("GET /checkpoint ") {
+        let target = request.split_whitespace().nth(1).unwrap_or("");
+        // A tracking pull announces the pulling monitor on `?peer=` —
+        // forward it so the proxied active learns its follow-peer
+        // source exactly like an unproxied pull's.
+        let announcing = announced_peer(target);
+        let (status, body) = if !(target == "/checkpoint" || target.starts_with("/checkpoint?")) {
             (404, "not found".to_string())
         } else {
             let rewrite = *self.rewrite.lock().unwrap();
-            match client.checkpoint() {
+            let pulled = match announcing {
+                Some(peer) => client.checkpoint_announcing(peer),
+                None => client.checkpoint(),
+            };
+            match pulled {
                 Ok(checkpoint) => (200, rewritten(&checkpoint, rewrite)),
                 Err(error) => (500, error.to_string()),
             }
@@ -204,6 +217,15 @@ impl CheckpointFixture {
         );
         let _ = stream.write_all(response.as_bytes());
     }
+}
+
+/// The `peer=` announcement a tracking pull carries on its request
+/// target — `None` for a plain `GET /checkpoint`.
+fn announced_peer(target: &str) -> Option<SocketAddr> {
+    target.split_once('?')?.1.split('&').find_map(|pair| {
+        pair.strip_prefix("peer=")
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 /// The document the fixture serves under `rewrite`: the live active
@@ -233,17 +255,6 @@ fn served_document(client: &MonitorClient) -> serde_json::Value {
     let (status, body) = client.request("GET", "/checkpoint", None).unwrap();
     assert_eq!(status, 200, "{body}");
     serde_json::from_str(&body).unwrap()
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
 }
 
 /// What one scripted run observed — the acceptance criteria in
@@ -293,22 +304,41 @@ struct Outcome {
 fn run_scenario() -> Outcome {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
+
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     // The active: field-owning from the start, its driven monitor
     // stepping the shared plant inside each requested scan — the
     // `--driven` wiring.
     let active_driver = RemoteDriver::connect(plant_addr).unwrap();
     let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
+    let mut active = Peer::active(
         assemble(&model, &registry, &active_gate).unwrap(),
         Some(&active_gate),
-    );
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
     let active_step = &active_driver;
     let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
         .unwrap()
@@ -335,7 +365,13 @@ fn run_scenario() -> Outcome {
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
     let fixture = CheckpointFixture::bind(active_monitor.local_addr());
     let standby_step = &standby_driver;
     let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
@@ -357,12 +393,13 @@ fn run_scenario() -> Outcome {
     let fixture_client = MonitorClient::new(fixture.addr);
 
     // An observer on the shared field — what the pair's writes actually
-    // did, and the run's operating point once the plant is serving.
+    // did, and the run's operating point once the plant is serving. The
+    // active already owns the field, so the observer's setup write rides
+    // the same claim token.
     let field = RemoteDriver::connect(plant_addr).unwrap();
+    field.claim_writer(1).unwrap();
 
-    thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
+    let outcome = thread::scope(|scope| {
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -546,7 +583,11 @@ fn run_scenario() -> Outcome {
         assert_eq!(final_standby.sync, None);
         let final_active = active_client.role().unwrap();
         assert_eq!(final_active.role, Role::Standby);
-        assert_eq!(final_active.sync, Some(StandbySync::Unsynchronized));
+        assert!(
+            matches!(final_active.sync, Some(StandbySync::Tracking { .. })),
+            "the demoted peer follows its successor's announced address \
+             and reconverges: {final_active:?}"
+        );
 
         let role_changes = |client: &MonitorClient| -> Vec<(Role, Role)> {
             client
@@ -604,7 +645,10 @@ fn run_scenario() -> Outcome {
             divergences,
             model_fingerprint: model.fingerprint(),
         }
-    })
+    });
+    drop(_plant);
+    serving.join().unwrap();
+    outcome
 }
 
 #[test]

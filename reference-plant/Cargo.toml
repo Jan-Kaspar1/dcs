@@ -4,9 +4,11 @@
 # dependencies are the pinned release crates. The pin is the release
 # contract's recorded mechanism: `git = "<published origin>"` at an
 # immutable revision on the release line — the rev recorded below is
-# the newest 0.1-series commit whose tooling serves the block-interface
-# registry, declared commands, and emitted events the clean check
-# proves; `docs/release-contract.md` records the mechanism.
+# the `v0.2.0` release's recorded commit
+# (docs/releases/v0.2.0/record.md), whose tooling serves the
+# block-interface registry, declared commands, and emitted events the
+# clean check proves; `docs/release-contract.md` records the
+# mechanism.
 [package]
 name = "pump-station"
 version = "0.1.0"
@@ -18,6 +20,6 @@ description = "Reference duty/standby lift station — a DCS consumer plant"
 [workspace]
 
 [dependencies]
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4355520594eaeb3b5e77561062e9789ace" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4355520594eaeb3b5e77561062e9789ace" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f" }
 serde_json = "1"

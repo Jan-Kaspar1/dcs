@@ -34,10 +34,20 @@ ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
                        commands, emitted events
+ci/restart.py          the restart-recovery leg — the driven
+                       controller stopped mid-scenario and relaunched
+                       onto the same state/journal files
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
+ci/ctl.py              the dcs-ctl leg — the released operator CLI
+                       driving the same run: receipted invoke, reads,
+                       and the named refusal modes
 ci/deploy_rig.py       the rig-definition consistency check —
                        deploy/compose.yaml against the manifest
+ci/schema_conformance.py  the served-registry structural conformance
+                       check — the driven run's `GET /schema` document
+                       against the release record's
+                       block-interfaces.schema.json (stdlib-only)
 deploy/manifest.json   the deployment declaration
 deploy/compose.yaml    the checked-in rig definition instantiating it
 ```
@@ -55,11 +65,11 @@ platform checkout — the only platform coupling is the pinned release in
 `Cargo.toml` pins the release crates by immutable revision:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "b85eaa4…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
 ```
 
-`tag = "v0.1.0"` names the identical commit once the release tag
+`tag = "v0.2.0"` names the identical commit once the release tag
 exists; a `rev` pin is always supported. `Cargo.lock` is committed so
 every build resolves the same sources.
 
@@ -91,9 +101,34 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev b85eaa4… \
-    dcs-model dcs-controller dcs-plant
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
+    dcs-model dcs-controller dcs-plant dcs-monitor
 ```
+
+The `dcs-monitor` package ships `dcs-ctl`, the released operator CLI —
+`dcs-ctl <addr> schema|resources|events|snapshot|signals|receipts|
+journal` reads the running controller's served contract, `invoke`
+submits a component's declared command through the bounded receipted
+path with `--actor` attribution, and `write`/`set-parameter`/`force`/
+`promote`/`demote`/`scan` cover the rest of the operator surface.
+
+The stage also exercises the contract's remaining `dcs-model` surfaces.
+The release record's schema artifacts —
+`docs/releases/<tag>/plant-model.schema.json` and
+`docs/releases/<tag>/block-interfaces.schema.json`, where `<tag>` is
+the manifest's `dcs_release` — are fetched through the same git remote
+and pinned revision the crates and tooling resolve over (the record
+lives in the release repository's tree at the pinned commit), and
+`dcs-model schema` / `dcs-model interface-schema` at the pinned rev
+must emit those bytes exactly — a divergence is `schema-drift`.
+`dcs-model diff` runs two legs: against a doctored *compatible*
+revision of the checked-in model it must name the actual change, and
+against the identical document it must report `no changes` — a leg
+whose expectation fails is `diff-mismatch`. Finally `dcs-model
+summary` and `dcs-model signal-index` run over the checked-in model
+with their outputs recorded to the run's evidence — the check
+transcript carries them verbatim with their sha256 digests, identical
+on every pass.
 
 ### 5. Run the simulation
 
@@ -104,6 +139,24 @@ observable outcomes — duty and lag staging, the high-level alarm's
 `not_writable` shelve refusal, ack latching, instrument failover and
 recovery, manual takeover, out-of-service suppression, and the
 pumped-down all-stop — identically on every run.
+
+The check's `restart` stage then proves the recovery contract the
+manifest's persistence fields declare — `ci/restart.py` launches the
+field-owning `dcs-controller --driven` with the manifest-declared
+`--state-file`/`--journal-file` flags pointed at runner-owned scratch
+paths, drives the deterministic scenario past a leg boundary — far
+enough to leave applied receipts and journaled transitions — stops the
+controller, and relaunches it onto the same files. The resumed run
+must report its resume and continue at the persisted tick — never a
+silent cold start at tick zero — its leg outcomes, receipts, and
+served field image equal to an uninterrupted reference pass, and the
+journal's `seq` order must continue across the file's `run_boundary`
+marker. A corrupt state file is refused at startup naming the file; a
+missing one cold-starts the resumed run and the leg reports the lost
+checkpoint rather than passing silently. Two passes must produce the
+identical `restart-digest`; a divergence fails
+`restart-resume-nondeterministic`, a violated contract
+`restart-resume-failed`.
 
 The check's `surface` stage then drives the same deterministic
 `--driven` run — `ci/simulate.py --surface` — asserting the served
@@ -131,6 +184,19 @@ drives its declaring component to emission, appearing in `GET
 every composed component; and `GET /journal` must answer the run's
 recorded transitions. A divergence fails `surface-mismatch`.
 
+The stage then checks the served `GET /schema` document itself against
+the fetched release-record artifact — `ci/schema_conformance.py` runs
+the consumer-side structural conformance the served-registry contract
+intends for non-Rust consumers: every `required` key present, declared
+properties and items carrying their declared JSON types, `enum`/`const`
+vocabularies held, `additionalProperties: false` enforced, and local
+`$ref`/`anyOf`/`oneOf` combinators resolved through the artifact's own
+`$defs`. The boundary is deliberate: this is a required-keys/field-shape
+check in stdlib-only python, while full draft-2020-12 validation —
+every keyword the draft defines — stays with the platform's own checks,
+where the `jsonschema` dependency exists. A missing or mistyped
+required field — any structural divergence — fails `schema-mismatch`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -145,6 +211,26 @@ schedule must produce the identical `consumer-digest` over the run's
 leg outcomes and command receipts, and two full passes must produce
 identical digests — a divergence fails `consumer-interference`, a
 nondeterministic stage `consumer-nondeterministic`.
+
+The check's `ctl` stage then proves the shipped operator CLI from the
+released artifacts — `ci/ctl.py` replays the deterministic driven run
+with `dcs-ctl` as the only driver: `dcs-ctl scan` paces the run,
+`dcs-ctl write` holds the exercise program's `run` input, and `dcs-ctl
+invoke sequencer:<id> advance|reset` submits the kind-declared commands
+through the bounded receipted path with `--actor` attribution — each
+`accepted` receipt settling `applied` at the scan boundary, visible
+through `dcs-ctl receipts` and journaled as `command_settled`. The leg
+asserts the read subcommands answer the served contract — `signals`,
+`schema`, `snapshot`, `events`, `resources` — that `resources` reports
+the per-command availability beside the named refusals (the unwritable
+bound point's `not declared writable`, the completed table's
+`command_refused` in the attributed events), that the kind-emitted
+`step_completed` reaches `dcs-ctl events`, and that the refusal modes
+exit nonzero naming the failure: an undeclared command answers
+`unknown_command`, a malformed `invoke` argument fails its
+declared-kind parse, and an unreachable monitor names its address. Two
+passes must produce the identical `ctl-digest` — a divergence fails
+`ctl-failed`, a nondeterministic stage `ctl-nondeterministic`.
 
 The obligations this demonstrates for any monitoring or UI consumer:
 
@@ -267,9 +353,16 @@ silently: a pin that resolves no release crates is `pin-unresolvable`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a
-re-recorded fingerprint is `manifest-fingerprint-mismatch`; a served
+re-recorded fingerprint is `manifest-fingerprint-mismatch`; a recorded
+schema artifact the pinned tooling no longer emits byte-identically is
+`schema-drift`; a served registry document failing the artifact's
+required structure is `schema-mismatch`; a `dcs-model diff` leg whose
+expectation fails is `diff-mismatch`; a served
 operator surface diverging from the emitted model's declaration is
-`surface-mismatch`; a consumer schedule changing the driven run's
+`surface-mismatch`; a restarted controller losing its persisted run —
+or failing to name a refused checkpoint — is `restart-resume-failed`;
+two restart-leg passes diverging is `restart-resume-nondeterministic`;
+a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
 `consumer-nondeterministic`. The names are recorded in the platform's

@@ -19,10 +19,17 @@ fresh, whose standby promotes, whose writer claim never re-arms, or
 whose io_health forgets the failures it counted, an injected quality
 fault the served snapshot keeps reporting Good, an error fault that
 never surfaces on io_health, a role that moves under a field fault,
-a clear that never restores the field value, and a model revision
+a clear that never restores the field value, a model revision
 whose revised peer never converges, converges to the wrong sync
 state, loses receipts across the boundary, regresses the field, or
-ends on the wrong fingerprint."""
+ends on the wrong fingerprint, a foreign-fingerprint standby
+that never reports the named negotiation refusal, converges anyway,
+accepts promotion, or leaves the active peer disturbed, and an
+incompatible revision whose peer silently crosses, degrades on the
+wrong detail, promotes anyway, answers the wrong refusal, or disturbs
+the active's receipts, journal, or field — plus a control half that
+refuses to converge."""
+import io
 import json
 import socket
 import tempfile
@@ -1304,6 +1311,292 @@ class CommandAdmissionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class FreshnessFeed:
+    """A stubbed pair for the stale-freshness scenario. ctrl-a is the
+    field writer: while it is up the shared plant steps and the
+    dynamics-driven stamp advances with it. ctrl-b is the tracking
+    standby — its own scan tick advances per snapshot read, its sync
+    reports `degraded` while the writer's checkpoint pulls miss, and the
+    budgeted point's served quality follows the declared five-tick lag
+    rule over the frozen stamp while the undeclared comparison keeps
+    Good. The writer's restart realigns the standby's tick — the resumed
+    checkpoint stream's rewind — and /history keeps the recorded
+    interval. Fault flags stage each named outcome the issue calls
+    out."""
+
+    BUDGET = 5
+    B_POINT = 13   # net-flow — the model's declared stale_after_ticks
+    C_POINT = 10   # level-primary — the undeclared comparison
+    PROMOTE_MISSES = 12  # the armed failover budget, past first stale
+
+    def __init__(self):
+        self.plant = 100     # the dynamics-driven driver stamp
+        self.b_tick = 100    # the standby's own scan tick
+        self.writer_up = True
+        self.misses = 0
+        self.promoted = False
+        self.stale_seen = False
+        self.relapsed = False
+        self.hist = {self.B_POINT: [], self.C_POINT: []}
+        self.seq = 1
+        self.stops = []
+        self.starts = []
+        # Fault flags for the named outcomes.
+        self.never_stale = False   # the budgeted point never presents
+        self.leak = False          # the undeclared point presents stale
+        self.relapse = False       # stale flips back to good mid-freeze
+        self.no_recover = False    # the restart never realigns the peer
+        self.freeze_takes = True   # False: the stop never freezes stamps
+        self.promote = False       # the armed failover budget fires
+        self.start_fails = False   # the restart action never completes
+
+    # The runner-owned lifecycle actions — replace ctx's
+    # stop_controller/start_controller.
+    def stop(self, name):
+        self.stops.append(name)
+        self.writer_up = False
+
+    def start(self, name):
+        self.starts.append(name)
+        if self.start_fails:
+            raise RuntimeError('docker start failed: no such container')
+        self.writer_up = True
+        if not self.promoted and not self.no_recover:
+            # The resumed checkpoint stream rewinds the tracking peer's
+            # tick domain to the plant's — the documented realign.
+            self.b_tick = self.plant
+
+    def _frozen(self):
+        # Stamps freeze while no peer steps the plant. A promoted
+        # standby steps it itself; a stop that never took leaves the
+        # writer effectively running.
+        return not self.writer_up and not self.promoted \
+            and self.freeze_takes
+
+    def _b_scan(self):
+        """One standby scan: its own tick advances, the plant's stamp
+        advances only while a writer steps it, and a downed writer's
+        pulls miss — the armed budget promoting at the configured
+        count."""
+        self.b_tick += 1
+        if not self._frozen():
+            self.plant += 1
+        if self.writer_up or not self.freeze_takes:
+            self.misses = 0
+        else:
+            self.misses += 1
+            if self.promote and self.misses >= self.PROMOTE_MISSES:
+                self.promoted = True
+
+    def _b_quality(self):
+        lag = max(0, self.b_tick - self.plant)
+        if lag > self.BUDGET and not self.never_stale:
+            if self.relapse and self.stale_seen and not self.relapsed:
+                self.relapsed = True
+                return 'good'
+            self.stale_seen = True
+            return {'uncertain': 'stale'}
+        return 'good'
+
+    def _c_quality(self):
+        lag = max(0, self.b_tick - self.plant)
+        if self.leak and lag > self.BUDGET:
+            return {'uncertain': 'stale'}
+        return 'good'
+
+    def _record(self, point, quality):
+        self.hist[point].append({'seq': self.seq, 'sample': {
+            'value': {'float': 1.0}, 'quality': quality,
+            'tick': self.plant}})
+        self.seq += 1
+
+    def _standby(self, method, route, query):
+        if (method, route) == ('GET', '/role'):
+            if self.promoted:
+                return 200, {'role': 'active', 'tick': self.b_tick}
+            sync = {'degraded': {'misses': self.misses}} if self.misses \
+                else {'tracking': {'aligned': self.plant}}
+            return 200, {'role': 'standby', 'tick': self.b_tick,
+                         'sync': sync}
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': [
+                {'point': self.B_POINT, 'signal': None,
+                 'name': 'net-flow', 'direction': 'in',
+                 'value_type': 'float', 'writable': False},
+                {'point': self.C_POINT, 'signal': None,
+                 'name': 'level-primary', 'direction': 'in',
+                 'value_type': 'float', 'writable': False}]}
+        if (method, route) == ('GET', '/snapshot'):
+            self._b_scan()
+            qb, qc = self._b_quality(), self._c_quality()
+            self._record(self.B_POINT, qb)
+            self._record(self.C_POINT, qc)
+            return 200, {'tick': self.b_tick, 'points': [
+                {'point': self.B_POINT, 'sample': {
+                    'value': {'float': 1.0}, 'quality': qb,
+                    'tick': self.plant}},
+                {'point': self.C_POINT, 'sample': {
+                    'value': {'float': 1.0}, 'quality': qc,
+                    'tick': self.plant}}]}
+        if (method, route) == ('GET', '/history'):
+            params = [part.split('=', 1) for part in query.split('&')]
+            wanted = [int(v) for k, v in params if k == 'point']
+            since = next((int(v) for k, v in params if k == 'since'), 0)
+            return 200, [{'point': point,
+                          'samples': [s for s in self.hist[point]
+                                      if s['seq'] > since]}
+                         for point in wanted]
+        raise AssertionError('unexpected request %s ctrl-b%s'
+                             % (method, route))
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        if host == 'ctrl-b:2':
+            return self._standby(method, route, query)
+        if not self.writer_up:
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': 'active', 'tick': self.plant}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class StaleFreshnessTests(unittest.TestCase):
+    """scenario_stale_freshness against the stubbed pair: stopping the
+    writer freezes the plant's stamps, the tracking standby's scans
+    outrun them, and the declared budget presents stale per-point while
+    the undeclared comparison keeps Good; the writer's restart realigns
+    the peer inside the failover bound and /history preserves the
+    interval."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = FreshnessFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, ctx=None, feed=None, evidence=None):
+        feed = feed if feed is not None else self.feed
+        evidence = evidence if evidence is not None else self.evidence
+        base = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+                'evidence_dir': str(evidence),
+                'stop_controller': feed.stop,
+                'start_controller': feed.start,
+                'failover_misses': 120}
+        if ctx is not None:
+            base.update(ctx)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'STALE_FRESHNESS_POLL', 0.001), \
+                patch.object(scenarios, 'STALE_WALL_DEADLINE', 5.0), \
+                patch.object(scenarios, 'STALE_RECOVER_DEADLINE', 1.0), \
+                patch.object(scenarios, 'STALE_RETURN_DEADLINE', 1.0):
+            return scenarios.scenario_stale_freshness(base)
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_stale_freshness,
+                      scenarios.SCENARIOS)
+
+    def test_freeze_stale_recovery_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.stops, ['active'])
+        self.assertEqual(self.feed.starts, ['active'])
+        self.assertTrue(self.feed.stale_seen)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        interval = json.loads(
+            (self.evidence / 'stale-freshness-history.json').read_text())
+        self.assertIsNotNone(interval['budgeted']['interval'])
+        self.assertFalse(interval['budgeted']['interval']['good_inside'])
+
+    def test_stale_never_presenting_fails(self):
+        self.feed.never_stale = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never presented Uncertain(Stale)',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_comparison_presenting_stale_fails(self):
+        self.feed.leak = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('leaked past its declaration',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_stale_reverting_to_healthy_fails(self):
+        self.feed.relapse = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('healthy last-known', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_recovery_after_restart_fails(self):
+        self.feed.no_recover = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('did not return Good', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promoted_peer_never_recovering_fails(self):
+        # The armed failover bound firing mid-freeze: the promoted peer
+        # reclaims the writer and resumes stepping, but its scan ticks
+        # lead the frozen stamps by the outage — the lag never closes.
+        self.feed.promote = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('self-promotion', record.get('detail', ''))
+        self.assertTrue(self.feed.promoted)
+        report.validate_scenario(record)
+
+    def test_unfrozen_induction_is_inconclusive(self):
+        # The writer-stop never took: the plant's stamps keep advancing
+        # and the peer keeps tracking, so a missing stale presentation
+        # cannot be attributed to the induction.
+        self.feed.freeze_takes = False
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never took effect', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_restart_action_is_inconclusive(self):
+        self.feed.start_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('restart never completed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_lifecycle_actions_are_inconclusive(self):
+        record = self.run_scenario(ctx={'stop_controller': None,
+                                        'start_controller': None})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('no documented', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs of the scenario
+        # against the same rig state record the same report and the
+        # same evidence files.
+        runs = []
+        for index in range(2):
+            evidence = Path(self.tmp.name) / ('evidence-' + str(index))
+            evidence.mkdir()
+            record = self.run_scenario(feed=FreshnessFeed(),
+                                       evidence=evidence)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
 class RevisionFeed:
     """A stubbed rig for the model-revision scenario. ctrl-b owns the
     field — the post-failover layout the suite reaches this case in —
@@ -1746,6 +2039,752 @@ class ModelRevisionTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
+class IncompatibleFeed:
+    """A stubbed rig for the incompatible-revision scenario. ctrl-b
+    owns the field — the post-failover layout the suite reaches this
+    case in — and ctrl-c is the third controller the runner action
+    launches twice: first on the incompatible document (its carryover
+    crossing refuses, so every role poll reports the named degraded
+    detail), then on the control document (the same revision minus the
+    retype), which converges reinitialized carrying point 302 as its
+    declared bool kind. Every transition is call-count keyed — never
+    wall-clock — so two scenario runs emit identical evidence. Fault
+    flags stage each named failure the issue calls out."""
+
+    POINT = 302     # the carried internal point the spec retypes
+    WATCH = 100     # the field `out` point the window watches
+    DETAIL = ('checkpoint internal point 302 carries Bool but the '
+             'revision declares Int — a retype must rename the point')
+    FINGERPRINT_DETAIL = ('checkpoint model fingerprint 7f2a does not '
+                          'match this run\'s 9c1e')
+
+    def __init__(self, journals, incompatible_doc, control_doc):
+        self.journals = {name: Path(p) for name, p in journals.items()}
+        self.incompatible_doc = incompatible_doc
+        self.control_doc = control_doc
+        self.ticks = {'a': 0, 'b': 40, 'c': 0}
+        self.roles = {'a': 'standby', 'b': 'active', 'c': 'standby'}
+        self.launched = False
+        self.incompatible = None
+        self.c_role_polls = 0
+        self.refuse_after = 3    # polls before the crossing reports
+        self.receipts = {'a': [], 'b': [], 'c': []}
+        self.staged_b = True
+        self.field = {'value': {'bool': True}, 'quality': 'good',
+                      'tick': 7}
+        self.seqs = {'a': 1, 'b': 1, 'c': 1}
+        self.calls = []
+        self.reads = 0
+        # Fault injection for the named-failure cases.
+        self.action_fails = False       # the runner action raises
+        self.never_cross = False        # c stays unsynchronized
+        self.fingerprint_degrade = False  # the wrong degrade detail
+        self.silent_cross = False       # the incompatible doc converges
+        self.promote_succeeds = False   # /promote answers 200
+        self.refusal_plain = False      # 409 without the named detail
+        self.receipts_grow = False      # b's receipt log moves mid-window
+        self.journal_grows = False      # b's journal file moves mid-window
+        self.field_regress = False      # the field stops following b
+        self.control_degrades = False   # the control relaunch refuses
+        for name in ('a', 'b'):
+            self.journals[name].parent.mkdir(parents=True,
+                                             exist_ok=True)
+            self.journals[name].write_text(
+                json.dumps({'run_boundary': {'run': 1, 'tick': 0}})
+                + '\n')
+
+    def _journal(self, peer, record):
+        with self.journals[peer].open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+
+    def _entry(self, peer, event):
+        self._journal(peer, {'entry': {'seq': self.seqs[peer],
+                                       'tick': self.ticks[peer],
+                                       'event': event}})
+        self.seqs[peer] += 1
+
+    def _report(self):
+        return {'from': 111, 'to': 222, 'resumed_at': self.ticks['b'],
+                'carried': [{'point': self.POINT,
+                             'value': {'bool': True}}],
+                'carried_outputs': [{'point': self.WATCH,
+                                     'value': {'bool': True}}],
+                'carried_forces': [], 'dropped': [],
+                'reinitialized': ['motor:20'], 'initialized': [900]}
+
+    # The runner-owned action — replaces ctx['start_revised'].
+    def start(self, name, incompatible=False):
+        self.calls.append(('start_revised', name, incompatible))
+        if self.action_fails:
+            raise RuntimeError('docker run failed: name in use')
+        self.launched = True
+        self.incompatible = incompatible
+        self.c_role_polls = 0
+        self.journals['c'].parent.mkdir(parents=True, exist_ok=True)
+        self._journal('c', {'run_boundary': {'run': 1, 'tick': 0}})
+        info = {'container': 'dcs-hw-qa-1-c',
+                'document': str(self.incompatible_doc
+                                if incompatible else self.control_doc),
+                'added_points': [900], 'added_signals': [10900]}
+        if incompatible:
+            info['retyped_point'] = self.POINT
+            info['rewired_connections'] = 3
+        return info
+
+    def _role(self, peer):
+        if peer != 'c':
+            return {'role': self.roles[peer], 'tick': self.ticks[peer],
+                    'sync': 'unsynchronized'
+                    if self.roles[peer] == 'standby' else None}
+        self.c_role_polls += 1
+        if self.c_role_polls < self.refuse_after or self.never_cross:
+            sync = 'unsynchronized'
+        elif self.incompatible:
+            if self.silent_cross:
+                sync = {'reinitialized': {'report': self._report()}}
+            elif self.fingerprint_degrade:
+                sync = {'degraded':
+                        {'detail': self.FINGERPRINT_DETAIL}}
+            else:
+                sync = {'degraded': {'detail': self.DETAIL}}
+        elif self.control_degrades:
+            sync = {'degraded': {'detail': self.DETAIL}}
+        else:
+            sync = {'reinitialized': {'report': self._report()}}
+        return {'role': self.roles['c'], 'tick': self.ticks['c'],
+                'sync': sync}
+
+    def _snapshot(self, peer):
+        self.ticks[peer] += 1
+        return {'tick': self.ticks[peer],
+                'points': [
+                    {'point': self.WATCH,
+                     'sample': {'value': {'bool': self.staged_b},
+                                'quality': 'good'}}],
+                'io_health': {'failed_writes': 0,
+                              'consecutive_failures': 0,
+                              'last_error': None}}
+
+    def _promote(self, peer):
+        self.calls.append(('promote', peer))
+        if self.promote_succeeds:
+            self.roles[peer] = 'active'
+            return 200, {'role': 'active', 'tick': self.ticks[peer]}
+        detail = 'checkpoint refused' if self.refusal_plain \
+            else self.DETAIL
+        body = {'not_converged': {'sync': {'degraded':
+                                           {'detail': detail}}}}
+        raise urllib.error.HTTPError(
+            'http://ctrl-c:3/promote', 409, 'Conflict', {},
+            io.BytesIO(json.dumps(body).encode()))
+
+    # The monitor channel — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        peer = {'ctrl-a:1': 'a', 'ctrl-b:2': 'b',
+                'ctrl-c:3': 'c'}[host]
+        if peer == 'c' and not self.launched:
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, self._role(peer)
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, self._snapshot(peer)
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts[peer])
+        if (method, route) == ('POST', '/promote'):
+            return self._promote(peer)
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+    # The plant's sim-net service — replaces scenarios._field_request.
+    def field_request(self, ctx, request):
+        if request['op'] == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': self.WATCH, 'direction': 'out',
+                 'sample': self.field, 'fault': None}]}
+        if request['op'] == 'read':
+            self.reads += 1
+            if self.reads == 2:
+                # Mid-window mutations stage the audit-trail faults:
+                # the active's receipts or journal moving under the
+                # refusal, or the field leaving the active's image.
+                if self.receipts_grow:
+                    self.receipts['b'].append(
+                        {'command': {'write_value': {'point': 302}},
+                         'actor': 'intruder'})
+                if self.journal_grows:
+                    self._entry('b', {'command_settled':
+                                      {'receipt': {'actor':
+                                                   'intruder'}}})
+                if self.field_regress:
+                    self.field = {'value': {'bool': not self.staged_b},
+                                  'quality': 'good', 'tick': 9}
+            return {'result': 'sample', 'sample': self.field}
+        raise AssertionError('unexpected plant request %s' % request)
+
+
+class IncompatibleRevisionTests(unittest.TestCase):
+    """scenario_incompatible_revision against the stubbed rig: the
+    feed's transitions are call-count keyed so each run emits
+    identical evidence, and every fault flag stages a named acceptance
+    failure — the incompatible document silently crossing, the degrade
+    landing on the foreign-fingerprint detail instead of the carryover
+    refusal, a promotion that answers anything but the named 409
+    payload, an active whose receipts, journal, or field move during
+    the observation window, and a control half that never converges."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        root = Path(self.tmp.name) / 'controllers'
+        self.incompatible_doc = Path(self.tmp.name) \
+            / 'model-revised-incompatible.json'
+        self.incompatible_doc.write_text(json.dumps(
+            {'revised': True, 'retyped': 302}))
+        self.control_doc = Path(self.tmp.name) / 'model-revised.json'
+        self.control_doc.write_text(json.dumps({'revised': True}))
+        self.journals = {name: root / name / 'journal.jsonl'
+                         for name in ('a', 'b', 'c')}
+        self.feed = IncompatibleFeed(self.journals,
+                                     self.incompatible_doc,
+                                     self.control_doc)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _ctx(self, feed=None):
+        feed = feed or self.feed
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'revised': 'http://ctrl-c:3',
+                'plant': 'plant:9',
+                'evidence_dir': str(self.evidence),
+                'start_revised': feed.start,
+                'journal_files': {
+                    'active': str(feed.journals['a']),
+                    'standby': str(feed.journals['b']),
+                    'revised': str(feed.journals['c'])}}
+
+    def run_scenario(self, feed=None, ctx=None):
+        feed = feed or self.feed
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, '_field_request',
+                             feed.field_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'REVISION_POLL', 0.001), \
+                patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
+                             2.0), \
+                patch.object(scenarios, 'REVISION_FIELD_ROUNDS', 4):
+            return scenarios.scenario_incompatible_revision(
+                ctx or self._ctx(feed))
+
+    def test_registered_in_scenarios(self):
+        self.assertIn(scenarios.scenario_incompatible_revision,
+                      scenarios.SCENARIOS)
+        # Immediately ahead of the compatible case: the control's
+        # promote leg belongs to scenario_model_revision in the same
+        # run.
+        order = list(scenarios.SCENARIOS)
+        self.assertEqual(
+            order.index(scenarios.scenario_incompatible_revision) + 1,
+            order.index(scenarios.scenario_model_revision))
+
+    def test_clean_refusal_passes_and_orders_the_legs(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The incompatible launch, the refused promotion, then the
+        # control relaunch — and no demote/promote of the field owner.
+        kinds = [kind for kind, *_ in self.feed.calls]
+        self.assertEqual(kinds, ['start_revised', 'promote',
+                                 'start_revised'])
+        self.assertEqual(self.feed.calls[0],
+                         ('start_revised', 'standby', True))
+        self.assertEqual(self.feed.calls[2],
+                         ('start_revised', 'standby', False))
+        self.assertEqual(self.feed.roles['b'], 'active')
+        self.assertEqual(self.feed.roles['c'], 'standby')
+
+    def test_two_runs_produce_identical_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        first = {p.name: p.read_bytes()
+                 for p in self.evidence.iterdir()}
+        second_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(second_tmp.cleanup)
+        evidence2 = Path(second_tmp.name) / 'evidence'
+        evidence2.mkdir()
+        journals2 = {name: Path(second_tmp.name) / 'controllers'
+                     / name / 'journal.jsonl'
+                     for name in ('a', 'b', 'c')}
+        feed2 = IncompatibleFeed(journals2, self.incompatible_doc,
+                                 self.control_doc)
+        ctx2 = {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'revised': 'http://ctrl-c:3',
+                'plant': 'plant:9',
+                'evidence_dir': str(evidence2),
+                'start_revised': feed2.start,
+                'journal_files': {
+                    'active': str(journals2['a']),
+                    'standby': str(journals2['b']),
+                    'revised': str(journals2['c'])}}
+        record2 = self.run_scenario(feed=feed2, ctx=ctx2)
+        self.assertEqual(record2['outcome'], 'passed', record2)
+        second = {p.name: p.read_bytes() for p in evidence2.iterdir()}
+        self.assertEqual(set(first), set(second))
+        for name, data in first.items():
+            self.assertEqual(data, second[name], name)
+
+    def test_silent_crossing_fails(self):
+        # The contract break this case exists to catch: the
+        # incompatible document converged reinitialized.
+        self.feed.silent_cross = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('reinitialized', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_fingerprint_degrade_is_the_wrong_refusal(self):
+        # The foreign-fingerprint degrade #483 exercises must not
+        # satisfy this case — the detail lacks the carryover naming.
+        self.feed.fingerprint_degrade = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('carryover', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_never_crossing_peer_is_inconclusive(self):
+        self.feed.never_cross = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never reported a checkpoint crossing',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promotion_succeeding_fails(self):
+        self.feed.promote_succeeds = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('409', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refusal_without_the_named_detail_fails(self):
+        self.feed.refusal_plain = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('carryover', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_receipt_drift_fails(self):
+        self.feed.receipts_grow = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('receipt', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_journal_drift_fails(self):
+        self.feed.journal_grows = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('journal', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_field_regression_fails(self):
+        self.feed.field_regress = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('field', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_control_degrading_fails(self):
+        # The same document minus the retype must converge — a second
+        # refusal names a rig defect, not the carryover violation.
+        self.feed.control_degrades = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('control', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_action_is_inconclusive(self):
+        self.feed.action_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never completed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class NegotiationFeed:
+    """A stubbed rig for the checkpoint-negotiation scenario. ctrl-b
+    owns the field — the post-failover layout the suite reaches this
+    case in — ctrl-a is its unsynchronized demoted partner, and ctrl-f
+    is the foreign peer the runner action launches on the derived
+    document without --revised: every pull produces a checkpoint the
+    peer refuses, so once its monitor answers it reports the named
+    degraded negotiation failure and never converges, and POST
+    /promote on it answers the 409 not_converged refusal. Each ctrl-b
+    snapshot read is one completed scan landing its staged write on
+    the faked sim-net field. Every transition is call-count keyed —
+    never wall-clock — so two scenario runs emit identical evidence.
+    Fault flags stage each named failure the issue calls out."""
+
+    V1, V2 = 111, 222  # the pair's and the foreign model fingerprints
+    WATCH = 100        # the field `out` point the window watches
+
+    def __init__(self, document):
+        self.document = document
+        self.ticks = {'a': 0, 'b': 40, 'f': 0}
+        self.launched = False   # f's monitor answers
+        self.f_polls = 0
+        self.degrade_after = 2  # f's first polls stay unsynchronized
+        self.promote_seen = False
+        self.staged = True      # the value ctrl-b's scans write
+        self.field = {'value': {'bool': True}, 'quality': 'good',
+                      'tick': 7}
+        self.receipts = {'b': [
+            {'command': {'write_value': {'point': 302, 'kind': 'bool',
+                                         'value': {'bool': True}}},
+             'outcome': {'applied': {'tick': 30}},
+             'actor': 'qa-lane'}]}
+        self.calls = []
+        # Fault injection for the named-failure cases.
+        self.action_fails = False   # the launch action raises
+        self.stop_fails = False     # the teardown action raises
+        self.never_refuse = False   # f stays unsynchronized
+        self.converges = False      # f reports tracking — violation
+        self.late_converge = False  # f leaves degraded mid-window
+        self.wrong_detail = False   # degraded names another rejection
+        self.wrong_fp = False       # the detail omits the pair's fp
+        self.promote_ok = False     # promote answers 200
+        self.promote_other = False  # 409 without not_converged
+        self.refusal_bare = False   # not_converged without the sync
+        self.stall_active = False   # the active's tick stops advancing
+        self.field_regress = False  # the field stops following writes
+        self.receipt_drift = False  # a receipt appears after promote
+
+    def _sync(self):
+        if self.wrong_detail:
+            return {'degraded': {
+                'detail': 'checkpoint carries output point 9 the '
+                          'point map does not serve as out'}}
+        found = self.V1 + 1 if self.wrong_fp else self.V1
+        return {'degraded': {
+            'detail': 'checkpoint model fingerprint %016x does not '
+                      "match this run's %016x" % (found, self.V2)}}
+
+    # The runner-owned actions — replace ctx['start_foreign'] and
+    # ctx['stop_foreign'].
+    def start(self, name):
+        self.calls.append(('start_foreign', name))
+        if self.action_fails:
+            raise RuntimeError('docker run failed: name in use')
+        self.launched = True
+        return {'container': 'dcs-hw-qa-1-foreign',
+                'document': str(self.document),
+                'added_points': [900], 'added_signals': [10900]}
+
+    def stop(self):
+        self.calls.append(('stop_foreign',))
+        if self.stop_fails:
+            raise RuntimeError('docker rm failed: no such container')
+        self.launched = False  # the foreign endpoint stops answering
+
+    def _role(self, peer):
+        if peer == 'a':
+            return {'role': 'standby', 'tick': self.ticks['a'],
+                    'sync': 'unsynchronized'}
+        if peer == 'b':
+            return {'role': 'active', 'tick': self.ticks['b']}
+        self.f_polls += 1
+        self.ticks['f'] += 1
+        if self.never_refuse or self.f_polls < self.degrade_after:
+            sync = 'unsynchronized'
+        elif self.converges or (
+                self.late_converge
+                and self.f_polls >= self.degrade_after + 3):
+            sync = {'tracking': {'aligned': self.ticks['b']}}
+        else:
+            sync = self._sync()
+        return {'role': 'standby', 'tick': self.ticks['f'],
+                'sync': sync}
+
+    def _snapshot(self, peer):
+        if peer == 'b':
+            if not self.stall_active:
+                self.ticks['b'] += 1
+                if not self.field_regress:
+                    self.field = {'value': {'bool': self.staged},
+                                  'quality': 'good',
+                                  'tick': self.ticks['b']}
+        else:
+            self.ticks[peer] += 1
+        return {'tick': self.ticks[peer],
+                'points': [{'point': self.WATCH,
+                            'sample': {'value': {'bool': self.staged},
+                                       'quality': 'good'}}]}
+
+    def _promote(self, url, peer):
+        self.calls.append(('promote', peer))
+        self.promote_seen = True
+        if self.promote_ok:
+            return 200, {'role': 'active', 'tick': self.ticks[peer]}
+        if self.promote_other:
+            payload = {'already_active': None}
+        elif self.refusal_bare:
+            payload = {'not_converged': {'sync': 'unsynchronized'}}
+        else:
+            payload = {'not_converged': {'sync': self._sync()}}
+        raise urllib.error.HTTPError(
+            url, 409, 'conflict', {},
+            io.BytesIO(json.dumps(payload).encode()))
+
+    # The monitor channel — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        peer = {'ctrl-a:1': 'a', 'ctrl-b:2': 'b',
+                'ctrl-f:4': 'f'}.get(host)
+        if peer is None or (peer == 'f' and not self.launched):
+            raise urllib.error.URLError('connection refused')
+        if (method, route) == ('GET', '/role'):
+            return 200, self._role(peer)
+        if (method, route) == ('GET', '/checkpoint'):
+            fp = self.V1 if peer != 'f' else self.V2
+            return 200, {'model_fingerprint': fp,
+                         'tick': self.ticks[peer]}
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, self._snapshot(peer)
+        if (method, route) == ('GET', '/receipts'):
+            receipts = list(self.receipts.get(peer, []))
+            if peer == 'b' and self.receipt_drift \
+                    and self.promote_seen:
+                receipts.append(
+                    {'command': {'write_value': {
+                        'point': 302, 'kind': 'bool',
+                        'value': {'bool': False}}},
+                     'outcome': {'applied': {'tick': self.ticks['b']}},
+                     'actor': 'qa-lane'})
+            return 200, receipts
+        if (method, route) == ('POST', '/promote'):
+            return self._promote(url, peer)
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+    # The plant's sim-net service — replaces scenarios._field_request.
+    def field_request(self, ctx, request):
+        if request['op'] == 'list_points':
+            return {'result': 'points', 'points': [
+                {'point': self.WATCH, 'direction': 'out',
+                 'sample': self.field, 'fault': None}]}
+        if request['op'] == 'read':
+            return {'result': 'sample', 'sample': self.field}
+        raise AssertionError('unexpected plant request %s' % request)
+
+
+class CheckpointNegotiationTests(unittest.TestCase):
+    """scenario_checkpoint_negotiation against the stubbed rig: the
+    feed's transitions are call-count keyed so each run emits identical
+    evidence, and every fault flag stages a named acceptance failure —
+    the foreign peer that never reports the refusal, converges anyway,
+    reports a different rejection, accepts promotion, or leaves the
+    active peer's ticks, field writes, or receipt log disturbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.document = Path(self.tmp.name) / 'model-foreign.json'
+        self.document.write_text(json.dumps({'revised': True}))
+        self.feed = NegotiationFeed(self.document)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _ctx(self):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'revised': 'http://ctrl-c:3',
+                'foreign': 'http://ctrl-f:4',
+                'plant': 'plant:9',
+                'evidence_dir': str(self.evidence),
+                'start_foreign': self.feed.start,
+                'stop_foreign': self.feed.stop}
+
+    def run_scenario(self, ctx=None):
+        with patch.object(scenarios, 'http_json', self.feed.http_json), \
+                patch.object(scenarios, '_field_request',
+                             self.feed.field_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
+                patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
+                patch.object(scenarios, 'NEGOTIATION_ROUNDS', 6):
+            return scenarios.scenario_checkpoint_negotiation(
+                ctx or self._ctx())
+
+    def test_registered_ahead_of_model_revision(self):
+        order = list(scenarios.SCENARIOS)
+        self.assertLess(
+            order.index(scenarios.scenario_checkpoint_negotiation),
+            order.index(scenarios.scenario_model_revision))
+
+    def test_clean_refusal_passes_validates_and_tears_down(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        kinds = [call[0] for call in self.feed.calls]
+        self.assertEqual(kinds,
+                         ['start_foreign', 'promote', 'stop_foreign'])
+        self.assertEqual(dict(
+            call for call in self.feed.calls if len(call) == 2
+        )['start_foreign'], 'standby')
+        self.assertFalse(self.feed.launched)
+
+    def test_two_runs_produce_identical_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        first = {p.name: p.read_bytes()
+                 for p in self.evidence.iterdir()}
+        second_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(second_tmp.cleanup)
+        evidence2 = Path(second_tmp.name) / 'evidence'
+        evidence2.mkdir()
+        feed2 = NegotiationFeed(self.document)
+        ctx2 = self._ctx()
+        ctx2['evidence_dir'] = str(evidence2)
+        ctx2['start_foreign'] = feed2.start
+        ctx2['stop_foreign'] = feed2.stop
+        with patch.object(scenarios, 'http_json', feed2.http_json), \
+                patch.object(scenarios, '_field_request',
+                             feed2.field_request), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
+                patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
+                patch.object(scenarios, 'NEGOTIATION_ROUNDS', 6):
+            record2 = scenarios.scenario_checkpoint_negotiation(ctx2)
+        self.assertEqual(record2['outcome'], 'passed', record2)
+        second = {p.name: p.read_bytes() for p in evidence2.iterdir()}
+        self.assertEqual(set(first), set(second))
+        for name, data in first.items():
+            self.assertEqual(data, second[name], name)
+
+    def test_never_refusing_peer_is_inconclusive(self):
+        self.feed.never_refuse = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never reached a negotiation verdict',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+        # Teardown still ran — the rig stays clean either way.
+        self.assertIn(('stop_foreign',), self.feed.calls)
+
+    def test_converged_foreign_peer_fails(self):
+        self.feed.converges = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('converged', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_other_rejection_detail_fails(self):
+        self.feed.wrong_detail = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('never named the fingerprint',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_detail_omitting_the_pair_fingerprint_fails(self):
+        self.feed.wrong_fp = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('does not name the pair', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_convergence_inside_the_window_fails(self):
+        self.feed.late_converge = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('left the refused state',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_promotion_accepted_fails(self):
+        self.feed.promote_ok = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('not_converged', record.get('detail', ''))
+        report.validate_scenario(record)
+        # Teardown still ran even on the failed leg.
+        self.assertIn(('stop_foreign',), self.feed.calls)
+
+    def test_other_409_refusal_fails(self):
+        self.feed.promote_other = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('not_converged', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refusal_without_the_sync_state_fails(self):
+        self.feed.refusal_bare = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('does not carry the degraded',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_active_tick_stall_fails(self):
+        self.feed.stall_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('tick stalled', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_field_regression_during_the_window_fails(self):
+        self.feed.field_regress = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('stopped receiving', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_receipt_drift_fails(self):
+        self.feed.receipt_drift = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('receipt log changed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_launch_action_is_inconclusive(self):
+        self.feed.action_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('action never completed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_failed_teardown_is_inconclusive(self):
+        self.feed.stop_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never removed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_actions_are_inconclusive(self):
+        ctx = self._ctx()
+        del ctx['start_foreign']
+        del ctx['stop_foreign']
+        del ctx['foreign']
+        record = self.run_scenario(ctx)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+
 class TuneFeed:
     """A stubbed monitor pair for the parameter-tune carryover
     scenario. ctrl-a owns the field and holds the parameter's live
@@ -2173,8 +3212,14 @@ class PlantLinkFeed:
                         'error': {'kind': 'fenced',
                                   'detail': 'another attachment owns '
                                             'field writes'}}
-            self.plant_tick += 1
-            return {'result': 'stepped', 'tick': self.plant_tick}
+            # The field fails closed while unclaimed: a restarted
+            # plant's claim-less window is a named refusal, not an
+            # open one — so the probe can tell "waiting for the owner's
+            # re-arm" from "fenced by a standing owner".
+            return {'result': 'error',
+                    'error': {'kind': 'unclaimed',
+                              'detail': 'no attachment holds '
+                                        'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
     # The monitor surface — replaces scenarios.http_json.
@@ -2386,6 +3431,8 @@ class CtlFeed:
         self.wrong_actor = False       # the journaled receipt loses the actor
         self.no_events = False         # the events read attributes nothing
         self.silent_accept = False     # the undeclared invoke applies
+        self.carryover = None          # a receipt an adopted checkpoint
+                                       # re-journals above the cursor
 
     @staticmethod
     def _ok(payload):
@@ -2435,7 +3482,8 @@ class CtlFeed:
         refused = self._refusal(command)
         if refused is None:
             receipt = {'command': command,
-                       'outcome': {'applied': {'tick': self.tick}},
+                       'outcome': {'accepted':
+                                   {'apply_tick': self.tick + 1}},
                        'actor': actor}
             rc, stderr = 0, ''
         else:
@@ -2445,10 +3493,24 @@ class CtlFeed:
             rc = 1
             stderr = 'dcs-ctl: ' + addr + ': command rejected: ' \
                 + next(iter(refused))
-        # Rejected receipts settle at submission and journal like
-        # applied ones — the real executor's durable record.
+        # An accepted command journals its applied echo at the promised
+        # tick; a rejected receipt is already final and echoes verbatim —
+        # the real executor's durable record. `carryover` injects the
+        # entry a checkpoint-adopted receipt re-journals on this peer —
+        # an earlier leg's identical command under its own actor —
+        # landing above the consumer's pre-submission cursor, ahead of
+        # this submission's own settlement.
         if not self.no_journal_entry:
+            if self.carryover is not None:
+                self.journal.append({'seq': self.next_seq,
+                                     'tick': self.tick,
+                                     'event': {'command_settled': {
+                                         'receipt': self.carryover}}})
+                self.next_seq += 1
+                self.carryover = None
             settled = dict(receipt)
+            if refused is None:
+                settled['outcome'] = {'applied': {'tick': self.tick + 1}}
             if self.wrong_actor:
                 settled['actor'] = 'qa-lane'
             self.journal.append({'seq': self.next_seq, 'tick': self.tick,
@@ -2723,6 +3785,55 @@ class DcsCtlTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('unattributed', record.get('detail', ''))
         report.validate_scenario(record)
+
+    def test_stale_identical_settlement_is_not_this_legs(self):
+        """The qa-20260916-065 defect: the served-interface case
+        submits the same picked command under actor 'qa-lane' ahead of
+        this leg, so the journal already holds an identical settled
+        receipt — the settlement read must start above the
+        pre-submission seq cursor, not match the stale entry."""
+        stale = {'seq': self.feed.next_seq, 'tick': 0,
+                 'event': {'command_settled': {'receipt': {
+                     'command': {'write_value': {
+                         'point': 302, 'kind': 'bool',
+                         'value': {'bool': True}}},
+                     'outcome': {'applied': {'tick': 0}},
+                     'actor': 'qa-lane'}}}}
+        self.feed.journal.append(stale)
+        self.feed.next_seq += 1
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        journal = json.loads(
+            (self.evidence / 'dcs-ctl-journal.json').read_text())
+        self.assertEqual(
+            journal['entry']['event']['command_settled']['receipt']
+            ['actor'], scenarios.CTL_ACTOR)
+
+    def test_carried_over_settlement_is_not_this_legs(self):
+        """The qa-20260917-002 defect: an earlier leg submits the same
+        picked command under actor 'qa-lane'; the receipt crosses peers
+        inside a checkpoint and re-journals on the serving peer only
+        when the adopting scan records it — landing above this leg's
+        pre-submission seq cursor, ahead of this submission's own
+        settlement. The settlement read must identify this leg's
+        receipt by the actor only it declares, not take the first
+        same-command entry past the floor."""
+        self.feed.carryover = {
+            'command': {'write_value': {'point': 302, 'kind': 'bool',
+                                        'value': {'bool': True}}},
+            'outcome': {'applied': {'tick': 40}},
+            'actor': 'qa-lane'}
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        journal = json.loads(
+            (self.evidence / 'dcs-ctl-journal.json').read_text())
+        entry = journal['entry']['event']['command_settled']['receipt']
+        self.assertEqual(entry['actor'], scenarios.CTL_ACTOR)
+        self.assertEqual(
+            journal['foreign']['event']['command_settled']['receipt']
+            ['actor'], 'qa-lane')
 
     def test_unattributed_event_fails(self):
         self.feed.no_events = True

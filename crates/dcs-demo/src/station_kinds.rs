@@ -77,7 +77,9 @@
 //! while the well refills with the group stood down, a manual takeover
 //! hand-drives `p101` — the command register standing while the level
 //! measurably drains, then released; a `Bad` primary flips the
-//! failover to the backup measurement; sustained `Bad` run contacts
+//! failover to the backup measurement; a `Bad` backup on its own —
+//! the issue-#502 reproduction — raises the `backup-unhealthy`
+//! annunciation while the primary keeps serving; sustained `Bad` run contacts
 //! prove the motor faults and drop both pumps from the group;
 //! out-of-service blocks a hand start; power-fail drops every pump's
 //! availability; a thermal contact trips its per-pump alarm.
@@ -147,6 +149,8 @@ pub mod points {
 
     /// The primary wet-well level measurement — the integrator's output.
     pub const LEVEL_PRIMARY: PointId = PointId(10);
+    /// The backup level measurement — the first-order lag's output.
+    pub const LEVEL_BACKUP: PointId = PointId(11);
     /// The declared station inflow — a `flow_sum` input.
     pub const INFLOW: PointId = PointId(12);
     /// The failover-selected level the chain and alarms control on.
@@ -195,16 +199,22 @@ pub mod points {
     pub fn out_of_service(index: usize) -> PointId {
         PointId(302 + 32 * index as u64)
     }
+    /// The failover's `backup_unhealthy` carrier — asserts while the
+    /// unused backup's own sample is untrusted.
+    pub const BACKUP_UNHEALTHY: PointId = PointId(222);
     /// Pump `index`'s managed motor-fault alarm's writable ack — the
     /// alarm region's `1000 + 10·a` blocks start per-pump alarms at
-    /// `a = 6 + 3·index` (fault/thermal/moisture in order).
+    /// `a = 7 + 3·index` (fault/thermal/moisture in order), after the
+    /// seven station alarms.
     pub fn fault_ack(index: usize) -> PointId {
-        PointId(1000 + 10 * (6 + 3 * index as u64))
+        PointId(1000 + 10 * (7 + 3 * index as u64))
     }
     /// Pump `index`'s managed thermal alarm's writable ack.
     pub fn thermal_ack(index: usize) -> PointId {
-        PointId(1000 + 10 * (7 + 3 * index as u64))
+        PointId(1000 + 10 * (8 + 3 * index as u64))
     }
+    /// The backup-unhealthy alarm's writable ack.
+    pub const BUH_ACK: PointId = PointId(1060);
     /// The high-level alarm's writable ack.
     pub const LAH_ACK: PointId = PointId(1000);
     /// The low-level alarm's writable ack.
@@ -298,6 +308,23 @@ pub fn field_ops() -> BTreeMap<u64, Vec<FieldOp>> {
             47,
             vec![Clear {
                 point: points::LEVEL_PRIMARY,
+            }],
+        ),
+        // The issue-#502 leg: the backup transmitter goes Bad on its
+        // own while the primary keeps serving — the failover stays put
+        // and the `backup-unhealthy` carrier and alarm annunciate the
+        // standby already lost.
+        (
+            48,
+            vec![Inject {
+                point: points::LEVEL_BACKUP,
+                quality: bad,
+            }],
+        ),
+        (
+            56,
+            vec![Clear {
+                point: points::LEVEL_BACKUP,
             }],
         ),
         // Both run contacts go Bad while their pumps run: the motors
@@ -403,6 +430,10 @@ pub fn actions() -> Vec<OperatorAction> {
         // raised.
         write(44, points::BA_ACK, true),
         write(46, points::BA_ACK, false),
+        // Acknowledge and release the backup-unhealthy alarm the
+        // standby leg raised — the failover stayed on the primary.
+        write(58, points::BUH_ACK, true),
+        write(60, points::BUH_ACK, false),
         // Acknowledge the motor-fault, all-faulted, and none-available
         // latches the run-contact failures raised.
         write(71, points::fault_ack(0), true),

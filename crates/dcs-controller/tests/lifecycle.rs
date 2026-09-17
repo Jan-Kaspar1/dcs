@@ -11,9 +11,10 @@
 //! active's `GET /checkpoint` and can rewrite the wire shape — the two
 //! knobs the loss-detection and negotiation legs need.
 //!
-//! The legs, in script order — the plant's writer claim is irrevocable
-//! once taken, so legs needing an unclaimed or unfenced field run
-//! before the takeover legs:
+//! The legs, in script order — the launched active holds the plant's
+//! writer claim from boot and the script's field attachment shares it
+//! under the pinned `--owner-token`, so legs needing a field-side write
+//! still run before the takeover legs re-token the claim:
 //!
 //! 1. **Checkpoint negotiation (#66, #133)** — the standby converges on
 //!    a version-0 wire shape (`format_version` absent); an unsupported
@@ -32,8 +33,11 @@
 //! 4. **Automatic failover (#65)** — the relay drops the heartbeat path;
 //!    the converged standby self-promotes at the budget-th miss's scan
 //!    boundary, takes the plant's writer claim, and the superseded
-//!    peer's writes answer `fenced` — the shared-field single-writer
-//!    rule honored.
+//!    peer's next field write answers `fenced` — the plant's verdict,
+//!    which demotes the still-running peer in place: gate re-closed,
+//!    role walking `demoting` to `standby`, the claim loss journaled —
+//!    the shared-field single-writer rule honored without killing the
+//!    superseded process.
 //! 5. **Rolling model revision (#87)** — a `--revised` standby on model
 //!    v2 crosses the fingerprint boundary into the named `reinitialized`
 //!    state carrying its carryover report; the documented
@@ -44,25 +48,28 @@
 //! the run returns proves repeated scripted runs identical.
 
 use dcs_core::{
-    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, JournalEvent,
-    ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    CarriedPoint, Command, CommandOutcome, Divergence, DroppedElement, IoDriver, IoError,
+    JournalEvent, ModelFingerprint, PointId, Role, StandbySync, SwitchError, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, image_value, kill, pump, sim_tcp_document, spawn_controller, spawn_controller_logged,
+    spawn_plant, write_model,
+};
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -93,6 +100,12 @@ const N: u64 = 8;
 const M: u64 = 6;
 /// Revised-model field ticks closing the run.
 const M2: u64 = 10;
+/// The field-ownership token the launched active pins via
+/// `--owner-token` — the claim the test's field attachment shares, so
+/// the divergence leg's skewed write keeps passing the plant's fencing
+/// while the active owns the field (and across the state-file restart,
+/// whose respawned process claims the same token).
+const OWNER_TOKEN: u64 = 499_003;
 const LEVEL: PointId = PointId(10);
 const SETPOINT: PointId = PointId(11);
 const VALVE: PointId = PointId(20);
@@ -109,133 +122,13 @@ const UNSUPPORTED_FORMAT_VERSION: u32 = 99;
 /// compare cannot mistake it for the staged output.
 const SKEWED_FIELD: f64 = -42.5;
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads stderr until its `listening on <addr>` line,
-/// and returns the running process plus the lines that preceded it —
-/// the state-file resume report lives there.
-fn spawn_logged(binary: &Path, args: &[String]) -> (Spawned, Vec<String>) {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut preamble = Vec::new();
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
-        }
-        match line.trim().strip_prefix("listening on ") {
-            Some(addr) => break addr.parse().unwrap(),
-            None => preamble.push(line.trim().to_string()),
-        }
-    };
-    (
-        Spawned {
-            child,
-            addr,
-            _stderr: stderr,
-        },
-        preamble,
-    )
-}
-
-/// Spawns `binary` and returns the running process — the plain shape
-/// for processes that report nothing before their address.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    spawn_logged(binary, args).0
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// The state-file restart's spawn: the resume report is a stderr line
-/// before `listening on`, so the preamble comes back with the process.
-fn spawn_controller_logged(model: &Path, extra: &[String]) -> (Spawned, Vec<String>) {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn_logged(Path::new(CONTROLLER), &args)
-}
-
-/// Writes `document` — a model JSON — under `dir` and loads it once so
-/// the caller can compare fingerprints.
-fn write_model(dir: &Path, name: &str, document: &serde_json::Value) -> (PathBuf, PlantModel) {
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(document).unwrap()).unwrap();
-    let model = PlantModel::load(&serde_json::to_string(document).unwrap()).unwrap();
-    (path, model)
-}
-
 /// The base controller-side document: the tank loop with its devices
 /// re-pointed at `sim-tcp` carrying the plant's address, the setpoint
 /// point 11 moved image-side — an internal writable `In` point, the
 /// operator value the carryover rule is about — and a second held
 /// operator value at point 31.
 fn base_model(plant: SocketAddr) -> serde_json::Value {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
+    let mut document = sim_tcp_document(MODEL_SOURCE, plant, SimTcp::PerDevice);
     let points = document["io_points"].as_array_mut().unwrap();
     let setpoint = points
         .iter_mut()
@@ -290,17 +183,6 @@ fn v2_model(dir: &Path, name: &str, plant: SocketAddr) -> (PathBuf, PlantModel) 
         }
     }
     write_model(dir, name, &document)
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
 }
 
 /// Asserts the field carries exactly `owner`'s last write and records
@@ -426,12 +308,22 @@ fn answer_fixture(shared: &FixtureShared, stream: &mut TcpStream) {
         }
     }
     let request = String::from_utf8_lossy(&head);
-    let (status, body) = if !request.starts_with("GET /checkpoint ") {
+    let target = request.split_whitespace().nth(1).unwrap_or("");
+    // A tracking pull announces the pulling monitor on `?peer=` —
+    // forward it so the proxied upstream learns its follow-peer source
+    // exactly like an unproxied pull's.
+    let announcing = announced_peer(target);
+    let (status, body) = if !(target == "/checkpoint" || target.starts_with("/checkpoint?")) {
         (404, "not found".to_string())
     } else {
         let upstream = *shared.upstream.lock().unwrap();
         let rewrite = *shared.rewrite.lock().unwrap();
-        match MonitorClient::new(upstream).checkpoint() {
+        let client = MonitorClient::new(upstream);
+        let pulled = match announcing {
+            Some(peer) => client.checkpoint_announcing(peer),
+            None => client.checkpoint(),
+        };
+        match pulled {
             Ok(checkpoint) => (200, rewritten(&checkpoint, rewrite)),
             Err(error) => (500, error.to_string()),
         }
@@ -441,6 +333,15 @@ fn answer_fixture(shared: &FixtureShared, stream: &mut TcpStream) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// The `peer=` announcement a tracking pull carries on its request
+/// target — `None` for a plain `GET /checkpoint`.
+fn announced_peer(target: &str) -> Option<SocketAddr> {
+    target.split_once('?')?.1.split('&').find_map(|pair| {
+        pair.strip_prefix("peer=")
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 /// The document the fixture serves under `rewrite`: the live active
@@ -470,33 +371,6 @@ fn served_document(client: &MonitorClient) -> serde_json::Value {
     let (status, body) = client.request("GET", "/checkpoint", None).unwrap();
     assert_eq!(status, 200, "{body}");
     serde_json::from_str(&body).unwrap()
-}
-
-/// Pumps one accepted connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the
-/// other side so the request/response pair completes and the sockets
-/// close cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
 }
 
 /// A controllable network path for the checkpoint-pull heartbeat: while
@@ -599,7 +473,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     let dir = std::env::temp_dir().join(format!("dcs-lifecycle-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let plant = spawn_plant();
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let (v1_path, v1) = v1_model(&dir, "v1.json", plant.addr);
     let (v2_path, v2) = v2_model(&dir, "v2.json", plant.addr);
     assert_ne!(
@@ -617,7 +491,10 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         &[
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
+            "--owner-token".to_string(),
+            OWNER_TOKEN.to_string(),
         ],
+        DT,
     );
     let fixture = CheckpointFixture::bind(active_process.addr);
     let relay = Relay::forwarding(fixture.addr);
@@ -629,11 +506,17 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let fixture_client = MonitorClient::new(fixture.addr);
     let field = RemoteDriver::connect(plant.addr).unwrap();
+    // The launched active holds the plant's single-writer claim from
+    // startup: this attachment joins that claim — the pinned token's
+    // other half — so the divergence leg's field-side write still lands
+    // where any third attachment's would fence.
+    field.claim_writer(OWNER_TOKEN).unwrap();
 
     // The run's operator inputs land by command — the held setpoint the
     // revision carries and the v1-only knob the revision drops.
@@ -858,8 +741,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     // held operator value — and the pair cadence continues without a
     // missed transfer.
     let interrupted = active.snapshot().unwrap().tick;
-    active_process.child.kill().unwrap();
-    active_process.child.wait().unwrap();
+    kill(&mut active_process);
     let persisted: Checkpoint =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(persisted.tick, interrupted);
@@ -876,7 +758,10 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         &[
             "--state-file".to_string(),
             state_path.to_str().unwrap().to_string(),
+            "--owner-token".to_string(),
+            OWNER_TOKEN.to_string(),
         ],
+        DT,
     );
     let resumed = MonitorClient::new(resumed_process.addr);
     assert!(
@@ -919,9 +804,9 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     // -- Leg 4: automatic failover with field-side fencing --------------
     // The heartbeat path partitions; the converged standby counts the
     // misses without promoting — the field keeps carrying the old
-    // owner's writes, still unclaimed — and the budget-th miss's scan
-    // boundary self-promotes it: the plant's writer claim taken and the
-    // gate lifted inside the same requested scan.
+    // owner's writes under its held claim — and the budget-th miss's
+    // scan boundary self-promotes it: the plant's writer claim taken
+    // and the gate lifted inside the same requested scan.
     let at_partition = standby.snapshot().unwrap().tick;
     relay.partition(true);
     for miss in 1..BUDGET {
@@ -950,28 +835,66 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     assert_eq!(carried, image_value(&promoted, VALVE));
     trace.push((carried, field.read(LEVEL).unwrap().value));
 
-    // The superseded peer — still running, still scanning — is fenced:
-    // the field refused its write inside the requested scan, and the
-    // field keeps only the new owner's output.
-    let fenced = resumed.advance(1).unwrap_err();
+    // The superseded peer — still running — is fenced at the field:
+    // the plant refused its write inside the requested scan, counted
+    // as the `fenced` fault while the scan completes degraded, and the
+    // fenced boundary walks it down the demote path rather than ending
+    // the process — gate re-closed, the reported role `demoting`, the
+    // claim loss journaled. The field keeps only the new owner's
+    // output throughout.
+    let fenced_scan = resumed.advance(1).unwrap();
+    assert_eq!(fenced_scan.tick, Tick(promotion_tick));
     assert!(
-        fenced.to_string().contains("fenced"),
-        "the returning peer's write must fail fenced: {fenced}"
+        matches!(
+            fenced_scan
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the returning peer's write must be refused fenced: {:?}",
+        fenced_scan.io_health
     );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
+    let superseded = resumed.role().unwrap();
+    assert_eq!(
+        superseded.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path, not die: {superseded:?}"
+    );
+    assert!(
+        resumed.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost { point } if point == VALVE
+        )),
+        "the fenced owner's journal must record the claim loss"
+    );
 
-    // The link heals — the old peer's monitor answers again and still
-    // reports `active`: fencing is the field's verdict, not a role the
-    // fenced peer adopted. Its writes stay refused.
+    // The link heals — the demoted peer's monitor answers again — and
+    // its first quiesced scan settles `standby`, its writes staying
+    // behind the re-closed gate: the survivable degraded state the
+    // single-writer rule resolves a superseded owner to. The promoted
+    // peer announced itself through its pulls, so the demoted run's
+    // first tracking cycle reconverges on its successor.
     relay.partition(false);
-    let superseded_role = resumed.role().unwrap().role;
-    assert_eq!(superseded_role, Role::Active);
-    let fenced_again = resumed.advance(1).unwrap_err();
+    let quiesced_scan = resumed.advance(1).unwrap();
+    assert_eq!(quiesced_scan.tick, Tick(promotion_tick + 1));
+    let settled = resumed.role().unwrap();
+    assert_eq!(settled.role, Role::Standby);
     assert!(
-        fenced_again.to_string().contains("fenced"),
-        "a healed but superseded peer stays fenced: {fenced_again}"
+        matches!(settled.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {settled:?}"
     );
     assert_eq!(field.read(VALVE).unwrap().value, carried);
+    assert_eq!(
+        role_changes(&resumed),
+        vec![
+            (Role::Active, Role::Demoting),
+            (Role::Demoting, Role::Standby)
+        ],
+        "the demotion the fenced boundary drove must journal in order"
+    );
 
     // The promoted peer owns the run: each tick the field carries
     // exactly its image's staged output.
@@ -980,8 +903,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         field_carry(&field, &owner, &mut trace);
     }
     // The fenced peer is retired — the run it superseded is over.
-    resumed_process.child.kill().unwrap();
-    resumed_process.child.wait().unwrap();
+    kill(&mut resumed_process);
 
     // -- Leg 5: rolling model revision ----------------------------------
     // A `--revised` standby on model v2 joins the promoted peer: its
@@ -996,6 +918,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
             standby_process.addr.to_string(),
             "--revised".to_string(),
         ],
+        DT,
     );
     let revised = MonitorClient::new(revised_process.addr);
     let crossing_tick = standby.snapshot().unwrap().tick;
@@ -1192,8 +1115,17 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
         "failover": {
             "partitioned_at": at_partition,
             "promoted_at": promotion_tick,
-            "fenced": [fenced.to_string(), fenced_again.to_string()],
-            "superseded_role": superseded_role,
+            "superseded": {
+                "fenced_fault": fenced_scan
+                    .io_health
+                    .last_error
+                    .as_ref()
+                    .map(|fault| fault.error.to_string()),
+                "fenced_scan": fenced_scan.tick,
+                "settled_scan": quiesced_scan.tick,
+                "roles": [superseded.role, settled.role],
+                "sync": settled.sync,
+            },
         },
         "revision": {
             "crossing_tick": crossing_tick,

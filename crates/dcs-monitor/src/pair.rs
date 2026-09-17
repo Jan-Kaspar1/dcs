@@ -17,9 +17,24 @@
 //! Commands go only to the peer reporting settled `active` — submitting
 //! to a standby or mid-transition peer would be refused with
 //! [`CommandError::NotActive`], and the pair view refuses earlier by
-//! never sending. A command landing mid-transition still draws that
-//! rejection: the view then re-polls both roles and retries once against
-//! the peer now reporting `active`, exactly as the decision prescribes.
+//! never sending. Two peers reporting `active` at once is the dual-active
+//! split-brain the one-logical-controller contract makes impossible: the
+//! view names it as a redundancy fault through [`PairClient::health`]
+//! rather than presenting the pair as healthy, holds its data source
+//! rather than re-homing between claimants, and finds no unambiguous
+//! command target — [`PairError::AmbiguousActive`], nothing sent — while
+//! the fault stands. A command landing mid-transition still draws the
+//! `NotActive` rejection: the view then re-polls both roles and retries
+//! once against the peer now reporting `active`, exactly as the decision
+//! prescribes.
+//!
+//! A standby that cannot demonstrate convergence is likewise named:
+//! `unsynchronized` is the legitimate transient a fresh or newly
+//! demoted peer occupies while its first tracking pulls land, so
+//! [`PairClient::health`] gives it [`CONVERGENCE_GRACE`] — but past the
+//! grace the pair has no converged failover peer (the state is
+//! permanent for a demoted peer with no checkpoint source), and the
+//! verdict says so rather than reporting a healthy pair.
 //!
 //! Tick continuity across a switchover is a property of the contract,
 //! not of this type: checkpoints align the standby's tick with the
@@ -30,12 +45,13 @@
 use crate::MonitorClient;
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    Role, RoleReport, TelemetrySnapshot,
+    Role, RoleReport, StandbySync, TelemetrySnapshot,
 };
 use dcs_model::SignalIndex;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 /// What the last role poll observed of one peer.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +76,13 @@ pub struct PeerView {
     addr: SocketAddr,
     client: MonitorClient,
     status: PeerStatus,
+    /// The instant the peer's current run of `unsynchronized` reports
+    /// began — the start of the convergence grace [`health`] reads.
+    /// `None` while the peer reports any converged sync state or is not
+    /// reporting at all.
+    ///
+    /// [`health`]: PairClient::health
+    unsynced_since: Option<Instant>,
 }
 
 impl PeerView {
@@ -92,6 +115,11 @@ pub enum PairError {
     /// mid-transition or its active is lost. Nothing was sent — a
     /// command must never land on a peer not reporting `active`.
     NoActivePeer,
+    /// More than one peer reports the settled `active` role — the
+    /// dual-active split-brain the one-logical-controller contract makes
+    /// impossible. Nothing was sent: no claimant is an unambiguous
+    /// target, and picking one would risk commanding a fenced peer.
+    AmbiguousActive,
     /// No peer can currently source the logical view — every poll has
     /// failed.
     NoSourcePeer,
@@ -104,6 +132,10 @@ impl fmt::Display for PairError {
         match self {
             Self::NoActivePeer => f.write_str(
                 "no peer reports role active; the pair is mid-transition or its active is lost",
+            ),
+            Self::AmbiguousActive => f.write_str(
+                "multiple peers report role active; the dual-active fault leaves \
+                 no unique command target",
             ),
             Self::NoSourcePeer => {
                 f.write_str("no peer is reachable to source the logical controller view")
@@ -128,6 +160,35 @@ impl From<io::Error> for PairError {
     }
 }
 
+/// The wall-clock grace a peer reporting `unsynchronized` gets before
+/// [`PairClient::health`] names it a redundancy fault — the transient a
+/// fresh or newly demoted standby legitimately occupies while its
+/// first tracking pulls land at the documented pull-per-scan cadence
+/// (a handful of scan periods at the controller's default 100 ms pace,
+/// plus a pull bound). Past it, a peer that still cannot demonstrate
+/// convergence — above all a demoted peer with no checkpoint source,
+/// which stays `unsynchronized` forever and can never be promoted back
+/// — leaves the pair with zero failover coverage, and the verdict
+/// says so rather than rendering "redundant pair healthy".
+pub const CONVERGENCE_GRACE: Duration = Duration::from_secs(5);
+
+/// The pair's redundancy health as the view summarizes it — the unique
+/// settled-`active` peer plus the named faults of the last role poll;
+/// the page's `pairHealth` verdict for in-process consumers. See
+/// [`PairClient::health`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairHealth {
+    /// The peer reporting settled `active` when exactly one does —
+    /// `None` while no peer reports it or the dual-active fault stands.
+    pub active: Option<SocketAddr>,
+    /// The named redundancy faults the last poll observed: an
+    /// unreachable peer, a degraded or diverged standby convergence, a
+    /// peer still `unsynchronized` past [`CONVERGENCE_GRACE`], no peer
+    /// reporting `active`, or more than one — the dual-active
+    /// split-brain. Empty is the healthy pair.
+    pub faults: Vec<String>,
+}
+
 /// A client-side view presenting an active/standby controller pair as
 /// one logical controller, per the monitoring-under-redundancy decision.
 ///
@@ -143,6 +204,10 @@ pub struct PairClient {
     peers: Vec<PeerView>,
     /// The peer index currently sourcing the logical view.
     source: Option<usize>,
+    /// The grace [`health`](Self::health) allows a peer's
+    /// `unsynchronized` report before naming it — see
+    /// [`CONVERGENCE_GRACE`].
+    convergence_grace: Duration,
 }
 
 impl PairClient {
@@ -156,10 +221,23 @@ impl PairClient {
                     addr,
                     client: MonitorClient::new(addr),
                     status: PeerStatus::Unknown,
+                    unsynced_since: None,
                 })
                 .collect(),
             source: None,
+            convergence_grace: CONVERGENCE_GRACE,
         }
+    }
+
+    /// Overrides [`CONVERGENCE_GRACE`] — the wall-clock grace a peer
+    /// reporting `unsynchronized` gets before [`health`](Self::health)
+    /// names it a redundancy fault. A deployment whose tracking cadence
+    /// is slower than the default 100 ms scan period widens it;
+    /// `Duration::ZERO` names the first observed `unsynchronized`
+    /// report.
+    pub fn with_convergence_grace(mut self, grace: Duration) -> Self {
+        self.convergence_grace = grace;
+        self
     }
 
     /// The configured peers with their last-polled statuses — the pair
@@ -185,7 +263,12 @@ impl PairClient {
     /// Selection prefers a peer reporting settled `active`, then a
     /// `promoting` peer (it already owns the field and is becoming
     /// active), then the previously selected peer while it stays
-    /// reachable, then any reachable peer.
+    /// reachable, then any reachable peer. Under the dual-active fault —
+    /// more than one peer reporting `active` — the current source is
+    /// held while it is one of the claimants: [`health`](Self::health)
+    /// names the fault, and re-homing the view between two reported
+    /// actives would only churn the displays without resolving which is
+    /// real.
     pub fn poll_roles(&mut self) {
         for peer in &mut self.peers {
             peer.status = match peer.client.role() {
@@ -194,9 +277,33 @@ impl PairClient {
                     detail: error.to_string(),
                 },
             };
+            // The convergence grace [`health`](Self::health) reads: an
+            // `unsynchronized` report starts or continues the peer's
+            // run; any converged sync state — and the unreachable
+            // fault, which `health` already names on its own — ends
+            // it.
+            peer.unsynced_since = match &peer.status {
+                PeerStatus::Reporting(report)
+                    if matches!(report.sync, Some(StandbySync::Unsynchronized)) =>
+                {
+                    Some(peer.unsynced_since.unwrap_or_else(Instant::now))
+                }
+                _ => None,
+            };
         }
+        let actives: Vec<usize> = self
+            .peers
+            .iter()
+            .enumerate()
+            .filter(|(_, peer)| {
+                matches!(&peer.status, PeerStatus::Reporting(report) if report.role == Role::Active)
+            })
+            .map(|(index, _)| index)
+            .collect();
         self.source = self
-            .settled_active()
+            .source
+            .filter(|index| actives.contains(index))
+            .or_else(|| actives.first().copied())
             .or_else(|| self.reporting(Role::Promoting))
             .or_else(|| {
                 self.source
@@ -207,6 +314,83 @@ impl PairClient {
                     .iter()
                     .position(|peer| matches!(peer.status, PeerStatus::Reporting(_)))
             });
+    }
+
+    /// The pair's redundancy health for the summary the view renders —
+    /// the same verdict the page's `pairHealth` computes over a `?peer`
+    /// pair: the uniquely reporting settled-`active` peer's address,
+    /// and the named redundancy faults the last poll observed — an
+    /// unreachable peer, a degraded or diverged standby convergence, a
+    /// peer still reporting `unsynchronized` past
+    /// [`CONVERGENCE_GRACE`] (the lost failover coverage a stranded
+    /// standby leaves, where `unsynchronized` may be permanent), no
+    /// peer reporting `active`, or more than one reporting it (the
+    /// dual-active split-brain the one-logical-controller contract makes
+    /// impossible). Pair health, never plant faults.
+    pub fn health(&self) -> PairHealth {
+        let mut faults = Vec::new();
+        let mut actives = Vec::new();
+        for peer in &self.peers {
+            match &peer.status {
+                PeerStatus::Unknown => {}
+                PeerStatus::Unreachable { .. } => {
+                    faults.push(format!("{} unreachable", peer.addr));
+                }
+                PeerStatus::Reporting(report) => {
+                    if report.role == Role::Active {
+                        actives.push(peer.addr);
+                    }
+                    match &report.sync {
+                        Some(StandbySync::Unsynchronized) => {
+                            if peer
+                                .unsynced_since
+                                .is_some_and(|since| since.elapsed() >= self.convergence_grace)
+                            {
+                                faults.push(format!(
+                                    "{} has not converged: unsynchronized past the \
+                                     convergence grace",
+                                    peer.addr
+                                ));
+                            }
+                        }
+                        Some(StandbySync::Degraded { detail }) => {
+                            faults.push(format!("{} sync degraded: {detail}", peer.addr));
+                        }
+                        Some(StandbySync::Diverged { mismatches }) => {
+                            faults.push(format!(
+                                "{} standby diverged: staged outputs mismatch the field at {}",
+                                peer.addr,
+                                mismatches
+                                    .iter()
+                                    .map(|mismatch| mismatch.point.0.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if actives.is_empty() {
+            faults.push("no peer reports role active".to_string());
+        } else if actives.len() > 1 {
+            faults.push(format!(
+                "dual-active: {} report role active",
+                actives
+                    .iter()
+                    .map(SocketAddr::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        PairHealth {
+            active: match actives.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            },
+            faults,
+        }
     }
 
     /// `GET /signals` from the current source — both peers serve the same
@@ -243,19 +427,27 @@ impl PairClient {
     /// A [`CommandError::NotActive`] rejection means the roles moved
     /// mid-flight: the view re-polls both peers and retries once against
     /// the peer now reporting `active`. A second refusal, or a poll
-    /// finding no settled-active peer, answers honestly: the rejection
-    /// receipt, or [`PairError::NoActivePeer`] when nothing could be
-    /// sent.
+    /// finding no unique settled-active peer, answers honestly: the
+    /// rejection receipt, [`PairError::NoActivePeer`] when none reports
+    /// `active`, or [`PairError::AmbiguousActive`] under the dual-active
+    /// fault — nothing is sent while no unique target exists.
     pub fn command(&mut self, command: &Command) -> Result<CommandReceipt, PairError> {
-        if self.settled_active().is_none() {
-            // Nothing polled yet, or the last poll saw no active: refresh
-            // before concluding there is no legitimate target.
+        if self.unique_active().is_none() {
+            // Nothing polled yet, or the last poll saw no unique active:
+            // refresh before concluding there is no legitimate target —
+            // a mid-settle dual report can resolve either way.
             self.poll_roles();
         }
         let mut retried = false;
         loop {
-            let Some(target) = self.settled_active() else {
-                return Err(PairError::NoActivePeer);
+            let Some(target) = self.unique_active() else {
+                return Err(if self.reporting(Role::Active).is_some() {
+                    // An active reports but is not unique — the
+                    // dual-active fault leaves no unambiguous target.
+                    PairError::AmbiguousActive
+                } else {
+                    PairError::NoActivePeer
+                });
             };
             let receipt = self.peers[target].client.command(command)?;
             let landed_mid_transition = matches!(
@@ -272,10 +464,17 @@ impl PairClient {
         }
     }
 
-    /// The peer index reporting settled `active`, if any — the only
-    /// legitimate command target.
-    fn settled_active(&self) -> Option<usize> {
-        self.reporting(Role::Active)
+    /// The peer index reporting settled `active` when exactly one does —
+    /// the only legitimate command target. No reported active, or the
+    /// dual-active fault's several, leaves no unambiguous target.
+    fn unique_active(&self) -> Option<usize> {
+        let mut actives = self.peers.iter().enumerate().filter(|(_, peer)| {
+            matches!(&peer.status, PeerStatus::Reporting(report) if report.role == Role::Active)
+        });
+        match (actives.next(), actives.next()) {
+            (Some((index, _)), None) => Some(index),
+            _ => None,
+        }
     }
 
     /// The peer index whose last report carries `role`, if any.

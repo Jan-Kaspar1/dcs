@@ -32,7 +32,7 @@
 //!   writable internal `ack` point — `managed-latching-alarm`s on the
 //!   selected level at the declared `high` and `cutoff` thresholds,
 //!   `managed-bool-latching-alarm`s on each motor's fault flag, the
-//!   failover's `backup_active`, the group's
+//!   failover's `backup_active` and `backup_unhealthy`, the group's
 //!   `none_available`/`all_faulted`, the per-pump thermal and moisture
 //!   contacts, and the station power-fail field point. Every managed
 //!   status point is `journaled` (decision 74), and the lifecycle
@@ -69,8 +69,8 @@
 //! managed layout the reference compositions share: `ack`/`shelve`/
 //! `oos` at offsets 0–2 where the instance declares the input,
 //! `alarm`/`unacknowledged`/`shelved`/`suppressed`/`out_of_service` at
-//! 3–7. The station alarms take `a` = 0–5 in declaration order and pump
-//! `i`'s fault/thermal/moisture alarms `a` = 6 + 3·i + 0/1/2; every
+//! 3–7. The station alarms take `a` = 0–6 in declaration order and pump
+//! `i`'s fault/thermal/moisture alarms `a` = 7 + 3·i + 0/1/2; every
 //! point's signal sits at `10000 + point`. The scheme is deterministic
 //! in declaration order, so identical builder invocations emit
 //! identical documents.
@@ -148,6 +148,8 @@ mod carriers {
     pub const BACKUP_ACTIVE_IN: u64 = 219;
     pub const NONE_AVAILABLE_IN: u64 = 220;
     pub const ALL_FAULTED_IN: u64 = 221;
+    pub const BACKUP_UNHEALTHY: u64 = 222;
+    pub const BACKUP_UNHEALTHY_IN: u64 = 223;
 }
 
 /// The first per-pump internal block: pump `i` owns
@@ -160,9 +162,9 @@ const PUMP_STRIDE: u64 = 32;
 /// 3–7.
 const ALARM_BASE: u64 = 1000;
 /// The first per-pump alarm index: pump `i`'s fault/thermal/moisture
-/// alarms take `PUMP_ALARM_BASE + 3·i` + 0/1/2, after the six station
+/// alarms take `PUMP_ALARM_BASE + 3·i` + 0/1/2, after the seven station
 /// alarms.
-const PUMP_ALARM_BASE: u64 = 6;
+const PUMP_ALARM_BASE: u64 = 7;
 /// Every point's signal id is `SIGNAL_BASE + point`.
 const SIGNAL_BASE: u64 = 10_000;
 
@@ -176,6 +178,16 @@ const GATE_OR: i64 = 1;
 /// far outside any measurable span, so only the declared threshold side
 /// can trip.
 const PARKED_LIMIT: f64 = 1.0e9;
+
+/// `net-flow`'s declared freshness budget — the one `stale_after_ticks`
+/// declaration the reference station carries, on the point the QA
+/// lane's stale-freshness scenario probes. Sizing: a healthy field read
+/// lags the scan by a tick or two at most, so `5` never trips in
+/// service, while a stopped writer freezes the driver stamps far past
+/// it inside the failover budget that bounds the outage. The point is
+/// deliberately one no component port consumes — the staleness evidence
+/// is presentational, not a perturbation of the control path.
+const NET_FLOW_STALE_AFTER: u64 = 5;
 
 /// The station's tunable contract — setpoints, staging policy, and
 /// alarm hysteresis. [`reference`](Self::reference) is the checked-in
@@ -372,6 +384,9 @@ pub struct PumpStationLayout {
     pub high_level: PointId,
     /// The failover's `backup_active` carrier.
     pub backup_active: PointId,
+    /// The failover's `backup_unhealthy` carrier — `journaled`; asserts
+    /// while the unused backup's own sample is untrusted.
+    pub backup_unhealthy: PointId,
     /// The group's `none_available` carrier.
     pub none_available: PointId,
     /// The group's `all_faulted` carrier.
@@ -394,6 +409,9 @@ pub struct PumpStationLayout {
     pub low_level_alarm: ManagedAlarmLayout,
     /// The managed backup-measurement-serving alarm.
     pub backup_active_alarm: ManagedAlarmLayout,
+    /// The managed backup-measurement-unhealthy alarm — the
+    /// standby-loss annunciation QA's issue-#502 finding called for.
+    pub backup_unhealthy_alarm: ManagedAlarmLayout,
     /// The managed no-pump-available alarm.
     pub none_available_alarm: ManagedAlarmLayout,
     /// The managed every-pump-faulted alarm.
@@ -459,7 +477,12 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     let level_primary = plant.field_input::<f64>(points::LEVEL_PRIMARY, level_primary_ch, false);
     let level_backup = plant.field_input::<f64>(points::LEVEL_BACKUP, level_backup_ch, false);
     plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
-    plant.field_input::<f64>(points::NET_FLOW, net_flow_ch, false);
+    plant.field_input_stale_after::<f64>(
+        points::NET_FLOW,
+        net_flow_ch,
+        false,
+        NET_FLOW_STALE_AFTER,
+    );
     let power_fail = plant.field_input::<bool>(points::POWER_FAIL, power_fail_ch, false);
     // The power-fail contact is a protection-layer reported state —
     // decision 74's durable record marks it `journaled` so its
@@ -535,15 +558,21 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         plant.internal_input::<bool>(PointId(carriers::NONE_AVAILABLE_IN), false, false);
     let all_faulted_in =
         plant.internal_input::<bool>(PointId(carriers::ALL_FAULTED_IN), false, false);
+    let backup_unhealthy =
+        plant.internal_output::<bool>(PointId(carriers::BACKUP_UNHEALTHY), false);
+    let backup_unhealthy_in =
+        plant.internal_input::<bool>(PointId(carriers::BACKUP_UNHEALTHY_IN), false, false);
 
     // The protection-relevant status carriers decision 74's durable
     // record names — the chain's dry-run and high flags, the failover's
-    // backup-serving state, and the group's availability roll-ups —
-    // marked `journaled` so every transition lands in the journal.
+    // backup-serving and standby-health states, and the group's
+    // availability roll-ups — marked `journaled` so every transition
+    // lands in the journal.
     for point in [
         below_cutoff,
         high_level,
         backup_active,
+        backup_unhealthy,
         none_available,
         all_faulted,
     ] {
@@ -646,6 +675,16 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             "all-faulted-in",
             "All-faulted flag delivered to its alarm",
         ),
+        (
+            carriers::BACKUP_UNHEALTHY,
+            "backup-unhealthy",
+            "The backup level measurement is untrusted while the primary serves",
+        ),
+        (
+            carriers::BACKUP_UNHEALTHY_IN,
+            "backup-unhealthy-in",
+            "Backup-unhealthy flag delivered to its alarm",
+        ),
     ] {
         let unit = match point {
             carriers::LEVEL_SEL
@@ -665,8 +704,11 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         );
     }
 
-    // The station-level components.
-    let failover = plant.add(FailoverSelectSpec::new(parameters([])));
+    // The station-level components. The failover declares its optional
+    // `backup_unhealthy` output: a failed standby annunciates while the
+    // primary still serves, closing the silent-redundancy-loss gap QA
+    // found (issue #502).
+    let failover = plant.add(FailoverSelectSpec::new(parameters([])).with_backup_unhealthy());
     let chain = plant.add(ThresholdChainSpec::new(parameters([
         ("cutoff", Value::Float(config.cutoff)),
         ("stop", Value::Float(config.stop)),
@@ -763,6 +805,24 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             "backup-active-alarm",
         ),
     ));
+    // The standby-health annunciation — the issue-#502 alarm: the
+    // failover's `backup_unhealthy` says the unused leg is already lost
+    // while the primary still carries the measurement, so the alarm
+    // stands before the failover would need the dead input.
+    let backup_unhealthy_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
+        parameters([
+            ("max_shelve_ticks", Value::Int(0)),
+            ("priority", Value::Int(2)),
+            ("class", Value::Int(1)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        ManagedInputs::default(),
+        rationalization(
+            "The backup level instrument has failed while the primary still serves — failover redundancy is already lost",
+            "Repair the backup level instrument before the primary fails",
+            "backup-unhealthy-alarm",
+        ),
+    ));
     let none_available_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         parameters([
             ("max_shelve_ticks", Value::Int(0)),
@@ -816,6 +876,13 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     plant.connect(level_lah, level_sel);
     plant.connect(level_lal, level_sel);
     plant.connect(&failover.backup_active, backup_active);
+    plant.connect(
+        failover
+            .backup_unhealthy
+            .as_ref()
+            .expect("the station spec declares backup_unhealthy"),
+        backup_unhealthy,
+    );
     plant.connect(level_chain, chain.level);
     plant.connect(&chain.demand, demand);
     plant.connect(demand_in, demand);
@@ -833,6 +900,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     plant.connect(backup_active_in, backup_active);
     plant.connect(none_available_in, none_available);
     plant.connect(all_faulted_in, all_faulted);
+    plant.connect(backup_unhealthy_in, backup_unhealthy);
 
     // The station-level alarms — each latching on its condition, its
     // own writable ack point, and the declared lifecycle surface the
@@ -917,6 +985,19 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "station",
     );
     plant.connect(power_fail, &power_fail_alarm.input);
+    let backup_unhealthy_alarm_layout = managed_station_alarm(
+        &mut plant,
+        6,
+        backup_unhealthy_alarm.id,
+        &backup_unhealthy_alarm.ack,
+        &backup_unhealthy_alarm.managed,
+        &backup_unhealthy_alarm.alarm,
+        &backup_unhealthy_alarm.unacknowledged,
+        false,
+        "backup-unhealthy",
+        "station",
+    );
+    plant.connect(backup_unhealthy_in, &backup_unhealthy_alarm.input);
 
     // Per-pump wiring.
     let mut pumps = Vec::with_capacity(config.pumps);
@@ -955,6 +1036,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             below_cutoff: PointId(carriers::BELOW_CUTOFF),
             high_level: PointId(carriers::HIGH_LEVEL),
             backup_active: PointId(carriers::BACKUP_ACTIVE),
+            backup_unhealthy: PointId(carriers::BACKUP_UNHEALTHY),
             none_available: PointId(carriers::NONE_AVAILABLE),
             all_faulted: PointId(carriers::ALL_FAULTED),
             failover: failover.id,
@@ -964,6 +1046,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             high_level_alarm,
             low_level_alarm,
             backup_active_alarm,
+            backup_unhealthy_alarm: backup_unhealthy_alarm_layout,
             none_available_alarm: none_available_alarm_layout,
             all_faulted_alarm: all_faulted_alarm_layout,
             power_fail_alarm: power_fail_alarm_layout,

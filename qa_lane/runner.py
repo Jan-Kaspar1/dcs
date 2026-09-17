@@ -33,6 +33,7 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,6 +87,11 @@ DEFAULT_CONFIG = {
     # The rolling model-revision case's third controller publishes its
     # monitor here; its sim-net side shares the run's labeled bridge.
     'revised_port': 18082,
+    # The checkpoint-negotiation case's foreign-fingerprint peer gets
+    # its own published port: it lives beside the pair while the
+    # revised container does not exist yet, and the case removes it
+    # before the model-revision launch.
+    'foreign_port': 18083,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -97,6 +103,13 @@ DEFAULT_CONFIG = {
     'builder_pids': 512,
     'builder_timeout': 5400,
     'monitor_timeout': 90,
+    # The tracking standby's --auto-promote heartbeat budget: that many
+    # consecutive failed checkpoint pulls — one per 100 ms scan cycle —
+    # self-promote it, so a stopped writer's plant freeze is bounded at
+    # ~12 s. The declared field freshness budget (5 ticks) presents
+    # stale well inside the window, while a healthy container restart
+    # (~3-5 s of misses) never reaches it.
+    'failover_misses': 120,
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
     'dynamics_fixture': 'crates/dcs-demo/fixtures/pump_station_dynamics.json',
     'capabilities': [
@@ -829,6 +842,13 @@ def _controller_dir(run_dir, name):
     return Path(run_dir) / 'controllers' / name
 
 
+def _controller_container(run_id, name):
+    """The run's controller container for a scenario ctx endpoint key:
+    'active' is ctrl-a's container, 'standby' ctrl-b's, whichever role
+    each currently reports."""
+    return 'dcs-hw-' + run_id + '-' + {'active': 'a', 'standby': 'b'}[name]
+
+
 def restart_controller(run_id, name, timeline):
     """The scenario-callable controller restart: `docker stop` then
     `docker start` on one of the run's already-launched controller
@@ -844,12 +864,36 @@ def restart_controller(run_id, name, timeline):
     recorded on the run's action timeline; a docker failure raises so
     the calling scenario reports the restart never completed.
     """
-    container = ('dcs-hw-' + run_id + '-'
-                 + {'active': 'a', 'standby': 'b'}[name])
+    container = _controller_container(run_id, name)
     timeline('controller-restart', 'docker stop ' + container)
     docker('stop', '--time', '2', container, timeout=90)
     docker('start', container, timeout=60)
     timeline('controller-restarted', container + ' running')
+
+
+def stop_controller(run_id, name, timeline):
+    """The stop half of the lifecycle action, alone: `docker stop` on
+    one of the run's controller containers, held down until the scenario
+    issues `start_controller` — the seam the stale-freshness case uses
+    to freeze the shared plant's stepping while it polls the surviving
+    peer. Recorded on the run's action timeline; a docker failure raises
+    so the induction is reported as never completed.
+    """
+    container = _controller_container(run_id, name)
+    timeline('controller-stop', 'docker stop ' + container)
+    docker('stop', '--time', '2', container, timeout=90)
+    timeline('controller-stopped', container + ' down')
+
+
+def start_controller(run_id, name, timeline):
+    """The matching start half: `docker start` on a container
+    `stop_controller` stopped — the resumed process reclaims the shared
+    plant's writer and the tracking peer's checkpoint stream resumes.
+    """
+    container = _controller_container(run_id, name)
+    timeline('controller-start', 'docker start ' + container)
+    docker('start', container, timeout=60)
+    timeline('controller-started', container + ' running')
 
 
 def stop_plant(run_id, timeline):
@@ -876,8 +920,21 @@ def start_plant(run_id, timeline):
     timeline('plant-started', container + ' running')
 
 
+def _revised_peer_role(cfg):
+    """The run's third controller's served RoleReport, or None when
+    its monitor is unreachable — the relaunch guard's read of whether
+    the existing '-c' container currently owns the field."""
+    try:
+        with urllib.request.urlopen(
+                'http://127.0.0.1:' + str(cfg['revised_port'])
+                + '/role', timeout=3) as response:
+            return json.loads(response.read() or b'null')
+    except Exception:
+        return None
+
+
 def start_revised_controller(cfg, record, run_dir, model, active,
-                             timeline):
+                             timeline, incompatible=False):
     """The scenario-callable rolling model-revision action
     (WW-LCM-001's deployment-update clause, the rolling
     model-revision decision): derive the revised model document from
@@ -898,8 +955,26 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     timeline; a derivation or docker failure raises so the calling
     scenario reports the action never completed.
 
+    `incompatible=True` runs the refusal half: the derivation applies
+    the checked-in post-derivation step (revision-incompatible.json)
+    that retypes a carried point so the crossing refuses with the
+    named carryover error, and the derived document lands at
+    model-revised-incompatible.json instead.
+
+    A second call relaunches the third container: a leftover '-c' —
+    the incompatible scenario's degraded standby, or a killed
+    earlier attempt — is removed first, but only after its served
+    /role proves it does not own the field; an active or promoting
+    '-c' refuses removal by name rather than silently orphaning the
+    plant's writer claim. Its runner-owned state and journal files
+    reset with the container so the new lifetime starts cold: a
+    state file left by the old document would fail the fingerprint
+    resume gate, and a second run boundary in one journal file would
+    misread the new lifetime.
+
     Returns the derivation summary (revised document path and the
-    recipe's added point/signal ids) plus the container name.
+    recipe's added point/signal ids — plus the retyped point on the
+    incompatible variant) plus the container name.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
@@ -908,17 +983,45 @@ def start_revised_controller(cfg, record, run_dir, model, active,
         raise RuntimeError('start_revised expects the active endpoint '
                            'key, got ' + repr(active))
     peer_name, peer_port = peers[active]
-    revised_doc = Path(run_dir) / 'model-revised.json'
-    info = revision.derive_revised_model(model, revised_doc)
+    name = ('model-revised-incompatible.json' if incompatible
+            else 'model-revised.json')
+    revised_doc = Path(run_dir) / name
+    info = (revision.derive_incompatible_model(model, revised_doc)
+            if incompatible
+            else revision.derive_revised_model(model, revised_doc))
     directory = _controller_dir(run_dir, 'c')
+    container = prefix + '-c'
+    listed = docker('ps', '-a', '--filter',
+                    'name=^/' + container + '$', '--format', '{{.ID}}',
+                    check=False)
+    if listed.returncode != 0:
+        raise RuntimeError('start_revised cannot prove the third '
+                           'controller is absent: docker ps failed: '
+                           + listed.stderr.strip()[:300])
+    if listed.stdout.strip():
+        report = _revised_peer_role(cfg)
+        if report and report.get('role') in ('active', 'promoting'):
+            raise RuntimeError('start_revised refuses to replace '
+                               + container + ': it reports role '
+                               + str(report['role']))
+        timeline('model-revision-replace',
+                 'docker rm -f ' + container
+                 + ' (served role ' + str((report or {}).get('role'))
+                 + ')')
+        docker('rm', '-f', container, timeout=60)
+        directory.mkdir(parents=True, exist_ok=True)
+        for artifact in ('state.json', 'journal.jsonl'):
+            (directory / artifact).unlink(missing_ok=True)
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
-    container = prefix + '-c'
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
     timeline('model-revision-start',
              'derive ' + revised_doc.name + ' (+points '
              + str(info['added_points']) + ', +signals '
-             + str(info['added_signals']) + '); launch ' + container
+             + str(info['added_signals'])
+             + (', retyped point ' + str(info['retyped_point'])
+                if incompatible else '')
+             + '); launch ' + container
              + ' --standby ' + standby + ' --revised')
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
@@ -938,31 +1041,117 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     return dict(info, container=container)
 
 
+def start_foreign_controller(cfg, record, run_dir, model, active,
+                             timeline):
+    """The scenario-callable checkpoint-negotiation action
+    (WW-LCM-001's named rejection of incompatible state): derive the
+    same recipe-revised document the model-revision case rolls in, then
+    launch the run's labeled foreign peer on it as `--standby <active>`
+    WITHOUT `--revised` — so its fingerprint gate must refuse every
+    checkpoint the active serves and it can never converge.
+
+    `active` is the scenario ctx key of the peer currently writing the
+    field ('active' is ctrl-a, 'standby' ctrl-b) — the foreign peer
+    pulls that peer's checkpoints. The container carries the run's
+    managed and run labels so teardown reconciles it with the rest of
+    the rig, mounts the derived document read-only at
+    /model/foreign.json, publishes its monitor on cfg['foreign_port'],
+    and gets its own runner-owned state/journal directory — the derived
+    document deliberately never shares the revision case's 'c' paths,
+    so a surviving artifact can never seed that launch. Both halves —
+    the derivation and the launch — are recorded on the run's action
+    timeline; a derivation or docker failure raises so the calling
+    scenario reports the action never completed.
+
+    Returns the derivation summary plus the container name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_foreign expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    foreign_doc = Path(run_dir) / 'model-foreign.json'
+    info = revision.derive_revised_model(model, foreign_doc)
+    directory = _controller_dir(run_dir, 'foreign')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-foreign'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    timeline('negotiation-start',
+             'derive ' + foreign_doc.name + '; launch ' + container
+             + ' --standby ' + standby + ' (no --revised)')
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['foreign_port']) + ':8082',
+           '-v', str(foreign_doc) + ':/model/foreign.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/foreign.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--standby', standby,
+           '--scan-ms', '100', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
+    timeline('negotiation-up', container
+             + ' running a foreign-fingerprint model')
+    return dict(info, container=container)
+
+
+def stop_foreign_controller(run_id, timeline):
+    """The checkpoint-negotiation case's teardown: `docker rm -f` on
+    the foreign peer's container — removed outright, not held down, so
+    later cases (the model-revision launch above all) see a clean rig.
+    Recorded on the run's action timeline like the other lifecycle
+    actions; a docker failure raises so the calling scenario reports
+    the teardown never completed."""
+    container = 'dcs-hw-' + run_id + '-foreign'
+    timeline('negotiation-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('negotiation-stopped', container + ' removed')
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key (the model-revision case's third controller
-    answers on 'revised' once launched), the published plant-protocol
+    answers on 'revised' once launched, the checkpoint-negotiation
+    case's foreign peer on 'foreign'), the published plant-protocol
     endpoint, the run's evidence dir and deadline, the runner-owned
-    controller-restart, plant stop/start, and model-revision actions,
-    and the host-side per-controller state/journal files the restart
-    and model-revision scenarios read."""
+    controller-restart, plant stop/start, model-revision, and
+    foreign-peer launch/teardown actions, and the host-side
+    per-controller state/journal files the restart and model-revision
+    scenarios read."""
     run_id = record['run_id']
-    names = {'active': 'a', 'standby': 'b', 'revised': 'c'}
+    names = {'active': 'a', 'standby': 'b', 'revised': 'c',
+             'foreign': 'foreign'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
+        'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'stop_controller': lambda name: stop_controller(
+            run_id, name, timeline),
+        'start_controller': lambda name: start_controller(
+            run_id, name, timeline),
+        'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
-        'start_revised': lambda name: start_revised_controller(
+        'start_revised': lambda name, incompatible=False:
+            start_revised_controller(
+                cfg, record, run_dir, src / cfg['model_fixture'],
+                name, timeline, incompatible),
+        'start_foreign': lambda name: start_foreign_controller(
             cfg, record, run_dir, src / cfg['model_fixture'], name,
             timeline),
+        'stop_foreign': lambda: stop_foreign_controller(
+            run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
@@ -1046,6 +1235,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', prefix + '-a:8080',
+           '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)

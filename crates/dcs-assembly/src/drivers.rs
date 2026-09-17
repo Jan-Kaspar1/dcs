@@ -319,6 +319,14 @@ pub type StepHook = Arc<dyn Fn(f64) -> Result<Tick, StepError> + Send + Sync>;
 /// the claim.
 pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 
+/// Forgets the backend's recorded field write-ownership — the
+/// per-backend half of [`FanoutDriver::release_field_claims`], run when
+/// this peer demotes: an attachment that gave the field up must not
+/// re-assert a stale claim when a re-attach finds the field's
+/// arbitration reset. `None` on kinds whose claim bookkeeping needs no
+/// forgetting — e.g. `sim-bus`, where a claim dies with its connection.
+pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -333,6 +341,10 @@ pub struct DeviceBackend {
     /// arbitrate a single writer, which keeps automatic failover off
     /// for models built on it.
     pub claim: Option<ClaimHook>,
+    /// Forgets the backend's recorded write-ownership claim — the
+    /// demotion counterpart of `claim`; `None` when the backend records
+    /// no claim state a released owner could wrongly re-assert.
+    pub release: Option<ReleaseHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -592,6 +604,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
     let claiming = Arc::clone(&remote);
+    let releasing = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -603,15 +616,23 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             })
         })),
         // The plant server's single-writer claim — the fencing a
-        // promoted peer takes out on the old field owner.
+        // promoted peer takes out on the old field owner. A grant
+        // flagged `Shared` still holds: one owner's several sim-tcp
+        // devices on one plant claim the same token by design, so the
+        // flag is the claimer's to heed, not the hook's to refuse.
         claim: Some(Arc::new(move |owner| {
             claiming
                 .claim_writer(owner)
+                .map(|_| ())
                 .map_err(|error| StepError::Backend {
                     backend: format!("device {device}"),
                     detail: error.to_string(),
                 })
         })),
+        // The claim's demotion counterpart: the attachment forgets its
+        // recorded owner so a re-attach after a plant restart does not
+        // re-assert a claim this peer gave up.
+        release: Some(Arc::new(move || releasing.release_claim())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -702,6 +723,9 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
+        // The device claim dies with its connection, so a re-attach
+        // never re-asserts it — there is nothing to forget.
+        release: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -794,6 +818,9 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                     detail: error.to_string(),
                 })
         })),
+        // As `sim-bus`: the claim is bound to the connection, so a
+        // re-attach carries no stale claim to forget.
+        release: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -885,6 +912,7 @@ fn ethercat_backend(
         io: device.clone(),
         step: None,
         claim: None,
+        release: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1076,6 +1104,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
         // Not field-facing — there is no shared field to claim.
         claim: None,
+        release: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1091,6 +1120,9 @@ struct Backend {
     /// [`DeviceBackend::claim`] carried into the built driver — the
     /// field-ownership claim a promotion takes out.
     claim: Option<ClaimHook>,
+    /// [`DeviceBackend::release`] carried into the built driver — the
+    /// claim-forgetting hook a demotion runs.
+    release: Option<ReleaseHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1158,6 +1190,7 @@ impl DriverPlan {
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
                 claim: None,
+                release: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1173,6 +1206,7 @@ impl DriverPlan {
                 io: planned.backend.io,
                 step: planned.backend.step,
                 claim: planned.backend.claim,
+                release: planned.backend.release,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1416,6 +1450,23 @@ impl FanoutDriver {
             }
         }
         Ok(())
+    }
+
+    /// Forgets every field-facing backend's recorded write-ownership
+    /// claim — the demotion counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer): a peer that gave
+    /// the field up does not re-assert a stale claim when a re-attach
+    /// finds the field's arbitration reset, so the restarted field's
+    /// claim stays free for the peer that legitimately owns it.
+    /// Backends without a release hook record nothing to forget.
+    pub fn release_field_claims(&self) {
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(release) = &backend.release
+            {
+                release();
+            }
+        }
     }
 
     /// The field-facing devices whose backends cannot arbitrate a single
@@ -1692,6 +1743,7 @@ mod tests {
             io,
             step: None,
             claim: None,
+            release: None,
             inspect: None,
             field_facing: false,
         }
