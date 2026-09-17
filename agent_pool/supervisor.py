@@ -29,7 +29,15 @@ class Supervisor:
         self.state = State(self.root / 'state.sqlite3')
         self.github = GitHub(config['repository'])
         self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
+        self.models = config.get('models') or ['swe-2-high']
         self.stopping = False
+
+    def model_for(self, worker):
+        """Assign each worker clone a stable slot in the configured model list."""
+        try:
+            return self.models[int(worker.rsplit('-', 1)[1]) % len(self.models)]
+        except (IndexError, ValueError):
+            return self.models[0]
 
     def log(self, text):
         line = time.strftime('%Y-%m-%dT%H:%M:%S%z') + ' ' + str(text)
@@ -290,9 +298,10 @@ Repair context: {repair}
         key = f"issue-{job['issue']}-{job['attempt']}-{job['repairs']}"
         self.state.update_job(job['issue'], branch=branch, clone=str(clone), status='working')
         self.state.set('launch:' + str(job['issue']), key)
-        metadata = self.runtime.spawn(key, clone, self.worker_prompt(issue, branch, repair), resume_session=job.get('session') if repair else None)
+        model = self.model_for(job['worker'])
+        metadata = self.runtime.spawn(key, clone, self.worker_prompt(issue, branch, repair), resume_session=job.get('session') if repair else None, model=model)
         self.state.set('process:' + str(job['issue']), metadata)
-        self.log(f"Launched {job['worker']} for #{job['issue']}")
+        self.log(f"Launched {job['worker']} for #{job['issue']} on {model}")
 
     def publish(self, job, issue):
         result = self.runtime.inspect_result(Path(job['clone']), job['branch'])
@@ -342,7 +351,7 @@ Repair context: {repair}
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 log = Path(metadata.get('log', '/nonexistent'))
                 tail = log.read_text(errors='replace')[-12000:] if log.is_file() else ''
-                if any(word in tail.lower() for word in ('quota exceeded','insufficient credits','authentication failed','unauthorized','rate limit exceeded')):
+                if any(word in tail.lower() for word in ('quota exceeded','insufficient credits','authentication failed','unauthorized','rate limit')):
                     self.state.pause('Local agent authentication or quota failure; inspect invocation log')
                 self.block(job, 'Local agent failed: ' + json.dumps(receipt)[:2000])
                 continue
@@ -512,7 +521,7 @@ Repair context: {repair}
                   'report_dir': str(report_dir), 'clone': str(clone),
                   'attempt': attempt, 'hashes': hashes}
         self.state.set('reviewer:launch', intent)
-        process = self.runtime.spawn(key, clone, text, timeout=cfg['timeout_seconds'])
+        process = self.runtime.spawn(key, clone, text, timeout=cfg['timeout_seconds'], model=self.models[0])
         self.state.set('reviewer', {**intent, 'process': process})
         self.log(f'Review {run_id} launched at {sha[:12]} (attempt {attempt})')
 
@@ -850,7 +859,7 @@ Repair context: {repair}
         clone = self.runtime.prepare_clone('coordinator')
         output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
         output.parent.mkdir(parents=True, exist_ok=True)
-        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')))
+        process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')), model=self.models[0])
         self.state.set('planner', {'process': process, 'output': str(output)})
         self.state.set('last_plan', now)
         self.log('Planner started')
@@ -953,7 +962,7 @@ Repair context: {repair}
             self.github.ensure_labels()
             self.recover_processes()
             delay = self.config['poll_seconds']
-            self.log('Supervisor started; local swe-2-high only')
+            self.log('Supervisor started; models: ' + ', '.join(self.models))
             try:
                 while not self.stopping:
                     try:
