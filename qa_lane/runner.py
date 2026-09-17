@@ -44,6 +44,17 @@ MANAGED_LABEL = 'dcs-hwtest.managed'
 RUN_LABEL = 'dcs-hwtest.run'
 IMAGE_PREFIX = 'dcs-hwtest/'
 
+# The rig's pinned field-ownership tokens, one per controller peer:
+# each container launches --owner-token with its key's token so a
+# scenario's third sim-net attachment can name the standing owner's
+# claim — the harness-sharing case the flag exists for (the
+# field-claim case's claimed_shared leg). A generated token would be
+# undiscoverable outside the container's stderr; pinning changes
+# nothing else about the claim. Keys are the container name suffixes
+# ('a', 'b', the revised case's 'c'); _scenario_ctx maps them onto the
+# endpoint names the scenarios address.
+OWNER_TOKENS = {'a': 0xD5C00A, 'b': 0xD5C00B, 'c': 0xD5C00C}
+
 DEFAULT_CONFIG = {
     'state_dir': '/srv/dcs-hwtest',
     'src_dir': '/srv/dcs-hwtest/src',
@@ -1032,6 +1043,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            '/model/revised.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', standby,
+           '--owner-token', str(OWNER_TOKENS['c']),
            '--revised',
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
@@ -1132,6 +1144,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # Each peer's pinned --owner-token keyed by endpoint name: the
+        # field-claim case's third attachment shares (and probes) the
+        # standing owner's claim by name through these.
+        'owner_tokens': {'active': OWNER_TOKENS['a'],
+                         'standby': OWNER_TOKENS['b'],
+                         'revised': OWNER_TOKENS['c']},
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
@@ -1222,6 +1240,8 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(OWNER_TOKENS['a']),
+           '--peer', prefix + '-b:8081',
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1235,6 +1255,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', prefix + '-a:8080',
+           '--owner-token', str(OWNER_TOKENS['b']),
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,

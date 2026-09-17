@@ -2,7 +2,8 @@
 drive scenario_consumer_schedule, scenario_served_interface,
 scenario_force_release, scenario_command_admission,
 scenario_controller_restart, scenario_plant_link_loss,
-scenario_field_fault, and scenario_model_revision through their
+scenario_field_fault, scenario_field_claim, and
+scenario_model_revision through their
 pass outcomes and the named
 failures their issues call out — a stalled reader whose leg's scan
 outputs stopped advancing, a lagging seq-cursor read answered with
@@ -31,6 +32,7 @@ the active's receipts, journal, or field — plus a control half that
 refuses to converge."""
 import io
 import json
+import os
 import socket
 import tempfile
 import threading
@@ -1145,6 +1147,622 @@ class FieldFaultTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never restored', record.get('detail', ''))
         report.validate_scenario(record)
+
+
+class ClaimPlantPeer:
+    """A plant-protocol peer enforcing the single-writer field claim
+    the field-claim scenario exercises: claim_writer preempts
+    unconditionally, ensure_writer grants only into an unclaimed or
+    same-owner claim — `claimed_shared` while other live attachments
+    hold the token — release_writer drops only the caller's hold (the
+    claim freed when the holder set empties, never on disconnect), and
+    write/step fence every attachment outside the holder set —
+    `unclaimed` while no claim stands at all. Fault flags stage each
+    named failure the scenario reports."""
+
+    def __init__(self):
+        self.samples = {
+            20: {'value': {'float': 1.5}, 'quality': 'good', 'tick': 0},
+            40: {'value': {'bool': False}, 'quality': 'good',
+                 'tick': 0},
+            200: {'value': {'bool': False}, 'quality': 'good',
+                  'tick': 0},
+        }
+        self.directions = {20: 'in', 40: 'in', 200: 'out'}
+        self.plant_tick = 0
+        self.claim = None         # {'owner': token, 'holders': set()}
+        self.shared_conns = set()  # holders that joined via ensure
+        self.next_conn = 0
+        self.conn_ids = {}
+        self.conns = set()
+        self.requests = []
+        self.lock = threading.Lock()
+        # Fault injection for the named-failure cases.
+        self.open_field = False           # mutations ignore the claim
+        self.ensure_preempts = False      # foreign ensure grants anyway
+        self.ensure_done = False          # shared grant answers `done`
+        self.shared_write_fenced = False  # a holder's write is refused
+        self.release_drops_claim = False  # one release frees the claim
+        self.idle_release_fails = False   # a holder of nothing refused
+        self.refuse_rogue = False         # claim_writer answers fenced
+        self.rogue_token = scenarios.CLAIM_ROGUE
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET,
+                                 socket.SO_REUSEADDR, 1)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen()
+        self.address = ('127.0.0.1:'
+                        + str(self.listener.getsockname()[1]))
+        self.thread = threading.Thread(target=self._serve,
+                                       daemon=True)
+        self.thread.start()
+
+    def _conn_id(self, conn):
+        key = id(conn)
+        if key not in self.conn_ids:
+            self.conn_ids[key] = self.next_conn
+            self.next_conn += 1
+        return self.conn_ids[key]
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            self.conns.add(conn)
+            threading.Thread(target=self._handle, args=(conn,),
+                             daemon=True).start()
+
+    def close(self):
+        self.listener.close()
+        for conn in list(self.conns):
+            conn.close()
+
+    def _fenced(self):
+        return {'result': 'error',
+                'error': {'kind': 'fenced',
+                          'detail': 'writer claim held by another '
+                                    'attachment'}}
+
+    def _handle(self, conn):
+        try:
+            buf = b''
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while b'\n' in buf:
+                    line, _, buf = buf.partition(b'\n')
+                    request = json.loads(line)
+                    response = self._respond(conn, request)
+                    conn.sendall(
+                        json.dumps(response).encode() + b'\n')
+        except OSError:
+            pass
+        finally:
+            # Disconnect releases nothing: the claim outlives a dead
+            # owner so the field fails closed until another claim.
+            self.conn_ids.pop(id(conn), None)
+            self.conns.discard(conn)
+            conn.close()
+
+    def _respond(self, conn, request):
+        with self.lock:
+            self.requests.append(request.get('op'))
+            cid = self._conn_id(conn)
+            op = request.get('op')
+            if op == 'list_points':
+                points = [
+                    {'point': p, 'direction': self.directions[p],
+                     'path': 'field.' + str(p),
+                     'type': 'scalar', 'index': i,
+                     'sample': dict(self.samples[p])}
+                    for i, p in enumerate(sorted(self.samples))
+                ]
+                return {'result': 'points', 'points': points}
+            if op == 'read':
+                return {'result': 'sample',
+                        'sample': dict(
+                            self.samples[request['point']])}
+            if op == 'claim_writer':
+                owner = request['owner']
+                if self.refuse_rogue and owner == self.rogue_token:
+                    return self._fenced()
+                self.claim = {'owner': owner, 'holders': {cid}}
+                self.shared_conns = set()
+                return {'result': 'done'}
+            if op == 'ensure_writer':
+                owner = request['owner']
+                if self.claim is None:
+                    self.claim = {'owner': owner, 'holders': {cid}}
+                    self.shared_conns = set()
+                    return {'result': 'done'}
+                if owner != self.claim['owner']:
+                    if self.ensure_preempts:
+                        self.claim = {'owner': owner,
+                                      'holders': {cid}}
+                        self.shared_conns = set()
+                        return {'result': 'done'}
+                    return self._fenced()
+                self.claim['holders'].add(cid)
+                self.shared_conns.add(cid)
+                if self.ensure_done:
+                    return {'result': 'done'}
+                return {'result': 'claimed_shared',
+                        'owner': owner}
+            if op == 'release_writer':
+                if self.claim is not None \
+                        and cid in self.claim['holders']:
+                    self.claim['holders'].discard(cid)
+                    self.shared_conns.discard(cid)
+                    if self.release_drops_claim \
+                            or not self.claim['holders']:
+                        self.claim = None
+                        self.shared_conns = set()
+                    return {'result': 'done'}
+                if self.idle_release_fails:
+                    return {'result': 'error',
+                            'error': {'kind': 'invalid_request',
+                                      'detail': 'no hold'}}
+                return {'result': 'done'}
+            if op == 'write':
+                if not self.open_field:
+                    if self.claim is None:
+                        return {'result': 'error',
+                                'error': {'kind': 'unclaimed',
+                                          'detail': 'no writer '
+                                                    'claim stands'}}
+                    if cid not in self.claim['holders'] \
+                            or (self.shared_write_fenced
+                                and cid in self.shared_conns):
+                        return {'result': 'error',
+                                'error': {
+                                    'kind': 'io',
+                                    'error': {'fenced':
+                                              self.claim['owner']}}}
+                self.samples[request['point']]['value'] \
+                    = request['value']
+                return {'result': 'done'}
+            if op == 'step':
+                if not self.open_field:
+                    if self.claim is None:
+                        return {'result': 'error',
+                                'error': {'kind': 'unclaimed',
+                                          'detail': 'no writer '
+                                                    'claim stands'}}
+                    if cid not in self.claim['holders']:
+                        return self._fenced()
+                self.plant_tick += 1
+                return {'result': 'stepped',
+                        'tick': self.plant_tick}
+            return {'result': 'error',
+                    'error': {'kind': 'invalid_request',
+                              'detail': 'unknown op'}}
+
+
+class FieldClaimFeed:
+    """A stubbed monitor pair for the field-claim scenario: ctrl-a the
+    launched active holding the plant's claim under TOKEN_A through
+    its own sim-net attachment, ctrl-b a tracking standby. Each
+    ctrl-a request is one scan boundary: an active scan writes the
+    field through the held claim, a fenced answer drives the
+    contract's degrade path — field_claim_lost journaled, demoting
+    then standby — a standby reconverges over a fixed count of scans,
+    and POST /promote re-claims under the pinned token. Fault flags
+    stage each named failure the scenario reports."""
+
+    TOKEN_A = 0xD5C00A
+    TOKEN_B = 0xD5C00B
+
+    def __init__(self, plant, unclaimed=False):
+        self.plant = plant
+        self.tick = 0
+        self.role = 'active'
+        self.reconverge = 0
+        self.journal = []
+        self.next_seq = 1
+        self.failed_writes = 0
+        self.stream = self._connect()
+        self.holds = False
+        self.dead = False
+        self.peer_up = False           # ctrl-b promoted and stayed
+        # Fault injection for the named-failure cases.
+        self.no_journal = False        # the loss demotes unrecorded
+        self.dies_on_fence = False     # the preempted owner exits
+        self.no_demote = False         # the loss never moves the role
+        self.never_converges = False   # the demoted peer re-promotes
+        self.never_reclaims = False    # the promotion re-takes nothing
+        self.peer_promotes = False     # ctrl-b reports active later
+        self.stalls = False            # the active's tick never grows
+        if not unclaimed:
+            self._roundtrip({'op': 'claim_writer',
+                             'owner': self.TOKEN_A})
+            self.holds = True
+
+    def close(self):
+        self.stream.close()
+
+    def _connect(self):
+        host, _, port = self.plant.address.rpartition(':')
+        return socket.create_connection((host, int(port)),
+                                        timeout=5)
+
+    def _roundtrip(self, request):
+        self.stream.sendall(json.dumps(request).encode() + b'\n')
+        line = b''
+        while not line.endswith(b'\n'):
+            line += self.stream.recv(65536)
+        return json.loads(line)
+
+    def _fenced(self, response):
+        error = (response or {}).get('error') or {}
+        inner = error.get('error')
+        return error.get('kind') == 'fenced' or (
+            error.get('kind') == 'io' and isinstance(inner, dict)
+            and 'fenced' in inner)
+
+    def _journal(self, event):
+        self.journal.append({'seq': self.next_seq,
+                             'tick': self.tick, 'event': event})
+        self.next_seq += 1
+
+    def _supersede(self):
+        # The contract's degrade path: count the fenced write,
+        # journal the loss, and walk demoting -> standby.
+        self.failed_writes += 1
+        self.holds = False
+        self.peer_up = True
+        if not self.no_journal:
+            self._journal({'field_claim_lost': {'point': 200}})
+        if self.dies_on_fence:
+            self.dead = True
+            return
+        if not self.no_demote:
+            self.role = 'demoting'
+            self._journal({'role_changed': {'from': 'active',
+                                            'to': 'demoting'}})
+
+    def _scan(self):
+        self.tick += 1
+        if self.role == 'demoting':
+            self.role = 'standby'
+            self._journal({'role_changed': {'from': 'demoting',
+                                            'to': 'standby'}})
+            self.reconverge = 2
+            return
+        if self.role == 'standby':
+            if self.reconverge:
+                self.reconverge -= 1
+            return
+        # A field-owning role writes every scan; the gate follows the
+        # role, so a promoted peer that re-claimed nothing meets the
+        # standing claim's fence and supersedes again.
+        if self._fenced(self._roundtrip(
+                {'op': 'write', 'point': 200,
+                 'value': {'bool': False}})):
+            self._supersede()
+            return
+        if self.role == 'promoting':
+            self.role = 'active'
+            self._journal({'role_changed': {'from': 'promoting',
+                                            'to': 'active'}})
+
+    def _refuse(self, url):
+        raise urllib.error.HTTPError(url, 409, 'conflict', None,
+                                     None)
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        if host == 'ctrl-b:2':
+            if (method, route) == ('GET', '/role'):
+                role = 'active' if (self.peer_promotes
+                                    and self.peer_up) else 'standby'
+                report = {'role': role, 'tick': self.tick}
+                if role == 'standby':
+                    report['sync'] = {
+                        'tracking': {'aligned': self.tick}}
+                return 200, report
+            if (method, route) == ('GET', '/checkpoint'):
+                return 200, {'tick': self.tick}
+            raise AssertionError('unexpected request %s %s'
+                                 % (method, url))
+        if self.dead:
+            raise urllib.error.URLError('connection refused')
+        if not self.stalls:
+            self._scan()
+        if (method, route) == ('GET', '/role'):
+            return 200, {'role': self.role, 'tick': self.tick}
+        if (method, route) == ('GET', '/snapshot'):
+            points = [{'point': p,
+                       'sample': dict(self.plant.samples[p])}
+                      for p in sorted(self.plant.samples)]
+            return 200, {'tick': self.tick, 'points': points,
+                         'io_health': {
+                             'failed_reads': 0,
+                             'failed_writes': self.failed_writes,
+                             'consecutive_failures': 0,
+                             'last_error': None,
+                             'driver': {'link': 'connected'}}}
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1])
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/promote'):
+            if self.role != 'standby' or self.reconverge \
+                    or self.never_converges:
+                self._refuse(url)
+            if not self.never_reclaims:
+                self._roundtrip({'op': 'claim_writer',
+                                 'owner': self.TOKEN_A})
+                self.holds = True
+            self.role = 'promoting'
+            self._journal({'role_changed': {'from': 'standby',
+                                            'to': 'promoting'}})
+            return 200, {'role': 'promoting', 'tick': self.tick}
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class FieldClaimTests(unittest.TestCase):
+    """The field-claim scenario under fakes: the plant enforces the
+    single-writer claim — fenced/claimed_shared/unclaimed/done
+    answers — and the stubbed pair walks the superseded owner's
+    degrade path and the restore promotion."""
+
+    def _ctx(self, plant, evidence):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'owner_tokens': {
+                    'active': FieldClaimFeed.TOKEN_A,
+                    'standby': FieldClaimFeed.TOKEN_B},
+                'plant': plant.address, 'evidence_dir': evidence}
+
+    def _run(self, evidence, plant_flags=None, feed_flags=None,
+             unclaimed=False):
+        plant = ClaimPlantPeer()
+        for name, value in (plant_flags or {}).items():
+            setattr(plant, name, value)
+        feed = FieldClaimFeed(plant, unclaimed=unclaimed)
+        for name, value in (feed_flags or {}).items():
+            setattr(feed, name, value)
+        try:
+            with patch.object(scenarios, 'http_json', feed.http_json), \
+                    patch.object(scenarios, 'CLAIM_DEADLINE', 2):
+                record = scenarios.scenario_field_claim(
+                    self._ctx(plant, evidence))
+        finally:
+            feed.close()
+            plant.close()
+        return plant, feed, record
+
+    def test_passed(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            plant, feed, record = self._run(evidence)
+            self.assertEqual(record['outcome'], 'passed')
+            self.assertTrue(report.validate_scenario(record))
+            for name in ('field-claim-probes.json',
+                         'field-claim-owner.json',
+                         'field-claim-lifecycle.json',
+                         'field-claim-rogue.json',
+                         'field-claim-superseded.json',
+                         'field-claim-promote.json',
+                         'field-claim-restored.json'):
+                path = os.path.join(evidence, name)
+                self.assertTrue(os.path.exists(path), name)
+                json.loads(Path(path).read_text())
+            # The restore re-claimed under the owner's token; the
+            # scenario's finally released its attachment's hold.
+            self.assertEqual(plant.claim,
+                             {'owner': feed.TOKEN_A,
+                              'holders': {0}})
+
+    def test_fails_when_the_field_is_open(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, plant_flags={'open_field': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('enforceable writer claim',
+                          record.get('detail', ''))
+
+    def test_fails_when_unclaimed(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(evidence, unclaimed=True)
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('enforceable writer claim',
+                          record.get('detail', ''))
+
+    def test_fails_when_ensure_preempts(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, plant_flags={'ensure_preempts': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('conditional grant preempted',
+                          record.get('detail', ''))
+
+    def test_fails_when_shared_answers_done(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, plant_flags={'ensure_done': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('claimed_shared',
+                          record.get('detail', ''))
+
+    def test_fails_when_the_shared_write_is_fenced(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, plant_flags={'shared_write_fenced': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('write under the shared claim',
+                          record.get('detail', ''))
+
+    def test_fails_when_release_drops_the_claim(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence,
+                plant_flags={'release_drops_claim': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('release', record.get('detail', ''))
+
+    def test_fails_when_idle_release_is_refused(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence,
+                plant_flags={'idle_release_fails': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('holder of nothing',
+                          record.get('detail', ''))
+
+    def test_refused_rogue_claim_still_passes(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            plant, feed, record = self._run(
+                evidence, plant_flags={'refuse_rogue': True})
+            self.assertEqual(record['outcome'], 'passed')
+            self.assertTrue(report.validate_scenario(record))
+            # The refused claim left the owner's claim standing.
+            self.assertEqual(plant.claim['owner'], feed.TOKEN_A)
+
+    def test_fails_when_the_rogue_kills_the_active(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'dies_on_fence': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('killed', record.get('detail', ''))
+
+    def test_fails_when_the_preemption_is_silent(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'no_journal': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('silent', record.get('detail', ''))
+
+    def test_fails_when_the_owner_never_demotes(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'no_demote': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('never demoted',
+                          record.get('detail', ''))
+
+    def test_fails_when_the_peer_never_repomotes(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'never_converges': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('never re-promoted',
+                          record.get('detail', ''))
+
+    def test_fails_when_the_promotion_reclaims_nothing(self):
+        # A promotion that never re-takes the claim meets the standing
+        # claim's fence on its next write and supersedes again — the
+        # pair never settles back onto the field owner.
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'never_reclaims': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('never settled active',
+                          record.get('detail', ''))
+
+    def test_fails_when_the_peer_ends_active(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'peer_promotes': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('return to standby',
+                          record.get('detail', ''))
+
+    def test_fails_when_the_active_stalls(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            _, _, record = self._run(
+                evidence, feed_flags={'stalls': True})
+            self.assertEqual(record['outcome'], 'failed')
+            self.assertIn('stalled', record.get('detail', ''))
+
+    def test_inconclusive_without_a_plant(self):
+        plant = ClaimPlantPeer()
+        feed = FieldClaimFeed(plant)
+        try:
+            ctx = self._ctx(plant, tempfile.mkdtemp())
+            ctx['plant'] = None
+            with patch.object(scenarios, 'http_json', feed.http_json):
+                record = scenarios.scenario_field_claim(ctx)
+            self.assertEqual(record['outcome'], 'inconclusive')
+        finally:
+            feed.close()
+            plant.close()
+
+    def test_inconclusive_without_a_token(self):
+        plant = ClaimPlantPeer()
+        feed = FieldClaimFeed(plant)
+        try:
+            ctx = self._ctx(plant, tempfile.mkdtemp())
+            ctx['owner_tokens'] = {}
+            with patch.object(scenarios, 'http_json', feed.http_json):
+                record = scenarios.scenario_field_claim(ctx)
+            self.assertEqual(record['outcome'], 'inconclusive')
+        finally:
+            feed.close()
+            plant.close()
+
+    def test_inconclusive_when_the_pair_is_down(self):
+        plant = ClaimPlantPeer()
+        try:
+            ctx = self._ctx(plant, tempfile.mkdtemp())
+
+            def down(method, url, body=None, timeout=10):
+                raise urllib.error.URLError('connection refused')
+            with patch.object(scenarios, 'http_json', down), \
+                    patch.object(scenarios, 'CLAIM_DEADLINE', 2):
+                record = scenarios.scenario_field_claim(ctx)
+            self.assertEqual(record['outcome'], 'inconclusive')
+        finally:
+            plant.close()
+
+    def test_fails_when_nothing_is_settled(self):
+        plant = ClaimPlantPeer()
+        feed = FieldClaimFeed(plant)
+        feed.role = 'standby'
+        try:
+            with tempfile.TemporaryDirectory() as evidence:
+                with patch.object(scenarios, 'http_json',
+                                  feed.http_json), \
+                        patch.object(scenarios, 'CLAIM_DEADLINE', 2):
+                    record = scenarios.scenario_field_claim(
+                        self._ctx(plant, evidence))
+                self.assertEqual(record['outcome'], 'failed')
+                self.assertIn('role=active',
+                              record.get('detail', ''))
+        finally:
+            feed.close()
+            plant.close()
+
+    def test_detaches_and_restores_rig_state(self):
+        with tempfile.TemporaryDirectory() as evidence:
+            plant, feed, record = self._run(evidence)
+            self.assertEqual(record['outcome'], 'passed')
+            # The scenario's attachment released every hold it took:
+            # only the owner's own attachment holds the claim.
+            self.assertEqual(plant.claim['holders'], {0})
+            # And the pair returned to its original layout.
+            self.assertEqual(feed.role, 'active')
+
+    def test_identical_evidence_across_runs(self):
+        runs = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as evidence:
+                _, _, record = self._run(evidence)
+                runs.append((
+                    record['outcome'], record['observations'],
+                    [(item['kind'], item['ref'],
+                      item.get('detail'))
+                     for item in record['evidence']],
+                    {name: Path(os.path.join(evidence, name))
+                     .read_text()
+                     for name in sorted(os.listdir(evidence))}))
+        self.assertEqual(runs[0], runs[1])
 
 
 class ForceFeed:
