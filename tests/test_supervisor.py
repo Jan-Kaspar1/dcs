@@ -87,6 +87,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('act as the product research worker', text)
         self.assertIn('separate source facts from proposed DCS behavior', text)
         self.assertIn('does not implement vendor-derived product behavior', text)
+        self.assertIn('never edit files outside this checkout', text)
 
     def test_full_issue_pr_merge_closed_flow(self):
         s=self.supervisor
