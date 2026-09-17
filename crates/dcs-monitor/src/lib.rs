@@ -862,6 +862,29 @@ impl<'d> Monitor<'d> {
         self.shared.lock().unwrap().peer.owns_field()
     }
 
+    /// Starts field ownership on the bound peer — the launched active's
+    /// startup half of the claim contract, run under the same lock that
+    /// serializes scans. The caller runs it once, after the bind that
+    /// proves the process can serve — a configured journal file
+    /// replayed, the listener bound — and before the first scan: the
+    /// claim [`Peer::activate`](dcs_runtime::Peer::activate) takes
+    /// preempts unconditionally and outlives a dead holder, so it must
+    /// be the run's last local startup step and its first shared-field
+    /// side effect — a process that fails earlier leaves no stale claim
+    /// fencing the field's standing owner. The refusal is the peer's
+    /// own [`SwitchError`](dcs_core::SwitchError): a claim the field
+    /// refuses fails the start with `FieldClaimFailed`, and a peer that
+    /// is not a launched active with `NotActive`.
+    pub fn activate(&self) -> Result<(), dcs_core::SwitchError> {
+        let mut shared = self.shared.lock().unwrap();
+        let Shared { peer, recorder } = &mut *shared;
+        peer.activate()?;
+        for change in peer.take_role_changes() {
+            recorder.note_role_change(change.tick, change.from, change.to);
+        }
+        Ok(())
+    }
+
     /// Applies a checkpoint pulled from the active peer — the standby's
     /// tracking half of the redundancy contract, taken under the same
     /// lock that serializes scans, so the apply lands at a scan
