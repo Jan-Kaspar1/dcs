@@ -16,10 +16,13 @@
 //! The `components`, `outputs`, and `internal` sections transfer verbatim —
 //! they are controller-side state: `outputs` carries the image's `Out`
 //! samples and `internal` the image-carried `In` samples. So does the
-//! `receipts` log — the run's command audit, so `GET /receipts` answers
-//! identically on a peer that adopted the checkpoint — along with the
-//! `command_admission` counters measuring that audit, so the pair's
-//! command-ingress telemetry agrees too. The `driver`
+//! `receipts` log — the bounded tail of the run's command audit, so
+//! `GET /receipts` answers identically on a peer that adopted the
+//! checkpoint — along with the `command_admission` counters measuring
+//! that audit, so the pair's command-ingress telemetry agrees too and
+//! the adopted window's place in the submission sequence stays known:
+//! `attempts` minus the retained length is the count the source already
+//! evicted. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -152,11 +155,16 @@ pub struct Checkpoint {
     /// checkpoints written before forces existed; defaults to empty.
     #[serde(default)]
     pub forces: BTreeMap<PointId, Value>,
-    /// The command receipt log at capture: every submitted command's
-    /// receipt in submission order — the run's command audit, served
-    /// as `GET /receipts`. Restoring it converges the tracking peer's
-    /// log to the active's, so the pair presents one continuous audit
-    /// trail across a switchover; entries still `Accepted` at capture
+    /// The command receipt log at capture: the retained tail of the
+    /// run's audit — the most recent receipts in submission order,
+    /// bounded by the capturing run's receipt-log capacity, served as
+    /// `GET /receipts`. The window's place in the submission sequence
+    /// is recoverable from the `command_admission` counters — see
+    /// [`receipt_base`](Self::receipt_base). Restoring it converges
+    /// the tracking peer's log to the active's, so the pair presents
+    /// one continuous audit trail across a switchover — evictions the
+    /// source already made showing on the peer as the same numbering
+    /// gap; entries still `Accepted` at capture
     /// re-queue on the restoring run — verbatim, past the pending
     /// queue's admission bound: carried run state is not new admission,
     /// so a command taken over between its submission boundary and its
@@ -169,10 +177,32 @@ pub struct Checkpoint {
     /// The pending-command queue's admission counters at capture,
     /// converging beside the `receipts` log they measure — the pair's
     /// `command_queue` telemetry section answers identically on either
-    /// peer. Absent from checkpoints written before the section existed;
-    /// defaults to zeroed.
+    /// peer. `attempts` doubles as the receipt window's high-water mark:
+    /// every submission produced exactly one receipt. Absent from
+    /// checkpoints written before the section existed; defaults to
+    /// zeroed — a legacy log is then the never-evicted prefix it always
+    /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
     #[serde(default)]
     pub command_admission: CommandAdmissionCounts,
+}
+
+impl Checkpoint {
+    /// The absolute submission index of `receipts[0]` — the count of
+    /// settled receipts the capturing run had already evicted at
+    /// capture.
+    ///
+    /// Derived rather than carried: `attempts` counts every lifetime
+    /// submission and each produced exactly one receipt, so
+    /// `attempts - receipts.len()` is the evicted prefix's length. A
+    /// checkpoint captured before admission counters existed reports
+    /// zeroed counters; saturating subtraction then resolves to 0 —
+    /// the base those logs genuinely had, since nothing had ever been
+    /// evicted.
+    pub fn receipt_base(&self) -> u64 {
+        self.command_admission
+            .attempts
+            .saturating_sub(self.receipts.len() as u64)
+    }
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.

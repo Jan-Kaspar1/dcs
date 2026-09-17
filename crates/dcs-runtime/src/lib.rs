@@ -85,8 +85,8 @@ pub use checkpoint::{
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{DivergenceReport, FLOAT_TOLERANCE, compare_staged, values_diverge};
 pub use executor::{
-    ComponentStatus, DEFAULT_COMMAND_QUEUE_CAPACITY, Executor, LinkError, PointMap, PointSpec,
-    ScanError, WiringError,
+    ComponentStatus, DEFAULT_COMMAND_QUEUE_CAPACITY, DEFAULT_RECEIPT_LOG_CAPACITY, Executor,
+    LinkError, PointMap, PointSpec, ScanError, WiringError,
 };
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange, SourceRestart, TrackReport, Transfer};
