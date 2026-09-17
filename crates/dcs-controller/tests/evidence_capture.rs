@@ -241,8 +241,9 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
         active_client.advance(1).unwrap();
 
         // The promoted peer — the endpoint the reproduction read —
-        // still serves the run's full receipt log, its journal carrying
-        // the command's settlement and the role changes of the switch.
+        // still serves the run's retained receipt log, its journal
+        // carrying the command's settlement and the role changes of the
+        // switch.
         assert_eq!(
             standby_client.receipts().unwrap(),
             active_client.receipts().unwrap()

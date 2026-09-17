@@ -1233,9 +1233,16 @@ impl<'d> Peer<'d> {
         self.executor.snapshot()
     }
 
-    /// The executor's receipt log.
+    /// The executor's receipt log — its retained, bounded tail.
     pub fn receipts(&self) -> &[CommandReceipt] {
         self.executor.receipts()
+    }
+
+    /// The absolute submission index of `receipts()[0]` — the count of
+    /// settled receipts already evicted; see
+    /// [`Executor::receipt_base`].
+    pub fn receipt_base(&self) -> u64 {
+        self.executor.receipt_base()
     }
 
     /// Records one scan cycle that overran its wall-clock period —

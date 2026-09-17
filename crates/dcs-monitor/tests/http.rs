@@ -1475,6 +1475,92 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
 }
 
 #[test]
+fn the_served_receipt_log_stays_bounded_while_the_journal_keeps_the_audit() {
+    // The QA finding's surface end to end: `GET /receipts` and the
+    // checkpoint the standby pulls flatten at the declared bound once
+    // settled receipts outnumber it — the journal keeps every
+    // settlement, and pending entries are never evicted.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    let executor = Executor::new(&driver, map, vec![Box::new(Scale)])
+        .unwrap()
+        .with_receipt_log_capacity(4);
+    let monitor = Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap();
+    let client = MonitorClient::new(monitor.local_addr());
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+
+        // Six settled commands against a bound of four: the served log
+        // and the checkpoint carry the newest four only, the eviction
+        // gap reading through `attempts`.
+        for value in 0..6 {
+            let receipt = client
+                .command(&write_value(
+                    10,
+                    ValueKind::Float,
+                    Value::Float(value as f64),
+                ))
+                .unwrap();
+            assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+            client.advance(1).unwrap();
+        }
+        assert_eq!(client.receipts().unwrap().len(), 4);
+        let checkpoint = client.checkpoint().unwrap();
+        assert_eq!(checkpoint.receipts.len(), 4);
+        assert_eq!(checkpoint.receipt_base(), 2);
+        assert_eq!(client.snapshot().unwrap().command_queue.attempts, 6);
+
+        // Two more pending submissions: the settled prefix evicts to
+        // the bound while both `Accepted` entries stay served.
+        for value in 6..8 {
+            client
+                .command(&write_value(
+                    10,
+                    ValueKind::Float,
+                    Value::Float(value as f64),
+                ))
+                .unwrap();
+        }
+        let receipts = client.receipts().unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert!(matches!(
+            receipts[2].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            receipts[3].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        client.advance(1).unwrap();
+        assert!(
+            client
+                .receipts()
+                .unwrap()
+                .iter()
+                .all(|receipt| matches!(receipt.outcome, CommandOutcome::Applied { .. }))
+        );
+
+        // Eviction dropped no audit: every one of the eight submissions
+        // journaled its settlement exactly once.
+        let journal = client.journal(0).unwrap();
+        let settlements = journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .count();
+        assert_eq!(settlements, 8);
+
+        monitor.shutdown();
+    });
+}
+
+#[test]
 fn the_paced_loops_overrun_feed_counts_into_io_health() {
     // The paced controller loop's documented feed: a cycle that overran
     // its wall-clock period is reported through
