@@ -331,8 +331,10 @@ pub enum Transfer {
     /// The checkpoint carried a different model fingerprint and the
     /// revision-armed peer crossed the boundary under the documented
     /// carryover rule — the peer reports [`StandbySync::Reinitialized`]
-    /// carrying this report.
-    Reinitialized(CarryoverReport),
+    /// carrying this report. Boxed beside `Applied`, which carries
+    /// nothing — the same indirection [`StandbySync::Reinitialized`]
+    /// gives the report on the wire.
+    Reinitialized(Box<CarryoverReport>),
 }
 
 /// What one standby tracking cycle did — the answer of
@@ -1005,7 +1007,9 @@ impl<'d> Peer<'d> {
             return Err(ApplyError::OwnsField);
         }
         if self.revision && checkpoint.model_fingerprint != self.executor.model_fingerprint() {
-            return self.reinitialize(checkpoint).map(Transfer::Reinitialized);
+            return self
+                .reinitialize(checkpoint)
+                .map(|report| Transfer::Reinitialized(Box::new(report)));
         }
         self.apply(checkpoint).map(|()| Transfer::Applied)
     }
@@ -1632,7 +1636,7 @@ mod tests {
         // the named sync state.
         let transfer = peer.transfer(&checkpoint).unwrap();
         let report = match &transfer {
-            Transfer::Reinitialized(report) => report.clone(),
+            Transfer::Reinitialized(report) => (**report).clone(),
             Transfer::Applied => panic!("a foreign fingerprint reinitializes"),
         };
         assert_eq!(report.resumed_at, Tick(5));
