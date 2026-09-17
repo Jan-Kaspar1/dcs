@@ -37,6 +37,9 @@ ci/simulate.py         the deterministic scripted-simulation runner;
 ci/restart.py          the restart-recovery leg — the driven
                        controller stopped mid-scenario and relaunched
                        onto the same state/journal files
+ci/pair.py             the redundant-pair leg — the manifest-declared
+                       standby pair run, switched, and checked against
+                       its persisted state and journal files
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -196,6 +199,29 @@ check in stdlib-only python, while full draft-2020-12 validation —
 every keyword the draft defines — stays with the platform's own checks,
 where the `jsonschema` dependency exists. A missing or mistyped
 required field — any structural divergence — fails `schema-mismatch`.
+
+The check's `pair` stage then proves the declared pair runs — not just
+that its definition parses: `ci/deploy_rig.py` verifies the standby
+wiring and persistence fields statically, while `ci/pair.py` reads
+those fields out of `deploy/manifest.json` and spawns
+`dcs-plant-server` plus two released `dcs-controller --driven --remote`
+instances wired exactly as the manifest declares — the standby's
+`--standby` flag at the peer it names, each controller's declared
+`--state-file`/`--journal-file` carried at runner-owned scratch paths.
+The leg converges the standby to `tracking` through the served `GET
+/role`, drives scans through `POST /scan` on each peer keeping their
+served snapshots identical, submits a kind-declared command the owner
+receipts `accepted` and the standby refuses `not_active`, and issues
+the receipted switchover — `POST /demote` on the field owner, `POST
+/promote` on the converged standby, each answered by its role report.
+The run must continue bumplessly: the promoted peer settles `active` at
+the continuing tick, the demoted peer reconverges `tracking`, the
+adopted receipt log stays identical on both peers, and each peer's
+durable journal file carries the run's `role_changed` transitions
+beside the settled receipt — the persistence vocabulary's first
+behavioral exercise, not just its static agreement. A violated
+contract fails `pair-failed`; two passes must produce the identical
+`pair-digest`, a divergence failing `pair-nondeterministic`.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
@@ -362,6 +388,9 @@ operator surface diverging from the emitted model's declaration is
 `surface-mismatch`; a restarted controller losing its persisted run —
 or failing to name a refused checkpoint — is `restart-resume-failed`;
 two restart-leg passes diverging is `restart-resume-nondeterministic`;
+a declared pair failing to converge, switch, or keep its journaled
+record is `pair-failed`; two pair-leg passes diverging is
+`pair-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is

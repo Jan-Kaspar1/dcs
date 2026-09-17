@@ -71,6 +71,21 @@
 #                served GET /schema document's structural conformance
 #                to the fetched block-interfaces schema artifact
 #                (surface-mismatch, schema-mismatch)
+#   pair         the consumer-declared redundant pair — the deployment
+#                the manifest actually declares, not just its
+#                definition: ci/pair.py reads the standby wiring and
+#                persistence fields out of deploy/manifest.json and
+#                spawns dcs-plant-server plus two released
+#                dcs-controller --driven --remote instances wired per
+#                the manifest, the declared --state-file/--journal-file
+#                paths under a runner-owned scratch directory. The
+#                standby converges to tracking through the served
+#                GET /role, scans driven through POST /scan keep the
+#                peers' images identical, a receipted demote/promote
+#                switches the roles, and the run continues bumplessly
+#                with the adopted receipts and the durable journal
+#                files' transition records intact; two passes produce
+#                identical digests (pair-failed, pair-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -610,13 +625,53 @@ for case in missing-required mistyped-required mistyped-nested; do
     served_case "$case"
 done
 
+echo "== pair =="
+# The redundant-pair half of WW-LCM-001's switchover evidence — the
+# deployment the manifest declares, run: the deploy stage proves the
+# wiring statically; this leg runs it. ci/pair.py reads the standby
+# target and the persistence fields out of deploy/manifest.json, spawns
+# dcs-plant-server plus the two declared controllers as released
+# --driven --remote instances — the standby wired --standby at its
+# named peer, each controller's declared --state-file/--journal-file
+# at runner-owned scratch paths — converges the standby to tracking,
+# drives scans through POST /scan on each peer, issues the receipted
+# demote/promote switch, and asserts the run continues bumplessly with
+# the adopted receipt log identical and each peer's durable journal
+# file carrying the transition records. Two passes must produce
+# identical digests.
+run_pair() {
+    python3 ci/pair.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_pair)" \
+    || fail "pair-failed: the redundant-pair leg did not hold — its evidence lines are above"
+SECOND="$(run_pair)" \
+    || fail "pair-failed: the redundant-pair leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "pair-nondeterministic: two pair-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a standby wired at a peer that never serves must
+# surface the named diagnostic — never a silently unconverged pass.
+if out="$(run_pair --tamper broken-peer-flag 2>&1)"; then
+    fail "pair-unchecked: a broken peer flag passed the pair leg"
+fi
+[[ "$out" == *"never reported tracking"* ]] \
+    || fail "pair-unchecked: the broken-peer-flag case did not report its named diagnostic: $out"
+echo "  broken-peer-flag: reported, pair-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/restart.py \
-        ci/schema_conformance.py ci/simulate.py README.md; do
+for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/pair.py \
+        ci/restart.py ci/schema_conformance.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
