@@ -2788,7 +2788,9 @@ function describeEventField(field) {
 // {"step_failed": ...} | {"event_emitted": {event: {event, component,
 // fields}}} — the kind-declared event's durable record — |
 // {"role_changed": {from, to}} |
-// {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
+// {"divergence_detected": {mismatches}} | {"reinitialized": {report}} |
+// {"source_restarted": {was_aligned, resumed_at}} — the tracked
+// stream's generation boundary.
 function describeEvent(event) {
   if ("point_changed" in event) {
     const change = event.point_changed;
@@ -2824,6 +2826,14 @@ function describeEvent(event) {
       event.divergence_detected.mismatches.map(m =>
         pointName(m.point) + " (staged " + formatValue(m.staged) +
         ", field " + formatValue(m.field) + ")").join(", ");
+  }
+  if ("source_restarted" in event) {
+    const restart = event.source_restarted;
+    return "tracking source restarted: resumed at tick " +
+      restart.resumed_at +
+      (restart.was_aligned === null || restart.was_aligned === undefined
+        ? ""
+        : " (was aligned to " + restart.was_aligned + ")");
   }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;

@@ -141,6 +141,26 @@ pub enum JournalEvent {
         /// The crossing's carryover record.
         report: CarryoverReport,
     },
+    /// A tracking peer's checkpoint source restarted or was replaced:
+    /// the stream's tick fell below the run's last alignment — or,
+    /// before any alignment stood, below the run's own tick — a new
+    /// tick generation, not a continuation of the tracked line. The
+    /// peer adopted the checkpoint's state without rewinding its run
+    /// tick: the entry's `tick` is the run tick the resync landed at,
+    /// `was_aligned` the alignment the regression broke, and
+    /// `resumed_at` the regressed checkpoint's own tick — where the new
+    /// generation's stream resumed. The redundant pair's audit record
+    /// of a generation boundary the checkpoint protocol cannot name on
+    /// its own.
+    SourceRestarted {
+        /// The last applied checkpoint's tick before the regression —
+        /// `None` when the run had never aligned, the regression then
+        /// measured against the run's own tick.
+        was_aligned: Option<Tick>,
+        /// The regressed checkpoint's own tick — where the new
+        /// generation's stream resumed.
+        resumed_at: Tick,
+    },
     /// A component emitted a kind-declared event — the durable record
     /// of a [`Declared`](crate::AdaptedEvent::Declared)-provenance
     /// [`EventSpec`](crate::EventSpec). The entry's `tick` is the
@@ -314,6 +334,22 @@ mod tests {
                     },
                 },
             },
+            JournalEntry {
+                seq: 12,
+                tick: Tick(15),
+                event: JournalEvent::SourceRestarted {
+                    was_aligned: Some(Tick(14)),
+                    resumed_at: Tick(1),
+                },
+            },
+            JournalEntry {
+                seq: 13,
+                tick: Tick(20),
+                event: JournalEvent::SourceRestarted {
+                    was_aligned: None,
+                    resumed_at: Tick(2),
+                },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -330,6 +366,7 @@ mod tests {
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"source_restarted\""), "{json}");
     }
 
     #[test]

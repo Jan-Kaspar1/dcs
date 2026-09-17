@@ -89,5 +89,5 @@ pub use executor::{
     ScanError, WiringError,
 };
 pub use gate::WriteGate;
-pub use peer::{ApplyError, Peer, RoleChange, TrackReport, Transfer};
+pub use peer::{ApplyError, Peer, RoleChange, SourceRestart, TrackReport, Transfer};
 pub use revision::CarryoverError;
