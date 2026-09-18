@@ -798,6 +798,79 @@ fn a_released_claim_returns_the_field_to_unclaimed_not_open() {
     });
 }
 
+/// Connects an attachment that ensures `owner` on `addr` and returns it
+/// once it holds the claim alone — a same-token ensure answers
+/// `ClaimedShared` while a dropped holder's corpse still counts,
+/// `Done` once every prior holder has been reaped server-side.
+fn sole_holder(addr: SocketAddr, owner: u64) -> RemoteDriver {
+    let probe = RemoteDriver::connect(addr).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match probe.ensure_writer(owner).unwrap() {
+            ClaimGrant::Exclusive => return probe,
+            ClaimGrant::Shared => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "a dropped holder was not reaped within {deadline:?}"
+                );
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_non_holder_release_cannot_strip_a_dead_owners_claim() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(5).unwrap();
+        // The owner's link drops: the server releases only its hold,
+        // leaving the dead-owner claim fencing the field for its
+        // token — the failure shape the never-released rule exists to
+        // preserve.
+        drop(owner);
+
+        // The empty holder set is unobservable — a same-token probe
+        // that could report it joins the set — so the reap is chased
+        // indirectly: this probe becomes the sole holder only once the
+        // owner's corpse is gone, and its own drop leaves exactly one
+        // corpse whose reap is then in flight.
+        drop(sole_holder(addr, 5));
+
+        // The defect's chain, watched across that last reap: an
+        // attachment holding nothing sends `release_writer`, then a
+        // foreign token ensures. A non-holder's release is a no-op —
+        // the dead owner's claim keeps the foreign token fenced — and
+        // the release stripping the claim is what let the ensure land.
+        let thief = RemoteDriver::connect(addr).unwrap();
+        let stranger = RemoteDriver::connect(addr).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            thief.release_writer().unwrap();
+            assert_eq!(
+                stranger.ensure_writer(9),
+                Err(RemoteError::Fenced),
+                "a non-holder's release stripped the dead owner's claim"
+            );
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // The same-token re-arm the fencing protects: the dead owner's
+        // re-attach is granted and its writes land — and its own
+        // release is the real hand-back, returning the field to
+        // `unclaimed`.
+        let rearmed = RemoteDriver::connect(addr).unwrap();
+        rearmed.ensure_writer(5).unwrap();
+        rearmed.write(PointId(20), Value::Float(7.0)).unwrap();
+        assert_eq!(rearmed.read(PointId(20)).unwrap().value, Value::Float(7.0));
+        rearmed.release_writer().unwrap();
+        assert_eq!(thief.step(0.1), Err(RemoteError::Unclaimed));
+    });
+}
+
 #[test]
 fn an_unclaimed_field_write_re_arms_the_recorded_owner_in_place() {
     with_server(loopback_map(), |addr| {

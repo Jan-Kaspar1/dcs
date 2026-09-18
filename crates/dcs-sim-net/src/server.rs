@@ -293,16 +293,20 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             // The deliberate hand-back: this connection leaves the
             // holder set, and the last hold out releases the claim —
             // the field returns to `unclaimed`, still closed to
-            // mutation. Disconnect alone never does this
-            // (`release_hold` drops the hold but keeps the claim), so a
-            // crashed owner's claim keeps fencing its token while a
-            // tool that claimed conditionally can hand the field back.
+            // mutation. A connection holding nothing removes nothing,
+            // so its release changes nothing either — a dead owner's
+            // empty holder set is the state the fencing exists for,
+            // not a claim an attachment may strip. Disconnect alone
+            // never does this (`release_hold` drops the hold but keeps
+            // the claim), so a crashed owner's claim keeps fencing its
+            // token while a tool that claimed conditionally can hand
+            // the field back.
             let mut writer = shared.writer.lock().unwrap();
-            if let Some(claim) = writer.as_mut() {
-                claim.holders.remove(&connection);
-                if claim.holders.is_empty() {
-                    *writer = None;
-                }
+            if writer
+                .as_mut()
+                .is_some_and(|claim| claim.holders.remove(&connection) && claim.holders.is_empty())
+            {
+                *writer = None;
             }
             PlantResponse::Done
         }
