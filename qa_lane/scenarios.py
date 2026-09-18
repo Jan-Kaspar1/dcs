@@ -7417,17 +7417,20 @@ LAG_STAGING_ACTOR = 'qa-lane'
 
 def _component_instance(schema, kind, alarm_point=None):
     """The served name of the `kind` component instance — when several
-    instances share the kind, the one whose `alarm` measurement binds
-    `alarm_point` — or None."""
+    instances share the kind, the one whose `alarm` resource binds
+    `alarm_point` — or None. The `alarm` port is Status-role, so it
+    lands in the interface's `state` collection, not `measurements`."""
     for entry in schema.get('interfaces') or []:
         interface = entry.get('interface') or {}
         if interface.get('kind') != kind:
             continue
         if alarm_point is None:
             return entry.get('name')
-        for measurement in interface.get('measurements') or []:
-            if measurement.get('name') == 'alarm' \
-                    and measurement.get('point') == alarm_point:
+        resources = (interface.get('measurements') or []) \
+            + (interface.get('state') or [])
+        for resource in resources:
+            if resource.get('name') == 'alarm' \
+                    and resource.get('point') == alarm_point:
                 return entry.get('name')
     return None
 
@@ -7663,11 +7666,14 @@ def scenario_lag_staging(ctx):
                 return next(iter(raw.values()), None)
             return raw
 
-        def poll(cond):
+        def poll(cond, keys=()):
             snap = _try_snapshot(ctx, base)
             if snap is None:
                 return None
             last['snap'] = snap
+            for key in keys:
+                if _point_sample(snap, points[key]) is not None:
+                    seen.add(key)
             return snap if cond(snap) else None
 
         def leg(name, cond, keys):
@@ -7675,7 +7681,7 @@ def scenario_lag_staging(ctx):
             miss classifies inconclusive when an awaited output never
             reported a sample, staging-failed when the served values
             never landed the leg."""
-            hit = wait_for(lambda: poll(cond),
+            hit = wait_for(lambda: poll(cond, keys),
                            time.monotonic() + LAG_STAGING_DEADLINE,
                            interval=LAG_STAGING_POLL)
             snap = last.get('snap') or {}
