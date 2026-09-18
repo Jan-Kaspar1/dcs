@@ -112,7 +112,8 @@
 //! checkpoint is the heartbeat miss the failover budget counts. Each
 //! pull also announces the pulling monitor's own address
 //! (`GET /checkpoint?peer=`), so the serving instance learns where its
-//! successor lives. There,
+//! successor lives — an announce the serving side accepts only when it
+//! names the pulling connection's own source address. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -1286,9 +1287,11 @@ fn main() -> ExitCode {
 /// the configured `--standby`/`--peer` target when set, else the monitor
 /// address a tracking peer announced through its `?peer=` pulls — the
 /// follow-peer half that lets a demoted launched active find its
-/// successor without a restart. The puller follows the resolved source,
-/// respawning when it changes, and announces this monitor's own address
-/// on every pull so the serving peer learns where to track back. A
+/// successor without a restart, the serving side accepting the
+/// announce only as the pulling connection's own source address. The
+/// puller follows the resolved source, respawning when it changes, and
+/// announces this monitor's own address on every pull so the serving
+/// peer learns where to track back. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
