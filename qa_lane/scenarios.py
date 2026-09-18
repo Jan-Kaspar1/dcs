@@ -4758,14 +4758,21 @@ FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
 
 
 def _point_sample(snapshot, point):
+    """The served sample of one point in a /snapshot payload, or None
+    when the point is absent — callers test or guard the None rather
+    than assume a dict."""
     for entry in (snapshot or {}).get('points', []):
         if entry.get('point') == point:
-            return entry.get('sample') or {}
-    return {}
+            return entry.get('sample')
+    return None
 
 
 def _point_quality(snapshot, point):
-    return _point_sample(snapshot, point).get('quality')
+    """The served quality of one point, or None when the point is
+    absent — the missing-point answer a diagnostics leg reports
+    instead of raising."""
+    sample = _point_sample(snapshot, point)
+    return sample.get('quality') if sample is not None else None
 
 
 def _forced_entry(snapshot, point):
@@ -6443,14 +6450,6 @@ def _quality_key(quality):
         name = next(iter(quality))
         return str(name) + ':' + str(quality[name])
     return 'unknown'
-
-
-def _point_sample(snapshot, point):
-    """The served sample of one point in a /snapshot payload, or None."""
-    for entry in snapshot.get('points', []):
-        if entry.get('point') == point:
-            return entry.get('sample')
-    return None
 
 
 def _plant_connect(ctx, timeout=5):
