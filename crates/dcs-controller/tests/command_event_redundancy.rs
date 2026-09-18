@@ -515,3 +515,197 @@ fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// QA finding `demote-boundary-pending-command-lost-or-phantom-applied`,
+/// the carried outcome: a command admitted on the active and still
+/// `Accepted` when `POST /demote` lands used to race the demoted run's
+/// first quiesced scan — settling `applied` on an image the gate
+/// already fenced, erased by the next adoption. Demotion now suspends
+/// the pending queue, so the receipt stays `Accepted` in the
+/// checkpoint the successor's final-sync pull carries: the command
+/// settles once, `applied`, on the run that actually wrote it — and
+/// the demoted peer's own scan can never mint a phantom application.
+#[test]
+fn a_pending_command_at_the_demote_boundary_rides_the_final_sync_carry() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-carry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Converge the pair on the active's checkpoints — both rest at
+    // tick N.
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+
+    // The admission lands on the active between the standby's last
+    // pull and the demote — `Accepted`, queued for the active's next
+    // scan.
+    let write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.command(&write).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
+        },
+        "{receipt:?}"
+    );
+
+    // The reproduction's ordering: demote before the active's next
+    // scan, then promote the standby. The demotion suspends the
+    // pending write — its receipt stays `Accepted` in the checkpoint
+    // the promote boundary's final pull carries.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+    let carried = standby.receipts().unwrap();
+    assert_eq!(carried.len(), 1, "{carried:?}");
+    assert!(
+        matches!(carried[0].outcome, CommandOutcome::Accepted { .. }),
+        "{carried:?}"
+    );
+
+    // The promoted peer's first scan settles the carried write —
+    // applied, on the run that owns the field.
+    let continued = standby.advance(1).unwrap();
+    assert_eq!(image_value(&continued, HELD), Value::Bool(true));
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    assert_eq!(
+        standby.receipts().unwrap()[0].outcome,
+        CommandOutcome::Applied { tick: Tick(N + 1) }
+    );
+
+    // The demoted peer's tracking pull adopts the line's checkpoint:
+    // the carried entry covers its suspended copy — nothing
+    // supersedes, and its own quiesced scan applies nothing the line
+    // did not. Its journal's `applied` settlement is the honest one —
+    // the field really took the write — and the adopted image keeps
+    // the value instead of erasing it a tick later.
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(true)
+    );
+    assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&standby, &write),
+        vec![(N + 1, CommandOutcome::Applied { tick: Tick(N + 1) })]
+    );
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(N + 1, CommandOutcome::Applied { tick: Tick(N + 1) })]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The apply-wins half of the finding: when the demoted peer's first
+/// tracking pull lands a checkpoint the pending command is absent
+/// from — the successor's line never carried it — the adoption used
+/// to drop the receipt wholesale: no settlement, no retained receipt,
+/// no journal record. The adopted log now reconciles the orphaned
+/// entry: it settles `Rejected`/`Superseded`, journaled once, and the
+/// quiesced scan that follows can still not apply it — no phantom
+/// `applied`, no point change the next adoption would erase.
+#[test]
+fn an_orphaned_pending_command_at_the_demote_boundary_settles_superseded() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-orphan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+
+    let write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.command(&write).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
+        },
+        "{receipt:?}"
+    );
+
+    // The orphaned shape: demote, then let the demoted peer's own
+    // tracking cycle run *before* the standby's promote-boundary pull
+    // can carry the command — the pulled checkpoint is the standby's
+    // own, whose receipt log predates the admission. The adoption
+    // settles the abandoned pending command `superseded` and journals
+    // it; the receipt log converges on the line's without a trace of
+    // the write except the settlement itself.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(
+            N,
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: Some(HELD) }
+            }
+        )]
+    );
+    // No phantom: no `applied` settlement journaled on either peer,
+    // and the quiesced image never minted the point change the next
+    // adoption would have had to erase.
+    assert_eq!(settlements_of(&standby, &write), vec![]);
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(false)
+    );
+
+    // The switchover completes on the line's own terms: the standby
+    // promotes, and the demoted peer's reconvergence introduces no
+    // second settlement — the orphaned command was already audited.
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+    standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(
+            N,
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: Some(HELD) }
+            }
+        )]
+    );
+    assert_eq!(settlements_of(&standby, &write), vec![]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
