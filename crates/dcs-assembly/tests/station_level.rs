@@ -218,7 +218,7 @@ fn bool_at(executor: &Executor, point: PointId) -> bool {
 /// `t + 1`, and the chain sees the failover's selection one loopback
 /// boundary after that.
 fn scan(executor: &mut Executor, driver: &FanoutDriver) {
-    executor.scan().unwrap();
+    executor.scan();
     driver.step(0.1).unwrap();
 }
 

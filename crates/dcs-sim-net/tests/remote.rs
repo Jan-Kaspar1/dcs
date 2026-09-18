@@ -112,7 +112,7 @@ fn scripted_run(driver: &(dyn IoDriver + Sync), mut step: impl FnMut(f64) -> Tic
     .unwrap();
     let mut trace = Vec::new();
     for _ in 0..20 {
-        executor.scan().unwrap();
+        executor.scan();
         step(0.1);
         trace.push(executor.sample(PointId(1)).unwrap());
         trace.push(executor.sample(PointId(2)).unwrap());
@@ -324,7 +324,7 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         // A live link reports connected with no failure history — the
         // driver's own diagnostics surface, beside the counters.
         assert_eq!(
@@ -340,7 +340,7 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
         // The dead link fails the input read — degraded to a Bad sample
         // — and the output write; both degrade into io_health while the
         // scan completes: a field outage does not stop the controller.
-        assert_eq!(executor.scan(), Ok(Tick(2)));
+        assert_eq!(executor.scan(), Tick(2));
 
         let snapshot = executor.snapshot();
         let health = &snapshot.io_health;
@@ -874,7 +874,7 @@ fn an_unclaimed_window_does_not_demote_the_standing_owner() {
         })
         .with_field_release(|| active.release_claim());
         peer.activate().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Active);
 
         // The issue's reproduction: a second connection claims the plant
@@ -887,7 +887,7 @@ fn an_unclaimed_window_does_not_demote_the_standing_owner() {
         // One active scan: the write re-arms the recorded owner and
         // lands — no `field_claim_lost`, no demotion, the field owned
         // again under the standing token.
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Active);
         assert!(peer.take_fencing_losses().is_empty());
         assert!(peer.take_role_changes().is_empty());

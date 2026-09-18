@@ -119,8 +119,9 @@
 //!   and the applying scan re-queues the carried receipt rather than
 //!   losing the command unaudited
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
-//!   [`TelemetrySnapshot`] taken after the last one; a `ScanError` → `500`;
-//!   refused with `409` on a paced monitor (see below)
+//!   [`TelemetrySnapshot`] taken after the last one; a failing
+//!   [`Driven::after_scan`] hook → `500`; refused with `409` on a paced
+//!   monitor (see below)
 //! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
 //!   page described below
 //!
@@ -388,7 +389,7 @@ use dcs_core::{
     PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, ScanError, TrackReport, Transfer};
+use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, TrackReport, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -456,8 +457,7 @@ const SERVE_WORKERS: usize = 4;
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
 /// ownership decides the step), and the checkpoint a state-file run
-/// persists at that boundary. A failure fails the request like a scan
-/// failure.
+/// persists at that boundary. A failure fails the request with `500`.
 pub type AfterScan<'d> = Box<dyn Fn(&Peer<'d>) -> Result<(), String> + Send + Sync + 'd>;
 
 /// Runs at a command's admission boundary — inside `POST /command`,
@@ -765,7 +765,7 @@ impl<'d> Monitor<'d> {
     /// endpoints track the paced run; their serving work stays off the
     /// lock. A pending role transition settles on the completed scan
     /// and its journal entry follows the scan's own events.
-    pub fn paced_scan(&self) -> Result<Tick, ScanError> {
+    pub fn paced_scan(&self) -> Tick {
         let mut shared = self.shared.lock().unwrap();
         scan_and_record(&mut shared, &self.store)
     }
@@ -1161,10 +1161,7 @@ impl<'d> Monitor<'d> {
                         // between scans instead of waiting the batch
                         // out.
                         let mut shared = self.shared.lock().unwrap();
-                        if let Err(error) = scan_and_record(&mut shared, &self.store) {
-                            failure = Some(error.to_string());
-                            break;
-                        }
+                        scan_and_record(&mut shared, &self.store);
                         if let Some(after_scan) = &self.driven.after_scan
                             && let Err(error) = after_scan(&shared.peer)
                         {
@@ -1312,27 +1309,9 @@ fn track_and_record(
 /// events, and the once-materialized snapshot publishes into the
 /// bounded store the read endpoints serve. The lock's hold ends at the
 /// swap — the consumer side never joins it.
-fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanError> {
+fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     let Shared { peer, recorder } = shared;
-    let tick = match peer.scan() {
-        Ok(tick) => tick,
-        Err(error) => {
-            // A scan aborted mid-way is not recorded — the run ends at
-            // it — but its boundary already counted the I/O faults
-            // into `io_health`: publish the faulted boundary's state
-            // so the served read model reports the fault rather than
-            // sitting on the last healthy scan. A fenced write on a
-            // peer that cannot quiesce it — no gate — still lands here
-            // carrying its claim-loss report, which journals the same
-            // way: the event belongs to the run's audit trail, not only
-            // the exit cause.
-            for loss in peer.take_fencing_losses() {
-                recorder.note_field_claim_lost(loss.tick, loss.point);
-            }
-            store.publish(peer.tick(), peer.snapshot(), peer.receipts());
-            return Err(error);
-        }
-    };
+    let tick = peer.scan();
     let snapshot = recorder.record_scan(peer.executor(), tick);
     // A field write the plant fenced — the claim this owner held was
     // preempted — completed the scan degraded and demoted the peer
@@ -1347,7 +1326,7 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Result<Tick, ScanE
         recorder.note_role_change(change.tick, change.from, change.to);
     }
     store.publish(tick, snapshot, peer.receipts());
-    Ok(tick)
+    tick
 }
 
 /// Splits a URL query into `key=value` pairs. The monitoring endpoints
