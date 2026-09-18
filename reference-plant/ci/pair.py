@@ -447,6 +447,7 @@ class PairRig:
         promote_what="the converged standby",
         promote_note="",
         audit_receipts=False,
+        after_promote=None,
     ):
         """The documented switch: `POST /demote` on the field owner
         then `POST /promote` on the converged peer — each answered by
@@ -456,7 +457,10 @@ class PairRig:
         demoted peer reconverged `tracking`, each peer's served
         journal audited for the switch's role transitions appended to
         its pre-switch record, and — with `audit_receipts` — the
-        adopted receipt logs asserted one identical log. Returns the
+        adopted receipt logs asserted one identical log. `after_promote`,
+        when given, runs once after the promote report and before the
+        first handover tick — the last moment a leg can act on the
+        demoted peer before its tracking pulls begin. Returns the
         switch record: the demote/promote reports, the handover
         `ticks` and final `owner` snapshot, both role reports, the
         promoted peer's receipts when audited, and each named peer's
@@ -473,6 +477,8 @@ class PairRig:
             "ticks": [],
             "owner": None,
         }
+        if after_promote is not None:
+            after_promote()
         for _ in range(handover):
             _tracked, owner = self.tick(
                 demote_url,

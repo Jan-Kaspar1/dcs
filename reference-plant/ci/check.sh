@@ -173,6 +173,21 @@
 #                pair's roles unchanged; two passes produce identical
 #                digests (burst-order-failed,
 #                burst-order-nondeterministic)
+#                The stage's peer-announce leg, ci/peer_announce.py
+#                on the same declared deployment: with the pair
+#                tracking — the standby's per-scan pulls announcing
+#                its own monitor address on the field owner, the
+#                source a demoted owner later follows — a foreign
+#                GET /checkpoint?peer=<closed-port> naming an
+#                address that is not the pulling connection's own
+#                must still answer the checkpoint read while the
+#                crafted announce is refused, and the
+#                demote/promote switch must reconverge the demoted
+#                peer tracking on its real successor rather than
+#                stranding it unsynchronized on the planted address;
+#                the pair's launch roles then restore; two passes
+#                produce identical digests (peer-announce-failed,
+#                peer-announce-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -970,6 +985,51 @@ for tamper in dropped-transition reordered-transition; do
     echo "  $tamper: reported, burst-order-failed"
 done
 
+# The pair contract's peer-announce leg, on the same
+# manifest-declared deployment: ci/peer_announce.py converges the
+# pair — the standby's per-scan checkpoint pulls announcing its own
+# monitor address on the field owner, the tracking source a demoted
+# owner later follows — then issues a foreign GET
+# /checkpoint?peer=<closed-port> naming an address that is not the
+# pulling connection's own. The checkpoint read must still answer
+# while the crafted announce is refused — it cannot overwrite the
+# recorded tracking source. The demote/promote switch then proves
+# the record: the crafted announce is issued again at the decisive
+# point — after the promote's own re-announce, before the demoted
+# peer's first tracking pull, the last write its fallback would
+# follow — and the demoted peer reconverges tracking on its real
+# successor rather than stranding unsynchronized on the planted
+# address. The leg restores the pair's launch roles; two passes
+# must produce identical digests.
+run_peer_announce() {
+    python3 ci/peer_announce.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_peer_announce)" \
+    || fail "peer-announce-failed: the peer-announce leg did not hold — its evidence lines are above"
+SECOND="$(run_peer_announce)" \
+    || fail "peer-announce-failed: the peer-announce leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "peer-announce-nondeterministic: two peer-announce passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a crafted announce naming the pulling
+# connection's own source — a closed local port — lands exactly as it
+# would on a controller whose acceptance check regressed, stranding
+# the demoted peer unsynchronized; the leg must surface the named
+# diagnostic — never a silently poisoned pass.
+if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
+    fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
+fi
+[[ "$out" == *"never reconverged"* ]] \
+    || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
+echo "  landed-announce: reported, peer-announce-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -977,6 +1037,7 @@ echo "== consumers =="
 # platform checkout.
 for file in ci/burst_order.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
+        ci/peer_announce.py \
         ci/refusal.py ci/restart.py ci/schema_conformance.py \
         ci/simulate.py ci/takeover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
