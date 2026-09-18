@@ -136,6 +136,25 @@
 #                produce identical digests
 #                (force-carryover-failed,
 #                force-carryover-nondeterministic)
+#                The stage's burst-order leg, ci/burst_order.py on the
+#                same declared deployment: with the pair tracking and
+#                the pump group holding a full demand, the emitted
+#                alarm set's deterministic consequential cascade
+#                (WW-ENG-003, WW-ALM-003, WW-ALM-004) is driven through
+#                the plant protocol's unfenced surface — a quality
+#                fault on level-primary so backup-active annunciates
+#                first, the power-fail contact written so the station
+#                permissives drop and the power alarm fires while the
+#                undrawn level climbs, then both run contacts faulted
+#                so none-available/all-faulted land last — every driven
+#                alarm's alarm/unacknowledged asserted through the
+#                active's monitor, the durable journal's ordered
+#                point_changed record preserving the driven activation
+#                order with no dropped or reordered entries, the
+#                restores journaling the returns in order, and the
+#                pair's roles unchanged; two passes produce identical
+#                digests (burst-order-failed,
+#                burst-order-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -837,14 +856,58 @@ fi
     || fail "force-carryover-unchecked: the expect-unforced case did not report its named diagnostic: $out"
 echo "  expect-unforced: reported, force-carryover-failed"
 
+# The pair contract's alarm-burst leg, on the same manifest-declared
+# deployment: ci/burst_order.py converges the pair and drives the
+# simulated well until the pump group holds a full demand — both pumps
+# staged and running — then drives the emitted alarm set's
+# consequential cascade (WW-ENG-003, WW-ALM-003, WW-ALM-004) through
+# the plant protocol's unfenced surface: a quality fault on
+# level-primary so backup-active annunciates first, the power-fail
+# contact written so the station permissives drop and the power alarm
+# fires while the undrawn level climbs, then both run contacts'
+# quality faulted so the proven motor faults roll up to all-faulted
+# last. The leg asserts every driven alarm's alarm/unacknowledged
+# through the active's monitor, audits the field owner's durable
+# journal for the driven activations and their returns in seq order —
+# the first-out record, with no dropped or reordered entries — and the
+# pair's roles unchanged. Two passes must produce identical digests.
+run_burst() {
+    python3 ci/burst_order.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_burst)" \
+    || fail "burst-order-failed: the alarm-burst leg did not hold — its evidence lines are above"
+SECOND="$(run_burst)" \
+    || fail "burst-order-failed: the alarm-burst leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "burst-order-nondeterministic: two burst-order passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a record missing a driven transition, or one
+# carrying them out of order, must surface the named diagnostic —
+# never a silently unexercised first-out proof.
+for tamper in dropped-transition reordered-transition; do
+    if out="$(run_burst --tamper "$tamper" 2>&1)"; then
+        fail "burst-order-unchecked: a $tamper journal passed the burst leg"
+    fi
+    [[ "$out" == *"missing or out of order"* ]] \
+        || fail "burst-order-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, burst-order-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/force_carryover.py \
-        ci/pair.py ci/refusal.py ci/restart.py ci/schema_conformance.py \
-        ci/simulate.py ci/takeover.py README.md; do
+for file in ci/burst_order.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
+        ci/force_carryover.py ci/pair.py ci/refusal.py ci/restart.py \
+        ci/schema_conformance.py ci/simulate.py ci/takeover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
