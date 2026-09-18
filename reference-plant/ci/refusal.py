@@ -55,10 +55,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 import pair
 import simulate
@@ -70,11 +67,7 @@ def eprint(*args):
 
 Abort = pair.Abort
 
-# The driven ticks each phase runs and the actor the leg's receipted
-# submission declares — the same counts the pair leg converges and
-# hands over on.
-CONVERGE_TICKS = pair.CONVERGE_TICKS
-HANDOVER_TICKS = pair.HANDOVER_TICKS
+# The actor the leg's receipted submission declares.
 ACTOR = "ci-refusal"
 
 
@@ -148,7 +141,7 @@ def refusal_pass(args, tamper):
             "the manifest declares no standby pair — the refusal leg "
             "has nothing to exercise"
         )
-    manifest, duty_decl, standby_decl = declared
+    _manifest, duty_decl, standby_decl = declared
     with open(args.model) as handle:
         model = json.load(handle)
     writable = [
@@ -161,63 +154,13 @@ def refusal_pass(args, tamper):
             "the emitted model declares no writable boolean point — "
             "the role-gated write leg has nothing to exercise"
         )
-    scratch = tempfile.mkdtemp(prefix="dcs-refusal-")
     digest_entries, evidence, failures = [], {}, []
-    plant = duty = standby = None
+    rig = None
     try:
-
-        def persistence(entry):
-            """The controller's declared persistence file basenames
-            instantiated under the leg's runner-owned scratch directory
-            — the same manifest fields the pair leg honors."""
-            root = os.path.join(scratch, entry["name"])
-            os.makedirs(root, exist_ok=True)
-            return {
-                field: os.path.join(root, os.path.basename(entry[field]))
-                if entry.get(field)
-                else None
-                for field in ("state_file", "journal_file")
-            }
-
-        duty_files = persistence(duty_decl)
-        standby_files = persistence(standby_decl)
-
-        plant = subprocess.Popen(
-            [
-                args.plant_server,
-                args.model,
-                "--dynamics",
-                args.dynamics,
-                "--listen",
-                "127.0.0.1:0",
-            ],
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        plant_addr = simulate.listen_address(plant, "dcs-plant-server")
-        plant_io = simulate.PlantClient(plant_addr)
-
-        duty, duty_url, preamble = pair.spawn_peer(
-            args.controller, args.model, args.dt, plant_addr, None, duty_files
-        )
-        if duty_url is None:
-            raise Abort(
-                f"the duty controller {duty_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
-        standby, standby_url, preamble = pair.spawn_peer(
-            args.controller,
-            args.model,
-            args.dt,
-            plant_addr,
-            duty_url.removeprefix("http://"),
-            standby_files,
-        )
-        if standby_url is None:
-            raise Abort(
-                f"the standby controller {standby_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
+        rig = pair.launch_pair(args, declared, tamper)
+        duty_url, standby_url = rig.duty_url, rig.standby_url
+        duty_files, standby_files = rig.duty_files, rig.standby_files
+        plant_io = rig.plant_io
 
         # Phase 1 — the induction: the freshly launched standby has not
         # yet completed its first transfer — no `POST /scan` has driven
@@ -284,34 +227,8 @@ def refusal_pass(args, tamper):
         # owner's latest checkpoint and the peers rest at the same tick
         # with identical images — the field owner's writes landing
         # undisturbed through the refused promote.
-        ticks = []
-        for _ in range(CONVERGE_TICKS):
-            tracked = pair.scan(standby_url, failures)
-            owner = pair.scan(duty_url, failures)
-            if pair.select_snapshot(tracked) != pair.select_snapshot(owner):
-                failures.append(
-                    "the tracking peer's image diverged from the field "
-                    f"owner's at tick {owner['tick']}"
-                )
-                raise Abort
-            ticks.append(owner["tick"])
-        standby_role = pair.get(f"{standby_url}/role", "GET /role", failures)
-        duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
-        sync = standby_role.get("sync")
-        if standby_role.get("role") != "standby" or not (
-            isinstance(sync, dict) and "tracking" in sync
-        ):
-            failures.append(
-                "the tracking peer never reported tracking — GET /role "
-                f"answers {standby_role}"
-            )
-            raise Abort
-        if duty_role.get("role") != "active":
-            failures.append(
-                f"the field owner reports {duty_role.get('role')!r}, "
-                "expected active"
-            )
-            raise Abort
+        converged = rig.converge(failures)
+        owner = converged["owner"]
         field = field_out_samples(plant_io)
         for mismatch in field_mismatches(owner, field):
             failures.append(
@@ -320,13 +237,13 @@ def refusal_pass(args, tamper):
             )
         if failures:
             raise Abort
-        evidence["converged"] = ticks[-1]
+        evidence["converged"] = converged["ticks"][-1]
         digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "ticks": converged["ticks"],
+                "duty_role": converged["duty_role"],
+                "standby_role": converged["standby_role"],
                 "field": field,
             }
         )
@@ -373,8 +290,7 @@ def refusal_pass(args, tamper):
             raise Abort
         # The settling tick: the peers' images must stay identical and
         # the point unchanged in the active's served snapshot.
-        tracked = pair.scan(standby_url, failures)
-        owner = pair.scan(duty_url, failures)
+        tracked, owner = pair.scan_pair(standby_url, duty_url, failures)
         if pair.select_snapshot(tracked) != pair.select_snapshot(owner):
             failures.append(
                 "the tracking peer's image diverged from the field "
@@ -462,89 +378,34 @@ def refusal_pass(args, tamper):
         # each answered by its RoleReport — and the run continues
         # bumplessly with the promoted peer active and the demoted peer
         # reconverging tracking.
-        status, demote = pair.request(f"{duty_url}/demote", {})
-        if status != 200 or demote.get("role") != "demoting":
-            failures.append(
-                f"POST /demote on the field owner answered {status} "
-                f"{demote}, expected a demoting report"
-            )
-            raise Abort
-        status, promote = pair.request(f"{standby_url}/promote", {})
-        if status != 200 or promote.get("role") != "promoting":
-            failures.append(
-                f"POST /promote on the tracking standby answered "
-                f"{status} {promote}, expected a promoting report — "
-                "the request the induction refused"
-            )
-            raise Abort
-        evidence["switched_at"] = demote["tick"]
-        ticks = []
-        for _ in range(HANDOVER_TICKS):
-            tracked = pair.scan(duty_url, failures)
-            owner = pair.scan(standby_url, failures)
-            if pair.select_snapshot(tracked) != pair.select_snapshot(owner):
-                failures.append(
-                    "the demoted peer's image diverged from the "
-                    f"promoted owner's at tick {owner['tick']} — the "
-                    "switch was not bumpless"
-                )
-                raise Abort
-            ticks.append(owner["tick"])
-        duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
-        standby_role = pair.get(f"{standby_url}/role", "GET /role", failures)
-        if standby_role.get("role") != "active":
-            failures.append(
-                f"the promoted peer reports {standby_role.get('role')!r}, "
-                "expected active"
-            )
-            raise Abort
-        sync = duty_role.get("sync")
-        if duty_role.get("role") != "standby" or not (
-            isinstance(sync, dict) and "tracking" in sync
-        ):
-            failures.append(
-                "the demoted peer never reconverged — GET /role "
-                f"answers {duty_role}"
-            )
-            raise Abort
+        switched = rig.switch(
+            duty_url,
+            standby_url,
+            failures,
+            promote_what="the tracking standby",
+            promote_note=" — the request the induction refused",
+        )
+        evidence["switched_at"] = switched["demote"]["tick"]
+        owner = switched["owner"]
         field = field_out_samples(plant_io)
         for mismatch in field_mismatches(owner, field):
             failures.append(
                 f"{mismatch} after the switch — the field does not "
                 "hold the promoted owner's writes"
             )
-        expected = {
-            duty_decl["name"]: [("active", "demoting"), ("demoting", "standby")],
-            standby_decl["name"]: [
-                ("standby", "promoting"),
-                ("promoting", "active"),
-            ],
-        }
-        transitions = {}
-        for name, (url, _files) in peers.items():
-            journal = pair.get(f"{url}/journal", "GET /journal", failures)
-            transitions[name] = pair.role_transitions(journal)
-            if [
-                (frm, to) for _tick, frm, to in transitions[name]
-            ] != expected[name]:
-                failures.append(
-                    f"{name}'s served journal carries the role "
-                    f"transitions {transitions[name]}, expected "
-                    f"{expected[name]} — the switch's hand-off record"
-                )
         if failures:
             raise Abort
         evidence["final_tick"] = owner["tick"]
         digest_entries.append(
             {
                 "phase": "switch",
-                "demote": demote,
-                "promote": promote,
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "demote": switched["demote"],
+                "promote": switched["promote"],
+                "ticks": switched["ticks"],
+                "duty_role": switched["demoted_role"],
+                "standby_role": switched["promoted_role"],
                 "field": field,
-                "transitions": transitions,
+                "transitions": switched["transitions"],
             }
         )
     except Abort as abort:
@@ -552,10 +413,8 @@ def refusal_pass(args, tamper):
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        pair.stop(standby)
-        pair.stop(duty)
-        pair.stop(plant)
-        shutil.rmtree(scratch, ignore_errors=True)
+        if rig is not None:
+            rig.close()
     return digest_entries, evidence, failures
 
 

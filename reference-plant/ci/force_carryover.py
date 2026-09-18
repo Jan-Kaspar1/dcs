@@ -66,11 +66,7 @@ unforced value — a genuine carryover must fail it.
 import argparse
 import hashlib
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
 import pair
 import simulate
@@ -83,11 +79,9 @@ def eprint(*args):
 
 Abort = pair.Abort
 
-# The driven ticks each phase runs — the pair leg's convergence count,
-# the post-switch scans the force must stand across, and the ticks the
-# restored roles get to settle. The actor the leg's receipted
-# submissions declare.
-CONVERGE_TICKS = pair.CONVERGE_TICKS
+# The driven ticks each phase runs — the post-switch scans the force
+# must stand across. The actor the leg's receipted submissions
+# declare.
 CARRY_TICKS = 4
 RESTORE_TICKS = 4
 ACTOR = "ci-force"
@@ -140,23 +134,6 @@ def force_entry(forces, point):
     )
 
 
-def tick(tracked_url, owner_url, failures):
-    """One driven pair tick — the tracking peer scanned first so its
-    pull applies the owner's latest checkpoint, then the field owner —
-    asserting the peers' images stay identical. Returns `(tracked,
-    owner)` — both served snapshots, so callers can assert force
-    evidence on each."""
-    tracked = pair.scan(tracked_url, failures)
-    owner = pair.scan(owner_url, failures)
-    if pair.select_snapshot(tracked) != pair.select_snapshot(owner):
-        failures.append(
-            "the tracking peer's image diverged from the field "
-            f"owner's at tick {owner['tick']}"
-        )
-        raise Abort
-    return tracked, owner
-
-
 def submit(url, command, failures):
     """POST one receipted command to the active's `/command` and assert
     the `accepted` submission — returns the receipt."""
@@ -203,7 +180,7 @@ def carryover_pass(args, tamper):
             "the manifest declares no standby pair — the force leg has "
             "nothing to exercise"
         )
-    manifest, duty_decl, standby_decl = declared
+    _manifest, duty_decl, standby_decl = declared
     with open(args.model) as handle:
         model = json.load(handle)
     point = force_target(model)
@@ -218,94 +195,24 @@ def carryover_pass(args, tamper):
     }
     unforce_command = {"unforce_point": {"point": point}}
 
-    scratch = tempfile.mkdtemp(prefix="dcs-force-")
     digest_entries, evidence, failures = [], {}, []
-    plant = duty = standby = None
+    rig = None
     try:
-
-        def persistence(entry):
-            """The controller's declared persistence file basenames
-            instantiated under the leg's runner-owned scratch directory
-            — the same manifest fields the pair legs honor."""
-            root = os.path.join(scratch, entry["name"])
-            os.makedirs(root, exist_ok=True)
-            return {
-                field: os.path.join(root, os.path.basename(entry[field]))
-                if entry.get(field)
-                else None
-                for field in ("state_file", "journal_file")
-            }
-
-        duty_files = persistence(duty_decl)
-        standby_files = persistence(standby_decl)
-
-        plant = subprocess.Popen(
-            [
-                args.plant_server,
-                args.model,
-                "--dynamics",
-                args.dynamics,
-                "--listen",
-                "127.0.0.1:0",
-            ],
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        plant_addr = simulate.listen_address(plant, "dcs-plant-server")
-
-        duty, duty_url, preamble = pair.spawn_peer(
-            args.controller, args.model, args.dt, plant_addr, None, duty_files
-        )
-        if duty_url is None:
-            raise Abort(
-                f"the duty controller {duty_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
-        standby, standby_url, preamble = pair.spawn_peer(
-            args.controller,
-            args.model,
-            args.dt,
-            plant_addr,
-            duty_url.removeprefix("http://"),
-            standby_files,
-        )
-        if standby_url is None:
-            raise Abort(
-                f"the standby controller {standby_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
+        rig = pair.launch_pair(args, declared, tamper)
+        duty_url, standby_url = rig.duty_url, rig.standby_url
 
         # Phase 1 — convergence: the pair leg's driven-tick loop, the
         # tracking peer scanned first so each pull applies the owner's
         # latest checkpoint and the peers rest identical.
-        ticks = []
-        for _ in range(CONVERGE_TICKS):
-            tracked, owner = tick(standby_url, duty_url, failures)
-            ticks.append(owner["tick"])
-        standby_role = pair.get(f"{standby_url}/role", "GET /role", failures)
-        duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
-        sync = standby_role.get("sync")
-        if standby_role.get("role") != "standby" or not (
-            isinstance(sync, dict) and "tracking" in sync
-        ):
-            failures.append(
-                "the tracking peer never reported tracking — GET /role "
-                f"answers {standby_role}"
-            )
-            raise Abort
-        if duty_role.get("role") != "active":
-            failures.append(
-                f"the field owner reports {duty_role.get('role')!r}, "
-                "expected active"
-            )
-            raise Abort
-        evidence["converged"] = ticks[-1]
+        converged = rig.converge(failures)
+        owner = converged["owner"]
+        evidence["converged"] = converged["ticks"][-1]
         digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "ticks": converged["ticks"],
+                "duty_role": converged["duty_role"],
+                "standby_role": converged["standby_role"],
             }
         )
 
@@ -332,7 +239,7 @@ def carryover_pass(args, tamper):
             )
             raise Abort
         receipt = submit(duty_url, force_command, failures)
-        tracked, owner = tick(standby_url, duty_url, failures)
+        tracked, owner = pair.tick(standby_url, duty_url, failures)
         active_sample = assert_force(
             owner, point, forced, "the active's", failures
         )
@@ -372,20 +279,8 @@ def carryover_pass(args, tamper):
         # Phase 3 — the documented switch: demote the field owner,
         # promote the converged standby, each answered by its
         # RoleReport.
-        status, demote = pair.request(f"{duty_url}/demote", {})
-        if status != 200 or demote.get("role") != "demoting":
-            failures.append(
-                f"POST /demote on the field owner answered {status} "
-                f"{demote}, expected a demoting report"
-            )
-            raise Abort
-        status, promote = pair.request(f"{standby_url}/promote", {})
-        if status != 200 or promote.get("role") != "promoting":
-            failures.append(
-                f"POST /promote on the converged standby answered "
-                f"{status} {promote}, expected a promoting report"
-            )
-            raise Abort
+        demote = rig.demote(duty_url, failures)
+        promote = rig.promote(standby_url, failures)
         evidence["switched_at"] = demote["tick"]
         digest_entries.append(
             {"phase": "switch", "demote": demote, "promote": promote}
@@ -399,7 +294,7 @@ def carryover_pass(args, tamper):
         ticks = []
         carried_sample = None
         for _ in range(CARRY_TICKS):
-            tracked, owner = tick(duty_url, standby_url, failures)
+            tracked, owner = pair.tick(duty_url, standby_url, failures)
             entry = force_entry(owner.get("forces", []), point)
             if entry is None or entry.get("value") != forced:
                 failures.append(
@@ -470,7 +365,7 @@ def carryover_pass(args, tamper):
         # observable state a same-value `WriteValue` produces; a field
         # point would resume the driver's read.
         release = submit(standby_url, unforce_command, failures)
-        tracked, owner = tick(duty_url, standby_url, failures)
+        tracked, owner = pair.tick(duty_url, standby_url, failures)
         if owner.get("forces"):
             failures.append(
                 f"the released run still carries forces "
@@ -517,23 +412,11 @@ def carryover_pass(args, tamper):
         # the reconverged peer, and drive the pair back to the
         # manifest's declared arrangement — the duty controller
         # `active`, its standby `tracking`.
-        status, demote = pair.request(f"{standby_url}/demote", {})
-        if status != 200 or demote.get("role") != "demoting":
-            failures.append(
-                f"POST /demote on the new field owner answered {status} "
-                f"{demote}, expected a demoting report"
-            )
-            raise Abort
-        status, promote = pair.request(f"{duty_url}/promote", {})
-        if status != 200 or promote.get("role") != "promoting":
-            failures.append(
-                f"POST /promote on the reconverged peer answered "
-                f"{status} {promote}, expected a promoting report"
-            )
-            raise Abort
+        demote = rig.demote(standby_url, failures, "the new field owner")
+        promote = rig.promote(duty_url, failures, "the reconverged peer")
         ticks = []
         for _ in range(RESTORE_TICKS):
-            tracked, owner = tick(standby_url, duty_url, failures)
+            tracked, owner = pair.tick(standby_url, duty_url, failures)
             ticks.append(owner["tick"])
         duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
         standby_role = pair.get(f"{standby_url}/role", "GET /role", failures)
@@ -569,10 +452,8 @@ def carryover_pass(args, tamper):
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        pair.stop(standby)
-        pair.stop(duty)
-        pair.stop(plant)
-        shutil.rmtree(scratch, ignore_errors=True)
+        if rig is not None:
+            rig.close()
     return digest_entries, evidence, failures
 
 
