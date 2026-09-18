@@ -61,10 +61,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 
 import pair
 import simulate
@@ -76,11 +73,9 @@ def eprint(*args):
 
 Abort = pair.Abort
 
-# The driven ticks each phase runs — the pair leg's convergence count,
-# the bound on the duty-demand wait, and the bound each phase's
-# declared effect gets to land across the wiring's one-scan carrier
-# crossings.
-CONVERGE_TICKS = pair.CONVERGE_TICKS
+# The driven ticks each phase runs — the bound on the duty-demand
+# wait, and the bound each phase's declared effect gets to land across
+# the wiring's one-scan carrier crossings.
 DEMAND_BOUND = 24
 SETTLE_BOUND = 16
 
@@ -147,30 +142,23 @@ def value(snapshot, point):
     return simulate.snapshot_point(snapshot, point)
 
 
-def tick(standby_url, duty_url, failures):
+def tick(rig, failures):
     """One driven pair tick — the tracking peer scanned first so its
     pull applies the owner's latest checkpoint, then the field owner —
     asserting the peers' images stay identical. Returns the owner's
     served snapshot."""
-    tracked = pair.scan(standby_url, failures)
-    owner = pair.scan(duty_url, failures)
-    if pair.select_snapshot(tracked) != pair.select_snapshot(owner):
-        failures.append(
-            "the tracking peer's image diverged from the field "
-            f"owner's at tick {owner['tick']}"
-        )
-        raise Abort
+    _tracked, owner = rig.tick(rig.standby_url, rig.duty_url, failures)
     return owner
 
 
-def drive_until(standby_url, duty_url, failures, condition):
+def drive_until(rig, failures, condition):
     """Driven pair ticks until `condition(owner_snapshot)` holds —
     returns the satisfying snapshot, or None when SETTLE_BOUND scans
     pass without it landing. The carried-point seam crosses one hop
     per scan, so each driven cause's declared effect takes a few
     scans to arrive; the bound names a landing that never did."""
     for _ in range(SETTLE_BOUND):
-        owner = tick(standby_url, duty_url, failures)
+        owner = tick(rig, failures)
         if condition(owner):
             return owner
     return None
@@ -248,7 +236,7 @@ def burst_pass(args, tamper):
             "the manifest declares no standby pair — the burst leg "
             "has nothing to exercise"
         )
-    manifest, duty_decl, standby_decl = declared
+    _manifest, duty_decl, standby_decl = declared
     with open(args.model) as handle:
         model = json.load(handle)
     points = signal_points(model)
@@ -257,105 +245,36 @@ def burst_pass(args, tamper):
             "the emitted model declares no station alarm set — the "
             "burst leg has nothing to exercise"
         )
-    scratch = tempfile.mkdtemp(prefix="dcs-burst-")
     digest_entries, evidence, failures = [], {}, []
-    plant = duty = standby = None
+    rig = None
     try:
-
-        def persistence(entry):
-            """The controller's declared persistence file basenames
-            instantiated under the leg's runner-owned scratch directory
-            — the same manifest fields the pair leg honors."""
-            root = os.path.join(scratch, entry["name"])
-            os.makedirs(root, exist_ok=True)
-            return {
-                field: os.path.join(root, os.path.basename(entry[field]))
-                if entry.get(field)
-                else None
-                for field in ("state_file", "journal_file")
-            }
-
-        duty_files = persistence(duty_decl)
-        standby_files = persistence(standby_decl)
-
-        plant = subprocess.Popen(
-            [
-                args.plant_server,
-                args.model,
-                "--dynamics",
-                args.dynamics,
-                "--listen",
-                "127.0.0.1:0",
-            ],
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        plant_addr = simulate.listen_address(plant, "dcs-plant-server")
-        plant_io = simulate.PlantClient(plant_addr)
-
-        duty, duty_url, preamble = pair.spawn_peer(
-            args.controller, args.model, args.dt, plant_addr, None, duty_files
-        )
-        if duty_url is None:
-            raise Abort(
-                f"the duty controller {duty_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
+        rig = pair.launch_pair(args, declared, tamper)
+        duty_url, standby_url = rig.duty_url, rig.standby_url
+        duty_files = rig.duty_files
+        plant_io = rig.plant_io
         # The field owner's writer claim: a release that claims at
         # startup reports the owner token on stderr ahead of its
         # listener; the earlier release line claims only on promotion,
         # so no token means the field stands unclaimed and the leg's
         # field writes land unfenced.
         owner_token = None
-        for line in preamble:
+        for line in rig.duty_preamble:
             claimed = re.search(r"owner token (\d+)", line)
             if claimed:
                 owner_token = int(claimed.group(1))
-        standby, standby_url, preamble = pair.spawn_peer(
-            args.controller,
-            args.model,
-            args.dt,
-            plant_addr,
-            duty_url.removeprefix("http://"),
-            standby_files,
-        )
-        if standby_url is None:
-            raise Abort(
-                f"the standby controller {standby_decl['name']} exited at "
-                f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-            )
 
         # Phase 1 — convergence: the pair leg's driven-tick loop, the
         # tracking peer scanned first so each pull applies the owner's
         # latest checkpoint and the peers rest identical.
-        ticks = []
-        for _ in range(CONVERGE_TICKS):
-            owner = tick(standby_url, duty_url, failures)
-            ticks.append(owner["tick"])
-        standby_role = pair.get(f"{standby_url}/role", "GET /role", failures)
-        duty_role = pair.get(f"{duty_url}/role", "GET /role", failures)
-        sync = standby_role.get("sync")
-        if standby_role.get("role") != "standby" or not (
-            isinstance(sync, dict) and "tracking" in sync
-        ):
-            failures.append(
-                "the tracking peer never reported tracking — GET /role "
-                f"answers {standby_role}"
-            )
-            raise Abort
-        if duty_role.get("role") != "active":
-            failures.append(
-                f"the field owner reports {duty_role.get('role')!r}, "
-                "expected active"
-            )
-            raise Abort
-        evidence["converged"] = ticks[-1]
+        converged = rig.converge(failures)
+        owner = converged["owner"]
+        evidence["converged"] = converged["ticks"][-1]
         digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "ticks": converged["ticks"],
+                "duty_role": converged["duty_role"],
+                "standby_role": converged["standby_role"],
             }
         )
 
@@ -366,7 +285,7 @@ def burst_pass(args, tamper):
         # stops journal on each.
         demand_at = None
         for _ in range(DEMAND_BOUND):
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             if (
                 value(owner, points["demand"]).get("int", 0) >= 2
                 and value(owner, points["staged"]).get("int", 0) >= 2
@@ -410,8 +329,7 @@ def burst_pass(args, tamper):
             )
             raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["backup_active"])
             == {"bool": True}
@@ -419,7 +337,7 @@ def burst_pass(args, tamper):
             and value(snapshot, points["backup_unack"]) == {"bool": True},
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the level-primary fault never annunciated — "
                 f"backup-active reads "
@@ -453,8 +371,7 @@ def burst_pass(args, tamper):
             )
             raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["power_alarm"])
             == {"bool": True}
@@ -464,7 +381,7 @@ def burst_pass(args, tamper):
             and value(snapshot, points["staged"]).get("int", 0) == 0,
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the power-fail drive's consequences never landed — "
                 f"power alarm reads "
@@ -495,7 +412,7 @@ def burst_pass(args, tamper):
         level_low = value(owner, points["level_selected"])
         level_after = level_low
         for _ in range(4):
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             level_after = value(owner, points["level_selected"])
         if not (
             isinstance(level_low, dict)
@@ -536,8 +453,7 @@ def burst_pass(args, tamper):
                 )
                 raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["faulted_alarm"])
             == {"bool": True}
@@ -548,7 +464,7 @@ def burst_pass(args, tamper):
             and value(snapshot, points["fault_unack_2"]) == {"bool": True},
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the run-contact faults never landed the all-faulted "
                 f"tail — all_faulted reads "
@@ -599,15 +515,14 @@ def burst_pass(args, tamper):
             failures.append(f"clear_fault on level-primary answered {verdict}")
             raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["backup_active"])
             == {"bool": False}
             and value(snapshot, points["backup_alarm"]) == {"bool": False},
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the cleared instrument left backup serving — "
                 f"backup-active reads "
@@ -624,8 +539,7 @@ def burst_pass(args, tamper):
             )
             raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["power_alarm"])
             == {"bool": False}
@@ -633,7 +547,7 @@ def burst_pass(args, tamper):
             and value(snapshot, points["avail_2"]) == {"bool": True},
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the restored contact left the permissives dropped — "
                 f"power alarm reads "
@@ -651,8 +565,7 @@ def burst_pass(args, tamper):
                 failures.append(f"clear_fault on {key} answered {verdict}")
                 raise Abort
         owner = drive_until(
-            standby_url,
-            duty_url,
+            rig,
             failures,
             lambda snapshot: value(snapshot, points["faulted_alarm"])
             == {"bool": False}
@@ -663,7 +576,7 @@ def burst_pass(args, tamper):
             and value(snapshot, points["run_2"]) == {"bool": True},
         )
         if owner is None:
-            owner = tick(standby_url, duty_url, failures)
+            owner = tick(rig, failures)
             failures.append(
                 "the cleared run contacts left the fault tail "
                 f"standing — all_faulted reads "
@@ -856,10 +769,8 @@ def burst_pass(args, tamper):
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        pair.stop(standby)
-        pair.stop(duty)
-        pair.stop(plant)
-        shutil.rmtree(scratch, ignore_errors=True)
+        if rig is not None:
+            rig.close()
     return digest_entries, evidence, failures
 
 
