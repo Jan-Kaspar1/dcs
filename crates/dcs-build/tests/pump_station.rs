@@ -375,7 +375,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         observe(&executor, &mut scans);
         match scan {
             // Pump-down phase done — drop the inflow below zero so the

@@ -327,7 +327,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
         observe(&executor);
         match scan {

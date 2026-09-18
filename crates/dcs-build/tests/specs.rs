@@ -1189,7 +1189,7 @@ fn field_input_stale_after_emits_and_enforces_the_budget() {
     let driver = sim_driver(&reloaded).unwrap();
     let mut executor = assemble(&reloaded, &dcs_controller::registry(), &driver).unwrap();
     driver.write(pv.into(), Value::Float(7.0)).unwrap();
-    executor.run(3).unwrap();
+    executor.run(3);
     let sample = executor
         .snapshot()
         .points

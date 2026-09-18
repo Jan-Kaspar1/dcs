@@ -292,7 +292,7 @@ fn zero_client_paced_runs_publish_into_bounded_storage() {
     // No server, no readers: the paced loop still publishes per scan —
     // the store's counters advance while its depth stays at the bound.
     for _ in 0..40 {
-        monitor.paced_scan().unwrap();
+        monitor.paced_scan();
     }
     let health = monitor.publication_health();
     let window = MonitorConfig::default().publication_capacity as u64;
@@ -337,7 +337,7 @@ fn a_stalled_reader_cannot_hold_the_executor_lock() {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         for _ in 0..12 {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
         }
         assert!(
             Instant::now() < deadline,
