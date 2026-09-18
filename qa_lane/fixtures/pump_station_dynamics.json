@@ -1,13 +1,5 @@
 [
   {
-    "flow_sum": {
-      "inputs": [],
-      "output": 12,
-      "bias": 0.2,
-      "initial": 0.2
-    }
-  },
-  {
     "bool_flow": {
       "input": 100,
       "output": 20,
@@ -29,7 +21,7 @@
     "flow_sum": {
       "inputs": [12, 20, 21],
       "output": 13,
-      "bias": 0.0,
+      "bias": 0.2,
       "initial": 0.2
     }
   },
