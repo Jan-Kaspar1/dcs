@@ -136,6 +136,24 @@
 #                produce identical digests
 #                (force-carryover-failed,
 #                force-carryover-nondeterministic)
+#                The stage's force-release leg, ci/force_release.py
+#                on the same declared deployment: with the pair
+#                tracking, a receipted force_point on a declared
+#                writable In point through the active's POST /command
+#                — asserting the substituted quality on both peers'
+#                snapshots across scans and the journaled applied
+#                settlement — then a receipted unforce_point asserted
+#                at its apply tick: the forces set empty, the point's
+#                live value resumed — for the internal target the
+#                force's last stamp re-stamped Good — a restore write
+#                proving the live path, the pair switched and its
+#                launch roles restored with the released state riding
+#                the checkpoint, and every transition journaled on
+#                the field owner's durable record with the standby's
+#                adopted log answering the same receipts; two passes
+#                produce identical digests
+#                (force-release-failed,
+#                force-release-nondeterministic)
 #                The stage's burst-order leg, ci/burst_order.py on the
 #                same declared deployment: with the pair tracking and
 #                the pump group holding a full demand, the emitted
@@ -871,6 +889,58 @@ fi
     || fail "force-carryover-unchecked: the expect-unforced case did not report its named diagnostic: $out"
 echo "  expect-unforced: reported, force-carryover-failed"
 
+# The pair contract's force-release leg, on the same
+# manifest-declared deployment: ci/force_release.py converges the
+# pair, submits a receipted force_point on a declared writable In
+# point through the active's POST /command — the emitted model marks
+# only internal In points writable, so the leg's p101-hand is the
+# honest target — asserting the Uncertain(Substituted) sample and the
+# forces badge on both peers while the force stands across scans, and
+# the journaled applied settlement. A receipted unforce_point must
+# settle applied at the next scan boundary — the forces set emptying
+# and the point resuming its unforced serve: for the internal target
+# the held-value rule leaves the force's last stamp re-stamped Good,
+# and the leg's restore write returns the pre-force held value. The
+# pair then switches and restores its launch roles — the released
+# state riding the checkpoint like any run state, never resurrecting
+# a released force — and the field owner's durable journal file must
+# carry each attributed transition in seq order with the standby's
+# adopted log answering the same receipts. Two passes must produce
+# identical digests.
+run_force_release() {
+    python3 ci/force_release.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_force_release)" \
+    || fail "force-release-failed: the force-release leg did not hold — its evidence lines are above"
+SECOND="$(run_force_release)" \
+    || fail "force-release-failed: the force-release leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "force-release-nondeterministic: two force-release passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a release expectation left standing — the
+# substitution asserted still badged after the unforce — and a record
+# settling the release without its journaled transition must each
+# surface the named diagnostic rather than pass silently.
+for tamper in expect-standing unjournaled-release; do
+    if out="$(run_force_release --tamper "$tamper" 2>&1)"; then
+        fail "force-release-unchecked: a $tamper passed the release leg"
+    fi
+    case "$tamper" in
+        expect-standing) evidence="expected the substitution still standing" ;;
+        unjournaled-release) evidence="missing or out of order" ;;
+    esac
+    [[ "$out" == *"$evidence"* ]] \
+        || fail "force-release-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, force-release-failed"
+done
+
 # The pair contract's alarm-burst leg, on the same manifest-declared
 # deployment: ci/burst_order.py converges the pair and drives the
 # simulated well until the pump group holds a full demand — both pumps
@@ -966,7 +1036,8 @@ echo "== consumers =="
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
 for file in ci/burst_order.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
-        ci/force_carryover.py ci/pair.py ci/peer_announce.py \
+        ci/force_carryover.py ci/force_release.py ci/pair.py \
+        ci/peer_announce.py \
         ci/refusal.py ci/restart.py ci/schema_conformance.py \
         ci/simulate.py ci/takeover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
