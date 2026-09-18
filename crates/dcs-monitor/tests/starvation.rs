@@ -1,0 +1,491 @@
+//! Regression coverage for the QA finding
+//! `incomplete-request-body-pins-monitor-workers`: request handlers
+//! once read bodies on the worker that accepted them, with no read
+//! bound — so a handful of TCP connections that sent headers and a
+//! promised body they never delivered pinned every worker, and `GET
+//! /role`, `GET /snapshot`, and the standby heartbeat's `GET
+//! /checkpoint` starved behind request-body traffic the plant never
+//! felt. On an armed pair that starvation read as a dead active and
+//! drove a spurious failover.
+//!
+//! The serving path is now split: any request that can hold a worker
+//! on a client-paced wait — the body-reading `POST /command` and
+//! `POST /scan`, plus any request still carrying body bytes the
+//! client owes, whose dropped reader drains the rest the same way —
+//! runs on a small submission lane behind a body-size bound, while
+//! every other endpoint serves from a pool a stalled body can never
+//! reach. These tests hold stalled-body connections against a live
+//! monitor and assert the served surface — and an armed standby's
+//! verdict on its active — never notices.
+
+use dcs_core::{
+    Command, CommandOutcome, Direction, IoDriver, IoError, PointId, Role, Sample, StandbySync,
+    Tick, Value, ValueKind,
+};
+use dcs_model::{PlantModel, SignalIndex};
+use dcs_monitor::{Driven, Monitor, MonitorClient};
+use dcs_runtime::{
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
+};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+/// In-memory driver stub — the same minimal stand-in the other monitor
+/// suites use.
+struct StubDriver {
+    points: Mutex<HashMap<PointId, Sample>>,
+}
+
+impl StubDriver {
+    fn new(points: &[(PointId, Value)]) -> Self {
+        Self {
+            points: Mutex::new(
+                points
+                    .iter()
+                    .map(|&(point, value)| (point, Sample::good(value, Tick::ZERO)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl IoDriver for StubDriver {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        self.points
+            .lock()
+            .unwrap()
+            .get(&point)
+            .copied()
+            .ok_or(IoError::UnknownPoint(point))
+    }
+
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        let mut points = self.points.lock().unwrap();
+        let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
+        if value.kind() != sample.value.kind() {
+            return Err(IoError::TypeMismatch {
+                point,
+                expected: sample.value.kind(),
+                found: value,
+            });
+        }
+        *sample = Sample::good(value, Tick::ZERO);
+        Ok(())
+    }
+}
+
+/// Reads `In` point 10 and drives `Out` point 20 at gain 2 — the same
+/// minimal component the other monitor suites use.
+struct Scale;
+
+impl Component for Scale {
+    fn name(&self) -> &str {
+        "scale"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        vec![
+            IoRequirement::input::<f64>("in", PointId(10)),
+            IoRequirement::output::<f64>("out", PointId(20)),
+        ]
+    }
+
+    fn step(&mut self, io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        let sample = io.read_typed::<f64>(PointId(10))?;
+        io.write_typed(PointId(20), sample.value * 2.0)?;
+        Ok(())
+    }
+}
+
+/// The model fixture behind the monitors: points 10/20/30 match the
+/// rig's point map.
+const MODEL: &str = include_str!("../fixtures/monitor.json");
+
+fn signal_index() -> SignalIndex {
+    PlantModel::load(MODEL).unwrap().signal_index()
+}
+
+fn point_map() -> PointMap {
+    PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float)
+}
+
+fn write_value(point: u64, value: f64) -> Command {
+    Command::WriteValue {
+        point: PointId(point),
+        kind: ValueKind::Float,
+        value: Value::Float(value),
+    }
+}
+
+/// The answer bound the reproduction held `GET /role` to — `curl -m3`.
+const ANSWER_BOUND: Duration = Duration::from_secs(3);
+
+/// The connections held open against the monitor — comfortably past
+/// the workers both lanes field together, so every worker of the old
+/// single pool pinned under the probe, and both submission workers
+/// still pin under the trickle shape.
+const PINNING_CONNECTIONS: usize = 8;
+
+/// One serving monitor on a dedicated thread. The monitor is
+/// `Arc`-shared so `stop`/drop can end it; the driver is leaked
+/// `'static` so the monitor outlives any borrow.
+struct Rig {
+    monitor: Arc<Monitor<'static>>,
+    client: MonitorClient,
+    addr: SocketAddr,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Rig {
+    /// Serves `monitor` on a spawned thread — the caller binds it
+    /// (plain, peer, or driven).
+    fn start(monitor: Monitor<'static>) -> Self {
+        let monitor = Arc::new(monitor);
+        let addr = monitor.local_addr();
+        let serving = Arc::clone(&monitor);
+        Self {
+            monitor,
+            client: MonitorClient::new(addr),
+            addr,
+            thread: Some(thread::spawn(move || serving.serve())),
+        }
+    }
+
+    /// A plain monitor — `POST /scan` stays available for the driven
+    /// standby's track pulls and the recovery assertions.
+    fn plain() -> Self {
+        let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+            (PointId(10), Value::Float(0.0)),
+            (PointId(20), Value::Float(0.0)),
+            (PointId(30), Value::Float(0.0)),
+        ])));
+        let executor = Executor::new(driver, point_map(), vec![Box::new(Scale)]).unwrap();
+        Self::start(Monitor::bind("127.0.0.1:0", executor, signal_index()).unwrap())
+    }
+
+    /// A peer monitor with `peer`'s role — `active` or `standby` — and
+    /// `driven` wiring when the standby tracks a source through its
+    /// `POST /scan` boundary.
+    fn peer(peer: Peer<'static>, driven: Option<Driven<'static>>) -> Self {
+        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
+        let monitor = match driven {
+            Some(driven) => monitor.driven(driven),
+            None => monitor,
+        };
+        Self::start(monitor)
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.monitor.shutdown();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A standby executor with the armed failover budget — the
+/// `--auto-promote` half of the reproduction's pair.
+fn standby_peer(budget: u32) -> Peer<'static> {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let executor = Executor::new(driver, point_map(), vec![Box::new(Scale)]).unwrap();
+    Peer::standby(executor, None).with_failover(budget)
+}
+
+fn active_peer() -> Peer<'static> {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let executor = Executor::new(driver, point_map(), vec![Box::new(Scale)]).unwrap();
+    Peer::active(executor, None)
+}
+
+/// The reproduction's probe shape: `POST /command` headers declaring a
+/// body far past any legitimate one, never sent. Each returned stream
+/// stays open — dropping it ends the pin.
+fn starve_on_declared_body(addr: SocketAddr) -> Vec<TcpStream> {
+    (0..PINNING_CONNECTIONS)
+        .map(|_| {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream
+                .write_all(
+                    b"POST /command HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                      Content-Length: 1000000\r\n\r\n",
+                )
+                .unwrap();
+            stream
+        })
+        .collect()
+}
+
+/// The trickle shape: headers whose bodies the handlers must read off
+/// the live socket — `Expect: 100-continue` requests get a live reader
+/// regardless of the declared size, chunked ones carry no declared
+/// length at all. The body never follows, so a worker that reads it
+/// blocks for as long as the connection stays open: the starvation a
+/// body cap cannot reach, which only the lane split covers.
+fn starve_on_trickled_body(addr: SocketAddr) -> Vec<TcpStream> {
+    (0..PINNING_CONNECTIONS)
+        .map(|index| {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            if index % 2 == 0 {
+                stream
+                    .write_all(
+                        b"POST /command HTTP/1.1\r\nHost: x\r\nContent-Length: 16\r\n\
+                          Expect: 100-continue\r\n\r\n",
+                    )
+                    .unwrap();
+            } else {
+                stream
+                    .write_all(
+                        b"POST /scan HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+                          10\r\n",
+                    )
+                    .unwrap();
+            }
+            stream
+        })
+        .collect()
+}
+
+/// Reads one response head off a pinning connection — the status code
+/// the server answered, or `None` when the worker never answered
+/// (blocked mid-body or starved behind one that is).
+fn response_status(stream: &TcpStream, timeout: Duration) -> Option<u16> {
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    let mut stream = stream;
+    let mut buf = [0u8; 512];
+    let mut head = Vec::new();
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+        }
+    }
+    String::from_utf8_lossy(&head)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+}
+
+/// Every served surface the reproduction starved answers within the
+/// bound while `streams` still hold their stalled bodies open.
+fn assert_served_surface_survives(addr: SocketAddr) {
+    let client = MonitorClient::with_timeout(addr, ANSWER_BOUND);
+    client
+        .role()
+        .expect("GET /role starved behind stalled bodies");
+    client
+        .checkpoint()
+        .expect("GET /checkpoint starved behind stalled bodies");
+    client
+        .snapshot()
+        .expect("GET /snapshot starved behind stalled bodies");
+}
+
+/// The reproduction's recovery evidence — socket close frees the
+/// workers, and submissions settle normally again.
+fn assert_recovery(addr: SocketAddr) {
+    let client = MonitorClient::with_timeout(addr, ANSWER_BOUND);
+    let receipt = client
+        .command(&write_value(10, 1.0))
+        .expect("POST /command never recovered");
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    client.advance(1).expect("POST /scan never recovered");
+}
+
+#[test]
+fn declared_bodies_never_sent_leave_the_serving_path_up() {
+    let rig = Rig::plain();
+    // The reproduction itself: headers promising a large body, then
+    // silence. On the unfixed pool each request blocked its worker in
+    // the body read and the probe's four connections starved the whole
+    // served surface. Now each routes to the submission lane, where a
+    // worker refuses the declared body 413 before reading a byte —
+    // then waits out the owed-body drain on its own lane while the
+    // served surface answers on.
+    let mut streams = starve_on_declared_body(rig.addr);
+    let refused = streams
+        .iter()
+        .filter(|stream| response_status(stream, ANSWER_BOUND) == Some(413))
+        .count();
+    assert!(
+        refused >= 1,
+        "a declared body past the bound should be refused 413, not awaited"
+    );
+    assert_served_surface_survives(rig.addr);
+    streams.clear();
+    assert_recovery(rig.addr);
+}
+
+#[test]
+fn stalled_bodies_pin_only_the_submission_lane() {
+    let rig = Rig::plain();
+    // Bodies the server must actually read, never delivered: on the
+    // unfixed pool every worker blocked in the read and the served
+    // surface died; now both submission workers block and the serving
+    // lane answers on.
+    let mut streams = starve_on_trickled_body(rig.addr);
+    // Give the dispatcher and workers a moment to reach their reads —
+    // the assertion below is meaningless if the pin has not landed.
+    thread::sleep(Duration::from_millis(250));
+    assert_served_surface_survives(rig.addr);
+    streams.clear();
+    assert_recovery(rig.addr);
+}
+
+#[test]
+fn bodies_owed_on_any_route_stay_off_the_serving_path() {
+    let rig = Rig::plain();
+    // The drain hole beneath the reproduction: a request whose handler
+    // never touches the body still carries it — a declared
+    // `Content-Length` leaves the owed remainder on a live reader, and
+    // dropping the request drains it on whatever worker holds it. A
+    // `GET /role` carrying a promised body is therefore as pinning as
+    // a `POST /command` one, so it routes to the submission lane too:
+    // answered there before its drain, while the serving lane answers
+    // on behind it.
+    let mut streams: Vec<TcpStream> = (0..PINNING_CONNECTIONS)
+        .map(|_| {
+            let mut stream = TcpStream::connect(rig.addr).unwrap();
+            stream
+                .write_all(b"GET /role HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n")
+                .unwrap();
+            stream
+        })
+        .collect();
+    let answered = streams
+        .iter()
+        .filter(|stream| response_status(stream, ANSWER_BOUND) == Some(200))
+        .count();
+    assert!(
+        answered >= 1,
+        "a body-owing request should still be answered before its drain"
+    );
+    assert_served_surface_survives(rig.addr);
+    streams.clear();
+    assert_recovery(rig.addr);
+}
+
+#[test]
+fn bodies_past_the_bound_are_refused_413() {
+    let rig = Rig::plain();
+    // Declared-past-the-bound: refused before a byte is read, on both
+    // body-reading endpoints.
+    for path in ["/command", "/scan"] {
+        let mut stream = TcpStream::connect(rig.addr).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                     Content-Length: 70000\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(response_status(&stream, ANSWER_BOUND), Some(413));
+    }
+    // Delivered-past-the-bound: a chunked body gets no declared-length
+    // pre-check, so the `take` bound is what trips — 413 the moment the
+    // decoded bytes cross the cap, without waiting for the rest of the
+    // framing.
+    let mut stream = TcpStream::connect(rig.addr).unwrap();
+    stream
+        .write_all(
+            b"POST /command HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+              20000\r\n",
+        )
+        .unwrap();
+    stream.write_all(&[b' '; 0x20000]).unwrap();
+    stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+    assert_eq!(response_status(&stream, ANSWER_BOUND), Some(413));
+
+    // Legitimate submissions are untouched.
+    assert_recovery(rig.addr);
+}
+
+/// The pair-level half of the reproduction: an armed standby tracking
+/// a paced active over `GET /checkpoint`. While the active's monitor
+/// is starved of workers by stalled bodies, the standby's heartbeat
+/// pulls once failed like a dead peer — misses reached the armed
+/// budget and the standby self-promoted against a live active. With
+/// the serving split the heartbeat rides the lane the bodies can never
+/// reach, so the starvation is invisible to the failover measure.
+#[test]
+fn an_armed_standby_holds_role_through_a_starved_active_monitor() {
+    let active = Rig::peer(active_peer(), None);
+    let standby = Rig::peer(
+        standby_peer(3),
+        Some(Driven {
+            track: Some(active.addr),
+            after_scan: None,
+        }),
+    );
+
+    // The active paces its own scans in-process — the wall-clock loop
+    // the reproduction's controller ran, immune to its own monitor's
+    // starvation by construction.
+    for _ in 0..3 {
+        active.monitor.paced_scan();
+    }
+    // The standby converges: its `POST /scan` boundary pulls the
+    // active's checkpoint and applies it — `Tracking`.
+    standby.client.advance(1).unwrap();
+    match standby.client.role().unwrap() {
+        report
+            if report.role == Role::Standby
+                && matches!(report.sync, Some(StandbySync::Tracking { .. })) => {}
+        report => panic!("the standby never converged: {report:?}"),
+    }
+
+    // Starve the active's monitor — the trickle shape that holds
+    // workers indefinitely, not the declared body a cap refuses.
+    let mut streams = starve_on_trickled_body(active.addr);
+    thread::sleep(Duration::from_millis(250));
+
+    // Well past the armed budget of three misses: each standby scan
+    // pulls the active's checkpoint. The pulls keep landing — the
+    // serving lane answers through the pin — so no miss ever accrues
+    // and the standby's verdict on its active stays alive. On the
+    // unfixed pool every pull hit the client timeout, three scans
+    // armed the budget, and the standby self-promoted.
+    for _ in 0..6 {
+        active.monitor.paced_scan();
+        standby.client.advance(1).unwrap();
+    }
+    let report = standby.client.role().unwrap();
+    assert_eq!(
+        report.role,
+        Role::Standby,
+        "the standby moved through the starvation: {report:?}"
+    );
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the standby's convergence degraded against a live active: {report:?}"
+    );
+
+    // And the starved active itself still reports — the served surface
+    // the heartbeat rides was never down.
+    let active_report = MonitorClient::with_timeout(active.addr, ANSWER_BOUND)
+        .role()
+        .expect("the active's /role starved behind stalled bodies");
+    assert_eq!(active_report.role, Role::Active);
+
+    streams.clear();
+    assert_recovery(active.addr);
+}
