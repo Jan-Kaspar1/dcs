@@ -1092,5 +1092,157 @@ class NegotiationActionTests(unittest.TestCase):
                         .is_relative_to(self.run_dir))
 
 
+class DrivenActionTests(unittest.TestCase):
+    """The scenario-callable driven-peer actions: the runner launches
+    the run's labeled third controller on the same mounted model with
+    --standby AND --driven — the externally paced standby whose pulls
+    happen only inside POST /scan — and removes the container again
+    for the case's teardown, both halves recorded on the run's action
+    timeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps({'version': 1}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_driven_peer_launches_standby_driven(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-d', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertIn('--standby', launch)
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+        # The externally paced seam: --driven, never --scan-ms —
+        # every pull happens inside a POST /scan request.
+        self.assertIn('--driven', launch)
+        self.assertNotIn('--scan-ms', launch)
+        self.assertNotIn('--revised', launch)
+        self.assertIn('127.0.0.1:' + str(self.cfg['driven_port'])
+                      + ':8082', launch)
+        self.assertIn(runner.CONTAINER_STATE_FILE, launch)
+        self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro', launch)
+        self.assertIn(str(self.run_dir / 'controllers' / 'd')
+                      + ':' + runner.CONTAINER_RUN_DIR, launch)
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
+        self.assertEqual([event for event, _ in events],
+                         ['driven-start', 'driven-up'])
+
+    def test_standby_endpoint_standbys_on_ctrl_b(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_driven_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['driven-start'])
+
+    def test_stop_removes_the_driven_container(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_driven_controller(
+                'qa-1', lambda event, detail=None: events.append(
+                    (event, detail)))
+        self.assertEqual(calls,
+                         [('rm', '-f', 'dcs-hw-qa-1-d')])
+        self.assertEqual([event for event, _ in events],
+                         ['driven-stop', 'driven-stopped'])
+
+    def test_failed_teardown_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'rm' and check:
+                raise RuntimeError('docker rm failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_driven_controller(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['driven-stop'])
+
+    def test_scenario_ctx_carries_driven_actions_and_endpoint(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_driven']('active')
+            ctx['stop_driven']()
+        self.assertEqual(ctx['driven'],
+                         'http://127.0.0.1:' + str(
+                             self.cfg['driven_port']))
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--standby', launch)
+        self.assertIn('--driven', launch)
+        self.assertEqual(calls[-1],
+                         ('rm', '-f', 'dcs-hw-qa-1-d'))
+        # The driven peer's state/journal paths sit inside the run dir.
+        self.assertTrue(Path(ctx['journal_files']['driven'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(ctx['state_files']['driven'])
+                        .is_relative_to(self.run_dir))
+
+
 if __name__ == '__main__':
     unittest.main()
