@@ -52,6 +52,12 @@ ci/takeover.py         the pair contract's takeover leg — the settled
                        hand running it under the declared guards and
                        a driven protection input, oos inhibiting it,
                        and the restore returning it to group control
+ci/force_carryover.py  the pair contract's force-carryover leg — a
+                       receipted force on a declared writable In point
+                       while tracking, asserted on both peers'
+                       snapshots, then still standing on the promoted
+                       peer after the switch, released through the
+                       receipted path, and the pair's roles restored
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -284,6 +290,41 @@ and restore transitions. A violated contract fails `takeover-failed`;
 two passes must produce the identical `takeover-digest`, a divergence
 failing `takeover-nondeterministic`.
 
+The stage's force-carryover leg — `ci/force_carryover.py` on the same
+declared deployment — then proves a standing operator force survives
+the switch on the customer's pair, the continuity clause applied to
+forcing. With the pair tracking, the leg records the target point's
+unforced sample — the control proving the unforced value is what
+would otherwise have served — and submits `force_point` through the
+active's `POST /command` — the leg's chosen receipted path. The
+emitted model marks only *internal* `In` points writable (the
+operator seam: alarm acks, per-pump `mode`/`hand`/`oos`, the exercise
+`run` request) — the released contract accepts internal targets, and
+the leg's `p101-hand` is the honest one: gated by the manual-mode AND
+while the pump stands in auto, so forcing it perturbs nothing
+downstream. The `accepted` submission must settle `applied`
+identically into both peers' adopted log, and the snapshot's `forces`
+entry must name the point with the forced value stamped
+`Uncertain(Substituted)` on both peers — the tracking standby's scans
+run adopted state, so its snapshot already carries the force. The
+leg then issues the `demote`/`promote` switch and asserts on the
+promoted peer — across driven scans — that `forces` still names the
+point and the sample stays the forced value at substituted quality:
+the force set rides the checkpoint through the promotion exactly as
+it does on the platform's lane, never released and never silently
+re-substituted. A receipted `unforce_point` on the new active must
+settle `applied`, empty the `forces` list, and resume the point's
+unforced serve — for an internal target the held-value rule leaves
+the force's last stamp re-stamped `Good`, the observable state a
+same-value `write_value` produces (a field point would resume the
+driver's read; the emitted model declares no writable field `In`
+point). The leg then restores the pair's declared roles — `demote`
+on the new owner, `promote` on the reconverged peer — leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `force-carryover-failed`; two passes must
+produce the identical `force-digest`, a divergence failing
+`force-carryover-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -461,7 +502,12 @@ selection's declared signals unreported, the guards ungated, the
 managed alarm unannunciated, the restore not returning the pump to
 group control, or the journal missing an attributed transition — is
 `takeover-failed`; two takeover-leg passes diverging is
-`takeover-nondeterministic`;
+`takeover-nondeterministic`; a standing force dropped or silently
+re-substituted by a promotion — the `forces` entry missing from the
+promoted peer's snapshot or the sample no longer the forced value at
+substituted quality — or a release leaving the set non-empty is
+`force-carryover-failed`; two force-carryover passes diverging is
+`force-carryover-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
