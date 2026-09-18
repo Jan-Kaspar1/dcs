@@ -983,6 +983,9 @@ impl<'d> Monitor<'d> {
         for restart in peer.take_source_restarts() {
             recorder.note_source_restart(restart);
         }
+        for receipt in peer.take_superseded_commands() {
+            recorder.note_settled(receipt, peer.tick());
+        }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
         // before the next scan publishes.
@@ -1014,6 +1017,9 @@ impl<'d> Monitor<'d> {
         }
         for restart in peer.take_source_restarts() {
             recorder.note_source_restart(restart);
+        }
+        for receipt in peer.take_superseded_commands() {
+            recorder.note_settled(receipt, peer.tick());
         }
         self.store.sync_receipts(peer.receipts());
         result
@@ -1317,6 +1323,9 @@ impl<'d> Monitor<'d> {
                 for restart in peer.take_source_restarts() {
                     recorder.note_source_restart(restart);
                 }
+                for receipt in peer.take_superseded_commands() {
+                    recorder.note_settled(receipt, peer.tick());
+                }
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
@@ -1458,6 +1467,12 @@ fn track_and_record(
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);
+    }
+    // Pending commands an adopted checkpoint abandoned — the demoted
+    // run's suspended queue the tracked line never carried — settle
+    // `superseded` here rather than vanishing from the audit.
+    for receipt in peer.take_superseded_commands() {
+        recorder.note_settled(receipt, peer.tick());
     }
     store.sync_receipts(peer.receipts());
     report
