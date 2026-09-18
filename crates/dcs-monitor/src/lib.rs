@@ -2,11 +2,23 @@
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
 //! small synchronous HTTP server, so no async runtime is involved.
-//! Requests dispatch across a small worker pool so a request whose
-//! handling legitimately waits on the network — a driven `POST /scan`
-//! batch's per-scan checkpoint pull, a promotion's final-sync fetch —
-//! stalls only its own worker instead of head-of-line blocking every
-//! endpoint behind it. The executor lives behind a [`Mutex`]
+//! Requests dispatch across two worker lanes: a submission lane for
+//! requests that can hold a worker on a client-paced wait —
+//! `POST /command` and `POST /scan`, the only handlers that read a
+//! request body, plus any request still carrying a body the client
+//! owes (dropping its live reader drains the remainder, the same
+//! unbounded wait) — and a serving lane for everything else. A client
+//! that stalls mid-body pins at most the small submission pool; the
+//! serving lane — `GET /checkpoint` among it, the heartbeat a tracking
+//! standby measures the active's liveness by — keeps answering, so
+//! request-body traffic can never impersonate a dead active. Within a
+//! lane a request whose handling legitimately waits on the network —
+//! a driven `POST /scan` batch's per-scan checkpoint pull, a
+//! promotion's final-sync fetch — stalls only its own worker instead
+//! of head-of-line blocking every endpoint behind it, and body reads
+//! themselves are bounded: a declared or delivered body past
+//! [`MAX_REQUEST_BODY`] is refused `413`. The executor lives behind a
+//! [`Mutex`]
 //! the control-plane endpoints and the scan loop share — scans, commands,
 //! checkpoints, and role changes hold it for their mutation, so a
 //! snapshot can never observe a half-run scan and commands always
@@ -95,7 +107,8 @@
 //!   converged, or a repeated promotion — answers `409` with the named
 //!   [`SwitchError`]
 //! - `POST /command`, body a [`Command`] → `200` [`CommandReceipt`]
-//!   (`accepted` / `rejected` outcome); an unparseable body → `400`.
+//!   (`accepted` / `rejected` outcome); an unparseable body → `400`,
+//!   a body past [`MAX_REQUEST_BODY`] → `413`.
 //!   The attributed envelope `{"command":…,"actor":…}` is also accepted
 //!   — the wire shape the command-path audit-identity decision records:
 //!   `actor` is the submitter's *declared* identity (attestation, not
@@ -121,7 +134,8 @@
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a failing
 //!   [`Driven::after_scan`] hook → `500`; refused with `409` on a paced
-//!   monitor (see below)
+//!   monitor before the body is even read (see below), and the same
+//!   `413` bound [`MAX_REQUEST_BODY`] gives `/command`
 //! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
 //!   page described below
 //!
@@ -391,10 +405,11 @@ use dcs_core::{
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, TrackReport, Transfer};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -444,15 +459,41 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The worker count [`Monitor::serve`] dispatches requests across.
-/// tiny_http queues accepted requests internally; each worker pops one
-/// and handles it end to end. The pool exists so a request whose work
-/// legitimately waits on the network — a driven `POST /scan` batch's
-/// per-scan checkpoint pull, a promotion's final-sync fetch — stalls
-/// only its own worker while every other endpoint keeps answering;
-/// control-plane mutations still serialize on the shared lock, the
-/// pool only choosing which request waits on it next.
+/// The worker count [`Monitor::serve`] dispatches the serving lane
+/// across — every request that cannot hold a worker on a client-paced
+/// wait: the GET reads, the `POST /promote`/`POST /demote` role
+/// changes, and the `404`s. tiny_http queues accepted requests
+/// internally; a dispatcher routes each onto this lane's own queue,
+/// and each worker handles one end to end. The pool exists so a
+/// request whose work legitimately waits on the network — a
+/// promotion's final-sync fetch — stalls only its own worker while
+/// every other endpoint keeps answering; control-plane mutations
+/// still serialize on the shared lock, the pool only choosing which
+/// request waits on it next.
 const SERVE_WORKERS: usize = 4;
+
+/// The worker count serving the submission lane — `POST /command` and
+/// `POST /scan`, the only handlers that read a request body, plus any
+/// request still carrying a body the client owes: reading that body
+/// waits on the client, and dropping its reader drains the remainder,
+/// the same unbounded wait. tiny_http exposes no socket timeout to
+/// bound either wait: a client that stalls mid-body holds its worker
+/// for as long as it cares to. Those client-paced waits are
+/// quarantined on this lane so the serving lane — `GET /checkpoint`
+/// among it, the heartbeat a tracking standby measures the active's
+/// liveness by — keeps answering through a stalled-body flood, per
+/// the disposable-consumer contract. Two workers keep a long
+/// `POST /scan` batch from queueing every command behind it; a flood
+/// beyond the lane's width can still starve submissions, but never
+/// the served surface.
+const SUBMIT_WORKERS: usize = 2;
+
+/// The bound on a request body the monitor will read — far past the
+/// largest legitimate body, a `Command` envelope or `ScanRequest` of
+/// tens of bytes. A request declaring more is refused `413` before a
+/// byte is read, and the read itself is `take`-bounded so a chunked or
+/// understated body cannot grow the buffer past the cap either.
+const MAX_REQUEST_BODY: u64 = 64 * 1024;
 
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
@@ -720,21 +761,54 @@ impl<'d> Monitor<'d> {
 
     /// Serves requests until [`shutdown`](Self::shutdown).
     ///
-    /// Blocking: run this on a dedicated thread. Requests dispatch
-    /// across a pool of [`SERVE_WORKERS`] workers rather than one at a
-    /// time: a request whose handling legitimately waits — a driven
-    /// `POST /scan` batch walking its per-scan pulls, a promotion's
-    /// final-sync fetch — occupies only its own worker and never
-    /// head-of-line blocks the reads and control-plane requests queued
-    /// behind it. The executor's command/scan interleaving stays
-    /// deterministic because the pool only decides which request waits
-    /// on the shared lock next: scans, commands, checkpoints, and role
-    /// changes still serialize on it.
+    /// Blocking: run this on a dedicated thread. One dispatcher drains
+    /// tiny_http's internal queue and routes each request onto one of
+    /// two lanes by [`submission`]: requests that can hold a worker on
+    /// a client-paced wait — the body-reading `POST /command` and
+    /// `POST /scan`, plus any request still carrying a body the client
+    /// owes, whose dropped reader drains the rest the same way — go to
+    /// the submission lane's [`SUBMIT_WORKERS`] workers; everything
+    /// else to the serving lane's [`SERVE_WORKERS`]. The split exists
+    /// because the body wait is the one serving step with no bound —
+    /// a client that stalls mid-body holds its worker indefinitely,
+    /// while every other wait is bounded: the serving pool's own
+    /// network waits carry [`CHECKPOINT_PULL_TIMEOUT`]. Quarantining
+    /// the unbounded wait keeps `GET /checkpoint`, `GET /role`, and
+    /// every other endpoint answering through a stalled-body flood —
+    /// the standby heartbeat measures the active's liveness, never its
+    /// request-body traffic. The executor's command/scan interleaving
+    /// stays deterministic either way: the pools only decide which
+    /// request waits on the shared lock next, and scans, commands,
+    /// checkpoints, and role changes still serialize on it.
     pub fn serve(&self) {
+        let submissions = Lane::new();
+        let served = Lane::new();
         std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while let Ok(request) = self.server.recv() {
+                    if submission(&request) {
+                        submissions.push(request);
+                    } else {
+                        served.push(request);
+                    }
+                }
+                // `recv` ending — `unblock` or a dead listener —
+                // drains both lanes and releases their workers.
+                submissions.close();
+                served.close();
+            });
             for _ in 0..SERVE_WORKERS {
-                scope.spawn(|| {
-                    while let Ok(request) = self.server.recv() {
+                let lane = &served;
+                scope.spawn(move || {
+                    while let Some(request) = lane.pop() {
+                        self.handle(request);
+                    }
+                });
+            }
+            for _ in 0..SUBMIT_WORKERS {
+                let lane = &submissions;
+                scope.spawn(move || {
+                    while let Some(request) = lane.pop() {
                         self.handle(request);
                     }
                 });
@@ -743,10 +817,11 @@ impl<'d> Monitor<'d> {
     }
 
     /// Stops a [`serve`](Self::serve) loop running on another thread.
+    /// One `unblock` ends the dispatcher's `recv`; its lane close
+    /// releases every worker once queued requests drain. Extra
+    /// unblocks only pad the dead queue, so the original
+    /// per-worker count stays as the harmless upper bound.
     pub fn shutdown(&self) {
-        // Each queued `Unblock` ends one worker's `recv` loop — a
-        // worker mid-request consumes it on its next pop — so the pool
-        // drains on one per worker.
         for _ in 0..SERVE_WORKERS {
             self.server.unblock();
         }
@@ -1127,8 +1202,11 @@ impl<'d> Monitor<'d> {
                 }
                 Err(response) => response,
             },
+            // The paced refusal needs no body — answering it ahead of
+            // the read keeps the wall clock's ownership obvious and
+            // skips a read the response never used.
+            (Method::Post, "/scan") if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
-                Ok(_) if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
                 Ok(body) => {
                     let mut failure = None;
                     for _ in 0..body.scans {
@@ -1264,6 +1342,89 @@ impl<'d> Monitor<'d> {
     }
 }
 
+/// Whether the request can hold a worker on a client-paced wait —
+/// the routing [`Monitor::serve`] applies. Two request shapes can:
+///
+/// - `POST /command` and `POST /scan`, the only handlers that read a
+///   request body: tiny_http hands them the body still on the socket,
+///   and a client that stalls mid-body holds the reader as long as it
+///   cares to.
+/// - Any request still owing the client body bytes, whatever its
+///   path: a declared `Content-Length` past the library's small eager
+///   buffer leaves the remainder on a live reader whose drop drains
+///   the rest — the same unbounded wait as the read — and a chunked
+///   body reads off the socket the same way.
+///
+/// Everything else — plain GETs and the bounded control-plane POSTs,
+/// including a `GET /role` whose client never promised a body — is
+/// answered without ever waiting on the client and belongs on the
+/// serving lane.
+fn submission(request: &Request) -> bool {
+    let reads_body = request.method() == &Method::Post
+        && matches!(
+            request.url().split('?').next(),
+            Some("/command") | Some("/scan")
+        );
+    reads_body
+        || request.body_length().is_some_and(|length| length > 0)
+        || request
+            .headers()
+            .iter()
+            .any(|header| header.field.equiv("Transfer-Encoding"))
+}
+
+/// One serving lane's request queue — [`Monitor::serve`]'s dispatcher
+/// pushes, the lane's workers pop. [`close`](Self::close) releases
+/// every blocked worker once the queued requests drain, so `shutdown`
+/// reaching the dispatcher propagates down both lanes.
+struct Lane {
+    inner: Mutex<LaneInner>,
+    ready: Condvar,
+}
+
+struct LaneInner {
+    queue: VecDeque<Request>,
+    closed: bool,
+}
+
+impl Lane {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(LaneInner {
+                queue: VecDeque::new(),
+                closed: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn push(&self, request: Request) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.closed {
+            inner.queue.push_back(request);
+            self.ready.notify_one();
+        }
+    }
+
+    fn pop(&self) -> Option<Request> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            if let Some(request) = inner.queue.pop_front() {
+                return Some(request);
+            }
+            if inner.closed {
+                return None;
+            }
+            inner = self.ready.wait(inner).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        self.inner.lock().unwrap().closed = true;
+        self.ready.notify_all();
+    }
+}
+
 /// One standby tracking cycle plus its journal recording — the body
 /// `track_cycle` runs, and `POST /scan` reaches through it:
 /// `Peer::track_once` runs the
@@ -1390,14 +1551,35 @@ fn journal_query(query: &str) -> Result<u64, String> {
     Ok(since)
 }
 
-/// Reads and parses a JSON request body; parse failures produce the `400`
-/// response directly.
-fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<Cursor<Vec<u8>>>> {
-    let mut body = String::new();
-    if request.as_reader().read_to_string(&mut body).is_err() {
-        return Err(json(400, "unreadable request body"));
+/// Reads a request body up to [`MAX_REQUEST_BODY`]: a declared length
+/// past the bound is refused `413` before a byte is read, and the read
+/// itself is `take`-bounded so a chunked or understated body cannot
+/// deliver more either — no worker ever buffers or waits on a body
+/// past the cap. Read failures produce the `400` response directly.
+fn read_body(request: &mut Request) -> Result<Vec<u8>, Response<Cursor<Vec<u8>>>> {
+    if request
+        .body_length()
+        .is_some_and(|length| length as u64 > MAX_REQUEST_BODY)
+    {
+        return Err(json(413, "request body too large"));
     }
-    serde_json::from_str(&body).map_err(|error| json(400, &error.to_string()))
+    let mut body = Vec::new();
+    match request
+        .as_reader()
+        .take(MAX_REQUEST_BODY + 1)
+        .read_to_end(&mut body)
+    {
+        Err(_) => Err(json(400, "unreadable request body")),
+        Ok(_) if body.len() as u64 > MAX_REQUEST_BODY => Err(json(413, "request body too large")),
+        Ok(_) => Ok(body),
+    }
+}
+
+/// Reads and parses a JSON request body within [`read_body`]'s bound;
+/// parse failures produce the `400` response directly.
+fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<Cursor<Vec<u8>>>> {
+    let body = read_body(request)?;
+    serde_json::from_slice(&body).map_err(|error| json(400, &error.to_string()))
 }
 
 /// Reads a `POST /command` body into its [`CommandEnvelope`]. The
@@ -1411,11 +1593,8 @@ fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<C
 fn read_command_submission(
     request: &mut Request,
 ) -> Result<CommandEnvelope, Response<Cursor<Vec<u8>>>> {
-    let mut body = String::new();
-    if request.as_reader().read_to_string(&mut body).is_err() {
-        return Err(json(400, "unreadable request body"));
-    }
-    let value: serde_json::Value = match serde_json::from_str(&body) {
+    let body = read_body(request)?;
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => return Err(json(400, &error.to_string())),
     };
