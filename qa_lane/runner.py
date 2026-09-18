@@ -111,7 +111,11 @@ DEFAULT_CONFIG = {
     # (~3-5 s of misses) never reaches it.
     'failover_misses': 120,
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
-    'dynamics_fixture': 'crates/dcs-demo/fixtures/pump_station_dynamics.json',
+    # The lane's own dynamics declaration: the shared fixture leaves
+    # the inflow channel to scripted forcing, while the unattended rig
+    # needs the declared inflow so the station cycles demand on its own
+    # — the duty-rotation case's honest lever.
+    'dynamics_fixture': 'qa_lane/fixtures/pump_station_dynamics.json',
     'capabilities': [
         {'key': 'no-ethercat',
          'detail': 'No EtherCAT driver in this revision; all field I/O '
