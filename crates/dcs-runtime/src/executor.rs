@@ -2372,6 +2372,25 @@ impl<'d> Executor<'d> {
         self.trim_receipts();
     }
 
+    /// Suspends the run's queued commands without settling them — the
+    /// demotion counterpart of [`supersede_commands`](Self::supersede_commands).
+    /// [`Peer::demote`](crate::Peer::demote) runs it as the gate closes:
+    /// the receipts stay `Accepted` in the log, so the checkpoints this
+    /// run keeps serving still carry them for a successor's
+    /// promotion-boundary pull ([`Peer::final_sync`](crate::Peer::final_sync),
+    /// [`carry_pending_commands`](Self::carry_pending_commands)) — but
+    /// the demoted run's own scans no longer apply them, because a
+    /// quiesced scan's `Applied` would journal an application the gate
+    /// kept off the field, erased by the next adoption. Each suspended
+    /// entry resolves on the tracked line's next checkpoint apply:
+    /// covered by the adopted log it re-queues and settles with the
+    /// run; dropped by it, the peer settles it `Rejected` carrying
+    /// [`CommandError::Superseded`] — a pending command neither
+    /// vanishes unaudited nor reports `applied` on an abandoned image.
+    pub fn suspend_pending_commands(&mut self) {
+        self.pending_commands.clear();
+    }
+
     /// The cyclic exchange at the read boundary: when the driver
     /// implemented [`CyclicIoDriver`] at wiring, one `exchange` call —
     /// after command application, so a command-staged write publishes in
