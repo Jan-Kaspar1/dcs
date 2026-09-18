@@ -45,6 +45,7 @@ prevent."""
 import io
 import json
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -58,6 +59,67 @@ from qa_lane import report, runner, scenarios, verify
 
 HELD_RESPONSE = (b'HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\n'
                  b'{"tick": 12, "points": []}')
+
+
+def _ctl_request(args):
+    """The one wire request the shipped dcs-plant-ctl sends for an
+    argv covering `list`, `read`, `fault`, and `clear-fault` — the
+    subcommands the migrated scenarios drive. `write`/`step` are the
+    tool's claimed mutations and the claim ops are the ones it does
+    not expose; the scenarios keep those on the raw client, so an argv
+    carrying them means a leg drifted off the covered seam."""
+    op = args[0] if args else None
+    if op == 'list':
+        return {'op': 'list_points'}
+    if op == 'read':
+        return {'op': 'read', 'point': int(args[1])}
+    if op == 'fault':
+        return {'op': 'inject_fault', 'point': int(args[1]),
+                'fault': _ctl_fault(args[2])}
+    if op == 'clear-fault':
+        return {'op': 'clear_fault', 'point': int(args[1])}
+    raise AssertionError('plant_ctl argv outside the covered '
+                         'subcommands: %s' % (args,))
+
+
+def _ctl_fault(arg):
+    """The Fault value the tool's `fault` argument parses to:
+    disconnected/timeout error faults, uncertain[:reason]/bad[:reason]
+    quality faults (defaulting to unspecified)."""
+    kind, _, reason = arg.partition(':')
+    if kind in ('disconnected', 'timeout') and not reason:
+        return kind
+    if kind in ('uncertain', 'bad'):
+        return {'quality': {kind: reason or 'unspecified'}}
+    raise AssertionError('unparseable fault argument %s' % arg)
+
+
+def _ctl_process(body=None, stderr='', returncode=0):
+    """A CompletedProcess-shaped answer for a faked ctx['plant_ctl']
+    seam — the shape runner.plant_ctl's `docker exec` returns: the
+    response JSON on stdout at exit 0, the refusal on stderr at exit
+    1."""
+    return subprocess.CompletedProcess(
+        args=('dcs-plant-ctl',), returncode=returncode,
+        stdout=json.dumps(body) if returncode == 0 else '',
+        stderr=stderr)
+
+
+def _ctl_wrap(dispatch, *args):
+    """Run argv through a stubbed wire dispatch as the shipped tool
+    would: the response JSON at exit 0, or the refusal's detail at
+    exit 1 — a transport failure raising is the tool's nonzero exit
+    too."""
+    try:
+        body = dispatch(_ctl_request(args))
+    except AssertionError:
+        raise
+    except Exception as exc:
+        return _ctl_process(stderr=str(exc), returncode=1)
+    if (body or {}).get('result') == 'error':
+        return _ctl_process(stderr=json.dumps(body.get('error')),
+                            returncode=1)
+    return _ctl_process(body)
 
 
 def _pipelined_bodies(raw):
@@ -1503,6 +1565,34 @@ class FakePlantPeer:
                 'error': {'kind': 'invalid_request',
                           'detail': 'unknown op'}}
 
+    def ctl(self, *args):
+        """The ctx['plant_ctl'] seam the migrated scenarios drive: the
+        argv's one wire request over a fresh connection — the same
+        exchange the shipped dcs-plant-ctl runs — wrapped in the
+        CompletedProcess shape the runner's `docker exec` action
+        returns. A server `error` result is the tool's nonzero exit
+        with the refusal on stderr."""
+        request = _ctl_request(args)
+        host, _, port = self.address.rpartition(':')
+        try:
+            with socket.create_connection((host, int(port)),
+                                          timeout=5) as conn:
+                conn.sendall(json.dumps(request).encode() + b'\n')
+                buffer = b''
+                while b'\n' not in buffer:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        raise ConnectionError('the plant closed '
+                                              'mid-answer')
+                    buffer += chunk
+            body = json.loads(buffer.split(b'\n', 1)[0])
+        except Exception as exc:
+            return _ctl_process(stderr=str(exc), returncode=1)
+        if (body or {}).get('result') == 'error':
+            return _ctl_process(stderr=json.dumps(body.get('error')),
+                                returncode=1)
+        return _ctl_process(body)
+
     def close(self):
         self.listener.close()
         self.thread.join(timeout=5)
@@ -1591,6 +1681,7 @@ class FieldFaultTests(unittest.TestCase):
     def run_scenario(self):
         ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
                'plant': self.plant.address,
+               'plant_ctl': self.plant.ctl,
                'evidence_dir': str(self.evidence)}
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
@@ -1939,6 +2030,7 @@ class BackupHealthTests(unittest.TestCase):
         return {'active': 'http://ctrl-a:1',
                 'standby': 'http://ctrl-b:2',
                 'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
                 'evidence_dir': str(self.evidence)}
 
     def run_scenario(self, ctx=None, feed=None):
@@ -1996,6 +2088,7 @@ class BackupHealthTests(unittest.TestCase):
         feed2 = BackupHealthFeed(plant2)
         ctx2 = self._ctx()
         ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
         ctx2['evidence_dir'] = str(evidence2)
         record2 = self.run_scenario(ctx=ctx2, feed=feed2)
         self.assertEqual(record2['outcome'], 'passed', record2)
@@ -2685,6 +2778,7 @@ class LagStagingTests(unittest.TestCase):
         return {'active': 'http://ctrl-a:1',
                 'standby': 'http://ctrl-b:2',
                 'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
                 'plant_owner': {'active': self.OWNER, 'standby': 424244},
                 'evidence_dir': str(self.evidence)}
 
@@ -2745,6 +2839,7 @@ class LagStagingTests(unittest.TestCase):
         feed2 = LagStagingFeed(plant2)
         ctx2 = self._ctx()
         ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
         ctx2['evidence_dir'] = str(evidence2)
         record2 = self.run_scenario(ctx=ctx2, feed=feed2)
         self.assertEqual(record2['outcome'], 'passed', record2)
@@ -4513,7 +4608,9 @@ class RevisionFeed:
             return self._promote(peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -4536,6 +4633,10 @@ class RevisionFeed:
                               'quality': 'good', 'tick': 9}
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class ModelRevisionTests(unittest.TestCase):
@@ -4566,6 +4667,7 @@ class ModelRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_revised': self.feed.start,
                 'journal_files': {
@@ -4575,8 +4677,6 @@ class ModelRevisionTests(unittest.TestCase):
 
     def run_scenario(self):
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             self.feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -4625,14 +4725,13 @@ class ModelRevisionTests(unittest.TestCase):
         feed2 = RevisionFeed(journals2, self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_revised'] = feed2.start
         ctx2['journal_files'] = {
             'active': str(journals2['a']),
             'standby': str(journals2['b']),
             'revised': str(journals2['c'])}
         with patch.object(scenarios, 'http_json', feed2.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed2.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -4897,7 +4996,9 @@ class IncompatibleFeed:
             return self._promote(peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -4922,6 +5023,10 @@ class IncompatibleFeed:
                                   'quality': 'good', 'tick': 9}
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class IncompatibleRevisionTests(unittest.TestCase):
@@ -4960,6 +5065,7 @@ class IncompatibleRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_revised': feed.start,
                 'journal_files': {
@@ -4970,8 +5076,6 @@ class IncompatibleRevisionTests(unittest.TestCase):
     def run_scenario(self, feed=None, ctx=None):
         feed = feed or self.feed
         with patch.object(scenarios, 'http_json', feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -5028,6 +5132,7 @@ class IncompatibleRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': feed2.plant_ctl,
                 'evidence_dir': str(evidence2),
                 'start_revised': feed2.start,
                 'journal_files': {
@@ -5275,7 +5380,9 @@ class NegotiationFeed:
             return self._promote(url, peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -5284,6 +5391,10 @@ class NegotiationFeed:
         if request['op'] == 'read':
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class CheckpointNegotiationTests(unittest.TestCase):
@@ -5311,14 +5422,13 @@ class CheckpointNegotiationTests(unittest.TestCase):
                 'revised': 'http://ctrl-c:3',
                 'foreign': 'http://ctrl-f:4',
                 'plant': 'plant:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_foreign': self.feed.start,
                 'stop_foreign': self.feed.stop}
 
     def run_scenario(self, ctx=None):
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             self.feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
@@ -5359,11 +5469,10 @@ class CheckpointNegotiationTests(unittest.TestCase):
         feed2 = NegotiationFeed(self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_foreign'] = feed2.start
         ctx2['stop_foreign'] = feed2.stop
         with patch.object(scenarios, 'http_json', feed2.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed2.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
@@ -5701,6 +5810,13 @@ class DoomedStartupFeed:
                                         'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
+    # The shipped plant tool — replaces ctx['plant_ctl'] for the
+    # covered subcommands (the census and the field reads); the bare
+    # `step` fencing probes stay on the _plant_probe patch above.
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.plant_request(None, request), *args)
+
 
 class DoomedStartupClaimTests(unittest.TestCase):
     """scenario_doomed_startup_claim against the stubbed rig: the
@@ -5733,6 +5849,7 @@ class DoomedStartupClaimTests(unittest.TestCase):
                 'revised': 'http://ctrl-c:3',
                 'foreign': 'http://ctrl-f:4',
                 'plant': '127.0.0.1:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_foreign': self.feed.start,
                 'stop_foreign': self.feed.stop,
@@ -5790,6 +5907,7 @@ class DoomedStartupClaimTests(unittest.TestCase):
                                   self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_foreign'] = feed2.start
         ctx2['stop_foreign'] = feed2.stop
         ctx2['state_files'] = {'foreign': str(directory2
@@ -6403,6 +6521,13 @@ class PlantLinkFeed:
                                         'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
+    # The shipped plant tool — replaces ctx['plant_ctl'] for the
+    # covered census; the bare `step` fencing probes stay on the
+    # _plant_probe patch above.
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.plant_request(None, request), *args)
+
     # The monitor surface — replaces scenarios.http_json.
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('/')[2]
@@ -6468,6 +6593,7 @@ class PlantLinkLossTests(unittest.TestCase):
     def run_scenario(self, ctx_extra=None):
         ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
                'plant': '127.0.0.1:9',
+               'plant_ctl': self.feed.plant_ctl,
                'evidence_dir': str(self.evidence),
                'stop_plant': self.feed.stop,
                'start_plant': self.feed.start}

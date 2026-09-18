@@ -767,25 +767,37 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
            'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant '
+           '-p dcs-controller -p dcs-plant -p dcs-sim-net '
            '&& cargo build --release --locked '
            '-p dcs-monitor --bin dcs-ctl',
            timeout=cfg['builder_timeout'])
+    # Extra binaries each image ships beside its entrypoint: the plant
+    # image carries dcs-plant-ctl — the plant-side tool the lane execs
+    # inside the container against the server's loopback listener, so
+    # the covered plant ops run through the shipped binary rather than
+    # a second Python implementation of the wire protocol.
+    ship = {'plant': ['dcs-plant-ctl']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
             ('plant', 'dcs-plant-server', 'dcs-hwtest/plant')):
-        binary_path = work / 'target' / 'release' / binary
-        if not binary_path.is_file():
-            raise RuntimeError('build produced no ' + binary)
+        binaries = [binary] + ship.get(crate, [])
+        for name in binaries:
+            binary_path = work / 'target' / 'release' / name
+            if not binary_path.is_file():
+                raise RuntimeError('build produced no ' + name)
         context = run_dir / ('image-' + crate)
         context.mkdir(exist_ok=True)
-        shutil.copy2(binary_path, context / binary)
+        copies = ''
+        for name in binaries:
+            shutil.copy2(work / 'target' / 'release' / name,
+                         context / name)
+            copies += 'COPY ' + name + ' /usr/local/bin/' + name + '\n'
         (context / 'Dockerfile').write_text(
             'FROM debian:bookworm-slim\n'
             'RUN useradd --no-create-home --shell /usr/sbin/nologin '
             '--uid 10001 dcs\n'
-            'COPY ' + binary + ' /usr/local/bin/' + binary + '\n'
+            + copies +
             'USER dcs\n'
             'ENTRYPOINT ["' + binary + '"]\n'
             'CMD ["--help"]\n')
@@ -966,6 +978,23 @@ def start_plant(run_id, timeline):
     timeline('plant-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('plant-started', container + ' running')
+
+
+def plant_ctl(run_id, port, *args):
+    """The scenario-callable plant-tool invocation: `docker exec` runs
+    the shipped `dcs-plant-ctl` inside the run's plant container
+    against the server's loopback listener — the ticket's honest seam,
+    so the lane's covered plant ops drive the binary the image carries
+    rather than a second Python implementation of the wire protocol.
+    The loopback address binds inside the container's own netns — the
+    exchange never leaves the rig bridge the netpolicy closes.
+    `check=False` returns the CompletedProcess on a refused request too
+    — the tool's nonzero exit is the answer the caller classifies, not
+    a docker failure."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    return docker('exec', container, 'dcs-plant-ctl',
+                  '127.0.0.1:' + str(port), *args,
+                  check=False, timeout=60)
 
 
 def _revised_peer_role(cfg):
@@ -1239,7 +1268,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     the run's evidence dir and deadline, the runner-owned
     controller restart/cold-restart, plant stop/start,
     model-revision, foreign-peer launch/teardown, and driven-peer
-    launch/teardown actions, and the host-side
+    launch/teardown actions, the shipped plant tool's docker-exec
+    invocation, and the host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
@@ -1269,6 +1299,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
+        # The shipped dcs-plant-ctl inside the plant container — the
+        # lane's seam for every plant op the tool's subcommands cover.
+        'plant_ctl': lambda *args: plant_ctl(
+            run_id, cfg['plant_port'], *args),
         'start_revised': lambda name, incompatible=False:
             start_revised_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'],

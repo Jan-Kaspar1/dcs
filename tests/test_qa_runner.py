@@ -572,6 +572,7 @@ class DcsCtlBuildTests(unittest.TestCase):
 
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
+                                            'dcs-plant-ctl',
                                             'dcs-ctl')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
@@ -602,7 +603,8 @@ class DcsCtlBuildTests(unittest.TestCase):
         with patch.object(runner, 'docker',
                           self._fake_docker(
                               [], binaries=('dcs-controller',
-                                            'dcs-plant-server'))):
+                                            'dcs-plant-server',
+                                            'dcs-plant-ctl'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
@@ -615,6 +617,104 @@ class DcsCtlBuildTests(unittest.TestCase):
         self.assertEqual(ctx['dcs_ctl'],
                          str(Path(self.cfg['state_dir']) / 'build-cache'
                              / 'target' / 'release' / 'dcs-ctl'))
+
+
+class PlantCtlShipTests(unittest.TestCase):
+    """The dcs-plant-ctl image seam: the bounded image build compiles
+    the plant-side tool beside the image binaries, the generated plant
+    image ships it beside dcs-plant-server with the entrypoint
+    unchanged, _scenario_ctx hands the cases a `docker exec`
+    invocation against the container's loopback listener, and a build
+    that produces no tool binary fails loudly rather than leaving the
+    cases to run against a phantom tool."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-plant-ctl',
+                                            'dcs-ctl')):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            if args[0] == 'run' and 'cargo' in str(args):
+                target = Path(self.cfg['state_dir']) / 'build-cache' \
+                    / 'target' / 'release'
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in binaries:
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, {'run_id': 'qa-1'}, self.src,
+            self.run_dir, self.run_dir / 'evidence', 0,
+            lambda e, d=None: None)
+
+    def test_build_compiles_the_tool_beside_the_server(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event), 'qa-1')
+        build = next(args for args, _ in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('-p dcs-controller -p dcs-plant -p dcs-sim-net',
+                      build[-1])
+        dockerfile = (self.run_dir / 'image-plant'
+                      / 'Dockerfile').read_text()
+        self.assertIn('COPY dcs-plant-server '
+                      '/usr/local/bin/dcs-plant-server', dockerfile)
+        self.assertIn('COPY dcs-plant-ctl '
+                      '/usr/local/bin/dcs-plant-ctl', dockerfile)
+        self.assertIn('ENTRYPOINT ["dcs-plant-server"]', dockerfile)
+        self.assertTrue(
+            (self.run_dir / 'image-plant' / 'dcs-plant-ctl').is_file())
+        controller = (self.run_dir / 'image-controller'
+                      / 'Dockerfile').read_text()
+        self.assertNotIn('dcs-plant-ctl', controller)
+
+    def test_build_fails_loudly_without_the_tool(self):
+        with patch.object(runner, 'docker',
+                          self._fake_docker(
+                              [], binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-ctl'))):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+
+    def test_scenario_ctx_execs_the_tool_inside_the_container(self):
+        calls = []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            answer = self._ctx()['plant_ctl']('list')
+        self.assertEqual(calls, [
+            (('exec', 'dcs-hw-qa-1-plant', 'dcs-plant-ctl',
+              '127.0.0.1:' + str(self.cfg['plant_port']), 'list'),
+             False)])
+        self.assertEqual(answer.returncode, 0)
+
+    def test_scenario_ctx_returns_refusals_without_raising(self):
+        calls = []
+
+        def refusing(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('', returncode=1)
+
+        with patch.object(runner, 'docker', refusing):
+            answer = self._ctx()['plant_ctl']('write', '10', '1.5')
+        self.assertEqual(answer.returncode, 1)
+        self.assertEqual(calls[0][1], False)
 
 
 class ModelRevisionActionTests(unittest.TestCase):
