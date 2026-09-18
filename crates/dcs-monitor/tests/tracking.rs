@@ -555,6 +555,91 @@ fn driven_stale_apply_leaves_the_standby_diverged() {
     assert_eq!(promoted.role, Role::Promoting);
 }
 
+/// The QA finding `checkpoint-peer-announce-overwrites-follow-source`:
+/// `GET /checkpoint?peer=` is the tracking standby announcing *its own*
+/// monitor address — a claim the serving monitor accepts only when it
+/// names the pulling connection's own source address. A client
+/// announcing an address that is not its own — the reproduction's
+/// bogus `10.255.255.1:9999` — is ignored while the checkpoint still
+/// answers `200`: the read endpoint cannot plant or overwrite the
+/// follow-peer tracking source, a field owner whose only "announce"
+/// was spoofed still refuses `POST /demote` with `no_tracking_source`,
+/// and a real tracking peer's announce keeps selecting the demotion's
+/// source.
+#[test]
+fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
+    let (standby, active) = DrivenStandby::start(None);
+    let bogus: SocketAddr = "10.255.255.1:9999".parse().unwrap();
+
+    // The reproduction's first half: ahead of any real announce the
+    // bogus foreign address does not land — the checkpoint answers,
+    // the announced tracking source stays unset.
+    active.client.checkpoint_announcing(bogus).unwrap();
+    assert_eq!(active.monitor.tracking_source(), None);
+
+    // A real tracking peer's announce lands: the driven standby's
+    // per-scan pull names its own bound address — the pulling
+    // connection's own source — which the serving monitor records.
+    standby.standby.client.advance(1).unwrap();
+    let standby_addr = standby.standby.monitor.local_addr();
+    assert_eq!(active.monitor.tracking_source(), Some(standby_addr));
+
+    // The spoofed announce cannot overwrite it either.
+    active.client.checkpoint_announcing(bogus).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(standby_addr));
+
+    // Demotion follows the recorded real source: the demoted peer's
+    // tracking pull converges against the standby that announced
+    // itself — a pull toward the planted address would have reported
+    // `degraded` naming it.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer tracks its announced successor, not the \
+         spoofed address: {report:?}"
+    );
+
+    // A field owner whose only "announce" was the spoofed one keeps
+    // refusing demotion — `no_tracking_source` rather than converging
+    // against the planted address.
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.checkpoint_announcing(bogus).unwrap();
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a spoofed announce must not arm the demotion tracking source: {error}"
+    );
+    assert_eq!(lonely.monitor.tracking_source(), None);
+
+    // The wildcard announce a `0.0.0.0`-bound puller sends — "my port
+    // on every interface" — resolves to the source the connection
+    // proves rather than dropping the follow-peer contract.
+    lonely
+        .client
+        .checkpoint_announcing("0.0.0.0:12345".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        lonely.monitor.tracking_source(),
+        Some("127.0.0.1:12345".parse().unwrap())
+    );
+    lonely.stop();
+}
+
 /// The paced-standby reproduction of the QA finding
 /// `monitor-requests-blocked-by-dead-peer-pull`: while the tracking
 /// pull stalls on a dead active, `GET /role` and `GET /snapshot` must
