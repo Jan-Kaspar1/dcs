@@ -44,6 +44,14 @@ ci/refusal.py          the pair contract's refusal half — the
                        pre-transfer promote answering not_converged,
                        the standby-directed write answering not_active,
                        the same promote succeeding once tracking
+ci/takeover.py         the pair contract's takeover leg — the settled
+                       pair driven until the pump group holds a duty
+                       demand, then the declared per-pump mode seam
+                       exercised through the receipted path: mode
+                       cutting the pump off the group's request,
+                       hand running it under the declared guards and
+                       a driven protection input, oos inhibiting it,
+                       and the restore returning it to group control
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -247,6 +255,35 @@ A violated contract fails `refusal-failed`; two passes must produce
 the identical `refusal-digest`, a divergence failing
 `refusal-nondeterministic`.
 
+The stage's takeover leg — `ci/takeover.py` on the same declared
+deployment — then proves the per-pump mode seam the emitted model
+declares actually holds for an operator on the customer's pair. With
+the pair tracking and the pump group holding a duty demand on pump 1,
+the leg submits a receipted `write_value` on `p101-mode` through the
+active's `POST /command` — the ticket's chosen released-tooling path —
+and asserts the settled `applied` receipt landing identically in both
+peers' adopted log while the pump's delivered command leaves the
+group's `cmd_1`: the auto-leg carriers report the manual selection and
+the pump-group status reflects the exclusion, the standing demand
+handed to pump 2. A receipted `p101-hand` then runs the pump on the
+operator demand while the declared thermal/moisture guards still gate
+it inside the availability aggregation; the leg drives the protection
+input through the plant protocol — an injected non-Good on the run
+contact, the simulator's unfenced diagnostic surface — asserting the
+proven command/feedback `fault` and its managed alarm's standing and
+unacknowledged flags, cleared through `clear_fault` and a receipted
+`ack`. A receipted `p101-oos` asserts the maintenance inhibit — the
+in-service guard cutting the hand request and the managed
+`out_of_service`/`suppressed` states annunciating — and the restore
+returns `mode`/`oos`/`hand`, the pump rejoining the group's roster
+with its delivered command following the group request again. The
+active's served `GET /journal` must carry each attributed transition
+in `seq` order — every receipted write's `applied` settlement named to
+the leg's actor beside the journaled mode, protection, alarm, inhibit,
+and restore transitions. A violated contract fails `takeover-failed`;
+two passes must produce the identical `takeover-digest`, a divergence
+failing `takeover-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -418,7 +455,13 @@ record is `pair-failed`; two pair-leg passes diverging is
 pre-transfer promote not answering `not_converged`, a standby-directed
 write not answering `not_active`, or a refusal disturbing the active —
 is `refusal-failed`; two refusal-leg passes diverging is
-`refusal-nondeterministic`;
+`refusal-nondeterministic`; a per-pump manual-takeover leg failing to
+hold — a receipted mode/hand/oos write unsettled, the manual
+selection's declared signals unreported, the guards ungated, the
+managed alarm unannunciated, the restore not returning the pump to
+group control, or the journal missing an attributed transition — is
+`takeover-failed`; two takeover-leg passes diverging is
+`takeover-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
