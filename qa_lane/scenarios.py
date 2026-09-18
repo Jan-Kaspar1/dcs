@@ -37,16 +37,21 @@ removes the peer again through ctx['stop_driven']; its pair-health
 surface is the page's own `pairHealth` rule applied to the /role
 reports the scenario polls.
 
-The field-fault and backup-health cases additionally open one
-plant-protocol connection to the run's published plant port — the
-newline-JSON request/response surface
-crates/dcs-sim-net/src/protocol.rs documents — to inject and clear
-per-point faults on the shared simulated field. The lag-staging case
-opens the same surface and ensures the field writer claim under the
+The field-fault and backup-health cases inject and clear per-point
+faults on the shared simulated field through the shipped
+`dcs-plant-ctl` binary — the plant-side tool the dcs-plant-server
+image carries, exec'd inside the run's plant container against its
+loopback listener through ctx['plant_ctl'] — so the lane drives the
+tool's own contract rather than a second Python implementation of
+the wire protocol crates/dcs-sim-net/src/protocol.rs documents. The
+lag-staging case instead opens the raw protocol surface on the
+published plant port and ensures the field writer claim under the
 settled active's pinned --owner-token (ctx['plant_owner']) — the
 designed shared-claim path for a test harness — so its inflow writes
 drive the dynamics' declared forcing input while the single-writer
-fencing keeps every other owner out.
+fencing keeps every other owner out; that claim shape and the bare
+`step` fencing probe are the ops the tool does not expose, so those
+legs stay on the raw client.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -564,34 +569,11 @@ REVISION_FIELD_ROUNDS = 6         # field/telemetry reads after the roll
 REVISION_POLL = 0.5               # cadence watching the roll's peers
 
 
-def _field_request(ctx, request):
-    """One newline-delimited request against the simulated plant's
-    sim-net service — the field-side truth below the monitor layer.
-    `ctx['plant']` carries the plant's loopback host:port."""
-    host, _, port = str(ctx['plant']).rpartition(':')
-    stream = socket.create_connection((host or '127.0.0.1',
-                                       int(port or 0)), timeout=5)
-    try:
-        stream.sendall(json.dumps(request).encode() + b'\n')
-        data = b''
-        while not data.endswith(b'\n'):
-            chunk = stream.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        stream.close()
-    return json.loads(data) if data else None
-
-
 def _field_sample(ctx, point):
     """The plant's stored sample for `point` — `{'value', 'quality',
     'tick'}` — or None when the read dropped; a lost observation, never
-    the leg's verdict."""
-    try:
-        body = _field_request(ctx, {'op': 'read', 'point': point})
-    except Exception:
-        return None
+    the leg's verdict. The shipped tool's `read` serves it."""
+    body = _try_plant_ctl(ctx, 'read', str(point))
     if not isinstance(body, dict):
         return None
     return body.get('sample')
@@ -599,8 +581,9 @@ def _field_sample(ctx, point):
 
 def _field_out_points(ctx):
     """Every field `out` point the simulated plant serves — the points
-    a field-owning scan writes — from the plant's own census."""
-    body = _field_request(ctx, {'op': 'list_points'})
+    a field-owning scan writes — from the plant's own census, listed by
+    the shipped tool."""
+    body = _try_plant_ctl(ctx, 'list')
     points = (body or {}).get('points') or []
     return [entry['point'] for entry in points
             if isinstance(entry, dict)
@@ -1752,10 +1735,10 @@ DOOMED_CORRUPT_RECORD = ('{"qa-lane": "corrupt first record — '
 
 
 def _probe_sample(ctx, point):
-    """The plant's stored sample for `point` through the probing
-    attachment — `{'value', 'quality', 'tick'}` — or None when the read
-    dropped; a lost observation, never the leg's verdict."""
-    body = _try_plant(ctx, {'op': 'read', 'point': point})
+    """The plant's stored sample for `point` through the shipped
+    tool's `read` — `{'value', 'quality', 'tick'}` — or None when the
+    read dropped; a lost observation, never the leg's verdict."""
+    body = _try_plant_ctl(ctx, 'read', str(point))
     if not isinstance(body, dict):
         return None
     return body.get('sample')
@@ -1824,7 +1807,7 @@ def scenario_doomed_startup_claim(ctx):
                                'the incumbent\'s receipted path cannot '
                                'be probed')
         point = target['point']
-        census = _try_plant(ctx, {'op': 'list_points'})
+        census = _try_plant_ctl(ctx, 'list')
         if census is None:
             return case.finish('inconclusive', 'the simulated plant '
                                'did not answer its point census')
@@ -4169,7 +4152,15 @@ def _plant_probe(ctx, request, timeout=5):
     owner's re-arm", not an open window. Each probe takes a new
     connection because the outage it watches is exactly a dead
     listener; the probe never sends `claim_writer` — claiming from
-    here would preempt the field owner it is checking for."""
+    here would preempt the field owner it is checking for. The probe
+    stays on the raw client rather than `dcs-plant-ctl`'s `step`
+    subcommand for the same reason: the tool wraps its mutation in its
+    own conditional claim — `ensure_writer` under the tool token, then
+    `release_writer` — so an unclaimed field would answer `stepped`
+    under a fleeting tool claim instead of the `unclaimed` verdict the
+    leg watches for, and that claim window could fence the field
+    owner's re-arm it polls for. The bare `step` is a request shape
+    the tool does not expose."""
     stream = _plant_connect(ctx, timeout=timeout)
     try:
         stream.settimeout(timeout)
@@ -4251,7 +4242,7 @@ def scenario_plant_link_loss(ctx):
         # The baseline: the field census names the points the link
         # boundary fails at once, and the fencing probe proves the
         # writer claim the outage must lose and recovery must re-take.
-        census = _try_plant(ctx, {'op': 'list_points'})
+        census = _try_plant_ctl(ctx, 'list')
         points = (census or {}).get('points', [])
         field_in = sorted(entry.get('point') for entry in points
                           if entry.get('direction') == 'in')
@@ -4411,7 +4402,7 @@ def scenario_plant_link_loss(ctx):
                 if report.get('role') != expected[name]:
                     return role_violation(name, report, expected,
                                           recovery['roles'])
-            if _try_plant(ctx, {'op': 'list_points'}) is not None:
+            if _try_plant_ctl(ctx, 'list') is not None:
                 recovery['plant'] = True
             probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
             if probe is not None:
@@ -6488,10 +6479,53 @@ def _plant_request(stream, request):
     return json.loads(line)
 
 
-def _plant_read(stream, point):
-    """The stored field sample for `point` — `{"op":"read"}` answered
-    as a `sample` result."""
-    response = _plant_request(stream, {'op': 'read', 'point': point})
+def _plant_ctl(ctx, *args):
+    """One `dcs-plant-ctl` invocation through the run's `plant_ctl`
+    seam — the shipped plant-side tool, exec'd inside the plant
+    container against its loopback listener, so the lane drives the
+    binary the image carries rather than a second Python
+    implementation of the wire protocol. The answer is the same
+    response object the raw wire produced (`{"result":"done"}`,
+    `{"result":"sample","sample":{...}}`, ...); a refused request or a
+    failed invocation comes back error-shaped, `detail` carrying the
+    tool's stderr."""
+    run = ctx.get('plant_ctl')
+    if run is None:
+        raise ConnectionError('the run context carries no plant_ctl '
+                              'seam for the shipped plant tool')
+    result = run(*args)
+    if result.returncode == 0:
+        try:
+            answer = json.loads(result.stdout)
+        except ValueError:
+            raise ConnectionError('dcs-plant-ctl printed an '
+                                  'unparseable answer: '
+                                  + str(result.stdout)[:300])
+        if not isinstance(answer, dict):
+            raise ConnectionError('dcs-plant-ctl printed a non-object '
+                                  'answer: ' + str(result.stdout)[:300])
+        return answer
+    return {'result': 'error',
+            'error': {'kind': 'tool_failed',
+                      'detail': (result.stderr or '').strip()[:400],
+                      'exit': result.returncode}}
+
+
+def _try_plant_ctl(ctx, *args):
+    """`_plant_ctl` or None — a refused invocation is one lost poll,
+    not the leg's verdict (the `_try_plant` contract applied to the
+    shipped tool's subcommands)."""
+    try:
+        answer = _plant_ctl(ctx, *args)
+    except Exception:
+        return None
+    return answer if answer.get('result') != 'error' else None
+
+
+def _plant_read(ctx, point):
+    """The stored field sample for `point` — the shipped tool's
+    `read`, answered as a `sample` result."""
+    response = _plant_ctl(ctx, 'read', str(point))
     if response.get('result') != 'sample':
         raise ConnectionError('plant read on point ' + str(point)
                               + ' answered '
@@ -6499,13 +6533,13 @@ def _plant_read(stream, point):
     return response.get('sample') or {}
 
 
-def _field_inputs(stream):
+def _field_inputs(ctx):
     """{point: PointInfo entry} for every 'in'-direction point the
-    plant serves — the list_points census, which is the field side's
-    own account of what the scenario may fault."""
-    response = _plant_request(stream, {'op': 'list_points'})
+    plant serves — the shipped tool's `list`, the field side's own
+    account of what the scenario may fault."""
+    response = _plant_ctl(ctx, 'list')
     if response.get('result') != 'points':
-        raise ConnectionError('plant list_points answered '
+        raise ConnectionError('plant list answered '
                               + json.dumps(response)[:300])
     return {entry.get('point'): entry
             for entry in response.get('points') or []
@@ -6526,7 +6560,6 @@ def scenario_field_fault(ctx):
                 'surfaces on io_health (failed_reads, last_error with '
                 'tick and direction) while the scan continues and no '
                 'role change follows')
-    stream = None
     injected = []
     try:
         # Self-contained on either role layout, like evidence-capture:
@@ -6539,8 +6572,7 @@ def scenario_field_fault(ctx):
         if ctx.get('plant') is None:
             return case.finish('inconclusive',
                                'the run publishes no plant endpoint')
-        stream = _plant_connect(ctx)
-        case.observe('plant protocol at ' + str(ctx['plant'])
+        case.observe('plant tool at ' + str(ctx['plant'])
                      + '; observing ' + active + ' (' + base + ')')
 
         # Fault targets must be points the field itself holds still:
@@ -6548,10 +6580,13 @@ def scenario_field_fault(ctx):
         # field value rather than a moved one. Two list_points probes
         # straddling a few plant steps find them, and each must already
         # read Good on the monitor — a forced or degraded point cannot
-        # evidence a fault it would mask.
-        first = _field_inputs(stream)
+        # evidence a fault it would mask. The field ops ride the
+        # shipped dcs-plant-ctl: read, list, and the fault commands need
+        # no writer claim, so they run beside the field owner's
+        # standing claim exactly as the raw requests did.
+        first = _field_inputs(ctx)
         time.sleep(FAULT_PROBE)
-        second = _field_inputs(stream)
+        second = _field_inputs(ctx)
         snap = _snapshot(ctx, base)
         served_good = {
             entry.get('point') for entry in snap.get('points', [])
@@ -6592,10 +6627,9 @@ def scenario_field_fault(ctx):
         # Leg 1: a quality fault substitutes the served quality, leaving
         # the stored field value — the bad-data-confidence clause's
         # "degraded, never silently healthy" half.
-        field_value = _plant_read(stream, quality_point).get('value')
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': quality_point,
-                     'fault': {'quality': {'bad': 'device_fault'}}})
+        field_value = _plant_read(ctx, quality_point).get('value')
+        verdict = _plant_ctl(ctx, 'fault', str(quality_point),
+                             'bad:device_fault')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6639,8 +6673,7 @@ def scenario_field_fault(ctx):
                                'active role — a field fault is not '
                                'peer loss')
 
-        verdict = _plant_request(stream, {'op': 'clear_fault',
-                                          'point': quality_point})
+        verdict = _plant_ctl(ctx, 'clear-fault', str(quality_point))
         if verdict.get('result') != 'done':
             return case.finish('failed', 'clear_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6656,7 +6689,7 @@ def scenario_field_fault(ctx):
                     != 'good':
                 return None
             try:
-                field = _plant_read(stream, quality_point)
+                field = _plant_read(ctx, quality_point)
             except Exception:
                 return None
             if sample.get('value') == field.get('value'):
@@ -6708,9 +6741,8 @@ def scenario_field_fault(ctx):
                 'injection')
         health0 = before.get('io_health') or {}
         tick0 = before.get('tick') or 0
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': error_point,
-                     'fault': 'disconnected'})
+        verdict = _plant_ctl(ctx, 'fault', str(error_point),
+                             'disconnected')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6804,17 +6836,11 @@ def scenario_field_fault(ctx):
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
     finally:
-        if stream is not None:
-            # The injected points are the run's shared field: a case
-            # that leaves them faulted poisons every later scenario.
-            for point in injected:
-                try:
-                    _plant_request(stream, {'op': 'clear_fault',
-                                            'point': point})
-                except Exception:
-                    pass
+        # The injected points are the run's shared field: a case that
+        # leaves them faulted poisons every later scenario.
+        for point in injected:
             try:
-                stream.close()
+                _plant_ctl(ctx, 'clear-fault', str(point))
             except Exception:
                 pass
 
@@ -6891,7 +6917,6 @@ def scenario_backup_health(ctx):
                 'applied and journals attributed to the lane actor, '
                 'and clearing the fault lands the journaled return '
                 'transitions')
-    stream = None
     injected = None      # the backup field point, while faulted
     restore_ack = None   # (base, point) while the ack write stands
     try:
@@ -6956,14 +6981,17 @@ def scenario_backup_health(ctx):
         if ctx.get('plant') is None:
             return case.finish('inconclusive',
                                'the run publishes no plant endpoint')
-        stream = _plant_connect(ctx)
-        field = _field_inputs(stream)
+        # The field census and the fault commands ride the shipped
+        # dcs-plant-ctl: neither takes the writer claim, so they run
+        # beside the field owner's standing claim exactly as the raw
+        # requests did.
+        field = _field_inputs(ctx)
         if points['backup'] not in field:
             return case.finish('inconclusive', 'the level-backup '
                                'signal\'s point ' + str(points['backup'])
                                + ' is not a field in-point the plant '
                                'serves')
-        case.observe('plant protocol connected; backup field point '
+        case.observe('plant tool answering; backup field point '
                      + str(points['backup']))
 
         last = {}
@@ -7004,9 +7032,8 @@ def scenario_backup_health(ctx):
                      for entry in _journal_list(journal0)
                      if isinstance(entry, dict)), default=0)
 
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': points['backup'],
-                     'fault': {'quality': {'bad': 'device_fault'}}})
+        verdict = _plant_ctl(ctx, 'fault', str(points['backup']),
+                             'bad:device_fault')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault on the backup '
                                'point refused: '
@@ -7251,8 +7278,8 @@ def scenario_backup_health(ctx):
         # sample to Good and lands the return transitions — the
         # health output and the standing alarm dropping on their
         # declared-journaled points — with the selection unmoved.
-        verdict = _plant_request(stream, {'op': 'clear_fault',
-                                          'point': points['backup']})
+        verdict = _plant_ctl(ctx, 'clear-fault',
+                             str(points['backup']))
         if verdict.get('result') != 'done':
             return case.finish('failed', 'clear_fault on the backup '
                                'point refused: '
@@ -7374,15 +7401,9 @@ def scenario_backup_health(ctx):
         # The injected point is the run's shared field and the ack
         # point the alarm's operator input: a case that leaves either
         # standing poisons every later scenario.
-        if stream is not None:
-            if injected is not None:
-                try:
-                    _plant_request(stream, {'op': 'clear_fault',
-                                            'point': injected})
-                except Exception:
-                    pass
+        if injected is not None:
             try:
-                stream.close()
+                _plant_ctl(ctx, 'clear-fault', str(injected))
             except Exception:
                 pass
         if restore_ack is not None:
@@ -7634,8 +7655,15 @@ def scenario_lag_staging(ctx):
             return case.finish('inconclusive', 'the run pins no '
                                'plant-writer owner token for the '
                                'settled active ' + str(active))
+        # The claim seam splits here: the field census and the inflow
+        # reads ride the shipped dcs-plant-ctl (list/read need no
+        # writer claim), while the standing shared claim and the
+        # writes under it stay on the raw client — the tool exposes no
+        # ensure_writer under a chosen owner token, and its `write`
+        # would claim under the tool token and fence against the
+        # active's standing claim rather than join it.
         stream = _plant_connect(ctx)
-        field = _field_inputs(stream)
+        field = _field_inputs(ctx)
         if points['inflow'] not in field:
             return case.finish('inconclusive', 'the inflow signal\'s '
                                'point ' + str(points['inflow'])
@@ -7651,7 +7679,7 @@ def scenario_lag_staging(ctx):
         case.observe('plant protocol attached under ' + active
                      + '\'s writer claim ('
                      + str(verdict.get('result')) + ')')
-        baseline_inflow = (_plant_read(stream, points['inflow'])
+        baseline_inflow = (_plant_read(ctx, points['inflow'])
                            .get('value') or {}).get('float')
         if not isinstance(baseline_inflow, (int, float)) \
                 or isinstance(baseline_inflow, bool) \
@@ -7925,7 +7953,7 @@ def scenario_lag_staging(ctx):
             return error
         restore_ack = None
 
-        restored = (_plant_read(stream, points['inflow'])
+        restored = (_plant_read(ctx, points['inflow'])
                     .get('value') or {}).get('float')
         if restored != baseline_inflow:
             return case.finish('failed', 'staging-failed: the inflow '
