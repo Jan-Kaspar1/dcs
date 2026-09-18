@@ -100,12 +100,12 @@ use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{
     DivergenceReport, ResolutionReport, compare_staged_points, values_diverge,
 };
-use crate::executor::{Executor, ScanError};
+use crate::executor::Executor;
 use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
-    CarryoverReport, Command, CommandReceipt, Divergence, IoError, PointId, Role, RoleReport,
-    Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandReceipt, Divergence, PointId, Role, RoleReport, Sample,
+    StandbySync, SwitchError, TelemetrySnapshot, Tick,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -194,8 +194,9 @@ pub struct Peer<'d> {
     pending_restarts: Vec<SourceRestart>,
     /// Whether the field-ownership claim this peer holds was observed
     /// lost — set when a field-owning scan's write reports
-    /// [`IoError::Fenced`], meaning another attachment now holds the
-    /// claim and the peer demotes itself on the spot. Re-armed by each
+    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), meaning another
+    /// attachment now holds the claim and the peer demotes itself on
+    /// the spot. Re-armed by each
     /// successful claim lift: the queued report is once per ownership,
     /// not once per fenced scan.
     fencing_lost: bool,
@@ -1190,10 +1191,10 @@ impl<'d> Peer<'d> {
     /// its writes are the field's truth.
     ///
     /// A field-owning scan whose write the shared field fenced —
-    /// [`IoError::Fenced`], meaning the claim this peer held was
-    /// preempted by another attachment — completes degraded like any
-    /// field fault: the refusal counts in `io_health` and one
-    /// [`FencingLoss`] queues for the journal. But the peer is
+    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), meaning the claim
+    /// this peer held was preempted by another attachment — completes
+    /// degraded like any field fault: the refusal counts in `io_health`
+    /// and one [`FencingLoss`] queues for the journal. But the peer is
     /// superseded, and a degraded report alone would leave it still
     /// believing it owns the field — still writing into the fence: the
     /// demote path runs in place, re-closing the gate and running the
@@ -1212,37 +1213,8 @@ impl<'d> Peer<'d> {
     /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
     /// before the journaled `CommandSettled` would echo a phantom
     /// application.
-    pub fn scan(&mut self) -> Result<Tick, ScanError> {
-        let tick = match self.executor.scan() {
-            Ok(tick) => tick,
-            Err(error) => {
-                if self.owns_field()
-                    && self.gate.is_some()
-                    && let ScanError::Io(IoError::Fenced(point)) = &error
-                {
-                    let tick = self.executor.tick();
-                    if !self.fencing_lost {
-                        self.fencing_lost = true;
-                        self.pending_fencing.push(FencingLoss {
-                            tick,
-                            point: *point,
-                        });
-                    }
-                    // Superseded: the field's single-writer claim
-                    // belongs to another attachment now. Re-close the
-                    // gate and report the aborted scan's tick — the
-                    // fenced write degrades this peer to the quiesced
-                    // tracking peer the demote path defines; it does
-                    // not end the run. Commands the aborted boundary
-                    // settled are reconciled first: they applied onto
-                    // the abandoned image only.
-                    self.executor.supersede_commands(tick);
-                    self.demote().expect("a field-owning peer demotes");
-                    return Ok(tick);
-                }
-                return Err(error);
-            }
-        };
+    pub fn scan(&mut self) -> Tick {
+        let tick = self.executor.scan();
         if self.owns_field()
             && let Some(point) = self.executor.fenced_write()
         {
@@ -1262,7 +1234,7 @@ impl<'d> Peer<'d> {
             // run's, so they settle superseded rather than applied.
             self.executor.supersede_commands(tick);
             self.demote().expect("a field-owning peer demotes");
-            return Ok(tick);
+            return tick;
         }
         match self.role {
             Role::Promoting => self.change(tick, Role::Active),
@@ -1274,7 +1246,7 @@ impl<'d> Peer<'d> {
         } else {
             self.staged = Some((tick, self.executor.staged_field_outputs()));
         }
-        Ok(tick)
+        tick
     }
 
     /// Drains reported-role transitions queued since the last call — for
@@ -1502,7 +1474,7 @@ mod tests {
         // A checkpoint from an equivalent run converges the standby.
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(7).unwrap();
+        source.run(7);
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(
             peer.sync_state(),
@@ -1525,7 +1497,7 @@ mod tests {
         );
 
         // The first post-promotion scan settles the role.
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Active);
         assert_eq!(peer.report().sync, None);
         assert!(peer.accepts_commands());
@@ -1556,7 +1528,7 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(3).unwrap();
+        source.run(3);
         let checkpoint = source.checkpoint();
         peer.apply(&checkpoint).unwrap();
 
@@ -1566,7 +1538,7 @@ mod tests {
         // A checkpoint offered to a field-owning peer is refused.
         assert_eq!(peer.apply(&checkpoint), Err(ApplyError::OwnsField));
 
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.promote(), Err(SwitchError::AlreadyActive));
         assert_eq!(peer.apply(&checkpoint), Err(ApplyError::OwnsField));
     }
@@ -1609,7 +1581,7 @@ mod tests {
             kind: ValueKind::Float,
             value: Value::Float(7.0),
         });
-        source.run(tick).unwrap();
+        source.run(tick);
         source.checkpoint()
     }
 
@@ -1675,7 +1647,7 @@ mod tests {
         peer.promote().unwrap();
         assert_eq!(peer.role(), Role::Promoting);
         assert!(gate.is_open());
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Active);
         // The carried operator value survived the switch.
         assert_eq!(
@@ -1736,7 +1708,7 @@ mod tests {
             released.store(true, Ordering::Relaxed);
         });
         peer.activate().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
         assert!(gate.is_open());
 
         peer.demote().unwrap();
@@ -1752,7 +1724,7 @@ mod tests {
         gate.write(point, Value::Float(9.0)).unwrap();
         assert_eq!(driver.value(point), Value::Float(0.0));
 
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
 
@@ -1840,7 +1812,7 @@ mod tests {
             Some(&gate),
         );
         peer.activate().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(field.value(OUTPUT), Value::Float(1.0));
         assert!(peer.take_fencing_losses().is_empty());
 
@@ -1850,7 +1822,7 @@ mod tests {
         // path's survivable state on the spot: gate re-closed, role
         // reporting `demoting`, the claim loss queued once.
         fenced.armed.store(true, Ordering::Relaxed);
-        assert_eq!(peer.scan(), Ok(Tick(2)));
+        assert_eq!(peer.scan(), Tick(2));
         assert_eq!(
             peer.snapshot().io_health.last_error,
             Some(IoFault {
@@ -1884,7 +1856,7 @@ mod tests {
         // never reaches the field — and the completed scan settles the
         // demotion. The loss stays one event per held claim: the
         // quiesced scans queue nothing further.
-        assert_eq!(peer.scan(), Ok(Tick(3)));
+        assert_eq!(peer.scan(), Tick(3));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(
             field.value(OUTPUT),
@@ -1908,7 +1880,7 @@ mod tests {
         peer.apply(&checkpoint).unwrap();
         peer.promote().unwrap();
         assert!(gate.is_open());
-        assert_eq!(peer.scan(), Ok(Tick(4)));
+        assert_eq!(peer.scan(), Tick(4));
         assert_eq!(
             peer.take_fencing_losses(),
             vec![FencingLoss {
@@ -1916,7 +1888,7 @@ mod tests {
                 point: OUTPUT
             }]
         );
-        assert_eq!(peer.scan(), Ok(Tick(5)));
+        assert_eq!(peer.scan(), Tick(5));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(
             peer.take_role_changes(),
@@ -1971,7 +1943,7 @@ mod tests {
             kind: ValueKind::Float,
             value: Value::Float(2.0),
         });
-        assert_eq!(peer.scan(), Ok(Tick(1)));
+        assert_eq!(peer.scan(), Tick(1));
         assert_eq!(
             peer.receipts()[0].outcome,
             CommandOutcome::Applied { tick: Tick(1) }
@@ -2008,7 +1980,7 @@ mod tests {
         // demotion runs. The reconciled settlements name the
         // supersession; the field write's own fenced refusal stands as
         // the named driver rejection; nothing reached the field.
-        assert_eq!(peer.scan(), Ok(Tick(2)));
+        assert_eq!(peer.scan(), Tick(2));
         assert_eq!(peer.role(), Role::Demoting);
         assert!(!gate.is_open());
         assert_eq!(field.value(INPUT), Value::Float(1.0));
@@ -2036,7 +2008,7 @@ mod tests {
 
         // The demoted peer's next quiesced boundary settles no strays —
         // the pending queue was drained by the reconciliation.
-        assert_eq!(peer.scan(), Ok(Tick(3)));
+        assert_eq!(peer.scan(), Tick(3));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(peer.receipts().len(), 3);
     }
@@ -2128,9 +2100,9 @@ mod tests {
     /// the standby applies the checkpoint, which runs the divergence
     /// check on the staged image of the matching tick, then scans.
     fn cycle(active: &mut Peer<'_>, standby: &mut Peer<'_>) {
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
     }
 
     #[test]
@@ -2156,9 +2128,9 @@ mod tests {
 
         // Converge: the first transfer aligns ticks; tracking cycles
         // keep the staged image and the field's values equal.
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         for _ in 0..3 {
             cycle(&mut active, &mut standby);
         }
@@ -2277,9 +2249,9 @@ mod tests {
         );
 
         // Converge and track clean: each same-tick comparison matches.
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         for _ in 0..3 {
             cycle(&mut active, &mut standby);
         }
@@ -2291,10 +2263,10 @@ mod tests {
         // Diverge: the staged image describes the tick-5 output; the
         // active's write lands, then a rogue writer moves the same
         // field point before the same-tick compare reads it.
-        active.scan().unwrap();
+        active.scan();
         field.write(OUTPUT, Value::Float(9.9)).unwrap();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         let diverged = StandbySync::Diverged {
             mismatches: vec![Divergence {
                 point: OUTPUT,
@@ -2347,8 +2319,8 @@ mod tests {
         // diverging point fails. A comparison that read nothing observed
         // nothing; the verdict stands.
         failing.armed.store(true, Ordering::Relaxed);
-        standby.scan().unwrap();
-        active.scan().unwrap();
+        standby.scan();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         assert_eq!(standby.sync_state(), &diverged);
         assert_eq!(
@@ -2365,8 +2337,8 @@ mod tests {
         // the named resolution carrying every compared point's
         // evidence — and the promote gate reopens.
         failing.armed.store(false, Ordering::Relaxed);
-        standby.scan().unwrap();
-        active.scan().unwrap();
+        standby.scan();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         assert_eq!(
             standby.sync_state(),
@@ -2407,9 +2379,9 @@ mod tests {
         );
 
         // Converge and track clean.
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         for _ in 0..3 {
             cycle(&mut active, &mut standby);
         }
@@ -2421,10 +2393,10 @@ mod tests {
         // Diverge: the staged image describes the tick-5 output; a rogue
         // writer moves the field point before the same-tick compare
         // reads it.
-        active.scan().unwrap();
+        active.scan();
         field.write(OUTPUT, Value::Float(9.9)).unwrap();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         let diverged = StandbySync::Diverged {
             mismatches: vec![Divergence {
                 point: OUTPUT,
@@ -2440,7 +2412,7 @@ mod tests {
         // boundary pull on the fresh tick-6 checkpoint: refused by the
         // standing verdict, which the boundary neither manufactures nor
         // revokes.
-        active.scan().unwrap();
+        active.scan();
         standby.final_sync(|| Ok(active.checkpoint()));
         assert_eq!(standby.sync_state(), &diverged);
         assert_eq!(
@@ -2501,9 +2473,9 @@ mod tests {
         // Converge, then diverge on the first same-tick compare — the
         // skew is armed from the start, so the tick-2 staged image
         // mismatches the field the active wrote.
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         assert_eq!(standby.take_divergences().len(), 1);
@@ -2512,8 +2484,8 @@ mod tests {
         // scans before the next apply leave no staged image whose tick
         // the checkpoint@4 matches — the apply runs no field
         // comparison, so the verdict stands and the gate stays shut.
-        active.scan().unwrap();
-        active.scan().unwrap();
+        active.scan();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         assert!(standby.take_resolutions().is_empty());
@@ -2548,9 +2520,9 @@ mod tests {
             None,
         );
 
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         standby.take_divergences();
@@ -2559,7 +2531,7 @@ mod tests {
         // diverged state evidence-free, but the restored verdict keeps
         // the report — and no resolution queues. The active scans once
         // first so its checkpoint is fresh enough to land.
-        active.scan().unwrap();
+        active.scan();
         standby.final_sync(|| Ok(active.checkpoint()));
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         assert_eq!(standby.take_resolutions(), vec![]);
@@ -2588,7 +2560,7 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(3).unwrap();
+        source.run(3);
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(
             peer.sync_state(),
@@ -2612,7 +2584,7 @@ mod tests {
         assert!(!gate.is_open());
 
         // A produced checkpoint resets the run — the active served.
-        source.run(1).unwrap();
+        source.run(1);
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.missed_transfers(), 0);
 
@@ -2626,7 +2598,7 @@ mod tests {
         assert!(claimed.load(Ordering::Relaxed));
         assert_eq!(peer.role(), Role::Promoting);
         assert!(gate.is_open());
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.role(), Role::Active);
     }
 
@@ -2655,7 +2627,7 @@ mod tests {
         // closed with the proof, and the peer reports `degraded`.
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(3).unwrap();
+        source.run(3);
         peer.apply(&source.checkpoint()).unwrap();
         peer.note_transfer_failed("a");
         peer.note_transfer_failed("b");
@@ -2682,7 +2654,7 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(3).unwrap();
+        source.run(3);
         peer.apply(&source.checkpoint()).unwrap();
 
         assert_eq!(
@@ -2723,7 +2695,7 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(4).unwrap();
+        source.run(4);
         let checkpoint = source.checkpoint();
 
         let report = peer.track_once(|| Ok(checkpoint));
@@ -2786,7 +2758,7 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(3).unwrap();
+        source.run(3);
         let checkpoint = source.checkpoint();
         assert_eq!(
             peer.track_once(|| Ok(checkpoint)),
@@ -3012,7 +2984,7 @@ mod tests {
 
         let source_driver = StubDriver::field(&[]);
         let mut source = Clocked::executor(&source_driver);
-        source.run(2).unwrap();
+        source.run(2);
         standby.apply(&source.checkpoint()).unwrap();
 
         // The admission lands after the last tracking pull — the
@@ -3027,7 +2999,7 @@ mod tests {
 
         standby.promote().unwrap();
         assert_eq!(standby.role(), Role::Promoting);
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.role(), Role::Active);
         assert_eq!(
             standby.receipts()[0].outcome,
@@ -3036,7 +3008,7 @@ mod tests {
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
 
         // Never again: the settled outcome stays the log's one entry.
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.receipts().len(), 1);
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
@@ -3055,8 +3027,8 @@ mod tests {
 
         for _ in 0..3 {
             standby.apply(&reference.checkpoint()).unwrap();
-            standby.scan().unwrap();
-            reference.scan().unwrap();
+            standby.scan();
+            reference.scan();
             assert_eq!(
                 standby.executor().emitted_events(),
                 reference.emitted_events()
@@ -3065,8 +3037,8 @@ mod tests {
 
         standby.promote().unwrap();
         for tick in 4..7 {
-            standby.scan().unwrap();
-            reference.scan().unwrap();
+            standby.scan();
+            reference.scan();
             assert_eq!(
                 standby.executor().emitted_events(),
                 reference.emitted_events()
@@ -3085,7 +3057,7 @@ mod tests {
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
         let source_driver = StubDriver::field(&[]);
         let mut source = Clocked::executor(&source_driver);
-        source.run(2).unwrap();
+        source.run(2);
         standby.apply(&source.checkpoint()).unwrap();
         assert_eq!(
             standby.sync_state(),
@@ -3135,9 +3107,9 @@ mod tests {
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
         let source_driver = StubDriver::field(&[]);
         let mut source = Clocked::executor(&source_driver);
-        source.run(2).unwrap();
+        source.run(2);
         standby.apply(&source.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.tick(), Tick(3));
 
         source.submit_command(Clocked::bump(7));
@@ -3166,7 +3138,7 @@ mod tests {
         assert_eq!(standby.receipts().len(), 1);
 
         standby.promote().unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.role(), Role::Active);
         assert_eq!(
             standby.receipts()[0].outcome,
@@ -3175,7 +3147,7 @@ mod tests {
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
 
         // Never again: the settled outcome stays the log's one entry.
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.receipts().len(), 1);
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
@@ -3191,14 +3163,14 @@ mod tests {
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
         let source_driver = StubDriver::field(&[]);
         let mut source = Clocked::executor(&source_driver);
-        source.run(2).unwrap();
+        source.run(2);
         source.submit_command(Clocked::bump(7));
 
         // The standby's own quiesced scan settles the carried invoke —
         // `Applied` on its line while the active, stalled at tick 2,
         // still serves it `Accepted`.
         standby.apply(&source.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.receipts()[0].outcome,
             CommandOutcome::Applied { tick: Tick(3) }
@@ -3213,7 +3185,7 @@ mod tests {
         );
 
         standby.promote().unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         // Settled once, never re-applied: the count holds at one bump.
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
@@ -3230,7 +3202,7 @@ mod tests {
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
         let source_driver = StubDriver::field(&[]);
         let mut source = Clocked::executor(&source_driver);
-        source.run(5).unwrap();
+        source.run(5);
         source.submit_command(Clocked::bump(7));
 
         standby.final_sync(|| Ok(source.checkpoint()));
@@ -3249,7 +3221,7 @@ mod tests {
         // settles with the run.
         standby.apply(&source.checkpoint()).unwrap();
         standby.promote().unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.role(), Role::Active);
         assert_eq!(beat_n(standby.executor()), 6);
         assert_eq!(
@@ -3274,10 +3246,10 @@ mod tests {
         // scans — the standing tracking shape.
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(7).unwrap();
+        source.run(7);
         peer.apply(&source.checkpoint()).unwrap();
-        peer.scan().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
+        peer.scan();
         assert_eq!(peer.tick(), Tick(9));
 
         // The source cold-restarts: a fresh run serves a tick-1
@@ -3285,7 +3257,7 @@ mod tests {
         // and aligned to the new generation — but its own clock stands.
         let restarted_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut restarted = executor(&restarted_driver);
-        restarted.run(1).unwrap();
+        restarted.run(1);
         peer.apply(&restarted.checkpoint()).unwrap();
         assert_eq!(
             peer.tick(),
@@ -3308,11 +3280,11 @@ mod tests {
 
         // The new generation's stream lands at tick + offset — the run
         // stays monotone while tracking the restarted source upward.
-        restarted.run(1).unwrap();
+        restarted.run(1);
         peer.apply(&restarted.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(10));
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.tick(), Tick(11));
         assert!(peer.take_source_restarts().is_empty());
 
@@ -3320,7 +3292,7 @@ mod tests {
         // named report, and the apply lands at the run's tick again.
         let again_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut again = executor(&again_driver);
-        again.run(1).unwrap();
+        again.run(1);
         peer.apply(&again.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(11));
         assert_eq!(
@@ -3346,18 +3318,18 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(4).unwrap();
+        source.run(4);
         peer.apply(&source.checkpoint()).unwrap();
         peer.promote().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
         peer.demote().unwrap();
         assert_eq!(peer.aligned_tick(), None);
-        peer.scan().unwrap();
+        peer.scan();
         assert_eq!(peer.tick(), Tick(6));
 
         let restarted_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut restarted = executor(&restarted_driver);
-        restarted.run(1).unwrap();
+        restarted.run(1);
         peer.apply(&restarted.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(1)));
@@ -3384,22 +3356,22 @@ mod tests {
 
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut source = executor(&source_driver);
-        source.run(4).unwrap();
+        source.run(4);
         peer.apply(&source.checkpoint()).unwrap();
 
         // Misses while the peer keeps scanning — the pull produced
         // nothing, the run ticked on past the alignment.
         peer.note_transfer_failed("active gone");
         peer.note_transfer_failed("active gone");
-        peer.scan().unwrap();
-        peer.scan().unwrap();
+        peer.scan();
+        peer.scan();
         assert_eq!(peer.tick(), Tick(6));
 
         // The source's resumed stream — warm-restarted or merely
         // lagging — still realigns the run at its own tick: same
         // generation, not a restart, so the apply does move the clock
         // back to the stream's line.
-        source.run(1).unwrap();
+        source.run(1);
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(5));
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));

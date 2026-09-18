@@ -587,7 +587,7 @@ fn assert_dead_peer_pull_stays_off_the_request_path(dead: SocketAddr) {
     let pacer = thread::spawn(move || {
         while !stopping.load(Ordering::Relaxed) {
             pacing.track_cycle(|| puller.poll());
-            let _ = pacing.paced_scan();
+            pacing.paced_scan();
             thread::sleep(Duration::from_millis(10));
         }
     });
@@ -754,7 +754,7 @@ fn track_cycles_pull_does_not_hold_the_request_serving_lock() {
                 thread::sleep(Duration::from_millis(400));
                 Err("fetch from 192.0.2.1:8080: stalled".to_string())
             });
-            let _ = pacing.paced_scan();
+            pacing.paced_scan();
         }
     });
     thread::sleep(Duration::from_millis(50));

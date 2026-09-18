@@ -1432,7 +1432,7 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
 
         // The paced loop's entry point: the scan runs through the shared
         // lock and is recorded like an endpoint-driven one.
-        assert_eq!(monitor.paced_scan(), Ok(Tick(1)));
+        assert_eq!(monitor.paced_scan(), Tick(1));
         assert_eq!(monitor.tick(), Tick(1));
         assert_eq!(client.snapshot().unwrap().tick, Tick(1));
         assert_eq!(
@@ -1460,7 +1460,7 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
                 apply_tick: Tick(2)
             }
         );
-        monitor.paced_scan().unwrap();
+        monitor.paced_scan();
         assert_eq!(
             client.receipts().unwrap()[0].outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -1580,7 +1580,7 @@ fn the_paced_loops_overrun_feed_counts_into_io_health() {
     let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
 
     assert_eq!(monitor.snapshot().io_health.scan_overruns, 0);
-    monitor.paced_scan().unwrap();
+    monitor.paced_scan();
     monitor.record_scan_overrun();
     monitor.record_scan_overrun();
     let snapshot = monitor.snapshot();
