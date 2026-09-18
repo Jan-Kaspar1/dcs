@@ -450,7 +450,11 @@ record is `pair-failed`; two pair-leg passes diverging is
 pre-transfer promote not answering `not_converged`, a standby-directed
 write not answering `not_active`, or a refusal disturbing the active —
 is `refusal-failed`; two refusal-leg passes diverging is
-`refusal-nondeterministic`;
+`refusal-nondeterministic`; a proven duty-pump failure not handing
+`duty` to the standby pump inside the declared bound — or the all-out
+annunciation, the declared recovery, or the journaled evidence not
+holding — is `handover-failed`; two handover-leg passes diverging is
+`handover-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
