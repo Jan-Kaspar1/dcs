@@ -58,6 +58,15 @@ ci/force_carryover.py  the pair contract's force-carryover leg — a
                        snapshots, then still standing on the promoted
                        peer after the switch, released through the
                        receipted path, and the pair's roles restored
+ci/burst_order.py      the pair contract's alarm-burst leg — a
+                       deterministic consequential cascade driven
+                       through the plant protocol on the settled pair,
+                       every driven alarm asserted through the active's
+                       monitor, and the durable journal's ordered
+                       point_changed record audited for the driven
+                       activation order with no dropped or reordered
+                       entries, the restores journaled in order, and
+                       the pair's roles unchanged
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -324,6 +333,35 @@ manifest's duty controller `active` and its standby `tracking`. A
 violated contract fails `force-carryover-failed`; two passes must
 produce the identical `force-digest`, a divergence failing
 `force-carryover-nondeterministic`.
+
+The stage's alarm-burst leg — `ci/burst_order.py` on the same declared
+deployment — then proves the durable ordered transition record keeps
+first-out order through a consequential alarm burst on the customer's
+pair, the incident-review evidence the emitted alarm set exists to
+give. With the pair tracking and the pump group holding a full demand
+— both pumps staged and running — the leg drives the cascade through
+the plant protocol's unfenced surface: a quality fault on
+`level-primary` fails the measurement over so `backup-active` and its
+managed alarm annunciate first; the `power-fail` contact is written so
+the station permissives drop — the availability aggregation losing its
+power-ok leg, both pumps de-staging, `none-available` annunciating —
+and the power alarm fires while the undrawn level climbs again; then
+both run contacts' quality is faulted so each motor's proven
+command/feedback `fault` asserts and the group's `all_faulted`
+roll-up lands last. Through the active's monitor the leg asserts every
+driven alarm's `alarm`/`unacknowledged` standing, then restores each
+input in driven order — the cleared instrument, the healthy contact,
+the good run feedback — so the journal carries the returns beside the
+assertions. The field owner's durable journal file must carry every
+driven activation and return in `seq` order — the first-out record,
+equal-tick transitions ordered by sequence rather than tick — with no
+dropped or reordered entries, the served `GET /journal` answering the
+same record, and the pair's roles unchanged throughout. A violated
+contract fails `burst-order-failed`; two passes must produce the
+identical `burst-order-digest`, a divergence failing
+`burst-order-nondeterministic`. The leg's doctored cases — a record
+dropping a driven transition or carrying them out of order — must
+report the named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
