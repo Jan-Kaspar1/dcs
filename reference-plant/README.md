@@ -67,6 +67,13 @@ ci/burst_order.py      the pair contract's alarm-burst leg — a
                        activation order with no dropped or reordered
                        entries, the restores journaled in order, and
                        the pair's roles unchanged
+ci/peer_announce.py    the pair contract's peer-announce leg — a
+                       foreign GET /checkpoint?peer=<closed-port> on
+                       the tracking pair's field owner refused while
+                       the checkpoint read answers, the demote/promote
+                       switch reconverging the demoted peer tracking
+                       on its real successor, and the pair's launch
+                       roles restored
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -363,6 +370,36 @@ identical `burst-order-digest`, a divergence failing
 dropping a driven transition or carrying them out of order — must
 report the named diagnostic rather than pass silently.
 
+The stage's peer-announce leg — `ci/peer_announce.py` on the same
+declared deployment — then proves the checkpoint `?peer=` announce
+acceptance contract on the customer's pair. A tracking standby's
+per-scan pull announces its own monitor address on the field owner —
+the tracking source a demoted owner later follows — and the serving
+monitor records an announce only when it names the pulling
+connection's own source address: a foreign client cannot rewrite
+where a demoted field owner tracks, the poisoning that would strand
+it `unsynchronized` and unpromotable. With the pair tracking and the
+genuine announce recorded, the leg issues a `GET
+/checkpoint?peer=<closed-port>` naming a dead address on a foreign
+IP — a source the pulling connection does not own. The checkpoint
+read must still answer the owner's checkpoint while the crafted
+announce is refused — it cannot overwrite the recorded tracking
+source. The `demote`/`promote` switch then proves the record: the
+crafted announce is issued again at the decisive point — after the
+promote's own re-announce, before the demoted peer's first tracking
+pull, the last write its fallback would follow — and the demoted
+field owner reconverges `tracking` on its real successor where a
+landed foreign address would have stranded it on a dead pull. The
+leg restores the pair's launch roles, leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `peer-announce-failed`; two passes must
+produce the identical `peer-announce-digest`, a divergence failing
+`peer-announce-nondeterministic`. The leg's doctored case — a
+crafted announce naming the pulling connection's own source,
+landing exactly as it would on a controller whose acceptance check
+regressed — must strand the demoted peer and report the named
+diagnostic rather than pass silently.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -546,6 +583,11 @@ promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is
 `force-carryover-failed`; two force-carryover passes diverging is
 `force-carryover-nondeterministic`;
+a foreign `?peer=` announce
+landing on the field owner's monitor — the checkpoint read refusing
+to answer, or the demoted peer stranding `unsynchronized` instead of
+tracking its real successor — is `peer-announce-failed`; two
+peer-announce passes diverging is `peer-announce-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
