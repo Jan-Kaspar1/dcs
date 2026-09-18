@@ -58,6 +58,17 @@ ci/force_carryover.py  the pair contract's force-carryover leg — a
                        snapshots, then still standing on the promoted
                        peer after the switch, released through the
                        receipted path, and the pair's roles restored
+ci/force_release.py    the pair contract's force-release leg — a
+                       receipted force substituted at
+                       Uncertain(Substituted) across scans on the
+                       settled pair, the receipted unforce releasing
+                       it at its apply tick with the live value
+                       resumed and the forced set cleared, the
+                       released state carried through the switch and
+                       the launch roles restored, and every
+                       transition journaled on the durable record
+                       with the standby's adopted log answering the
+                       same receipts
 ci/burst_order.py      the pair contract's alarm-burst leg — a
                        deterministic consequential cascade driven
                        through the plant protocol on the settled pair,
@@ -333,6 +344,40 @@ manifest's duty controller `active` and its standby `tracking`. A
 violated contract fails `force-carryover-failed`; two passes must
 produce the identical `force-digest`, a divergence failing
 `force-carryover-nondeterministic`.
+
+The stage's force-release leg — `ci/force_release.py` on the same
+declared deployment — then proves the release half of the forcing
+contract on the customer's pair, the substituted-data honesty the
+carryover leg's carry leaves unproven. With the pair tracking, the
+leg records the target's unforced sample — the control proving the
+unforced value is what would otherwise have served — and submits
+`force_point` on the same writable internal target through the
+active's `POST /command`, asserting the `applied` settlement at the
+applying scan's tick identical in both peers' adopted log, the
+`forces` entry and the `Uncertain(Substituted)` sample on both peers,
+the substituted stamp standing across further driven scans, and the
+active's served journal carrying the attributed settlement. A
+receipted `unforce_point` must then release the point at its apply
+tick: the `forces` set empty and the live value resumed — for the
+internal target the held-value rule leaves the force's last stamp
+re-stamped `Good`, the observable state a same-value `write_value`
+produces — on both peers, its `applied` settlement landing at that
+scan boundary in the identical adopted log and the held image never
+re-substituting across further scans. A receipted `write_value`
+returning the pre-force held value proves the live write path
+resumed. The leg then issues the `demote`/`promote` switch and
+asserts the promoted peer serves the released state — no resurrected
+force, the live image carried like any run state — before restoring
+the pair's launch roles, leaving the manifest's duty controller
+`active` and its standby `tracking`. The field owner's durable
+journal file must carry the force, release, and restore settlements
+attributed to the leg's actor beside the quality transitions and the
+pair's role records in `seq` order — the served `GET /journal`
+answering the same record — while the standby's adopted receipt log
+answers the same settled receipts throughout. A violated contract
+fails `force-release-failed`; two passes must produce the identical
+`force-release-digest`, a divergence failing
+`force-release-nondeterministic`.
 
 The stage's alarm-burst leg — `ci/burst_order.py` on the same declared
 deployment — then proves the durable ordered transition record keeps
