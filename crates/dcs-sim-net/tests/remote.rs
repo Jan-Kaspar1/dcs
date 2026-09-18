@@ -799,6 +799,55 @@ fn a_released_claim_returns_the_field_to_unclaimed_not_open() {
 }
 
 #[test]
+fn a_non_holder_release_cannot_dissolve_a_dead_owners_claim() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        let stray = RemoteDriver::connect(addr).unwrap();
+
+        // The field owner claims and writes, then dies still holding
+        // the claim: the empty-holder claim it leaves is the fence a
+        // dead owner's silence keeps standing.
+        owner.claim_writer(1).unwrap();
+        owner.write(PointId(20), Value::Float(1.0)).unwrap();
+        assert_eq!(stray.ensure_writer(2), Err(RemoteError::Fenced));
+        drop(owner);
+
+        // The disconnect reaps the owner's hold on the server's
+        // schedule — no request can observe the empty set without
+        // joining it — so the stray release is repeated across the
+        // reaping window. A `release_writer` from an attachment holding
+        // nothing must never dissolve the claim: before the reap it
+        // removes nothing from a set still naming the corpse, and after
+        // it the empty set is the dead-owner state the claim exists to
+        // fence rather than the last holder's hand-back.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            stray.release_writer().unwrap();
+            match stray.ensure_writer(2) {
+                Err(RemoteError::Fenced) => {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                grant => panic!("a non-holder release dissolved the dead owner's claim: {grant:?}"),
+            }
+        }
+
+        // The stray's mutations stay fenced at the field itself — only
+        // a fresh preempting claim moves the ownership.
+        assert_eq!(
+            stray.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(stray.step(0.1), Err(RemoteError::Fenced));
+        stray.claim_writer(2).unwrap();
+        stray.write(PointId(20), Value::Float(4.0)).unwrap();
+        assert_eq!(stray.read(PointId(20)).unwrap().value, Value::Float(4.0));
+    });
+}
+
+#[test]
 fn an_unclaimed_field_write_re_arms_the_recorded_owner_in_place() {
     with_server(loopback_map(), |addr| {
         let owner = RemoteDriver::connect(addr).unwrap();
