@@ -92,6 +92,10 @@ DEFAULT_CONFIG = {
     # revised container does not exist yet, and the case removes it
     # before the model-revision launch.
     'foreign_port': 18083,
+    # The dead-peer-latency case's driven third controller publishes
+    # its monitor here; its sim-net side shares the run's labeled
+    # bridge.
+    'driven_port': 18084,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -1156,27 +1160,97 @@ def stop_foreign_controller(run_id, timeline):
     timeline('negotiation-stopped', container + ' removed')
 
 
+def start_driven_controller(cfg, record, run_dir, model, active,
+                            timeline):
+    """The scenario-callable driven-standby launch — the
+    dead-peer-latency case's second survivor: the run's labeled
+    driven controller on the same mounted model, `--standby <peer>
+    --driven`, so every checkpoint pull it ever performs happens
+    inside a `POST /scan` request — the per-request pull chain a
+    batched scan carries, and the work the serve-pool decision
+    confines to the batch's own worker. Fresh and never driven, it
+    reports `unsynchronized` — the convergence-grace clock the pair
+    health surface reads.
+
+    `active` is the scenario ctx key of the peer the driven standby
+    tracks ('active' is ctrl-a, 'standby' ctrl-b) — the checkpoint
+    source the case's stop induction then makes unreachable. The
+    container carries the run's managed and run labels so teardown
+    reconciles it with the rest of the rig, mounts the run's model
+    read-only at /model/plant.json, publishes its monitor on
+    cfg['driven_port'], and gets its own runner-owned state/journal
+    directory. The launch is recorded on the run's action timeline; a
+    docker failure raises so the calling scenario reports the action
+    never completed.
+
+    Returns the launched container's name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_driven expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    directory = _controller_dir(run_dir, 'd')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-d'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    timeline('driven-start', 'launch ' + container + ' --standby '
+             + standby + ' --driven')
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['driven_port']) + ':8082',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/plant.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--standby', standby,
+           '--driven', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
+    timeline('driven-up', container + ' serving a driven standby')
+    return {'container': container}
+
+
+def stop_driven_controller(run_id, timeline):
+    """The dead-peer-latency case's teardown: `docker rm -f` on the
+    driven peer's container — removed outright, not held down, so
+    later cases see the rig's original pair. Recorded on the run's
+    action timeline like the other lifecycle actions; a docker
+    failure raises so the calling scenario reports the teardown
+    never completed."""
+    container = 'dcs-hw-' + run_id + '-d'
+    timeline('driven-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('driven-stopped', container + ' removed')
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key (the model-revision case's third controller
     answers on 'revised' once launched, the checkpoint-negotiation
-    case's foreign peer on 'foreign'), the published plant-protocol
+    case's foreign peer on 'foreign', the dead-peer-latency case's
+    driven standby on 'driven'), the published plant-protocol
     endpoint, the pinned plant-writer owner token per endpoint key,
     the run's evidence dir and deadline, the runner-owned
     controller restart/cold-restart, plant stop/start,
-    model-revision, and foreign-peer launch/teardown actions, and
-    the host-side
+    model-revision, foreign-peer launch/teardown, and driven-peer
+    launch/teardown actions, and the host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
-             'foreign': 'foreign'}
+             'foreign': 'foreign', 'driven': 'd'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
+        'driven': 'http://127.0.0.1:' + str(cfg['driven_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
         # The pinned --owner-token per endpoint key: a scenario
         # attachment ensures the writer claim under the active's token
@@ -1203,6 +1277,11 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             cfg, record, run_dir, src / cfg['model_fixture'], name,
             timeline),
         'stop_foreign': lambda: stop_foreign_controller(
+            run_id, timeline),
+        'start_driven': lambda name: start_driven_controller(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
+        'stop_driven': lambda: stop_driven_controller(
             run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')

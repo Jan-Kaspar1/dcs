@@ -44,6 +44,20 @@ ci/refusal.py          the pair contract's refusal half — the
                        pre-transfer promote answering not_converged,
                        the standby-directed write answering not_active,
                        the same promote succeeding once tracking
+ci/takeover.py         the pair contract's takeover leg — the settled
+                       pair driven until the pump group holds a duty
+                       demand, then the declared per-pump mode seam
+                       exercised through the receipted path: mode
+                       cutting the pump off the group's request,
+                       hand running it under the declared guards and
+                       a driven protection input, oos inhibiting it,
+                       and the restore returning it to group control
+ci/force_carryover.py  the pair contract's force-carryover leg — a
+                       receipted force on a declared writable In point
+                       while tracking, asserted on both peers'
+                       snapshots, then still standing on the promoted
+                       peer after the switch, released through the
+                       receipted path, and the pair's roles restored
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -247,6 +261,70 @@ A violated contract fails `refusal-failed`; two passes must produce
 the identical `refusal-digest`, a divergence failing
 `refusal-nondeterministic`.
 
+The stage's takeover leg — `ci/takeover.py` on the same declared
+deployment — then proves the per-pump mode seam the emitted model
+declares actually holds for an operator on the customer's pair. With
+the pair tracking and the pump group holding a duty demand on pump 1,
+the leg submits a receipted `write_value` on `p101-mode` through the
+active's `POST /command` — the ticket's chosen released-tooling path —
+and asserts the settled `applied` receipt landing identically in both
+peers' adopted log while the pump's delivered command leaves the
+group's `cmd_1`: the auto-leg carriers report the manual selection and
+the pump-group status reflects the exclusion, the standing demand
+handed to pump 2. A receipted `p101-hand` then runs the pump on the
+operator demand while the declared thermal/moisture guards still gate
+it inside the availability aggregation; the leg drives the protection
+input through the plant protocol — an injected non-Good on the run
+contact, the simulator's unfenced diagnostic surface — asserting the
+proven command/feedback `fault` and its managed alarm's standing and
+unacknowledged flags, cleared through `clear_fault` and a receipted
+`ack`. A receipted `p101-oos` asserts the maintenance inhibit — the
+in-service guard cutting the hand request and the managed
+`out_of_service`/`suppressed` states annunciating — and the restore
+returns `mode`/`oos`/`hand`, the pump rejoining the group's roster
+with its delivered command following the group request again. The
+active's served `GET /journal` must carry each attributed transition
+in `seq` order — every receipted write's `applied` settlement named to
+the leg's actor beside the journaled mode, protection, alarm, inhibit,
+and restore transitions. A violated contract fails `takeover-failed`;
+two passes must produce the identical `takeover-digest`, a divergence
+failing `takeover-nondeterministic`.
+
+The stage's force-carryover leg — `ci/force_carryover.py` on the same
+declared deployment — then proves a standing operator force survives
+the switch on the customer's pair, the continuity clause applied to
+forcing. With the pair tracking, the leg records the target point's
+unforced sample — the control proving the unforced value is what
+would otherwise have served — and submits `force_point` through the
+active's `POST /command` — the leg's chosen receipted path. The
+emitted model marks only *internal* `In` points writable (the
+operator seam: alarm acks, per-pump `mode`/`hand`/`oos`, the exercise
+`run` request) — the released contract accepts internal targets, and
+the leg's `p101-hand` is the honest one: gated by the manual-mode AND
+while the pump stands in auto, so forcing it perturbs nothing
+downstream. The `accepted` submission must settle `applied`
+identically into both peers' adopted log, and the snapshot's `forces`
+entry must name the point with the forced value stamped
+`Uncertain(Substituted)` on both peers — the tracking standby's scans
+run adopted state, so its snapshot already carries the force. The
+leg then issues the `demote`/`promote` switch and asserts on the
+promoted peer — across driven scans — that `forces` still names the
+point and the sample stays the forced value at substituted quality:
+the force set rides the checkpoint through the promotion exactly as
+it does on the platform's lane, never released and never silently
+re-substituted. A receipted `unforce_point` on the new active must
+settle `applied`, empty the `forces` list, and resume the point's
+unforced serve — for an internal target the held-value rule leaves
+the force's last stamp re-stamped `Good`, the observable state a
+same-value `write_value` produces (a field point would resume the
+driver's read; the emitted model declares no writable field `In`
+point). The leg then restores the pair's declared roles — `demote`
+on the new owner, `promote` on the reconverged peer — leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `force-carryover-failed`; two passes must
+produce the identical `force-digest`, a divergence failing
+`force-carryover-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -418,7 +496,18 @@ record is `pair-failed`; two pair-leg passes diverging is
 pre-transfer promote not answering `not_converged`, a standby-directed
 write not answering `not_active`, or a refusal disturbing the active —
 is `refusal-failed`; two refusal-leg passes diverging is
-`refusal-nondeterministic`;
+`refusal-nondeterministic`; a per-pump manual-takeover leg failing to
+hold — a receipted mode/hand/oos write unsettled, the manual
+selection's declared signals unreported, the guards ungated, the
+managed alarm unannunciated, the restore not returning the pump to
+group control, or the journal missing an attributed transition — is
+`takeover-failed`; two takeover-leg passes diverging is
+`takeover-nondeterministic`; a standing force dropped or silently
+re-substituted by a promotion — the `forces` entry missing from the
+promoted peer's snapshot or the sample no longer the forced value at
+substituted quality — or a release leaving the set non-empty is
+`force-carryover-failed`; two force-carryover passes diverging is
+`force-carryover-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is

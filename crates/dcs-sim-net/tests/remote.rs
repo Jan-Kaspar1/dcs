@@ -5,10 +5,11 @@
 
 use dcs_core::{
     Direction, DriverDiagnostics, IoDriver, IoError, IoFault, LinkState, PointId, Quality,
-    QualityReason, Sample, Tick, Value, ValueKind,
+    QualityReason, Role, Sample, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
+    WriteGate,
 };
 use dcs_sim::{
     ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
@@ -794,5 +795,105 @@ fn a_released_claim_returns_the_field_to_unclaimed_not_open() {
         probe.release_writer().unwrap();
         assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
         second.write(PointId(20), Value::Float(4.0)).unwrap();
+    });
+}
+
+#[test]
+fn an_unclaimed_field_write_re_arms_the_recorded_owner_in_place() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(777).unwrap();
+        owner.write(PointId(20), Value::Float(1.0)).unwrap();
+        owner.step(0.1).unwrap();
+
+        // A second connection preempts the claim and hands it straight
+        // back — the soft-DoS shape from the issue: the field sits
+        // unclaimed while the owner's connection stays alive.
+        let interposer = RemoteDriver::connect(addr).unwrap();
+        interposer.claim_writer(777_777).unwrap();
+        interposer.release_writer().unwrap();
+        assert_eq!(
+            RemoteDriver::connect(addr).unwrap().step(0.1),
+            Err(RemoteError::Unclaimed)
+        );
+
+        // The recorded owner re-arms conditionally and the mutation
+        // lands instead of surfacing a fencing verdict.
+        owner.write(PointId(20), Value::Float(2.0)).unwrap();
+        owner.step(0.1).unwrap();
+        assert_eq!(owner.read(PointId(20)).unwrap().value, Value::Float(2.0));
+
+        // A genuinely stolen field still fences: the re-arm refuses and
+        // the write answers the point's `Fenced`.
+        interposer.claim_writer(888_888).unwrap();
+        assert_eq!(
+            owner.write(PointId(20), Value::Float(3.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        // The standing owner is undisturbed.
+        interposer.write(PointId(20), Value::Float(4.0)).unwrap();
+    });
+}
+
+#[test]
+fn an_unclaimed_window_does_not_demote_the_standing_owner() {
+    with_server(loopback_map(), |addr| {
+        const OWNER: u64 = 777;
+        const FOREIGN: u64 = 777_777;
+
+        // The driven-active shape: the executor scans behind a closed
+        // write gate over the remote attachment, activated under the
+        // owner's claim.
+        let active = RemoteDriver::connect(addr).unwrap();
+        let gate = WriteGate::closed(&active);
+        let point_map: PointMap = [
+            (PointId(10), Direction::In, ValueKind::Float),
+            (PointId(20), Direction::Out, ValueKind::Float),
+        ]
+        .into_iter()
+        .collect();
+        let mut peer = Peer::active(
+            Executor::new(
+                &gate,
+                point_map,
+                vec![Box::new(Accumulator {
+                    input: PointId(10),
+                    output: PointId(20),
+                    total: 0.0,
+                })],
+            )
+            .unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            active
+                .claim_writer(OWNER)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| active.release_claim());
+        peer.activate().unwrap();
+        peer.scan().unwrap();
+        assert_eq!(peer.role(), Role::Active);
+
+        // The issue's reproduction: a second connection claims the plant
+        // socket under a foreign owner then releases, leaving the field
+        // unclaimed while the controller connection stays alive.
+        let interposer = RemoteDriver::connect(addr).unwrap();
+        interposer.claim_writer(FOREIGN).unwrap();
+        interposer.release_writer().unwrap();
+
+        // One active scan: the write re-arms the recorded owner and
+        // lands — no `field_claim_lost`, no demotion, the field owned
+        // again under the standing token.
+        peer.scan().unwrap();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(peer.take_fencing_losses().is_empty());
+        assert!(peer.take_role_changes().is_empty());
+
+        // The write landed on the shared field under the re-armed claim.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
     });
 }
