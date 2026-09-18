@@ -95,7 +95,11 @@
 //!   transferable state. This is the peer-sync endpoint a standby
 //!   controller pulls from (the peer-transport decision): like every
 //!   request it is served at a scan boundary under the executor lock, so
-//!   the checkpoint is always a consistent between-scans capture
+//!   the checkpoint is always a consistent between-scans capture. A
+//!   pull's `?peer=` announces the pulling monitor's own address — the
+//!   follow-peer half of the tracking-source contract, accepted only
+//!   when it names the request's own source address — so this instance
+//!   knows where to track if it is later demoted
 //! - `GET /role` → `200` [`RoleReport`] — the instance's reported role
 //!   in a redundant pair (`active`, `standby`, or a transition state)
 //!   plus the standby's convergence — the pair-as-one-controller
@@ -579,8 +583,11 @@ pub struct Monitor<'d> {
     /// tracking-source contract: a peer with no configured source that
     /// is later demoted tracks its successor here, so a launched active
     /// demoted mid-run reconverges and stays promotable instead of
-    /// stranding `unsynchronized` forever. Outside `shared`: the value
-    /// is request-path bookkeeping, never part of a scan's state.
+    /// stranding `unsynchronized` forever. An announce lands only when
+    /// it names the pulling connection's own source address — the read
+    /// endpoint cannot rewrite the tracking source for an unrelated
+    /// client. Outside `shared`: the value is request-path
+    /// bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
 }
 
@@ -739,11 +746,13 @@ impl<'d> Monitor<'d> {
     /// The checkpoint address this peer tracks — `Driven`'s `track` or
     /// the configured [`with_standby_source`](Self::with_standby_source)
     /// when set, else the monitor address a tracking peer announced
-    /// through its `GET /checkpoint?peer=` pulls. The announced fallback
-    /// is the follow-peer half of the tracking-source contract: a peer
-    /// launched without a source — an active never told its peer — that
-    /// is later demoted tracks its successor here and reconverges
-    /// instead of stranding `unsynchronized` and unpromotable.
+    /// through its `GET /checkpoint?peer=` pulls — an announce accepted
+    /// only from the connection it names as its own address. The
+    /// announced fallback is the follow-peer half of the
+    /// tracking-source contract: a peer launched without a source — an
+    /// active never told its peer — that is later demoted tracks its
+    /// successor here and reconverges instead of stranding
+    /// `unsynchronized` and unpromotable.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
         self.driven
             .track
@@ -1092,6 +1101,7 @@ impl<'d> Monitor<'d> {
     fn handle(&self, mut request: Request) {
         let method = request.method().clone();
         let url = request.url().to_string();
+        let remote = request.remote_addr().copied();
         let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
@@ -1111,8 +1121,14 @@ impl<'d> Monitor<'d> {
                 // The follow-peer half of the tracking-source
                 // contract: a tracking peer announces its own monitor
                 // address on the pull, so this instance knows where to
-                // track if it is later demoted.
-                if let Some(announced) = checkpoint_peer(query) {
+                // track if it is later demoted. The announce is the
+                // puller's claim about itself, so it lands only from
+                // the connection it claims — `checkpoint_peer` accepts
+                // a `?peer=` naming the request's own source address
+                // and ignores any other, so the read endpoint cannot
+                // rewrite the demotion tracking source for an
+                // unrelated client.
+                if let Some(announced) = checkpoint_peer(query, remote) {
                     *self.announced.lock().unwrap() = Some(announced);
                 }
                 json(200, &self.shared.lock().unwrap().peer.checkpoint())
@@ -1540,17 +1556,32 @@ fn history_query(query: &str) -> Result<(Vec<PointId>, u64), String> {
 
 /// The `/checkpoint` query's `peer` key — the pulling monitor's own
 /// address, announced so this instance knows where to track after a
-/// demotion. An absent or unparseable value simply announces nothing:
-/// the checkpoint itself is still served, keeping older pullers and
-/// plain `GET /checkpoint` readers compatible.
-fn checkpoint_peer(query: &str) -> Option<SocketAddr> {
-    query_pairs(query).find_map(|(key, value)| {
+/// demotion — validated against `remote`, the request's source
+/// address. The announce is the puller's claim about itself, so it is
+/// accepted only when its IP is the connection's source IP; a wildcard
+/// announced IP — a `0.0.0.0`-bound puller announcing "my port on
+/// every interface" — resolves to the source the connection proves.
+/// Any other value is a client claiming an address that is not its
+/// own and announces nothing, as do an absent or unparseable `peer`
+/// and a request whose source cannot be read: the checkpoint itself is
+/// still served, keeping older pullers and plain `GET /checkpoint`
+/// readers compatible.
+fn checkpoint_peer(query: &str, remote: Option<SocketAddr>) -> Option<SocketAddr> {
+    let announced = query_pairs(query).find_map(|(key, value)| {
         if key == "peer" {
-            value.parse().ok()
+            value.parse::<SocketAddr>().ok()
         } else {
             None
         }
-    })
+    })?;
+    let remote = remote?;
+    if announced.ip() == remote.ip() {
+        Some(announced)
+    } else if announced.ip().is_unspecified() {
+        Some(SocketAddr::new(remote.ip(), announced.port()))
+    } else {
+        None
+    }
 }
 
 /// The `/journal` query: `since` keeps only entries with a higher `seq`.
@@ -1850,7 +1881,9 @@ impl MonitorClient {
     /// `GET /checkpoint?peer=<addr>`: the tracking pull — the
     /// checkpoint fetch plus the follow-peer announcement: `peer`
     /// names this client's own monitor address, which the serving
-    /// monitor records as its tracking source for a later demotion.
+    /// monitor records as its tracking source for a later demotion —
+    /// landing only because it names the pulling connection's own
+    /// source address.
     pub fn checkpoint_announcing(&self, peer: SocketAddr) -> io::Result<Checkpoint> {
         self.get_json(&format!("/checkpoint?peer={peer}"))
     }
