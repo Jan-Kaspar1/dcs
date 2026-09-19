@@ -3497,20 +3497,26 @@ def scenario_event_retention(ctx):
                       'component is located through')
         ref = save_evidence(ctx['evidence_dir'],
                             'event-retention-served.json',
-                            {'resources': resources, 'history': history,
-                             'journal': journal})
-        case.evidence('file', ref, 'the resource, point-history, and '
-                      'journal records before the driven emissions')
+                            {'signals': signals, 'resources': resources,
+                             'history': history, 'journal': journal})
+        case.evidence('file', ref, 'the signal index, resource, '
+                      'point-history, and journal records before the '
+                      'driven emissions')
 
         # The qualifying component is model-declared, never hardcoded:
-        # a served instance whose interface declares at least one
-        # History-retained and one Latest-retained event.
+        # an instance the registry declares — and the resource view
+        # serves — carrying at least one History-retained and one
+        # Latest-retained event.
+        served = {str(entry.get('name'))
+                  for entry in resources.get('components') or []
+                  if entry.get('name')}
         qualifying = None
         for entry in schema.get('interfaces') or []:
             interface = (entry or {}).get('interface') or {}
             declared = _routed_declarations(interface)
             if 'history' in declared.values() \
-                    and 'latest' in declared.values():
+                    and 'latest' in declared.values() \
+                    and str(entry.get('name')) in served:
                 qualifying = (str(entry.get('name')), interface,
                               declared)
                 break

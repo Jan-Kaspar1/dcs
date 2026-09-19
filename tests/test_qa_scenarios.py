@@ -795,6 +795,7 @@ class RetentionFeed:
         self.standby_admits = False      # standby accepts the drive
         self.peer_undocumented = False   # standby serves no descriptor
         self.no_qualifier = False        # no routed retentions declared
+        self.unserved = False            # /resources omits the component
         self.no_path = False             # no commands to drive through
         self.no_emissions = False        # accepted drives emit nothing
 
@@ -911,12 +912,13 @@ class RetentionFeed:
                               'interface': self._interface()}]}
         if (method, route) == ('GET', '/resources'):
             journal = self.peer_journal if standby else self.journal
+            components = [] if (not standby and self.unserved) else [
+                {'name': 'seq:1', 'kind': 'sequencer',
+                 'measurements': [], 'configuration': [],
+                 'state': [], 'commands': [],
+                 'events': self._events(journal)}]
             return 200, {'publication': self.tick, 'tick': self.tick,
-                         'components': [
-                             {'name': 'seq:1', 'kind': 'sequencer',
-                              'measurements': [], 'configuration': [],
-                              'state': [], 'commands': [],
-                              'events': self._events(journal)}]}
+                         'components': components}
         if (method, route) == ('GET', '/journal'):
             journal = self.peer_journal if standby else self.journal
             return 200, list(journal)
@@ -1058,6 +1060,15 @@ class EventRetentionTests(unittest.TestCase):
 
     def test_no_qualifying_component_is_inconclusive(self):
         self.feed.no_qualifier = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_declared_but_unserved_component_is_inconclusive(self):
+        # The registry declares the qualifying interface but the
+        # resource view never serves the instance — locating runs
+        # through both endpoints, so nothing qualifies.
+        self.feed.unserved = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'inconclusive', record)
         report.validate_scenario(record)
