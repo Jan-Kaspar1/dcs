@@ -42,7 +42,14 @@
 //! thermal/moisture guards, a plant-protocol protection input's proven
 //! fault and managed alarm, the out-of-service inhibit, and the
 //! restore returning the pump to group control with each attributed
-//! transition journaled in order — the `consumers`
+//! transition journaled in order — plus the pair contract's
+//! staged-vs-field divergence leg: the tracking standby's checkpoint
+//! pulls withheld through an observation window while a field-side
+//! write lands through the run's plant-protocol client, the stale
+//! peer's served `diverged` report naming the perturbed output, its
+//! promote refused `not_converged` with no field hand-off, the
+//! active's writes/receipts/journal undisturbed, and a write-free
+//! control window reconverging and promoting normally — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -71,6 +78,7 @@
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
 //! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
 //! `refusal-failed`, `takeover-failed`, `peer-announce-failed`,
+//! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`, and
 //! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
@@ -479,6 +487,34 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
         );
     }
+    // The pair contract's staged-vs-field divergence leg ran and held:
+    // the withheld-pull window left the stale peer's served report
+    // diverged naming the perturbed output, its promote refused
+    // not_converged with no field hand-off, the resolution journaled
+    // once the field matched again, and the write-free control window
+    // reconverged and promoted — its digest line reports the evidence,
+    // and the skipped-field-write case reported its named diagnostic.
+    let divergence_line = stdout
+        .lines()
+        .find(|line| line.contains("divergence-digest"))
+        .unwrap_or_else(|| panic!("the divergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "diverged at tick",
+        "naming point",
+        "not_converged",
+        "no field hand-off",
+        "resolved at tick",
+        "control window promoted at tick",
+    ] {
+        assert!(
+            divergence_line.contains(phrase),
+            "the divergence digest names no '{phrase}' evidence: {divergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("skip-field-write: reported, divergence-missed"),
+        "the divergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     // The pair contract's report leg ran and held: the released
     // dcs-alarm-report computed the declared AlarmReport metric set
     // over the field owner's served journal and its manifest-declared
@@ -808,6 +844,60 @@ fn a_doctored_follows_group_expectation_reports_takeover_failed() {
     assert!(
         stderr.contains("did not follow the group"),
         "expected the named follows-group evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored divergence leg skipping the field-side write while the
+/// diverged report is still asserted is the `divergence-missed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag,
+/// refusal, and takeover tests use. The driver's `skip-field-write`
+/// tamper withholds the plant-protocol write; the honest
+/// resumed-checkpoint comparison finds the staged image matching the
+/// untouched field, so the leg must fail naming the report it
+/// expected — never a silently unconvinced pass.
+#[test]
+fn a_skipped_field_write_reports_divergence_missed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-divergence-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/divergence.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "skip-field-write",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the staged-vs-field divergence leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a skipped field-side write passed the divergence leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected the diverged report"),
+        "expected the named diverged-report evidence, got:\n{stderr}"
     );
 }
 

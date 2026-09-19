@@ -229,6 +229,33 @@
 #                standby leaves the active's field writes undisturbed
 #                and reports no failover; two passes produce identical
 #                digests (failover-failed, failover-nondeterministic)
+#                The stage's staged-vs-field divergence leg,
+#                ci/divergence.py on the same declared deployment: with
+#                the pair settled and the standby tracking, the
+#                standby's checkpoint pulls are withheld for an
+#                observation window — the driven run making the
+#                partition literal — while a field-side write lands
+#                through the run's dedicated plant-protocol client (the
+#                same connection the simulate stage's
+#                inject_fault/clear_fault ops use), the client joining
+#                the field's writer claim under the duty's recorded
+#                owner token so the write lands on the carried p101-cmd
+#                output. With the pull path resumed, the stale peer's
+#                served GET /role must report standby under the
+#                diverged sync state naming the perturbed output, its
+#                journal must carry the divergence_detected record, and
+#                POST /promote must answer the named not_converged
+#                refusal carrying the diverged report — no field
+#                hand-off, the active's writes, receipts, and journal
+#                undisturbed, the duty's continued writes restoring the
+#                field so the standby's next same-tick comparison
+#                resolves the verdict; a control leg runs the identical
+#                window without the field-side write — the standby
+#                reconverges and the documented demote/promote switch
+#                succeeds, the refusal naming the staged-vs-field
+#                divergence rather than partition staleness; two
+#                passes produce identical digests
+#                (divergence-missed, divergence-nondeterministic)
 #                The stage's report leg, ci/report.py on the same
 #                declared deployment: with the pair tracking, one
 #                managed alarm is driven through its
@@ -1220,6 +1247,55 @@ fi
     || fail "failover-unchecked: the early-promotion case did not report its named diagnostic: $out"
 echo "  early-promotion: reported, failover-failed"
 
+# The pair contract's staged-vs-field divergence leg, on the same
+# manifest-declared deployment: ci/divergence.py converges the pair,
+# then withholds the tracking standby's checkpoint pulls for an
+# observation window — the driven run making the partition literal —
+# while a field-side write lands through the run's dedicated
+# plant-protocol client (the connection the simulate stage's
+# inject_fault/clear_fault ops use), the client joining the field's
+# writer claim under the duty's recorded owner token so the write
+# lands on the carried p101-cmd output the standby's staged image
+# covers. With the pull path resumed, the stale peer's served GET
+# /role must report standby under the diverged sync state naming the
+# perturbed output, its served and durable journals must carry the
+# divergence_detected record, and POST /promote must answer the named
+# not_converged refusal carrying the diverged report — never a silent
+# or wrong verdict and never a field hand-off of the stale image —
+# while the active's writes, receipts, and journal run undisturbed,
+# the duty's continued writes restoring the field so the standby's
+# next same-tick comparison resolves the verdict. A control leg runs
+# the identical window with no field-side write: the standby
+# reconverges and the documented demote/promote switch succeeds —
+# the refusal names the staged-vs-field divergence, not the
+# partition's staleness. Two passes must produce identical digests.
+run_divergence() {
+    python3 ci/divergence.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_divergence)" \
+    || fail "divergence-missed: the staged-vs-field divergence leg did not hold — its evidence lines are above"
+SECOND="$(run_divergence)" \
+    || fail "divergence-missed: the staged-vs-field divergence leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "divergence-nondeterministic: two divergence-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the field-side write skipped while the leg still
+# asserts the diverged report and the refused promote must surface the
+# named diagnostic — never a silently unconvinced pass.
+if out="$(run_divergence --tamper skip-field-write 2>&1)"; then
+    fail "divergence-unchecked: a skipped field-side write passed the divergence leg"
+fi
+[[ "$out" == *"expected the diverged report"* ]] \
+    || fail "divergence-unchecked: the skip-field-write case did not report its named diagnostic: $out"
+echo "  skip-field-write: reported, divergence-missed"
+
 # The pair contract's alarm-report leg, on the same
 # manifest-declared deployment: ci/report.py converges the pair, then
 # drives one managed alarm through its lifecycle — the level-primary
@@ -1282,7 +1358,7 @@ echo "== consumers =="
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
 for file in ci/availability.py ci/burst_order.py ci/consumers.py \
-        ci/ctl.py ci/deploy_rig.py ci/failover.py \
+        ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
