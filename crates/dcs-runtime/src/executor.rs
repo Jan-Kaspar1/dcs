@@ -1553,7 +1553,10 @@ impl<'d> Executor<'d> {
     /// exactly the checkpoint's while its internal `In` samples overlay
     /// the image's held values, and the receipt log becomes the
     /// checkpoint's — the pair's one command audit, entries still
-    /// `Accepted` re-queued for this run's next boundary. The next
+    /// `Accepted` re-queued for this run's next boundary — extended by
+    /// this run's own still-unreached tail when the adopted window's
+    /// submission high-water never saw it (see
+    /// [`adopt_receipts`](Self::adopt_receipts)). The next
     /// [`scan`](Executor::scan) then
     /// continues the run the checkpoint captured.
     ///
@@ -1651,7 +1654,41 @@ impl<'d> Executor<'d> {
     /// never drops it. The admission counters converge with the audit
     /// they measure, so the pair's `command_queue` telemetry section
     /// answers identically.
+    ///
+    /// One stretch of this run's own log survives the convergence:
+    /// the contiguous suffix the adopted window's high-water mark —
+    /// `attempts`, the submission index one past the last the source
+    /// recorded — does not reach. A receipt at or beyond that mark is
+    /// a submission the checkpoint's source had not observed at
+    /// capture, so its absence from the adopted log is the checkpoint's
+    /// staleness, not the line's verdict; dropping it would settle a
+    /// provisional absence as if it were one. The suffix — a demoted
+    /// run's suspended commands and the settled receipts below them —
+    /// is restored verbatim behind the adopted window and `attempts`
+    /// rises to cover it, so the checkpoint this run keeps serving
+    /// still offers the entries to a successor's
+    /// [`carry_pending_commands`](Self::carry_pending_commands) pull.
+    /// Restored `Accepted` entries stay suspended — they do not
+    /// re-queue, a quiesced scan must not mint an `Applied` the line
+    /// never ordered — and resolve when a covering adoption
+    /// adjudicates their indices: carried then, settling with the
+    /// line, or passed by and abandoned. A suffix whose base index
+    /// sits past the adopted high-water — evictions the source never
+    /// saw opening a gap the log cannot span — cannot be restored and
+    /// drops with the rest of the abandoned window.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
+        // The adopted window's end in the submission sequence — the
+        // high-water a prior receipt's index measures against. Indices
+        // at or beyond it extend the adopted log contiguously only
+        // while the run's window reaches back to meet it: a prior base
+        // above the mark leaves a gap no restoration can span.
+        let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
+        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+            let skip = (adopted_end - self.receipt_base()).min(self.receipts.len() as u64) as usize;
+            self.receipts[skip..].to_vec()
+        } else {
+            Vec::new()
+        };
         self.receipts.clone_from(&checkpoint.receipts);
         // The adopted log is re-trimmed to this run's own bound: a
         // checkpoint captured under a looser capacity cannot grow this
@@ -1677,6 +1714,19 @@ impl<'d> Executor<'d> {
             .command_admission
             .high_water
             .max(self.pending_commands.len());
+        if !uncovered.is_empty() {
+            // The restored suffix lands after the queue rebuild on
+            // purpose: its `Accepted` entries are suspended state the
+            // tracked line has not adjudicated, not carried commands
+            // owed a boundary, so they must not re-queue. `attempts`
+            // rises to the window's true high-water — the submissions
+            // this log still holds — keeping `receipt_base` honest and
+            // the served checkpoint carrying them for a successor's
+            // carry.
+            self.command_admission.attempts = adopted_end + uncovered.len() as u64;
+            self.receipts.extend(uncovered);
+            self.trim_receipts();
+        }
     }
 
     /// Adopts the admissions a checkpoint's receipt log carries past
@@ -2382,11 +2432,18 @@ impl<'d> Executor<'d> {
     /// the demoted run's own scans no longer apply them, because a
     /// quiesced scan's `Applied` would journal an application the gate
     /// kept off the field, erased by the next adoption. Each suspended
-    /// entry resolves on the tracked line's next checkpoint apply:
-    /// covered by the adopted log it re-queues and settles with the
-    /// run; dropped by it, the peer settles it `Rejected` carrying
-    /// [`CommandError::Superseded`] — a pending command neither
-    /// vanishes unaudited nor reports `applied` on an abandoned image.
+    /// entry resolves on the tracked line's checkpoint applies: covered
+    /// by the adopted log it re-queues and settles with the run; passed
+    /// by the adopted window's high-water without being carried, the
+    /// peer settles it `Rejected` carrying
+    /// [`CommandError::Superseded`]. An adoption whose high-water has
+    /// not reached the entry's index settles nothing — the source had
+    /// not observed the submission at capture, so
+    /// [`adopt_receipts`](Self::adopt_receipts) restores it suspended
+    /// for a covering checkpoint to adjudicate — a pending command
+    /// neither vanishes unaudited, reports `applied` on an abandoned
+    /// image, nor settles `superseded` on a verdict the line never
+    /// made.
     pub fn suspend_pending_commands(&mut self) {
         self.pending_commands.clear();
     }

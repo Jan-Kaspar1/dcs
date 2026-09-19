@@ -204,13 +204,17 @@ pub struct Peer<'d> {
     /// [`FencingLoss`] per observed preemption.
     pending_fencing: Vec<FencingLoss>,
     /// Pending commands the tracked line abandoned — receipts a
-    /// checkpoint adoption dropped while still `Accepted`, each already
-    /// settled `Rejected` carrying [`CommandError::Superseded`] and
-    /// queued for the journal. A command admitted before this peer's
-    /// demotion, or adopted still-`Accepted` from an earlier transfer,
-    /// the applied log does not carry can never apply here — the gate
-    /// quiesces the run's writes — so it settles rejected rather than
-    /// vanishing unaudited or `applied` on an abandoned image.
+    /// checkpoint adoption left behind while still `Accepted`, each
+    /// already settled `Rejected` carrying [`CommandError::Superseded`]
+    /// and queued for the journal. Abandoned means adjudicated: the
+    /// adopted window's submission high-water passed the receipt's
+    /// index without carrying the command, so the line demonstrably
+    /// moved on without it — a stale checkpoint that never observed
+    /// the submission drops nothing, `Executor::adopt_receipts`
+    /// restoring the unreached tail suspended instead. A genuinely
+    /// abandoned command can never apply here — the gate quiesces the
+    /// run's writes — so it settles rejected rather than vanishing
+    /// unaudited or `applied` on an abandoned image.
     pending_superseded: Vec<CommandReceipt>,
 }
 
@@ -687,11 +691,18 @@ impl<'d> Peer<'d> {
     /// no longer apply them: a quiesced scan's `Applied` would journal
     /// an application the gate kept off the field, erased by the next
     /// adoption. Each suspended entry resolves on the tracked line's
-    /// next checkpoint apply: covered by the adopted log it re-queues
-    /// and settles with the run; dropped by it, it settles `Rejected`
+    /// checkpoint applies: covered by the adopted log it re-queues and
+    /// settles with the run; passed by the adopted window's submission
+    /// high-water without being carried, it settles `Rejected`
     /// carrying [`CommandError::Superseded`] and queues for the
     /// journal — never `applied` on the fenced image, never vanished
-    /// unaudited.
+    /// unaudited. An adoption whose high-water has not reached an
+    /// entry's index adjudicates nothing: the tracked source captured
+    /// the checkpoint before it observed the submission, so the
+    /// unreached tail is restored suspended — still served for the
+    /// successor's carry — and the receipt keeps exactly one terminal
+    /// settle ahead of it rather than a provisional `superseded` the
+    /// next, fresher adoption would contradict.
     ///
     /// Only a field-owning instance demotes; anything else is refused
     /// with [`SwitchError::NotActive`]. The demoted peer's reported
@@ -880,7 +891,8 @@ impl<'d> Peer<'d> {
         self.misses = 0;
         // The still-`Accepted` receipts this log holds — the demoted
         // run's suspended commands and any adopted pending entries —
-        // are what the adoption below either covers or abandons.
+        // are what the adoption below either covers, passes by, or
+        // leaves unrestored behind its high-water.
         let pending = self.pending_accepted();
         let (offset, regressed) = self.stream_offset(checkpoint);
         let landed = Tick(checkpoint.tick.0 + offset);
@@ -1044,6 +1056,15 @@ impl<'d> Peer<'d> {
     /// the journal rather than vanishing unaudited. A covered entry's
     /// outcome is the line's own — re-queued still `Accepted`, or
     /// already settled on the tracked run — and needs nothing.
+    ///
+    /// Absent means adjudicated, not merely unseen: the adoption keeps
+    /// every prior receipt at or beyond its window's high-water — the
+    /// submissions the tracked source had not observed at capture —
+    /// so the entries reaching this reconciliation as missing are
+    /// exactly the ones the line's submission sequence passed without
+    /// carrying. The suspended tail a stale checkpoint could not see
+    /// never arrives here to settle `superseded` provisionally and be
+    /// contradicted by the next, fresher adoption.
     fn note_abandoned_commands(&mut self, pending: Vec<(u64, CommandReceipt)>) {
         let base = self.executor.receipt_base();
         for (index, receipt) in pending {
@@ -3520,12 +3541,15 @@ mod tests {
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(0));
     }
 
-    /// The apply-wins half of the finding: the demoted peer's first
-    /// tracking pull on a line that never carried its pending command
-    /// used to drop the receipt wholesale — no settlement, no retained
-    /// receipt, no journal record. The adoption now reconciles the
-    /// abandoned entry: it settles `Rejected` carrying
-    /// `Superseded` and queues for the settle journal.
+    /// The apply-wins half of the finding: a pending command the
+    /// tracked line demonstrably passed by settles `Rejected` carrying
+    /// `Superseded` rather than vanishing unaudited. Passed by means
+    /// adjudicated, not merely absent: the adopted receipt window's
+    /// submission high-water covers the orphan's index, and the entry
+    /// the line holds there is a different command — the successor's
+    /// history moved on with admissions of its own, never carrying
+    /// this one. (The stale-checkpoint case — a window that never
+    /// reached the index — is the next test's: it settles nothing.)
     #[test]
     fn an_adoption_orphaned_pending_command_settles_superseded() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
@@ -3534,19 +3558,23 @@ mod tests {
         peer.activate().unwrap();
         peer.scan();
 
-        // The tracked line — a peer whose last pull predates the
-        // admission, so its served checkpoint lacks the command.
+        // The tracked line — a successor that started from this peer's
+        // pre-admission checkpoint but moved on with an admission of
+        // its own: its receipt window covers index 0 with a different
+        // command, so the orphan's absence is adjudicated.
         let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let source_gate = WriteGate::closed(&source_driver);
         let mut source = Peer::standby(Clocked::executor(&source_gate), Some(&source_gate));
         source.apply(&peer.checkpoint()).unwrap();
+        source.submit_command(Clocked::bump(3));
         source.scan();
 
         // The admission lands after the line's last pull; the demotion
         // suspends it. The demoted peer's first tracking apply then
-        // adopts a receipt log the command is absent from: orphaned,
-        // it settles superseded and queues for the journal rather than
-        // vanishing unaudited.
+        // adopts a receipt log whose high-water passed the entry's
+        // index carrying a different command: orphaned, it settles
+        // superseded and queues for the journal rather than vanishing
+        // unaudited.
         peer.submit_command(Clocked::bump(7));
         peer.demote().unwrap();
         peer.apply(&source.checkpoint()).unwrap();
@@ -3562,10 +3590,99 @@ mod tests {
         );
         // The drain empties — one settlement per orphan, journaled once.
         assert!(peer.take_superseded_commands().is_empty());
-        // No strays: the suspended command never re-queues, so the
-        // demoted run's next scan applies nothing for it.
+        // No strays: the superseded command never re-queues, so the
+        // demoted run's next scan applies nothing for it — the count
+        // stays the adopted line's own bump, never the orphan's — and
+        // no later adoption or scan can mint an `applied` beside the
+        // settled `superseded`.
+        peer.scan();
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.scan();
+        assert!(peer.take_superseded_commands().is_empty());
+        assert_eq!(peer.receipts(), source.receipts());
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
+    }
+
+    /// QA finding `superseded-command-still-settles-applied`: the
+    /// demote boundary's stale-checkpoint collision. A tracking pull
+    /// can land a checkpoint the source captured before it ever
+    /// observed the admission — the receipt window's submission
+    /// high-water never reached the suspended entry's index, so its
+    /// absence there is the capture's staleness, not the line's
+    /// verdict. The adoption restores the unreached tail suspended:
+    /// no `superseded` journals, the checkpoint this peer keeps
+    /// serving still offers the command to the successor's
+    /// final-sync carry, and the covering adoption that follows
+    /// settles it exactly once — never a provisional `superseded`
+    /// beside the `applied`.
+    #[test]
+    fn a_stale_adoption_cannot_supersede_a_suspended_command() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(Clocked::executor(&gate), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+
+        // The tracked line — the QA reproduction's successor, whose
+        // last pull predates the admission: its served checkpoint's
+        // receipt window never reached the command's index.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let source_gate = WriteGate::closed(&source_driver);
+        let mut source = Peer::standby(Clocked::executor(&source_gate), Some(&source_gate));
+        source.apply(&peer.checkpoint()).unwrap();
+        source.scan();
+
+        // The raced admission and demote: the pending command suspends
+        // at submission index 0.
+        peer.submit_command(Clocked::bump(7));
+        peer.demote().unwrap();
+
+        // The first tracking pull lands the stale checkpoint: the
+        // suspended entry is restored behind the adopted window, not
+        // settled `superseded` — nothing journals, and the checkpoint
+        // this peer still serves keeps offering it.
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(peer.take_superseded_commands().is_empty());
+        assert_eq!(peer.receipt_base(), 0);
+        assert_eq!(peer.receipts().len(), 1);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            peer.checkpoint().receipts[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        // Restored entries stay suspended — the demoted run's quiesced
+        // scan applies nothing for them.
         peer.scan();
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(0));
+
+        // The successor's promote-boundary pull still finds the
+        // command in the served checkpoint, carries it, and settles it
+        // on the live line.
+        source.final_sync(|| Ok(peer.checkpoint()));
+        source.promote().unwrap();
+        source.scan();
+        assert_eq!(
+            source.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(4) }
+        );
+
+        // The covering adoption converges the log on the line's
+        // verdict: the receipt settles `applied` — the one terminal
+        // outcome, with no `superseded` ever journaled beside it.
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(peer.take_superseded_commands().is_empty());
+        assert_eq!(peer.receipts(), source.receipts());
+        assert_eq!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(4) }
+        );
+        peer.scan();
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+        assert_eq!(peer.receipts().len(), 1);
     }
 
     /// The carried half of the fix: a suspended command the tracked
