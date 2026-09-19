@@ -432,6 +432,11 @@ Repair context: {repair}
                 tail = log.read_text(errors='replace')[-12000:] if log.is_file() else ''
                 category, retry_after = classify(receipt, tail)
                 self.admission.finish(owner, metadata, category, retry_after)
+                if job.get('session') and 'session' in tail.lower() and (
+                        'not found' in tail.lower() or 'no such' in tail.lower()):
+                    # The stored session is gone; the next retry must start a
+                    # fresh one instead of failing on --resume/--session again.
+                    self.state.update_job(job['issue'], session=None)
                 if category in ('rate', 'endpoint'):
                     self.requeue_quota(job, category)
                 elif category in ('auth', 'credits'):
@@ -440,7 +445,9 @@ Repair context: {repair}
                 self.block(job, 'Local agent failed: ' + json.dumps(receipt)[:2000])
                 continue
             if not job.get('session'):
-                session = self.runtime.session_id(Path(job['clone']), since=metadata.get('started_at'))
+                session = self.runtime.session_id(Path(job['clone']), since=metadata.get('started_at'),
+                                                  model=self.model_for(job['worker']),
+                                                  key=metadata.get('key'))
                 if session:
                     self.state.update_job(job['issue'], session=session)
             try:

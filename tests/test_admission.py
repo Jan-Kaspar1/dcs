@@ -100,6 +100,13 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(classify({'exit_code': 1}, 'Rate limit exceeded. Retry-After: 300'), ('rate', 300))
         self.assertEqual(classify({'exit_code': 0}, 'test verifies rate limit handling')[0], 'success')
 
+    def test_timeout_with_provider_stream_error_scopes_cooldown(self):
+        tail = 'level=ERROR message="stream error" error.error="AI_APICallError: Rate limit exceeded"'
+        self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, tail)[0], 'rate')
+        tail = 'level=ERROR message="stream error" error.error="unexpected server error"'
+        self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, tail)[0], 'endpoint')
+        self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, 'rate limit')[0], 'timeout')
+
 
 if __name__ == '__main__':
     unittest.main()
