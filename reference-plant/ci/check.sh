@@ -36,7 +36,9 @@
 #                release, images, mounted model and dynamics paths,
 #                the fingerprint propagated into the controller
 #                invocations, listen addresses, the pair's standby
-#                wiring, and the optional per-controller persistence
+#                wiring, the standby's optional failover_budget
+#                declaration carried as its --auto-promote flag, and
+#                the optional per-controller persistence
 #                paths (state_file/journal_file) backed by writable
 #                mounts and flags — parsed and validated through
 #                `docker compose config` or the fallback parser, with
@@ -209,6 +211,24 @@
 #                /resources reporting identical verdicts throughout;
 #                two passes produce identical digests
 #                (availability-failed, availability-nondeterministic)
+#                The stage's automatic-failover leg, ci/failover.py on
+#                the same declared deployment: the manifest's
+#                failover_budget arms the standby's --auto-promote —
+#                then the pair is converged, the field-owning
+#                container stopped, and the surviving peer's driven
+#                scans asserted through its served surface: GET /role
+#                reports the miss run under the degraded sync state,
+#                the self-promotion lands at the declared budget's
+#                scan boundary, the plant's writer claim fences a
+#                foreign attachment while the promoted peer's writes
+#                land (a fencing probe through the run's
+#                plant-protocol client), driven scans and receipted
+#                commands continue uninterrupted, and the durable
+#                journal records the transition distinguishably from
+#                an operator-requested switch; a variant severing the
+#                standby leaves the active's field writes undisturbed
+#                and reports no failover; two passes produce identical
+#                digests (failover-failed, failover-nondeterministic)
 #                The stage's report leg, ci/report.py on the same
 #                declared deployment: with the pair tracking, one
 #                managed alarm is driven through its
@@ -629,6 +649,24 @@ elif case == "undeclared-writable-mount":
         "volumes:\n  ctrl-a-data:\n  ctrl-a-scratch:",
         1,
     )
+elif case == "failover-flag-missing":
+    # ctrl-b keeps its declared failover_budget while the rig
+    # definition drops the --auto-promote flag.
+    compose = compose.replace(
+        "      - --auto-promote\n      - \"3\"\n", "", 1)
+elif case == "failover-flag-undeclared":
+    # The rig definition keeps --auto-promote while the manifest
+    # drops the declaration — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][1]["failover_budget"]
+    manifest = json.dumps(document, indent=2)
+elif case == "failover-wrong-peer":
+    # The declared budget moves to the duty entry — automatic
+    # failover arms a tracking standby only.
+    document = json.loads(manifest)
+    document["controllers"][0]["failover_budget"] = \
+        document["controllers"][1].pop("failover_budget")
+    manifest = json.dumps(document, indent=2)
 elif case == "persistence-omitted":
     # Both fields omitted together with their flags and mounts — the
     # optional deployment a consumer without durable storage declares.
@@ -665,7 +703,9 @@ PY
 
 for divergence in persistence-mount-divergence persistence-flag-divergence \
         persistence-mount-read-only undeclared-persistence-flag \
-        undeclared-writable-mount persistence-omitted; do
+        undeclared-writable-mount failover-flag-missing \
+        failover-flag-undeclared failover-wrong-peer \
+        persistence-omitted; do
     rig_case "$divergence"
 done
 
@@ -1138,6 +1178,48 @@ for tamper in refused-available diverged-standby; do
     echo "  $tamper: reported, availability-failed"
 done
 
+# The pair contract's automatic-failover leg, on the same
+# manifest-declared deployment: ci/failover.py arms the declared
+# standby with the manifest's failover_budget — the deployment
+# vocabulary's --auto-promote half — converges the pair, stops the
+# field-owning container, and asserts through the surviving peer's
+# monitor and the plant protocol: the served role path reports the
+# miss run under the degraded sync state then active at the declared
+# budget's scan boundary, the plant's writer claim fences a foreign
+# attachment while the promoted peer's own writes land, subsequent
+# driven scans and receipted commands continue uninterrupted, and
+# the promoted peer's durable journal records the transition
+# distinguishably from an operator-requested switch. A variant run
+# severs the standby instead: the field owner's writes run
+# undisturbed and nothing reports a failover. Two passes must
+# produce identical digests.
+run_failover() {
+    python3 ci/failover.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_failover)" \
+    || fail "failover-failed: the automatic-failover leg did not hold — its evidence lines are above"
+SECOND="$(run_failover)" \
+    || fail "failover-failed: the automatic-failover leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "failover-nondeterministic: two failover-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg asserting the standby promoted before the
+# declared budget must surface the named diagnostic — never a
+# silently unexercised promotion gate.
+if out="$(run_failover --tamper early-promotion 2>&1)"; then
+    fail "failover-unchecked: a doctored promotion expectation passed the failover leg"
+fi
+[[ "$out" == *"expected the standby active at miss"* ]] \
+    || fail "failover-unchecked: the early-promotion case did not report its named diagnostic: $out"
+echo "  early-promotion: reported, failover-failed"
+
 # The pair contract's alarm-report leg, on the same
 # manifest-declared deployment: ci/report.py converges the pair, then
 # drives one managed alarm through its lifecycle — the level-primary
@@ -1200,7 +1282,7 @@ echo "== consumers =="
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
 for file in ci/availability.py ci/burst_order.py ci/consumers.py \
-        ci/ctl.py ci/deploy_rig.py \
+        ci/ctl.py ci/deploy_rig.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \

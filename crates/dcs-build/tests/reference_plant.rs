@@ -440,6 +440,45 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("landed-announce: reported, peer-announce-failed"),
         "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
+    // The pair contract's automatic-failover leg ran and held: the
+    // declared failover_budget armed the standby's --auto-promote, the
+    // severed field owner left the surviving peer's miss run reported,
+    // the self-promotion landed at the declared budget's boundary, the
+    // plant's writer claim fenced foreign writes while the promoted
+    // peer's writes landed, the run continued, and the severed-standby
+    // variant left the owner undisturbed — its digest line reports the
+    // evidence, and the early-promotion case reported its named
+    // diagnostic.
+    let failover_line = stdout
+        .lines()
+        .find(|line| line.contains("failover-digest"))
+        .unwrap_or_else(|| panic!("the failover leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "self-promoted at tick",
+        "persisted journal records",
+        "undisturbed at tick",
+    ] {
+        assert!(
+            failover_line.contains(phrase),
+            "the failover digest names no '{phrase}' evidence: {failover_line}"
+        );
+    }
+    assert!(
+        stdout.contains("early-promotion: reported, failover-failed"),
+        "the failover leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The failover declaration's deploy-stage divergences each
+    // reported the named mismatch.
+    for line in [
+        "failover-flag-missing refused: rig-mismatch",
+        "failover-flag-undeclared refused: rig-mismatch",
+        "failover-wrong-peer refused: rig-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
     // The pair contract's report leg ran and held: the released
     // dcs-alarm-report computed the declared AlarmReport metric set
     // over the field owner's served journal and its manifest-declared
