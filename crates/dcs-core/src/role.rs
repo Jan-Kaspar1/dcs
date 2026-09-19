@@ -116,7 +116,10 @@ pub enum StandbySync {
     /// apply — and has consumed the active's checkpoint under the
     /// documented model-boundary carryover rule: operator-writable
     /// internal points matched by declared identity carried their last
-    /// values, component state reinitialized, and every element without
+    /// values, component state reinitialized — the report's
+    /// `reverted_tuning` itemizing the declared parameters whose
+    /// checkpointed values the crossing reverted to the revision's
+    /// declared defaults — and every element without
     /// a continuation is named in `report`. A promotable state: the run
     /// is defined, and the documented switchover order — demote the old
     /// peer, then promote — moves the field writer to the revised model
@@ -292,6 +295,7 @@ mod tests {
                         carried_forces: vec![],
                         dropped: vec![],
                         reinitialized: vec![],
+                        reverted_tuning: vec![],
                         initialized: vec![],
                     }),
                 }),

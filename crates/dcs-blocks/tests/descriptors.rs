@@ -4,19 +4,20 @@
 //! `TelemetrySnapshot` serde-roundtrips.
 
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BadTermResponse, BlowerGroup, BlowerGroupConfig, BlowerIo,
-    BlowerOutputs, BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
-    CoordinatorOutputs, Counter, DemandFallback, DemandFallbackConfig, DemandFallbackIo,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FallbackResponse, FeedforwardSum,
-    FeedforwardSumConfig, FeedforwardSumIo, FilterIo, GateOperation, GroupOutputs, GuardResponse,
-    HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs, Interlock, LatchingAlarm,
-    ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMode, PhaseMonitor,
-    PhaseMonitorIo, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState,
-    RateLimiter, RateOfRise, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
-    SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer,
-    Totalizer, UnitBounds, Valve, ZoneIo,
+    AdvanceMode, AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, AutoStart,
+    BackwashCoordinator, BackwashCoordinatorConfig, BackwashSequence, BackwashSequenceConfig,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BadTermResponse, BlowerGroup,
+    BlowerGroupConfig, BlowerIo, BlowerOutputs, BlowerRotation, BoolGate, BoolLatchingAlarm,
+    CoordinationStrategy, CoordinatorOutputs, Counter, DemandFallback, DemandFallbackConfig,
+    DemandFallbackIo, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FallbackResponse,
+    FaultPolicy, FeedforwardSum, FeedforwardSumConfig, FeedforwardSumIo, FilterIo, GateOperation,
+    GroupOutputs, GuardResponse, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs,
+    Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
+    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, OverrunPolicy,
+    PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RateOfRise, Rationalization,
+    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, StagingAuthority,
+    SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
 use dcs_core::{Command, CommandVerdict, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -420,6 +421,61 @@ fn rig() -> Rig {
             .unwrap(),
         ),
         Box::new(
+            BackwashSequence::new(
+                "bws",
+                BackwashSequenceInputs {
+                    trig_time: point(&mut specs, 410, Direction::In, ValueKind::Bool),
+                    trig_headloss: point(&mut specs, 411, Direction::In, ValueKind::Bool),
+                    trig_turbidity: point(&mut specs, 412, Direction::In, ValueKind::Bool),
+                    trig_operator: point(&mut specs, 413, Direction::In, ValueKind::Bool),
+                    grant: point(&mut specs, 414, Direction::In, ValueKind::Bool),
+                    abort: point(&mut specs, 415, Direction::In, ValueKind::Bool),
+                    fault: point(&mut specs, 416, Direction::In, ValueKind::Bool),
+                    meas: vec![point(&mut specs, 417, Direction::In, ValueKind::Float)],
+                },
+                BackwashSequenceOutputs {
+                    request: point(&mut specs, 420, Direction::Out, ValueKind::Bool),
+                    active: point(&mut specs, 421, Direction::Out, ValueKind::Bool),
+                    pending: point(&mut specs, 422, Direction::Out, ValueKind::Bool),
+                    done: point(&mut specs, 423, Direction::Out, ValueKind::Bool),
+                    aborted: point(&mut specs, 424, Direction::Out, ValueKind::Bool),
+                    overrun: point(&mut specs, 425, Direction::Out, ValueKind::Bool),
+                    trigger_source: point(&mut specs, 426, Direction::Out, ValueKind::Int),
+                    step: point(&mut specs, 427, Direction::Out, ValueKind::Int),
+                    out: point(&mut specs, 428, Direction::Out, ValueKind::Float),
+                    phases: vec![
+                        point(&mut specs, 430, Direction::Out, ValueKind::Bool),
+                        point(&mut specs, 431, Direction::Out, ValueKind::Bool),
+                    ],
+                },
+                vec![
+                    BackwashStep {
+                        ticks: 2,
+                        value: 10.0,
+                        advance: AdvanceMode::Timed,
+                        bound: None,
+                        meas: None,
+                        on_overrun: OverrunPolicy::Advance,
+                    },
+                    BackwashStep {
+                        ticks: 3,
+                        value: 20.0,
+                        advance: AdvanceMode::Measured,
+                        bound: Some(50.0),
+                        meas: Some(0),
+                        on_overrun: OverrunPolicy::Hold,
+                    },
+                ],
+                BackwashSequenceConfig {
+                    auto_start: AutoStart::Direct,
+                    abort_step: 1,
+                    on_fault_step: 1,
+                    on_fault_policy: FaultPolicy::Hold,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
             HeaderCoordinator::new(
                 "hdr",
                 point(&mut specs, 280, Direction::In, ValueKind::Float),
@@ -606,7 +662,7 @@ fn rig() -> Rig {
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 34] = [
+const EXPECTED_KINDS: [&str; 35] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -634,6 +690,7 @@ const EXPECTED_KINDS: [&str; 34] = [
     ManagedLatchingAlarm::KIND,
     ManagedBoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
+    BackwashSequence::KIND,
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
     PhaseMonitor::KIND,
@@ -671,7 +728,7 @@ fn wired() -> (SimDriver, PointMap, Vec<Box<dyn Component>>) {
 fn snapshot() -> TelemetrySnapshot {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     executor.snapshot()
 }
 
@@ -764,7 +821,7 @@ fn reported_parameters_match_each_kinds_declared_set() {
 fn reported_values_equal_the_checkpointed_fields() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // Every reported value is what the same run's checkpoint persists
     // for the component — the standby and the faceplate read one
@@ -787,7 +844,7 @@ fn reported_values_equal_the_checkpointed_fields() {
 fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // A receipted tune on the `pid` instance reports its new value in
     // the next snapshot under the declared name.
@@ -796,7 +853,7 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
         name: "kp".to_string(),
         value: Value::Float(3.5),
     });
-    executor.scan().unwrap();
+    executor.scan();
     let pid = &executor.snapshot().parameters[2];
     assert_eq!(pid.name, "pid");
     assert_eq!(pid.values["kp"], Value::Float(3.5));
@@ -806,7 +863,7 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let checkpoint = executor.checkpoint();
     let (sim, point_map, components) = wired();
     let mut restored = Executor::restore(&sim, point_map, components, &checkpoint, None).unwrap();
-    restored.scan().unwrap();
+    restored.scan();
     assert_eq!(
         restored.snapshot().parameters,
         executor.snapshot().parameters
@@ -848,7 +905,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // verdict carries the same refusal the receipted path settles.
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     let snapshot = executor.snapshot();
     let seq = snapshot
@@ -868,7 +925,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // `advance {count: 9}` lands past the table's last step: the run
     // completes and the same scan's probe reports the standing refusal.
     executor.submit_command(invoke("seq", "advance", &[("count", Value::Int(9))]));
-    executor.scan().unwrap();
+    executor.scan();
     let snapshot = executor.snapshot();
     assert_eq!(
         verdict(&snapshot, "seq", "advance"),
@@ -886,7 +943,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // `reset` re-opens `advance`: the next scan's probe reports it
     // invocable again — the verdicts track checkpointed run state.
     executor.submit_command(invoke("seq", "reset", &[]));
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         verdict(&executor.snapshot(), "seq", "advance"),
         Some(&CommandVerdict {

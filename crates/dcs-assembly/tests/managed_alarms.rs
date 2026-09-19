@@ -140,7 +140,7 @@ fn managed_alarms_fixture_assembles_through_the_registry() {
     let model = model();
     let driver = sim_driver(&model).unwrap();
     let mut executor = build_executor(&model, &driver);
-    executor.scan().unwrap();
+    executor.scan();
 
     let snapshot = executor.snapshot();
     assert!(
@@ -196,7 +196,7 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
 
     // Trip the fault alarm and acknowledge nothing: the record stands.
     driver.write(FAULT, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_ALARM));
     assert!(flag(&executor, FAULT_UNACK));
 
@@ -204,14 +204,14 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
     // and the flag asserts while the record stands untouched.
     let receipt = executor.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_SHELVED));
     assert!(flag(&executor, FAULT_ALARM));
     assert!(flag(&executor, FAULT_UNACK));
 
     // An ack mid-shelve clears the latch normally.
     executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_SHELVED));
     assert!(flag(&executor, FAULT_ALARM));
     assert!(!flag(&executor, FAULT_UNACK));
@@ -220,11 +220,11 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
     // The bound is three scans — the request's asserting scan counts
     // as the first: one more shelved scan, then expiry drops the flag
     // while the request still stands.
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_SHELVED), "scan 3 of the bound");
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, FAULT_SHELVED), "bound 3 expired");
-    executor.scan().unwrap();
+    executor.scan();
     assert!(
         !flag(&executor, FAULT_SHELVED),
         "the standing request cannot re-arm"
@@ -232,33 +232,33 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
 
     // Cycling the request through false re-arms a fresh bound.
     executor.submit_command(write_value(FAULT_SHELVE, Value::Bool(false)));
-    executor.scan().unwrap();
+    executor.scan();
     executor.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_SHELVED), "cycled request re-shelves");
     executor.submit_command(write_value(FAULT_SHELVE, Value::Bool(false)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, FAULT_SHELVED));
 
     // Out of service: the flag follows the command level, manual in
     // both directions, and a trip arriving mid-OOS evaluates and
     // latches normally.
     driver.write(FAULT, Value::Bool(false)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, FAULT_ALARM));
     executor.submit_command(write_value(FAULT_OOS, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_OOS_FLAG));
     driver.write(FAULT, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_OOS_FLAG));
     assert!(flag(&executor, FAULT_ALARM), "the mid-OOS trip reports");
     assert!(flag(&executor, FAULT_UNACK), "the mid-OOS trip latches");
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_OOS_FLAG), "no automatic return");
     executor.submit_command(write_value(FAULT_OOS, Value::Bool(false)));
     executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, FAULT_OOS_FLAG));
     assert!(!flag(&executor, FAULT_UNACK));
 
@@ -266,18 +266,18 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
     // it — `alarm` reports the truth while the latch is withheld.
     executor.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
     driver.write(FAULT, Value::Bool(false)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     executor.submit_command(write_value(FAULT_SUPPRESS, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_SUPPRESSED));
     driver.write(FAULT, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, FAULT_ALARM));
     assert!(!flag(&executor, FAULT_UNACK), "annunciation withheld");
 
     // Release: the outlasted condition arrives as a new transition.
     executor.submit_command(write_value(FAULT_SUPPRESS, Value::Bool(false)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, FAULT_SUPPRESSED));
     assert!(flag(&executor, FAULT_ALARM));
     assert!(flag(&executor, FAULT_UNACK), "released fresh — latched");
@@ -292,20 +292,20 @@ fn the_float_sibling_shelves_and_suppresses_identically() {
 
     // Trip high at 90+ and shelve the standing alarm.
     driver.write(LEVEL, Value::Float(95.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_ALARM));
     assert!(flag(&executor, LEVEL_UNACK));
     executor.submit_command(write_value(LEVEL_SHELVE, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_SHELVED));
 
     // Expiry at the bound — three scans, the asserting one counted —
     // while the request stands.
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_SHELVED));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_SHELVED), "last scan of the bound");
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, LEVEL_SHELVED), "bound 3 expired");
     assert!(flag(&executor, LEVEL_ALARM), "the record never moved");
     assert!(flag(&executor, LEVEL_UNACK));
@@ -314,26 +314,26 @@ fn the_float_sibling_shelves_and_suppresses_identically() {
     // a condition that ended under suppression.
     executor.submit_command(write_value(LEVEL_SUPPRESS, Value::Bool(true)));
     driver.write(LEVEL, Value::Float(50.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_SUPPRESSED));
     assert!(!flag(&executor, LEVEL_UNACK), "the withheld latch cleared");
     executor.submit_command(write_value(LEVEL_SUPPRESS, Value::Bool(false)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, LEVEL_ALARM));
     assert!(!flag(&executor, LEVEL_UNACK), "a cleared trip stays silent");
 
     // Re-trip after release: a fresh transition latches.
     driver.write(LEVEL, Value::Float(95.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_ALARM));
     assert!(flag(&executor, LEVEL_UNACK));
 
     // OOS entry and manual return on the Float sibling too.
     executor.submit_command(write_value(LEVEL_OOS, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, LEVEL_OOS_FLAG));
     executor.submit_command(write_value(LEVEL_OOS, Value::Bool(false)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(!flag(&executor, LEVEL_OOS_FLAG));
 }
 
@@ -361,12 +361,12 @@ fn an_unwritable_shelve_point_rejects_not_writable_at_submission() {
     // trips and latches, OOS works, and `shelved`/`suppressed` report
     // the absent surfaces as standing-clear.
     driver.write(POWER, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, POWER_ALARM));
     assert!(!flag(&executor, POWER_SHELVED));
     assert!(!flag(&executor, POWER_SUPPRESSED));
     executor.submit_command(write_value(POWER_OOS, Value::Bool(true)));
-    executor.scan().unwrap();
+    executor.scan();
     assert!(flag(&executor, POWER_OOS_FLAG));
 }
 
@@ -380,15 +380,15 @@ fn checkpointed_standby_mid_shelve_continues_identically() {
     let mut active = build_executor(&model, &driver_a);
 
     driver_a.write(FAULT, Value::Bool(true)).unwrap();
-    active.scan().unwrap();
+    active.scan();
     active.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
-    active.scan().unwrap();
+    active.scan();
     active.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
     active.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
     active.submit_command(write_value(FAULT_OOS, Value::Bool(true)));
     // Two of three bound scans elapse across the next two scans.
-    active.scan().unwrap();
-    active.scan().unwrap();
+    active.scan();
+    active.scan();
     assert!(flag(&active, FAULT_SHELVED));
     assert!(flag(&active, FAULT_OOS_FLAG));
 
@@ -402,15 +402,15 @@ fn checkpointed_standby_mid_shelve_continues_identically() {
     // Through expiry and the manual returns, both run identically.
     driver_b.write(FAULT, Value::Bool(true)).unwrap();
     for _ in 0..4 {
-        active.scan().unwrap();
-        standby.scan().unwrap();
+        active.scan();
+        standby.scan();
     }
     standby.submit_command(write_value(FAULT_SHELVE, Value::Bool(false)));
     standby.submit_command(write_value(FAULT_OOS, Value::Bool(false)));
     active.submit_command(write_value(FAULT_SHELVE, Value::Bool(false)));
     active.submit_command(write_value(FAULT_OOS, Value::Bool(false)));
-    active.scan().unwrap();
-    standby.scan().unwrap();
+    active.scan();
+    standby.scan();
     assert_eq!(
         serde_json::to_string(&active.snapshot()).unwrap(),
         serde_json::to_string(&standby.snapshot()).unwrap()
@@ -424,10 +424,10 @@ fn identical_scripted_runs_produce_identical_snapshots() {
         let driver = sim_driver(&model).unwrap();
         let mut executor = build_executor(&model, &driver);
         driver.write(FAULT, Value::Bool(true)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         executor.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
         for _ in 0..6 {
-            executor.scan().unwrap();
+            executor.scan();
         }
         serde_json::to_string(&executor.snapshot()).unwrap()
     };
