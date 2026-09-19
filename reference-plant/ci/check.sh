@@ -229,6 +229,22 @@
 #                standby leaves the active's field writes undisturbed
 #                and reports no failover; two passes produce identical
 #                digests (failover-failed, failover-nondeterministic)
+#                The stage's standby-restart leg,
+#                ci/standby_restart.py on the same declared
+#                deployment: with the pair tracking and a receipted
+#                command settled, the tracking standby's container is
+#                stopped and relaunched onto its declared
+#                --state-file/--journal-file — the field owner driven
+#                through the downtime with its writes landing and a
+#                second command settling applied — the resumed peer
+#                reporting standby rather than claiming the field and
+#                reconverging to tracking inside the leg's declared
+#                window, its journal file carrying the restart
+#                boundary ordered after run 1's entries with seq
+#                order intact, the active's journal undisturbed, and
+#                the pair still promoting afterward; two passes
+#                produce identical digests (standby-restart-failed,
+#                standby-restart-nondeterministic)
 #                The stage's report leg, ci/report.py on the same
 #                declared deployment: with the pair tracking, one
 #                managed alarm is driven through its
@@ -1220,6 +1236,51 @@ fi
     || fail "failover-unchecked: the early-promotion case did not report its named diagnostic: $out"
 echo "  early-promotion: reported, failover-failed"
 
+# The pair contract's standby-restart leg, on the same
+# manifest-declared deployment: ci/standby_restart.py converges the
+# pair and settles a receipted command into the adopted log, then
+# stops the tracking standby's container and relaunches it onto its
+# declared --state-file/--journal-file — the standby half of
+# WW-LCM-001's restart-recovery clause on the deployed pair. The
+# relaunch must report the resume at the persisted tick — never a
+# silent cold start — rejoin in standby rather than claiming the
+# field, and reconverge to tracking inside the leg's declared window
+# while the field owner's driven scans keep writing and a second
+# command settles applied. The standby's durable journal must carry
+# the restart boundary ordered after run 1's entries with seq order
+# intact, the active's journal runs undisturbed, and the documented
+# switch must still promote the restarted peer — the restart left no
+# wedge for later legs. Two passes must produce identical digests.
+run_standby_restart() {
+    python3 ci/standby_restart.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_standby_restart)" \
+    || fail "standby-restart-failed: the standby-restart leg did not hold — its evidence lines are above"
+SECOND="$(run_standby_restart)" \
+    || fail "standby-restart-failed: the standby-restart leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "standby-restart-nondeterministic: two standby-restart passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a state file gone missing at the restart point,
+# and the restart's assertions held against a peer never restarted,
+# must each surface the named diagnostic — never a silently
+# unrestarted pass.
+for tamper in missing-state-file skip-restart; do
+    if out="$(run_standby_restart --tamper "$tamper" 2>&1)"; then
+        fail "standby-restart-unchecked: a $tamper passed the standby-restart leg"
+    fi
+    [[ "$out" == *"never reported a resume"* ]] \
+        || fail "standby-restart-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, standby-restart-failed"
+done
+
 # The pair contract's alarm-report leg, on the same
 # manifest-declared deployment: ci/report.py converges the pair, then
 # drives one managed alarm through its lifecycle — the level-primary
@@ -1286,8 +1347,8 @@ for file in ci/availability.py ci/burst_order.py ci/consumers.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
-        ci/schema_conformance.py ci/simulate.py ci/takeover.py \
-        README.md; do
+        ci/schema_conformance.py ci/simulate.py ci/standby_restart.py \
+        ci/takeover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
