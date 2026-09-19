@@ -1128,3 +1128,51 @@ print("registry, receipt, and event tamper cases report named mismatches")
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The release contract's named-diagnostic vocabulary must resolve
+/// every `<leg>-unchecked` self-check diagnostic `ci/check.sh` emits —
+/// an operator or tool reading a self-check failure resolves the name
+/// against the declared contract, so an emitted name the vocabulary
+/// does not declare is an unnamed diagnostic by another name. An
+/// emitted `<stem>-unchecked` is covered when the contract declares
+/// the name itself, or when the declared `<leg>-unchecked` convention
+/// covers it — the convention entry present and the leg's own
+/// `<stem>` or `<stem>-failed` diagnostic declared.
+#[test]
+fn the_contract_declares_every_emitted_unchecked_diagnostic() {
+    let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
+    let contract = std::fs::read_to_string(root().join("docs/release-contract.md")).unwrap();
+    let declared = |name: &str| contract.contains(&format!("`{name}`"));
+    // The emitted set: every `fail "<name>-unchecked:` the script can
+    // report — the first token of a fail message is its diagnostic.
+    let mut emitted: Vec<String> = Vec::new();
+    for line in check.lines() {
+        let mut rest = line;
+        while let Some(start) = rest.find("fail \"") {
+            rest = &rest[start + "fail \"".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.ends_with("-unchecked") && !emitted.contains(&name) {
+                emitted.push(name);
+            }
+        }
+    }
+    assert!(
+        !emitted.is_empty(),
+        "ci/check.sh emits no -unchecked self-check diagnostics"
+    );
+    // The convention entry itself must be declared for it to cover a
+    // name the vocabulary does not enumerate verbatim.
+    let convention = declared("<leg>-unchecked");
+    for name in &emitted {
+        let stem = name.strip_suffix("-unchecked").unwrap();
+        assert!(
+            declared(name)
+                || (convention && (declared(stem) || declared(&format!("{stem}-failed")))),
+            "the contract's named-diagnostic vocabulary covers neither \
+             the emitted {name} nor its leg"
+        );
+    }
+}
