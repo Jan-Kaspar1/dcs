@@ -46,6 +46,7 @@ import copy
 import io
 import json
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -59,6 +60,67 @@ from qa_lane import report, runner, scenarios, verify
 
 HELD_RESPONSE = (b'HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\n'
                  b'{"tick": 12, "points": []}')
+
+
+def _ctl_request(args):
+    """The one wire request the shipped dcs-plant-ctl sends for an
+    argv covering `list`, `read`, `fault`, and `clear-fault` — the
+    subcommands the migrated scenarios drive. `write`/`step` are the
+    tool's claimed mutations and the claim ops are the ones it does
+    not expose; the scenarios keep those on the raw client, so an argv
+    carrying them means a leg drifted off the covered seam."""
+    op = args[0] if args else None
+    if op == 'list':
+        return {'op': 'list_points'}
+    if op == 'read':
+        return {'op': 'read', 'point': int(args[1])}
+    if op == 'fault':
+        return {'op': 'inject_fault', 'point': int(args[1]),
+                'fault': _ctl_fault(args[2])}
+    if op == 'clear-fault':
+        return {'op': 'clear_fault', 'point': int(args[1])}
+    raise AssertionError('plant_ctl argv outside the covered '
+                         'subcommands: %s' % (args,))
+
+
+def _ctl_fault(arg):
+    """The Fault value the tool's `fault` argument parses to:
+    disconnected/timeout error faults, uncertain[:reason]/bad[:reason]
+    quality faults (defaulting to unspecified)."""
+    kind, _, reason = arg.partition(':')
+    if kind in ('disconnected', 'timeout') and not reason:
+        return kind
+    if kind in ('uncertain', 'bad'):
+        return {'quality': {kind: reason or 'unspecified'}}
+    raise AssertionError('unparseable fault argument %s' % arg)
+
+
+def _ctl_process(body=None, stderr='', returncode=0):
+    """A CompletedProcess-shaped answer for a faked ctx['plant_ctl']
+    seam — the shape runner.plant_ctl's `docker exec` returns: the
+    response JSON on stdout at exit 0, the refusal on stderr at exit
+    1."""
+    return subprocess.CompletedProcess(
+        args=('dcs-plant-ctl',), returncode=returncode,
+        stdout=json.dumps(body) if returncode == 0 else '',
+        stderr=stderr)
+
+
+def _ctl_wrap(dispatch, *args):
+    """Run argv through a stubbed wire dispatch as the shipped tool
+    would: the response JSON at exit 0, or the refusal's detail at
+    exit 1 — a transport failure raising is the tool's nonzero exit
+    too."""
+    try:
+        body = dispatch(_ctl_request(args))
+    except AssertionError:
+        raise
+    except Exception as exc:
+        return _ctl_process(stderr=str(exc), returncode=1)
+    if (body or {}).get('result') == 'error':
+        return _ctl_process(stderr=json.dumps(body.get('error')),
+                            returncode=1)
+    return _ctl_process(body)
 
 
 def _pipelined_bodies(raw):
@@ -1463,13 +1525,26 @@ class FakePlantPeer:
                 while b'\n' in buffer:
                     line, buffer = buffer.split(b'\n', 1)
                     if line:
-                        response = self.dispatch(json.loads(line))
+                        response = self.dispatch_for(conn,
+                                                     json.loads(line))
                         conn.sendall(json.dumps(response).encode()
                                      + b'\n')
         except OSError:
             pass
         finally:
+            self.release_conn(conn)
             conn.close()
+
+    def dispatch_for(self, conn, request):
+        """The connection-aware request hook — claim-arbitrating
+        subclasses need the attachment's identity to track claim
+        holders; the base contract is per-request."""
+        return self.dispatch(request)
+
+    def release_conn(self, conn):
+        """The connection's end — claim-holding subclasses drop the
+        attachment's hold here; a standing claim never releases on
+        disconnect."""
 
     def served(self, point):
         """The sample a reader observes: stored value, injected
@@ -1503,6 +1578,34 @@ class FakePlantPeer:
         return {'result': 'error',
                 'error': {'kind': 'invalid_request',
                           'detail': 'unknown op'}}
+
+    def ctl(self, *args):
+        """The ctx['plant_ctl'] seam the migrated scenarios drive: the
+        argv's one wire request over a fresh connection — the same
+        exchange the shipped dcs-plant-ctl runs — wrapped in the
+        CompletedProcess shape the runner's `docker exec` action
+        returns. A server `error` result is the tool's nonzero exit
+        with the refusal on stderr."""
+        request = _ctl_request(args)
+        host, _, port = self.address.rpartition(':')
+        try:
+            with socket.create_connection((host, int(port)),
+                                          timeout=5) as conn:
+                conn.sendall(json.dumps(request).encode() + b'\n')
+                buffer = b''
+                while b'\n' not in buffer:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        raise ConnectionError('the plant closed '
+                                              'mid-answer')
+                    buffer += chunk
+            body = json.loads(buffer.split(b'\n', 1)[0])
+        except Exception as exc:
+            return _ctl_process(stderr=str(exc), returncode=1)
+        if (body or {}).get('result') == 'error':
+            return _ctl_process(stderr=json.dumps(body.get('error')),
+                                returncode=1)
+        return _ctl_process(body)
 
     def close(self):
         self.listener.close()
@@ -1592,6 +1695,7 @@ class FieldFaultTests(unittest.TestCase):
     def run_scenario(self):
         ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
                'plant': self.plant.address,
+               'plant_ctl': self.plant.ctl,
                'evidence_dir': str(self.evidence)}
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
@@ -1940,6 +2044,7 @@ class BackupHealthTests(unittest.TestCase):
         return {'active': 'http://ctrl-a:1',
                 'standby': 'http://ctrl-b:2',
                 'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
                 'evidence_dir': str(self.evidence)}
 
     def run_scenario(self, ctx=None, feed=None):
@@ -1997,6 +2102,7 @@ class BackupHealthTests(unittest.TestCase):
         feed2 = BackupHealthFeed(plant2)
         ctx2 = self._ctx()
         ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
         ctx2['evidence_dir'] = str(evidence2)
         record2 = self.run_scenario(ctx=ctx2, feed=feed2)
         self.assertEqual(record2['outcome'], 'passed', record2)
@@ -2686,6 +2792,7 @@ class LagStagingTests(unittest.TestCase):
         return {'active': 'http://ctrl-a:1',
                 'standby': 'http://ctrl-b:2',
                 'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
                 'plant_owner': {'active': self.OWNER, 'standby': 424244},
                 'evidence_dir': str(self.evidence)}
 
@@ -2746,6 +2853,7 @@ class LagStagingTests(unittest.TestCase):
         feed2 = LagStagingFeed(plant2)
         ctx2 = self._ctx()
         ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
         ctx2['evidence_dir'] = str(evidence2)
         record2 = self.run_scenario(ctx=ctx2, feed=feed2)
         self.assertEqual(record2['outcome'], 'passed', record2)
@@ -4514,7 +4622,9 @@ class RevisionFeed:
             return self._promote(peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -4537,6 +4647,10 @@ class RevisionFeed:
                               'quality': 'good', 'tick': 9}
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class ModelRevisionTests(unittest.TestCase):
@@ -4567,6 +4681,7 @@ class ModelRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_revised': self.feed.start,
                 'journal_files': {
@@ -4576,8 +4691,6 @@ class ModelRevisionTests(unittest.TestCase):
 
     def run_scenario(self):
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             self.feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -4626,14 +4739,13 @@ class ModelRevisionTests(unittest.TestCase):
         feed2 = RevisionFeed(journals2, self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_revised'] = feed2.start
         ctx2['journal_files'] = {
             'active': str(journals2['a']),
             'standby': str(journals2['b']),
             'revised': str(journals2['c'])}
         with patch.object(scenarios, 'http_json', feed2.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed2.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -4898,7 +5010,9 @@ class IncompatibleFeed:
             return self._promote(peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -4923,6 +5037,10 @@ class IncompatibleFeed:
                                   'quality': 'good', 'tick': 9}
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class IncompatibleRevisionTests(unittest.TestCase):
@@ -4961,6 +5079,7 @@ class IncompatibleRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_revised': feed.start,
                 'journal_files': {
@@ -4971,8 +5090,6 @@ class IncompatibleRevisionTests(unittest.TestCase):
     def run_scenario(self, feed=None, ctx=None):
         feed = feed or self.feed
         with patch.object(scenarios, 'http_json', feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'REVISION_POLL', 0.001), \
                 patch.object(scenarios, 'REVISION_CONVERGE_DEADLINE',
@@ -5029,6 +5146,7 @@ class IncompatibleRevisionTests(unittest.TestCase):
                 'standby': 'http://ctrl-b:2',
                 'revised': 'http://ctrl-c:3',
                 'plant': 'plant:9',
+                'plant_ctl': feed2.plant_ctl,
                 'evidence_dir': str(evidence2),
                 'start_revised': feed2.start,
                 'journal_files': {
@@ -5276,7 +5394,9 @@ class NegotiationFeed:
             return self._promote(url, peer)
         raise AssertionError('unexpected request %s %s' % (method, url))
 
-    # The plant's sim-net service — replaces scenarios._field_request.
+    # The plant's sim-net service — the wire dispatch the ctx
+    # ['plant_ctl'] seam wraps, covering the tool's list/read
+    # subcommands the scenario's field legs drive.
     def field_request(self, ctx, request):
         if request['op'] == 'list_points':
             return {'result': 'points', 'points': [
@@ -5285,6 +5405,10 @@ class NegotiationFeed:
         if request['op'] == 'read':
             return {'result': 'sample', 'sample': self.field}
         raise AssertionError('unexpected plant request %s' % request)
+
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.field_request(None, request), *args)
 
 
 class CheckpointNegotiationTests(unittest.TestCase):
@@ -5312,14 +5436,13 @@ class CheckpointNegotiationTests(unittest.TestCase):
                 'revised': 'http://ctrl-c:3',
                 'foreign': 'http://ctrl-f:4',
                 'plant': 'plant:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_foreign': self.feed.start,
                 'stop_foreign': self.feed.stop}
 
     def run_scenario(self, ctx=None):
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
-                patch.object(scenarios, '_field_request',
-                             self.feed.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
@@ -5360,11 +5483,10 @@ class CheckpointNegotiationTests(unittest.TestCase):
         feed2 = NegotiationFeed(self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_foreign'] = feed2.start
         ctx2['stop_foreign'] = feed2.stop
         with patch.object(scenarios, 'http_json', feed2.http_json), \
-                patch.object(scenarios, '_field_request',
-                             feed2.field_request), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_POLL', 0.001), \
                 patch.object(scenarios, 'NEGOTIATION_DEADLINE', 2.0), \
@@ -5702,6 +5824,13 @@ class DoomedStartupFeed:
                                         'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
+    # The shipped plant tool — replaces ctx['plant_ctl'] for the
+    # covered subcommands (the census and the field reads); the bare
+    # `step` fencing probes stay on the _plant_probe patch above.
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.plant_request(None, request), *args)
+
 
 class DoomedStartupClaimTests(unittest.TestCase):
     """scenario_doomed_startup_claim against the stubbed rig: the
@@ -5734,6 +5863,7 @@ class DoomedStartupClaimTests(unittest.TestCase):
                 'revised': 'http://ctrl-c:3',
                 'foreign': 'http://ctrl-f:4',
                 'plant': '127.0.0.1:9',
+                'plant_ctl': self.feed.plant_ctl,
                 'evidence_dir': str(self.evidence),
                 'start_foreign': self.feed.start,
                 'stop_foreign': self.feed.stop,
@@ -5791,6 +5921,7 @@ class DoomedStartupClaimTests(unittest.TestCase):
                                   self.document)
         ctx2 = self._ctx()
         ctx2['evidence_dir'] = str(evidence2)
+        ctx2['plant_ctl'] = feed2.plant_ctl
         ctx2['start_foreign'] = feed2.start
         ctx2['stop_foreign'] = feed2.stop
         ctx2['state_files'] = {'foreign': str(directory2
@@ -6404,6 +6535,13 @@ class PlantLinkFeed:
                                         'field writes'}}
         raise AssertionError('unexpected plant request %s' % request)
 
+    # The shipped plant tool — replaces ctx['plant_ctl'] for the
+    # covered census; the bare `step` fencing probes stay on the
+    # _plant_probe patch above.
+    def plant_ctl(self, *args):
+        return _ctl_wrap(
+            lambda request: self.plant_request(None, request), *args)
+
     # The monitor surface — replaces scenarios.http_json.
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('/')[2]
@@ -6469,6 +6607,7 @@ class PlantLinkLossTests(unittest.TestCase):
     def run_scenario(self, ctx_extra=None):
         ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
                'plant': '127.0.0.1:9',
+               'plant_ctl': self.feed.plant_ctl,
                'evidence_dir': str(self.evidence),
                'stop_plant': self.feed.stop,
                'start_plant': self.feed.start}
@@ -7049,6 +7188,587 @@ class DcsCtlTests(unittest.TestCase):
             report.validate_scenario(record)
 
 
+class StarvationFeed:
+    """A stubbed armed pair for the monitor-starvation leg. ctrl-a is
+    the flooded active — each served /snapshot is one paced scan
+    having landed — and ctrl-b is the armed tracking standby: each
+    /role poll on it is one landed checkpoint pull, its reported
+    tracking alignment advancing one scan, unless a doctor moves its
+    sync or role mid-hold. The leg's raw-connection seam hands out
+    FakeSockets; the plant fences every third-party probe while the
+    writer claim stands."""
+    POINT = 204
+
+    def __init__(self):
+        self.tick = 0         # the active's run tick
+        self.aligned = 0      # the standby's landed checkpoint pulls
+        self.polls = 0        # standby /role polls — the heartbeat
+        self.receipts = []
+        self.journal_a = []
+        self.journal_b = []
+        self.seq = 0
+        self.sockets = []
+        # The doctors for the named-failure cases.
+        self.starve_reads = False    # the serving reads never answer
+        self.late_reads = False      # they answer past the bound
+        self.promote_after = None    # poll count the standby promotes at
+        self.stall_after = None      # poll count its pulls stop landing
+        self.never_tracks = False    # no armed tracking standby settles
+        self.unfenced = False        # probes write through the claim
+        self.claim_lost = False      # a field_claim_lost is journaled
+        self.role_journaled = False  # a role_changed is journaled
+        self.no_recover = False      # the submission lane never frees
+
+    # --- the runner-owned transport seams ---
+
+    def connect(self, base, timeout=5):
+        stream = FakeSocket()
+        self.sockets.append(stream)
+        return stream
+
+    def plant(self, ctx, request, timeout=5):
+        if self.unfenced:
+            return {'ok': {'stepped': True}}
+        return {'error': {'kind': 'fenced'}}
+
+    def request_status(self, method, url, body=None, timeout=5):
+        if self.no_recover:
+            raise urllib.error.URLError('timed out')
+        host, _, path = url[7:].partition('/')
+        path = '/' + path
+        if host.startswith('ctrl-a') and path == '/scan' \
+                and method == 'POST':
+            return 409, b'{"error": "paced"}'
+        raise urllib.error.URLError('no route ' + path)
+
+    # --- the stubbed monitor surface ---
+
+    def http_json(self, method, url, body=None, timeout=5):
+        host, _, path = url[7:].partition('/')
+        path = '/' + path
+        if host.startswith('ctrl-a'):
+            return self.active(method, path, body)
+        if host.startswith('ctrl-b'):
+            return self.standby(method, path, body)
+        raise urllib.error.URLError('unknown host ' + host)
+
+    def active(self, method, path, body):
+        if method == 'GET' \
+                and any(not stream.closed for stream in self.sockets):
+            if self.starve_reads:
+                raise urllib.error.URLError('timed out')
+            if self.late_reads:
+                time.sleep(0.5)   # past the patched bound — a late
+                                  # answer, the bound contract broken
+        if path == '/role':
+            return 200, {'role': 'active', 'tick': self.tick}
+        if path == '/signals':
+            return 200, {'points': [
+                {'name': 'p101-oos', 'point': self.POINT,
+                 'kind': 'bool', 'writable': True,
+                 'direction': 'in', 'value_type': 'bool'}]}
+        if path == '/snapshot':
+            self.tick += 1   # one paced scan landed per served read
+            return 200, {'tick': self.tick,
+                         'points': [{'point': self.POINT,
+                                     'sample': {'value': {
+                                         'bool': False}}}]}
+        if path == '/checkpoint':
+            return 200, {'tick': self.tick,
+                         'model_fingerprint': 'fp'}
+        if path == '/receipts':
+            for receipt in self.receipts:
+                if 'accepted' in receipt['outcome']:
+                    receipt['outcome'] = {'applied': {'tick': self.tick}}
+                    self.seq += 1
+                    self.journal_a.append({
+                        'seq': self.seq, 'tick': self.tick,
+                        'event': {'command_settled': {'receipt': {
+                            'id': receipt['id'], 'actor': 'qa-lane',
+                            'command': receipt['command'],
+                            'outcome': {'applied': {}}}}}})
+            return 200, list(self.receipts)
+        if path.startswith('/journal'):
+            entries = list(self.journal_a)
+            if '?since=' in path and self.claim_lost:
+                entries.append({'seq': 90, 'tick': self.tick,
+                                'event': {'field_claim_lost': {
+                                    'point': 9}}})
+            return 200, entries
+        if path == '/command' and method == 'POST':
+            if self.no_recover:
+                raise urllib.error.URLError('timed out')
+            receipt = {'id': 'r' + str(len(self.receipts) + 1),
+                       'command': body['command'],
+                       'outcome': {'accepted': {}},
+                       'actor': body.get('actor')}
+            self.receipts.append(receipt)
+            return 200, receipt
+        raise urllib.error.URLError('no route ' + path)
+
+    def standby(self, method, path, body):
+        if path == '/role':
+            self.polls += 1
+            if self.never_tracks:
+                return 200, {'role': 'standby', 'tick': self.aligned,
+                             'sync': {'unsynchronized': {}}}
+            if self.promote_after is not None \
+                    and self.polls >= self.promote_after:
+                return 200, {'role': 'promoting', 'tick': self.aligned}
+            if self.stall_after is not None \
+                    and self.polls >= self.stall_after:
+                return 200, {'role': 'standby', 'tick': self.aligned,
+                             'sync': {'degraded': {'detail':
+                                      'fetch failed: timed out'}}}
+            self.aligned += 1   # one landed checkpoint pull
+            return 200, {'role': 'standby', 'tick': self.aligned,
+                         'sync': {'tracking': {'aligned': self.aligned}}}
+        if path.startswith('/journal'):
+            entries = list(self.journal_b)
+            if '?since=' in path and self.role_journaled:
+                entries.append({'seq': 91, 'tick': self.aligned,
+                                'event': {'role_changed': {
+                                    'from': 'standby',
+                                    'to': 'promoting'}}})
+            return 200, entries
+        raise urllib.error.URLError('no route ' + path)
+
+
+class MonitorStarvationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = StarvationFeed()
+
+    def _ctx(self, feed=None, **extra):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1', 'standby': 'http://ctrl-b:2',
+               'plant': 'tcp://plant:9', 'failover_misses': 120,
+               'evidence_dir': str(self.evidence)}
+        ctx.update(extra)
+        return ctx
+
+    def run_scenario(self, feed=None, ctx=None, **patches):
+        feed = feed or self.feed
+        constants = {'POLL_INTERVAL': 0.001, 'LATENCY_BOUND': 0.3,
+                     'STARVE_SETTLE': 1.0, 'STARVE_POLL': 0.001,
+                     'STARVE_DEADLINE': 1.0, 'STARVE_PULL_ADVANCE': 3,
+                     'STARVE_RECOVER': 1.0}
+        constants.update(patches)
+        with patch.multiple(scenarios, **constants), \
+                patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, '_connect', feed.connect), \
+                patch.object(scenarios, '_plant_probe', feed.plant), \
+                patch.object(scenarios, '_request_status',
+                             feed.request_status):
+            return scenarios.scenario_monitor_starvation(
+                ctx or self._ctx(feed))
+
+    def test_registered_in_scenarios(self):
+        order = list(scenarios.SCENARIOS)
+        self.assertIn(scenarios.scenario_monitor_starvation, order)
+        # The leg sits in the armed pre-switch window — ahead of the
+        # tune case's a->b switch, behind the dead-peer case that
+        # restores the rig it shares the window with.
+        self.assertLess(
+            order.index(scenarios.scenario_dead_peer_latency),
+            order.index(scenarios.scenario_monitor_starvation))
+        self.assertLess(
+            order.index(scenarios.scenario_monitor_starvation),
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(verify.case_function('monitor-starvation'),
+                      scenarios.scenario_monitor_starvation)
+
+    def test_armed_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        self.assertEqual(record['observations'],
+                         ['two starvation passes, identical digests'])
+        self.assertEqual(len(self.feed.sockets),
+                         scenarios.STARVE_CONNECTIONS * 2)
+        self.assertTrue(all(stream.closed
+                            for stream in self.feed.sockets))
+        self.assertTrue(all(stream.sent in scenarios.STARVE_REQUESTS
+                            for stream in self.feed.sockets))
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        digest = None
+        for number in (1, 2):
+            window = json.loads(
+                (self.evidence
+                 / ('monitor-starvation-pass-' + str(number)
+                    + '.json')).read_text())
+            self.assertEqual(window['digest']['reads'], {
+                '/role': 'bounded', '/snapshot': 'bounded',
+                '/checkpoint': 'bounded'})
+            self.assertEqual(window['digest']['scans'], 'advanced')
+            self.assertEqual(window['digest']['tracking'], 'advanced')
+            self.assertEqual(window['digest']['fencing'], 'fenced')
+            self.assertEqual(window['digest']['journal'], 'clean')
+            self.assertEqual(window['digest']['recovery'], 'settled')
+            self.assertEqual(window['digest']['roles'], 'unchanged')
+            self.assertEqual(window['violations'], {})
+            self.assertEqual(window['armed_miss_budget'], 120)
+            if digest is not None:
+                self.assertEqual(digest, window['digest'])
+            digest = window['digest']
+
+    def test_starved_liveness_reads_report_failed(self):
+        self.feed.starve_reads = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_late_liveness_reads_report_nondeterministic(self):
+        self.feed.late_reads = True
+        record = self.run_scenario(STARVE_PULL_ADVANCE=1,
+                                   STARVE_DEADLINE=4.0)
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-nondeterministic'), record['detail'])
+        self.assertIn('past the', record['detail'])
+        report.validate_scenario(record)
+
+    def test_promoting_standby_reports_nondeterministic(self):
+        self.feed.promote_after = 4
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-nondeterministic'), record['detail'])
+        self.assertIn('promoting', record['detail'])
+        report.validate_scenario(record)
+
+    def test_stalled_pulls_report_failed(self):
+        self.feed.stall_after = 3
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_unfenced_probe_reports_nondeterministic(self):
+        self.feed.unfenced = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-nondeterministic'), record['detail'])
+        self.assertIn('wrote through', record['detail'])
+        report.validate_scenario(record)
+
+    def test_journaled_claim_loss_reports_nondeterministic(self):
+        self.feed.claim_lost = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-nondeterministic'), record['detail'])
+        self.assertIn('field_claim_lost', record['detail'])
+        report.validate_scenario(record)
+
+    def test_journaled_role_change_reports_nondeterministic(self):
+        self.feed.role_journaled = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-nondeterministic'), record['detail'])
+        self.assertIn('role_changed', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unrecovered_submission_lane_reports_failed(self):
+        self.feed.no_recover = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'monitor-starvation-failed'), record['detail'])
+        self.assertIn('never answered a command', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_armed_tracking_standby_inconclusive(self):
+        self.feed.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('no armed tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_plant_endpoint_inconclusive(self):
+        ctx = self._ctx()
+        del ctx['plant']
+        record = self.run_scenario(ctx=ctx)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('fencing probes', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            feed = StarvationFeed()
+            evidence = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence.mkdir()
+            self.evidence = evidence
+            record = self.run_scenario(feed=feed,
+                                       ctx=self._ctx(feed))
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class RearmPlantPeer(FakePlantPeer):
+    """The unclaimed-rearm rig's plant half: FakePlantPeer plus the
+    full write-ownership arbitration the scenario induces — per-
+    attachment holder tracking, `claim_writer`'s unconditional
+    preemption, `ensure_writer`'s conditional grant, `release_writer`
+    dropping only this attachment's hold (the last-holder release
+    unclaiming the field), disconnect dropping the hold but never the
+    claim, and `write`/`step` fencing against the standing claim —
+    the server's contract shape. The feed drives the controller
+    side's scan writes through `owner_write`, the RemoteDriver re-arm
+    contract applied: fenced under a foreign claim, an unclaimed
+    field re-arming the recorded token inline before the write lands."""
+
+    IN, OUT = 10, 100
+
+    def __init__(self, owner):
+        super().__init__()
+        self.samples = {
+            self.IN: {'value': {'float': 0.8}, 'quality': 'good',
+                      'tick': 0},
+            self.OUT: {'value': {'float': 0.0}, 'quality': 'good',
+                       'tick': 0}}
+        self.owner = owner
+        self.claim = {'owner': owner, 'holders': {'controller'},
+                      'phantom': False}   # the standing owner claim
+        self.plant_tick = 0
+        # The doctors staging each named defect.
+        self.down = False           # every attachment drops unanswered
+        self.open_field = False     # mutations ignore the claim
+        self.phantom_rearm = False  # a re-armed claim never fences
+        self.shared = False         # claims answer claimed_shared
+        self.release_refuses = False
+        self.dropped = False        # the re-arm keeps dropping writes
+
+    def _holders(self):
+        return (self.claim or {}).get('holders') or set()
+
+    def owner_write(self, demote_on_unclaimed=False,
+                    rearm_drops=False):
+        """One controller-scan field write through the RemoteDriver's
+        inline re-arm: 'fenced' under a foreign claim (the caller
+        demotes); an unclaimed field re-arms the recorded token in
+        place and the write lands — unless the doctor drops it."""
+        if self.claim is None:
+            if demote_on_unclaimed:
+                return 'fenced'   # the defect: demote on Unclaimed
+            self.claim = {'owner': self.owner,
+                          'holders': {'controller'},
+                          'phantom': self.phantom_rearm}
+            if rearm_drops:
+                self.dropped = True
+                return 'rearmed'  # claim re-armed, write never landed
+        elif 'controller' not in self._holders():
+            return 'fenced'
+        if self.dropped:
+            return 'rearmed'      # the writes keep dropping
+        self.plant_tick += 1
+        self.samples[self.OUT].update(tick=self.plant_tick,
+                                      value={'float': 1.5})
+        return 'landed'
+
+    def release_conn(self, conn):
+        # Disconnect drops the attachment's hold, never the claim —
+        # the dead-owner fencing the standing claim provides.
+        if self.claim is not None:
+            self.claim['holders'].discard(conn)
+
+    def _claim_for(self, conn, request):
+        op, owner = request['op'], request.get('owner')
+        if op == 'release_writer':
+            if self.release_refuses:
+                return {'result': 'error', 'error': {
+                    'kind': 'invalid_request',
+                    'detail': 'release refused'}}
+            if self.claim is not None:
+                self.claim['holders'].discard(conn)
+                if not self.claim['holders']:
+                    self.claim = None
+            return {'result': 'done'}
+        shared = self.claim is not None \
+            and self.claim['owner'] == owner \
+            and any(h is not conn for h in self._holders())
+        if op == 'ensure_writer' and self.claim is not None \
+                and self.claim['owner'] != owner \
+                and not self.claim.get('phantom'):
+            return {'result': 'error', 'error': {
+                'kind': 'fenced',
+                'detail': 'the field is owned by another attachment'}}
+        if self.claim is None or self.claim['owner'] != owner:
+            self.claim = {'owner': owner, 'holders': {conn},
+                          'phantom': False}
+        else:
+            self.claim['holders'].add(conn)
+        if shared or self.shared:
+            return {'result': 'claimed_shared', 'owner': owner}
+        return {'result': 'done'}
+
+    def dispatch_for(self, conn, request):
+        if self.down:
+            raise OSError('the plant is down')
+        op = request.get('op')
+        if op in ('claim_writer', 'ensure_writer', 'release_writer'):
+            self.requests.append(request)
+            return self._claim_for(conn, request)
+        if op in ('write', 'step'):
+            self.requests.append(request)
+            if self.open_field or conn in self._holders():
+                if op == 'step':
+                    self.plant_tick += 1
+                    return {'result': 'stepped',
+                            'tick': self.plant_tick}
+                self.samples[request['point']].update(
+                    value=request['value'], tick=self.plant_tick)
+                return {'result': 'done'}
+            if self.claim is None:
+                return {'result': 'error', 'error': {
+                    'kind': 'unclaimed',
+                    'detail': 'no attachment holds field writes'}}
+            if op == 'step':
+                return {'result': 'error', 'error': {
+                    'kind': 'fenced',
+                    'detail': 'another attachment owns field writes'}}
+            return {'result': 'error', 'error': {
+                'kind': 'io', 'error': {'fenced': request['point']}}}
+        if op == 'list_points':
+            self.requests.append(request)
+            return {'result': 'points', 'points': [
+                {'point': p, 'sample': self.served(p),
+                 'direction': 'out' if p == self.OUT else 'in',
+                 'fault': self.faults.get(p)}
+                for p in sorted(self.samples)]}
+        return super().dispatch_for(conn, request)
+
+
+class UnclaimedRearmFeed:
+    """A stubbed pair for the unclaimed-rearm scenario: ctrl-a is the
+    field owner — each served /snapshot is one scan's write attempted
+    through the plant peer's claim arbitration — and ctrl-b is the
+    tracking standby. The pair reports the settled active/standby
+    layout the leg induces on, the journals and the io_health
+    fencing-loss ledger the leg audits, and doctor flags stage each
+    named defect the issue calls out."""
+
+    OWNER = 424243
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.demoted = False
+        self.failed_writes = 0
+        self.journal = []
+        self.seq = 0
+        self.peer_role_calls = 0
+        # The doctors staging each named defect.
+        self.silent = False             # ctrl-a never reports
+        self.demote_on_unclaimed = False  # the window demotes it
+        self.rearm_drops = False        # the re-arm drops the write
+        self.ledger_grows = False       # the fencing ledger grows
+        self.claim_lost_journaled = False
+        self.role_journaled = False
+        self.peer_journaled = False
+        self.peer_moves = False         # the standby reports a move
+        self.peer_wrong_role = False    # the pair never settles
+        self.peer_demoted = False       # the restore's demote landed
+
+    def _scan(self):
+        """One controller scan: the field write attempted through the
+        plant's claim arbitration — the fencing verdict demotes the
+        owner through the settled fencing-loss contract."""
+        self.tick += 1
+        if self.demoted:
+            return
+        if self.plant.owner_write(
+                demote_on_unclaimed=self.demote_on_unclaimed,
+                rearm_drops=self.rearm_drops) == 'fenced':
+            self.demoted = True
+            self.failed_writes += 1
+            for event in ({'field_claim_lost':
+                           {'point': self.plant.OUT}},
+                          {'role_changed': {'from': 'active',
+                                            'to': 'standby'}}):
+                self.seq += 1
+                self.journal.append({'seq': self.seq,
+                                     'tick': self.tick,
+                                     'event': event})
+        if self.ledger_grows:
+            self.failed_writes += 1
+
+    def _journal(self, since):
+        entries = [dict(e) for e in self.journal if e['seq'] > since]
+        if self.claim_lost_journaled:
+            entries.append({'seq': since + 1, 'tick': self.tick,
+                            'event': {'field_claim_lost':
+                                      {'point': self.plant.OUT}}})
+        if self.role_journaled:
+            entries.append({'seq': since + 2, 'tick': self.tick,
+                            'event': {'role_changed':
+                                      {'from': 'active',
+                                       'to': 'standby'}}})
+        return entries
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        since = int(query.split('=', 1)[1]) \
+            if query.startswith('since=') else 0
+        if host.startswith('ctrl-b'):
+            if route == '/role':
+                self.peer_role_calls += 1
+                role = 'standby'
+                if self.peer_moves and self.peer_role_calls > 1 \
+                        and not self.peer_demoted:
+                    role = 'promoting'
+                if self.peer_wrong_role:
+                    role = 'active'
+                return 200, {'role': role, 'tick': 0,
+                             'sync': {'tracking': {'aligned': 1}}}
+            if route == '/demote':
+                self.peer_demoted = True
+                return 200, {'role': 'standby'}
+            if route == '/journal':
+                entries = []
+                if self.peer_journaled:
+                    entries = [{'seq': since + 1, 'tick': 0,
+                                'event': {'role_changed':
+                                          {'from': 'standby',
+                                           'to': 'promoting'}}}]
+                return 200, entries
+            raise AssertionError('unhandled ' + url)
+        if not host.startswith('ctrl-a'):
+            raise urllib.error.URLError('unknown host ' + host)
+        if self.silent:
+            raise urllib.error.URLError('unreachable')
+        if route == '/role':
+            return 200, {'tick': self.tick,
+                         'role': 'standby' if self.demoted
+                                 else 'active'}
+        if route == '/snapshot':
+            self._scan()
+            return 200, {'tick': self.tick, 'points': [],
+                         'io_health':
+                         {'failed_writes': self.failed_writes,
+                          'journal_errors': 0, 'journals_appended': 0}}
+        if route == '/journal':
+            return 200, self._journal(since)
+        if route == '/promote':
+            self.demoted = False
+            return 200, {'role': 'active'}
+        raise AssertionError('unhandled ' + url)
+
+
 class RotationPlant:
     """The field half of the duty-rotation rig: the lane dynamics'
     ambient inflow — the net-flow sum's declared bias — integrated
@@ -7471,9 +8191,10 @@ class DutyRotationTests(unittest.TestCase):
     def test_registered_in_scenarios(self):
         order = list(scenarios.SCENARIOS)
         # The restored pre-switch window behind the dead-peer case —
-        # the settled tracking pair ahead of the force case's legs.
-        self.assertEqual(
-            order.index(scenarios.scenario_dead_peer_latency) + 1,
+        # the settled tracking pair ahead of the force case's legs,
+        # with the monitor-starvation leg sharing the window in front.
+        self.assertLess(
+            order.index(scenarios.scenario_dead_peer_latency),
             order.index(scenarios.scenario_duty_rotation))
         self.assertEqual(
             order.index(scenarios.scenario_duty_rotation) + 1,
@@ -7676,6 +8397,241 @@ class DutyRotationTests(unittest.TestCase):
         self.assertIn('unacknowledged latch never cleared',
                       record.get('detail', ''))
         report.validate_scenario(record)
+
+
+class UnclaimedRearmTests(unittest.TestCase):
+    """The unclaimed-rearm scenario against the stubbed pair: a clean
+    rig passes with identical digests and evidence, each doctored
+    defect reports the named diagnostic, and the unreachable rig is
+    inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = RearmPlantPeer(UnclaimedRearmFeed.OWNER)
+        self.feed = UnclaimedRearmFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def _ctx(self):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'revised': 'http://ctrl-c:3',
+                'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
+                'plant_owner': {'active': self.feed.OWNER,
+                                'standby': 424244},
+                'evidence_dir': str(self.evidence)}
+
+    def run_scenario(self, feed=None, ctx=None):
+        feed = feed or self.feed
+        ctx = ctx or self._ctx()
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'UNCLAIMED_REARM_SETTLE', 2), \
+                patch.object(scenarios, 'UNCLAIMED_REARM_POLL', 0.001), \
+                patch.object(scenarios, 'UNCLAIMED_REARM_DEADLINE', 2), \
+                patch.object(scenarios, 'UNCLAIMED_REARM_ROUNDS', 4):
+            return scenarios.scenario_unclaimed_rearm(ctx)
+
+    def test_registered(self):
+        self.assertIn(scenarios.scenario_unclaimed_rearm,
+                      scenarios.SCENARIOS)
+        self.assertIs(verify.case_function('unclaimed-rearm'),
+                      scenarios.scenario_unclaimed_rearm)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertTrue((self.evidence
+                         / 'unclaimed-rearm-pass-1.json').is_file())
+        self.assertTrue((self.evidence
+                         / 'unclaimed-rearm-pass-2.json').is_file())
+        report.validate_scenario(record)
+
+    def test_demoting_window_reports_failed(self):
+        self.feed.demote_on_unclaimed = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_rearm_dropping_write_reports_failed(self):
+        self.feed.rearm_drops = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('never landed', record['detail'])
+        report.validate_scenario(record)
+
+    def test_phantom_rearm_reports_failed(self):
+        self.plant.phantom_rearm = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('conditional claim', record['detail'])
+        report.validate_scenario(record)
+
+    def test_open_field_reports_failed(self):
+        self.plant.open_field = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('no standing writer claim', record['detail'])
+        report.validate_scenario(record)
+
+    def test_ledger_growth_reports_failed(self):
+        self.feed.ledger_grows = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('fencing-loss ledger', record['detail'])
+        report.validate_scenario(record)
+
+    def test_journaled_claim_loss_reports_failed(self):
+        self.feed.claim_lost_journaled = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('field_claim_lost', record['detail'])
+        report.validate_scenario(record)
+
+    def test_journaled_role_change_reports_failed(self):
+        self.feed.role_journaled = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('role transition', record['detail'])
+        report.validate_scenario(record)
+
+    def test_peer_role_move_reports_failed(self):
+        self.feed.peer_moves = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-failed'), record['detail'])
+        self.assertIn('tracking peer', record['detail'])
+        report.validate_scenario(record)
+
+    def test_shared_claim_reports_nondeterministic(self):
+        self.plant.shared = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-nondeterministic'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'writes': 'landed'}, {}, {'pass': 1}),
+                       ({'writes': 'stalled'}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_unclaimed_rearm_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'unclaimed-rearm-nondeterministic'), record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_release_refusal_reports_inconclusive(self):
+        self.plant.release_refuses = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('hand-back', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_active_reports_failed(self):
+        self.feed.silent = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unsettled_pair_reports_inconclusive(self):
+        self.feed.peer_wrong_role = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never settled', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_plant_reports_inconclusive(self):
+        self.plant.down = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_missing_plant_endpoint_reports_inconclusive(self):
+        ctx = self._ctx()
+        del ctx['plant']
+        record = self.run_scenario(ctx=ctx)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('claim ops', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            plant = RearmPlantPeer(UnclaimedRearmFeed.OWNER)
+            feed = UnclaimedRearmFeed(plant)
+            evidence = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence.mkdir()
+            self.plant, self.evidence = plant, evidence
+            try:
+                record = self.run_scenario(feed=feed)
+            finally:
+                plant.close()
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class PointAccessorTests(unittest.TestCase):
+    """The snapshot point accessors' single contract: _point_sample
+    serves the point's sample and answers None when the point is
+    absent — the missing-point answer _point_quality shares on the
+    diagnostics path instead of raising."""
+
+    SNAPSHOT = {'tick': 7, 'points': [
+        {'point': 10, 'sample': {'value': {'bool': True},
+                                 'quality': 'good'}},
+        {'point': 20, 'sample': {'value': {'float': 1.5},
+                                 'quality': {'uncertain':
+                                             'substituted'}}}]}
+
+    def test_point_sample_serves_the_present_point(self):
+        self.assertEqual(
+            scenarios._point_sample(self.SNAPSHOT, 10),
+            {'value': {'bool': True}, 'quality': 'good'})
+        self.assertEqual(
+            scenarios._point_sample(self.SNAPSHOT, 20),
+            {'value': {'float': 1.5},
+             'quality': {'uncertain': 'substituted'}})
+
+    def test_point_sample_missing_point_answers_none(self):
+        self.assertIsNone(scenarios._point_sample(self.SNAPSHOT, 99))
+        self.assertIsNone(scenarios._point_sample({}, 10))
+
+    def test_point_quality_serves_the_present_point(self):
+        self.assertEqual(
+            scenarios._point_quality(self.SNAPSHOT, 10), 'good')
+        self.assertEqual(
+            scenarios._point_quality(self.SNAPSHOT, 20),
+            {'uncertain': 'substituted'})
+
+    def test_point_quality_missing_point_answers_none(self):
+        self.assertIsNone(scenarios._point_quality(self.SNAPSHOT, 99))
+        self.assertIsNone(scenarios._point_quality({}, 10))
 
 
 if __name__ == '__main__':

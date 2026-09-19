@@ -58,6 +58,33 @@ ci/force_carryover.py  the pair contract's force-carryover leg — a
                        snapshots, then still standing on the promoted
                        peer after the switch, released through the
                        receipted path, and the pair's roles restored
+ci/force_release.py    the pair contract's force-release leg — a
+                       receipted force substituted at
+                       Uncertain(Substituted) across scans on the
+                       settled pair, the receipted unforce releasing
+                       it at its apply tick with the live value
+                       resumed and the forced set cleared, the
+                       released state carried through the switch and
+                       the launch roles restored, and every
+                       transition journaled on the durable record
+                       with the standby's adopted log answering the
+                       same receipts
+ci/burst_order.py      the pair contract's alarm-burst leg — a
+                       deterministic consequential cascade driven
+                       through the plant protocol on the settled pair,
+                       every driven alarm asserted through the active's
+                       monitor, and the durable journal's ordered
+                       point_changed record audited for the driven
+                       activation order with no dropped or reordered
+                       entries, the restores journaled in order, and
+                       the pair's roles unchanged
+ci/peer_announce.py    the pair contract's peer-announce leg — a
+                       foreign GET /checkpoint?peer=<closed-port> on
+                       the tracking pair's field owner refused while
+                       the checkpoint read answers, the demote/promote
+                       switch reconverging the demoted peer tracking
+                       on its real successor, and the pair's launch
+                       roles restored
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -325,6 +352,99 @@ violated contract fails `force-carryover-failed`; two passes must
 produce the identical `force-digest`, a divergence failing
 `force-carryover-nondeterministic`.
 
+The stage's force-release leg — `ci/force_release.py` on the same
+declared deployment — then proves the release half of the forcing
+contract on the customer's pair, the substituted-data honesty the
+carryover leg's carry leaves unproven. With the pair tracking, the
+leg records the target's unforced sample — the control proving the
+unforced value is what would otherwise have served — and submits
+`force_point` on the same writable internal target through the
+active's `POST /command`, asserting the `applied` settlement at the
+applying scan's tick identical in both peers' adopted log, the
+`forces` entry and the `Uncertain(Substituted)` sample on both peers,
+the substituted stamp standing across further driven scans, and the
+active's served journal carrying the attributed settlement. A
+receipted `unforce_point` must then release the point at its apply
+tick: the `forces` set empty and the live value resumed — for the
+internal target the held-value rule leaves the force's last stamp
+re-stamped `Good`, the observable state a same-value `write_value`
+produces — on both peers, its `applied` settlement landing at that
+scan boundary in the identical adopted log and the held image never
+re-substituting across further scans. A receipted `write_value`
+returning the pre-force held value proves the live write path
+resumed. The leg then issues the `demote`/`promote` switch and
+asserts the promoted peer serves the released state — no resurrected
+force, the live image carried like any run state — before restoring
+the pair's launch roles, leaving the manifest's duty controller
+`active` and its standby `tracking`. The field owner's durable
+journal file must carry the force, release, and restore settlements
+attributed to the leg's actor beside the quality transitions and the
+pair's role records in `seq` order — the served `GET /journal`
+answering the same record — while the standby's adopted receipt log
+answers the same settled receipts throughout. A violated contract
+fails `force-release-failed`; two passes must produce the identical
+`force-release-digest`, a divergence failing
+`force-release-nondeterministic`.
+
+The stage's alarm-burst leg — `ci/burst_order.py` on the same declared
+deployment — then proves the durable ordered transition record keeps
+first-out order through a consequential alarm burst on the customer's
+pair, the incident-review evidence the emitted alarm set exists to
+give. With the pair tracking and the pump group holding a full demand
+— both pumps staged and running — the leg drives the cascade through
+the plant protocol's unfenced surface: a quality fault on
+`level-primary` fails the measurement over so `backup-active` and its
+managed alarm annunciate first; the `power-fail` contact is written so
+the station permissives drop — the availability aggregation losing its
+power-ok leg, both pumps de-staging, `none-available` annunciating —
+and the power alarm fires while the undrawn level climbs again; then
+both run contacts' quality is faulted so each motor's proven
+command/feedback `fault` asserts and the group's `all_faulted`
+roll-up lands last. Through the active's monitor the leg asserts every
+driven alarm's `alarm`/`unacknowledged` standing, then restores each
+input in driven order — the cleared instrument, the healthy contact,
+the good run feedback — so the journal carries the returns beside the
+assertions. The field owner's durable journal file must carry every
+driven activation and return in `seq` order — the first-out record,
+equal-tick transitions ordered by sequence rather than tick — with no
+dropped or reordered entries, the served `GET /journal` answering the
+same record, and the pair's roles unchanged throughout. A violated
+contract fails `burst-order-failed`; two passes must produce the
+identical `burst-order-digest`, a divergence failing
+`burst-order-nondeterministic`. The leg's doctored cases — a record
+dropping a driven transition or carrying them out of order — must
+report the named diagnostic rather than pass silently.
+
+The stage's peer-announce leg — `ci/peer_announce.py` on the same
+declared deployment — then proves the checkpoint `?peer=` announce
+acceptance contract on the customer's pair. A tracking standby's
+per-scan pull announces its own monitor address on the field owner —
+the tracking source a demoted owner later follows — and the serving
+monitor records an announce only when it names the pulling
+connection's own source address: a foreign client cannot rewrite
+where a demoted field owner tracks, the poisoning that would strand
+it `unsynchronized` and unpromotable. With the pair tracking and the
+genuine announce recorded, the leg issues a `GET
+/checkpoint?peer=<closed-port>` naming a dead address on a foreign
+IP — a source the pulling connection does not own. The checkpoint
+read must still answer the owner's checkpoint while the crafted
+announce is refused — it cannot overwrite the recorded tracking
+source. The `demote`/`promote` switch then proves the record: the
+crafted announce is issued again at the decisive point — after the
+promote's own re-announce, before the demoted peer's first tracking
+pull, the last write its fallback would follow — and the demoted
+field owner reconverges `tracking` on its real successor where a
+landed foreign address would have stranded it on a dead pull. The
+leg restores the pair's launch roles, leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `peer-announce-failed`; two passes must
+produce the identical `peer-announce-digest`, a divergence failing
+`peer-announce-nondeterministic`. The leg's doctored case — a
+crafted announce naming the pulling connection's own source,
+landing exactly as it would on a controller whose acceptance check
+regressed — must strand the demoted peer and report the named
+diagnostic rather than pass silently.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -508,6 +628,11 @@ promoted peer's snapshot or the sample no longer the forced value at
 substituted quality — or a release leaving the set non-empty is
 `force-carryover-failed`; two force-carryover passes diverging is
 `force-carryover-nondeterministic`;
+a foreign `?peer=` announce
+landing on the field owner's monitor — the checkpoint read refusing
+to answer, or the demoted peer stranding `unsynchronized` instead of
+tracking its real successor — is `peer-announce-failed`; two
+peer-announce passes diverging is `peer-announce-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is

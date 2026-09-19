@@ -37,16 +37,26 @@ removes the peer again through ctx['stop_driven']; its pair-health
 surface is the page's own `pairHealth` rule applied to the /role
 reports the scenario polls.
 
-The field-fault and backup-health cases additionally open one
-plant-protocol connection to the run's published plant port — the
-newline-JSON request/response surface
-crates/dcs-sim-net/src/protocol.rs documents — to inject and clear
-per-point faults on the shared simulated field. The lag-staging case
-opens the same surface and ensures the field writer claim under the
+The field-fault and backup-health cases inject and clear per-point
+faults on the shared simulated field through the shipped
+`dcs-plant-ctl` binary — the plant-side tool the dcs-plant-server
+image carries, exec'd inside the run's plant container against its
+loopback listener through ctx['plant_ctl'] — so the lane drives the
+tool's own contract rather than a second Python implementation of
+the wire protocol crates/dcs-sim-net/src/protocol.rs documents. The
+lag-staging case instead opens the raw protocol surface on the
+published plant port and ensures the field writer claim under the
 settled active's pinned --owner-token (ctx['plant_owner']) — the
 designed shared-claim path for a test harness — so its inflow writes
 drive the dynamics' declared forcing input while the single-writer
-fencing keeps every other owner out.
+fencing keeps every other owner out; that claim shape and the bare
+`step` fencing probe are the ops the tool does not expose, so those
+legs stay on the raw client. The unclaimed-rearm case uses the same
+split: its field census and watched-output reads ride the shipped
+tool, while the preempt-and-release induction and the bare `step`
+fencing probes stay on the raw client — `claim_writer` is an op the
+tool does not expose, and its conditional ensure could never preempt
+the standing owner into the unclaimed window.
 
 Evidence is written into the run's evidence/ directory as each response
 arrives, so a killed run still leaves inspectable artifacts behind.
@@ -564,34 +574,11 @@ REVISION_FIELD_ROUNDS = 6         # field/telemetry reads after the roll
 REVISION_POLL = 0.5               # cadence watching the roll's peers
 
 
-def _field_request(ctx, request):
-    """One newline-delimited request against the simulated plant's
-    sim-net service — the field-side truth below the monitor layer.
-    `ctx['plant']` carries the plant's loopback host:port."""
-    host, _, port = str(ctx['plant']).rpartition(':')
-    stream = socket.create_connection((host or '127.0.0.1',
-                                       int(port or 0)), timeout=5)
-    try:
-        stream.sendall(json.dumps(request).encode() + b'\n')
-        data = b''
-        while not data.endswith(b'\n'):
-            chunk = stream.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        stream.close()
-    return json.loads(data) if data else None
-
-
 def _field_sample(ctx, point):
     """The plant's stored sample for `point` — `{'value', 'quality',
     'tick'}` — or None when the read dropped; a lost observation, never
-    the leg's verdict."""
-    try:
-        body = _field_request(ctx, {'op': 'read', 'point': point})
-    except Exception:
-        return None
+    the leg's verdict. The shipped tool's `read` serves it."""
+    body = _try_plant_ctl(ctx, 'read', str(point))
     if not isinstance(body, dict):
         return None
     return body.get('sample')
@@ -599,8 +586,9 @@ def _field_sample(ctx, point):
 
 def _field_out_points(ctx):
     """Every field `out` point the simulated plant serves — the points
-    a field-owning scan writes — from the plant's own census."""
-    body = _field_request(ctx, {'op': 'list_points'})
+    a field-owning scan writes — from the plant's own census, listed by
+    the shipped tool."""
+    body = _try_plant_ctl(ctx, 'list')
     points = (body or {}).get('points') or []
     return [entry['point'] for entry in points
             if isinstance(entry, dict)
@@ -1752,10 +1740,10 @@ DOOMED_CORRUPT_RECORD = ('{"qa-lane": "corrupt first record — '
 
 
 def _probe_sample(ctx, point):
-    """The plant's stored sample for `point` through the probing
-    attachment — `{'value', 'quality', 'tick'}` — or None when the read
-    dropped; a lost observation, never the leg's verdict."""
-    body = _try_plant(ctx, {'op': 'read', 'point': point})
+    """The plant's stored sample for `point` through the shipped
+    tool's `read` — `{'value', 'quality', 'tick'}` — or None when the
+    read dropped; a lost observation, never the leg's verdict."""
+    body = _try_plant_ctl(ctx, 'read', str(point))
     if not isinstance(body, dict):
         return None
     return body.get('sample')
@@ -1824,7 +1812,7 @@ def scenario_doomed_startup_claim(ctx):
                                'the incumbent\'s receipted path cannot '
                                'be probed')
         point = target['point']
-        census = _try_plant(ctx, {'op': 'list_points'})
+        census = _try_plant_ctl(ctx, 'list')
         if census is None:
             return case.finish('inconclusive', 'the simulated plant '
                                'did not answer its point census')
@@ -4169,7 +4157,15 @@ def _plant_probe(ctx, request, timeout=5):
     owner's re-arm", not an open window. Each probe takes a new
     connection because the outage it watches is exactly a dead
     listener; the probe never sends `claim_writer` — claiming from
-    here would preempt the field owner it is checking for."""
+    here would preempt the field owner it is checking for. The probe
+    stays on the raw client rather than `dcs-plant-ctl`'s `step`
+    subcommand for the same reason: the tool wraps its mutation in its
+    own conditional claim — `ensure_writer` under the tool token, then
+    `release_writer` — so an unclaimed field would answer `stepped`
+    under a fleeting tool claim instead of the `unclaimed` verdict the
+    leg watches for, and that claim window could fence the field
+    owner's re-arm it polls for. The bare `step` is a request shape
+    the tool does not expose."""
     stream = _plant_connect(ctx, timeout=timeout)
     try:
         stream.settimeout(timeout)
@@ -4251,7 +4247,7 @@ def scenario_plant_link_loss(ctx):
         # The baseline: the field census names the points the link
         # boundary fails at once, and the fencing probe proves the
         # writer claim the outage must lose and recovery must re-take.
-        census = _try_plant(ctx, {'op': 'list_points'})
+        census = _try_plant_ctl(ctx, 'list')
         points = (census or {}).get('points', [])
         field_in = sorted(entry.get('point') for entry in points
                           if entry.get('direction') == 'in')
@@ -4411,7 +4407,7 @@ def scenario_plant_link_loss(ctx):
                 if report.get('role') != expected[name]:
                     return role_violation(name, report, expected,
                                           recovery['roles'])
-            if _try_plant(ctx, {'op': 'list_points'}) is not None:
+            if _try_plant_ctl(ctx, 'list') is not None:
                 recovery['plant'] = True
             probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
             if probe is not None:
@@ -4767,14 +4763,21 @@ FORCE_DEADLINE = 30  # bound on each boundary/settlement wait
 
 
 def _point_sample(snapshot, point):
+    """The served sample of one point in a /snapshot payload, or None
+    when the point is absent — callers test or guard the None rather
+    than assume a dict."""
     for entry in (snapshot or {}).get('points', []):
         if entry.get('point') == point:
-            return entry.get('sample') or {}
-    return {}
+            return entry.get('sample')
+    return None
 
 
 def _point_quality(snapshot, point):
-    return _point_sample(snapshot, point).get('quality')
+    """The served quality of one point, or None when the point is
+    absent — the missing-point answer a diagnostics leg reports
+    instead of raising."""
+    sample = _point_sample(snapshot, point)
+    return sample.get('quality') if sample is not None else None
 
 
 def _forced_entry(snapshot, point):
@@ -6454,14 +6457,6 @@ def _quality_key(quality):
     return 'unknown'
 
 
-def _point_sample(snapshot, point):
-    """The served sample of one point in a /snapshot payload, or None."""
-    for entry in snapshot.get('points', []):
-        if entry.get('point') == point:
-            return entry.get('sample')
-    return None
-
-
 def _plant_connect(ctx, timeout=5):
     """A TCP connection to the run's published plant-protocol endpoint —
     ctx['plant'] carries the published 'host:port'."""
@@ -6488,10 +6483,53 @@ def _plant_request(stream, request):
     return json.loads(line)
 
 
-def _plant_read(stream, point):
-    """The stored field sample for `point` — `{"op":"read"}` answered
-    as a `sample` result."""
-    response = _plant_request(stream, {'op': 'read', 'point': point})
+def _plant_ctl(ctx, *args):
+    """One `dcs-plant-ctl` invocation through the run's `plant_ctl`
+    seam — the shipped plant-side tool, exec'd inside the plant
+    container against its loopback listener, so the lane drives the
+    binary the image carries rather than a second Python
+    implementation of the wire protocol. The answer is the same
+    response object the raw wire produced (`{"result":"done"}`,
+    `{"result":"sample","sample":{...}}`, ...); a refused request or a
+    failed invocation comes back error-shaped, `detail` carrying the
+    tool's stderr."""
+    run = ctx.get('plant_ctl')
+    if run is None:
+        raise ConnectionError('the run context carries no plant_ctl '
+                              'seam for the shipped plant tool')
+    result = run(*args)
+    if result.returncode == 0:
+        try:
+            answer = json.loads(result.stdout)
+        except ValueError:
+            raise ConnectionError('dcs-plant-ctl printed an '
+                                  'unparseable answer: '
+                                  + str(result.stdout)[:300])
+        if not isinstance(answer, dict):
+            raise ConnectionError('dcs-plant-ctl printed a non-object '
+                                  'answer: ' + str(result.stdout)[:300])
+        return answer
+    return {'result': 'error',
+            'error': {'kind': 'tool_failed',
+                      'detail': (result.stderr or '').strip()[:400],
+                      'exit': result.returncode}}
+
+
+def _try_plant_ctl(ctx, *args):
+    """`_plant_ctl` or None — a refused invocation is one lost poll,
+    not the leg's verdict (the `_try_plant` contract applied to the
+    shipped tool's subcommands)."""
+    try:
+        answer = _plant_ctl(ctx, *args)
+    except Exception:
+        return None
+    return answer if answer.get('result') != 'error' else None
+
+
+def _plant_read(ctx, point):
+    """The stored field sample for `point` — the shipped tool's
+    `read`, answered as a `sample` result."""
+    response = _plant_ctl(ctx, 'read', str(point))
     if response.get('result') != 'sample':
         raise ConnectionError('plant read on point ' + str(point)
                               + ' answered '
@@ -6499,13 +6537,13 @@ def _plant_read(stream, point):
     return response.get('sample') or {}
 
 
-def _field_inputs(stream):
+def _field_inputs(ctx):
     """{point: PointInfo entry} for every 'in'-direction point the
-    plant serves — the list_points census, which is the field side's
-    own account of what the scenario may fault."""
-    response = _plant_request(stream, {'op': 'list_points'})
+    plant serves — the shipped tool's `list`, the field side's own
+    account of what the scenario may fault."""
+    response = _plant_ctl(ctx, 'list')
     if response.get('result') != 'points':
-        raise ConnectionError('plant list_points answered '
+        raise ConnectionError('plant list answered '
                               + json.dumps(response)[:300])
     return {entry.get('point'): entry
             for entry in response.get('points') or []
@@ -6526,7 +6564,6 @@ def scenario_field_fault(ctx):
                 'surfaces on io_health (failed_reads, last_error with '
                 'tick and direction) while the scan continues and no '
                 'role change follows')
-    stream = None
     injected = []
     try:
         # Self-contained on either role layout, like evidence-capture:
@@ -6539,8 +6576,7 @@ def scenario_field_fault(ctx):
         if ctx.get('plant') is None:
             return case.finish('inconclusive',
                                'the run publishes no plant endpoint')
-        stream = _plant_connect(ctx)
-        case.observe('plant protocol at ' + str(ctx['plant'])
+        case.observe('plant tool at ' + str(ctx['plant'])
                      + '; observing ' + active + ' (' + base + ')')
 
         # Fault targets must be points the field itself holds still:
@@ -6548,10 +6584,13 @@ def scenario_field_fault(ctx):
         # field value rather than a moved one. Two list_points probes
         # straddling a few plant steps find them, and each must already
         # read Good on the monitor — a forced or degraded point cannot
-        # evidence a fault it would mask.
-        first = _field_inputs(stream)
+        # evidence a fault it would mask. The field ops ride the
+        # shipped dcs-plant-ctl: read, list, and the fault commands need
+        # no writer claim, so they run beside the field owner's
+        # standing claim exactly as the raw requests did.
+        first = _field_inputs(ctx)
         time.sleep(FAULT_PROBE)
-        second = _field_inputs(stream)
+        second = _field_inputs(ctx)
         snap = _snapshot(ctx, base)
         served_good = {
             entry.get('point') for entry in snap.get('points', [])
@@ -6592,10 +6631,9 @@ def scenario_field_fault(ctx):
         # Leg 1: a quality fault substitutes the served quality, leaving
         # the stored field value — the bad-data-confidence clause's
         # "degraded, never silently healthy" half.
-        field_value = _plant_read(stream, quality_point).get('value')
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': quality_point,
-                     'fault': {'quality': {'bad': 'device_fault'}}})
+        field_value = _plant_read(ctx, quality_point).get('value')
+        verdict = _plant_ctl(ctx, 'fault', str(quality_point),
+                             'bad:device_fault')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6639,8 +6677,7 @@ def scenario_field_fault(ctx):
                                'active role — a field fault is not '
                                'peer loss')
 
-        verdict = _plant_request(stream, {'op': 'clear_fault',
-                                          'point': quality_point})
+        verdict = _plant_ctl(ctx, 'clear-fault', str(quality_point))
         if verdict.get('result') != 'done':
             return case.finish('failed', 'clear_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6656,7 +6693,7 @@ def scenario_field_fault(ctx):
                     != 'good':
                 return None
             try:
-                field = _plant_read(stream, quality_point)
+                field = _plant_read(ctx, quality_point)
             except Exception:
                 return None
             if sample.get('value') == field.get('value'):
@@ -6708,9 +6745,8 @@ def scenario_field_fault(ctx):
                 'injection')
         health0 = before.get('io_health') or {}
         tick0 = before.get('tick') or 0
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': error_point,
-                     'fault': 'disconnected'})
+        verdict = _plant_ctl(ctx, 'fault', str(error_point),
+                             'disconnected')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault refused: '
                                + json.dumps(verdict)[:300])
@@ -6804,17 +6840,11 @@ def scenario_field_fault(ctx):
     except Exception as exc:
         return case.finish('inconclusive', str(exc))
     finally:
-        if stream is not None:
-            # The injected points are the run's shared field: a case
-            # that leaves them faulted poisons every later scenario.
-            for point in injected:
-                try:
-                    _plant_request(stream, {'op': 'clear_fault',
-                                            'point': point})
-                except Exception:
-                    pass
+        # The injected points are the run's shared field: a case that
+        # leaves them faulted poisons every later scenario.
+        for point in injected:
             try:
-                stream.close()
+                _plant_ctl(ctx, 'clear-fault', str(point))
             except Exception:
                 pass
 
@@ -6891,7 +6921,6 @@ def scenario_backup_health(ctx):
                 'applied and journals attributed to the lane actor, '
                 'and clearing the fault lands the journaled return '
                 'transitions')
-    stream = None
     injected = None      # the backup field point, while faulted
     restore_ack = None   # (base, point) while the ack write stands
     try:
@@ -6956,14 +6985,17 @@ def scenario_backup_health(ctx):
         if ctx.get('plant') is None:
             return case.finish('inconclusive',
                                'the run publishes no plant endpoint')
-        stream = _plant_connect(ctx)
-        field = _field_inputs(stream)
+        # The field census and the fault commands ride the shipped
+        # dcs-plant-ctl: neither takes the writer claim, so they run
+        # beside the field owner's standing claim exactly as the raw
+        # requests did.
+        field = _field_inputs(ctx)
         if points['backup'] not in field:
             return case.finish('inconclusive', 'the level-backup '
                                'signal\'s point ' + str(points['backup'])
                                + ' is not a field in-point the plant '
                                'serves')
-        case.observe('plant protocol connected; backup field point '
+        case.observe('plant tool answering; backup field point '
                      + str(points['backup']))
 
         last = {}
@@ -7004,9 +7036,8 @@ def scenario_backup_health(ctx):
                      for entry in _journal_list(journal0)
                      if isinstance(entry, dict)), default=0)
 
-        verdict = _plant_request(
-            stream, {'op': 'inject_fault', 'point': points['backup'],
-                     'fault': {'quality': {'bad': 'device_fault'}}})
+        verdict = _plant_ctl(ctx, 'fault', str(points['backup']),
+                             'bad:device_fault')
         if verdict.get('result') != 'done':
             return case.finish('failed', 'inject_fault on the backup '
                                'point refused: '
@@ -7251,8 +7282,8 @@ def scenario_backup_health(ctx):
         # sample to Good and lands the return transitions — the
         # health output and the standing alarm dropping on their
         # declared-journaled points — with the selection unmoved.
-        verdict = _plant_request(stream, {'op': 'clear_fault',
-                                          'point': points['backup']})
+        verdict = _plant_ctl(ctx, 'clear-fault',
+                             str(points['backup']))
         if verdict.get('result') != 'done':
             return case.finish('failed', 'clear_fault on the backup '
                                'point refused: '
@@ -7374,15 +7405,9 @@ def scenario_backup_health(ctx):
         # The injected point is the run's shared field and the ack
         # point the alarm's operator input: a case that leaves either
         # standing poisons every later scenario.
-        if stream is not None:
-            if injected is not None:
-                try:
-                    _plant_request(stream, {'op': 'clear_fault',
-                                            'point': injected})
-                except Exception:
-                    pass
+        if injected is not None:
             try:
-                stream.close()
+                _plant_ctl(ctx, 'clear-fault', str(injected))
             except Exception:
                 pass
         if restore_ack is not None:
@@ -7634,8 +7659,15 @@ def scenario_lag_staging(ctx):
             return case.finish('inconclusive', 'the run pins no '
                                'plant-writer owner token for the '
                                'settled active ' + str(active))
+        # The claim seam splits here: the field census and the inflow
+        # reads ride the shipped dcs-plant-ctl (list/read need no
+        # writer claim), while the standing shared claim and the
+        # writes under it stay on the raw client — the tool exposes no
+        # ensure_writer under a chosen owner token, and its `write`
+        # would claim under the tool token and fence against the
+        # active's standing claim rather than join it.
         stream = _plant_connect(ctx)
-        field = _field_inputs(stream)
+        field = _field_inputs(ctx)
         if points['inflow'] not in field:
             return case.finish('inconclusive', 'the inflow signal\'s '
                                'point ' + str(points['inflow'])
@@ -7651,7 +7683,7 @@ def scenario_lag_staging(ctx):
         case.observe('plant protocol attached under ' + active
                      + '\'s writer claim ('
                      + str(verdict.get('result')) + ')')
-        baseline_inflow = (_plant_read(stream, points['inflow'])
+        baseline_inflow = (_plant_read(ctx, points['inflow'])
                            .get('value') or {}).get('float')
         if not isinstance(baseline_inflow, (int, float)) \
                 or isinstance(baseline_inflow, bool) \
@@ -7925,7 +7957,7 @@ def scenario_lag_staging(ctx):
             return error
         restore_ack = None
 
-        restored = (_plant_read(stream, points['inflow'])
+        restored = (_plant_read(ctx, points['inflow'])
                     .get('value') or {}).get('float')
         if restored != baseline_inflow:
             return case.finish('failed', 'staging-failed: the inflow '
@@ -10064,6 +10096,933 @@ def scenario_dead_peer_latency(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The serving-lane resilience contract (WW-FND-004, WW-LCM-001 — the
+# settled #624 lane split proven end to end on the armed deployed
+# pair): the monitor quarantines the body-reading handlers — POST
+# /command, POST /scan, and any request still owed a body — onto a
+# bounded submission pool behind MAX_REQUEST_BODY, so a stalled-body
+# flood pins only that lane while the SERVE_WORKERS serving lane keeps
+# answering — GET /checkpoint among it, the heartbeat the armed
+# tracking standby measures the active's liveness by. Before the fix
+# the same flood pinned every worker, timed out /role for the whole
+# hold, and on an armed rig read as a dead active: the standby's
+# heartbeat pulls missed, it self-promoted inside the armed budget,
+# claimed the field, and fenced a live active — transport-level
+# starvation indistinguishable from active death. The leg opens the
+# saturating set of incomplete-body connections against the settled
+# active's monitor; through the hold the liveness reads keep answering
+# inside the declared per-request bound while the standby's checkpoint
+# pulls keep landing — its reported tracking alignment advancing, no
+# role transition on either peer, no role_changed or field_claim_lost
+# journaled, and the plant's writer claim still fencing third-party
+# probes; closing the set frees the submission lane — a receipted
+# command settles applied and the pace-driven scans keep landing —
+# with the pair's roles unchanged throughout. Two consecutive passes
+# must produce identical digests. The diagnostics name the miss by
+# class: monitor-starvation-failed is the serving contract not
+# performing — a liveness read never answering, the standby's pulls
+# stalling, a fencing probe unanswered, the recovery never landing;
+# monitor-starvation-nondeterministic is the run producing a result
+# the contract declares impossible — a role transition or
+# field_claim_lost, a probe writing through the standing claim, a
+# regressed alignment, an answer past the declared bound, or two
+# passes disagreeing.
+
+STARVE_CONNECTIONS = 8   # the saturating set — past both lanes' worker
+                         # pools summed, the shape the reproduction
+                         # pinned every worker with
+STARVE_PULL_ADVANCE = 15  # checkpoint-pull advances the hold must
+                          # witness on the armed standby — ~1.5s of
+                          # landed heartbeats at the rig's scan cadence
+STARVE_SETTLE = 30       # bound on the pair reporting its settled
+                         # armed tracking layout before the leg runs
+STARVE_DEADLINE = 20     # bound on one pass's hold — past the armed
+                         # 120-miss budget at the rig's scan cadence,
+                         # so a starved heartbeat produces the spurious
+                         # promotion inside the window; a heartbeat
+                         # that never lands the witnessed pulls starved
+STARVE_POLL = 0.4        # sampling cadence inside the hold
+STARVE_RECOVER = 20      # bound on the post-close settlement and the
+                         # resumed scan cadence
+STARVE_ENDPOINTS = ('/role', '/snapshot', '/checkpoint')
+
+# The reproduction's pinning shape: headers a body-reading handler must
+# block on, the declared body never following — an Expect request's
+# held reader and a chunked scan's unterminated first chunk. Each holds
+# its submission-lane worker until the connection closes.
+STARVE_REQUESTS = (
+    b'POST /command HTTP/1.1\r\nHost: q\r\nContent-Length: 16\r\n'
+    b'Expect: 100-continue\r\n\r\n',
+    b'POST /scan HTTP/1.1\r\nHost: q\r\nTransfer-Encoding: chunked\r\n'
+    b'\r\n10\r\n')
+
+
+def _starvation_flood(base):
+    """The saturating set of incomplete-body connections against a
+    monitor base — each carrying a pinning request whose declared body
+    never follows. Returns the open sockets; raises OSError when the
+    set never opens."""
+    streams = []
+    try:
+        for index in range(STARVE_CONNECTIONS):
+            stream = _connect(base)
+            stream.sendall(
+                STARVE_REQUESTS[index % len(STARVE_REQUESTS)])
+            streams.append(stream)
+    except OSError:
+        for stream in streams:
+            stream.close()
+        raise
+    return streams
+
+
+def _starvation_pass(ctx, active, peer, point, value, floors):
+    """One starvation pass: flood the active's submission lane, hold
+    the window while the serving reads, the armed standby's checkpoint
+    pulls, and the field's fencing probes are sampled — the hold ends
+    once the witnessed pulls prove the heartbeat kept landing — then
+    close and prove the submission lane recovered. Returns (digest,
+    violations, evidence): digest is the pass's normalized verdict
+    record, identical across clean passes; violations is
+    {key: (diagnostic, detail)} in first-seen order."""
+    base, peer_base = ctx[active], ctx[peer]
+    violations = {}
+    evidence = {}
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    stats = {path: {'answered': 0, 'within': 0}
+             for path in STARVE_ENDPOINTS}
+    tracking = {'first': None, 'aligned': None, 'lost': False}
+    fencing = {'answered': 0, 'unfenced': 0}
+    snaps = []
+    journal_clean = True
+    try:
+        streams = _starvation_flood(base)
+    except OSError as exc:
+        note('flood', 'monitor-starvation-failed',
+             'the saturating set never opened: ' + str(exc)[:200])
+        return None, violations, evidence
+    try:
+        # The hold: sample until the standby's witnessed pulls prove
+        # the heartbeat kept landing — or the deadline names the
+        # starvation.
+        deadline = time.monotonic() + STARVE_DEADLINE
+        while time.monotonic() < deadline:
+            for path in STARVE_ENDPOINTS:
+                try:
+                    body, elapsed = _timed(
+                        lambda: http_json('GET', base + path,
+                                          timeout=LATENCY_BOUND)[1])
+                except Exception as exc:
+                    note('read-' + path, 'monitor-starvation-failed',
+                         'GET ' + path + ' never answered inside the '
+                         + str(LATENCY_BOUND) + 's bound under the '
+                         'hold: ' + str(exc)[:150])
+                    continue
+                stats[path]['answered'] += 1
+                if elapsed <= LATENCY_BOUND:
+                    stats[path]['within'] += 1
+                else:
+                    note('late-' + path,
+                         'monitor-starvation-nondeterministic',
+                         'GET ' + path + ' answered in '
+                         + format(elapsed, '.2f') + 's past the '
+                         + str(LATENCY_BOUND) + 's bound under the '
+                         'hold')
+                if path == '/snapshot':
+                    snaps.append(body.get('tick')
+                                 if isinstance(body, dict) else None)
+            report = _try_role(ctx, peer_base)
+            if report is None:
+                note('peer-role', 'monitor-starvation-failed',
+                     'the armed standby\'s own monitor never answered '
+                     '/role through the hold')
+            elif report.get('role') != 'standby':
+                tracking['lost'] = True
+                note('peer-moved',
+                     'monitor-starvation-nondeterministic',
+                     'the armed standby moved to role '
+                     + str(report.get('role')) + ' under the hold — '
+                     'the failover transition the lane split exists '
+                     'to prevent')
+            else:
+                aligned = _tracking_aligned(report)
+                if aligned is None:
+                    note('sync-lost', 'monitor-starvation-failed',
+                         'the standby\'s sync left tracking under the '
+                         'hold — its checkpoint pulls stopped landing')
+                elif tracking['first'] is None:
+                    tracking['first'] = aligned
+                    tracking['aligned'] = aligned
+                elif tracking['aligned'] is not None \
+                        and aligned < tracking['aligned']:
+                    note('regressed',
+                         'monitor-starvation-nondeterministic',
+                         'the standby\'s reported alignment regressed '
+                         'mid-hold: ' + str(aligned) + ' below '
+                         + str(tracking['aligned']))
+                else:
+                    tracking['aligned'] = aligned
+            probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+            if probe is not None:
+                fencing['answered'] += 1
+                if not _fenced(probe):
+                    fencing['unfenced'] += 1
+                    note('unfenced',
+                         'monitor-starvation-nondeterministic',
+                         'a third-party probe wrote through the '
+                         'standing writer claim under the hold')
+            if tracking['aligned'] is not None \
+                    and tracking['first'] is not None \
+                    and tracking['aligned'] - tracking['first'] \
+                    >= STARVE_PULL_ADVANCE:
+                break
+            time.sleep(STARVE_POLL)
+        # The journal audit — read through the still-open flood; it is
+        # itself a serving-lane read.
+        for name, floor in floors.items():
+            try:
+                _, journal = http_json(
+                    'GET', ctx[name] + '/journal?since=' + str(floor),
+                    timeout=LATENCY_BOUND)
+            except Exception as exc:
+                journal_clean = False
+                note('journal-' + name, 'monitor-starvation-failed',
+                     name + '\'s journal never served through the '
+                     'hold: ' + str(exc)[:150])
+                continue
+            for entry in _journal_list(journal):
+                event = entry.get('event') or {}
+                if 'role_changed' in event:
+                    journal_clean = False
+                    note('journaled-role-' + name,
+                         'monitor-starvation-nondeterministic',
+                         name + ' journaled a role_changed event '
+                         'through the hold')
+                if 'field_claim_lost' in event:
+                    journal_clean = False
+                    note('journaled-claim-' + name,
+                         'monitor-starvation-nondeterministic',
+                         name + ' journaled a field_claim_lost event '
+                         'through the hold')
+    finally:
+        for stream in streams:
+            stream.close()
+
+    # The hold's verdicts.
+    for path, entry in stats.items():
+        if entry['answered'] == 0:
+            note('served-' + path, 'monitor-starvation-failed',
+                 'GET ' + path + ' never answered under the hold')
+    moved = 'peer-moved' in violations or 'sync-lost' in violations
+    if not moved:
+        if tracking['first'] is None:
+            note('pulls-never', 'monitor-starvation-failed',
+                 'the standby\'s checkpoint pulls never landed '
+                 'through the hold — the heartbeat the armed budget '
+                 'counts')
+        elif tracking['aligned'] - tracking['first'] \
+                < STARVE_PULL_ADVANCE:
+            note('pulls-stalled', 'monitor-starvation-failed',
+                 'the standby\'s checkpoint pulls stalled through '
+                 'the hold — ' + str(tracking['aligned']
+                                     - tracking['first'])
+                 + ' witnessed advances, the heartbeat the armed '
+                 + str(ctx.get('failover_misses'))
+                 + '-miss budget counts')
+    ticks = [tick for tick in snaps if isinstance(tick, int)]
+    if snaps and not ticks:
+        note('scans-tickless', 'monitor-starvation-failed',
+             'the served snapshots carried no run tick under the '
+             'hold')
+    elif len(ticks) > 1 and ticks[-1] <= ticks[0]:
+        note('scans-stalled', 'monitor-starvation-failed',
+             'the active\'s pace-driven scans stalled under the '
+             'hold — /snapshot\'s tick never advanced')
+    if fencing['answered'] == 0:
+        note('fencing', 'monitor-starvation-failed',
+             'the field never answered a fencing probe through the '
+             'hold')
+
+    # Recovery: the flood closed, the submission lane frees — the
+    # receipted path, the driven-scan endpoint's documented refusal,
+    # and the paced cadence all return.
+    recovery = {}
+    floor = floors.get(active, 0)
+    try:
+        _, before = http_json('GET', base + '/receipts')
+        index = len(_receipt_list(before))
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': {'point': point, 'kind': 'bool',
+                                         'value': {'bool': value}}},
+             'actor': 'qa-lane'})
+        recovery['command'] = {'status': status,
+                               'outcome': _outcome_key(receipt)}
+        if status != 200 \
+                or recovery['command']['outcome'] != 'accepted':
+            note('recovery-command', 'monitor-starvation-failed',
+                 'the recovery command answered '
+                 + recovery['command']['outcome'] + ' — the '
+                 'submission lane never freed')
+        else:
+            settled = wait_for(
+                lambda: _settled_outcome(ctx, base, index),
+                time.monotonic() + STARVE_RECOVER)
+            recovery['settled'] = settled
+            if settled != 'applied':
+                note('recovery-settled', 'monitor-starvation-failed',
+                     'the recovery command never settled applied: '
+                     + str(settled))
+
+            def covered():
+                try:
+                    _, journal = http_json(
+                        'GET', base + '/journal?since=' + str(floor))
+                except Exception:
+                    return None
+                return _journal_covers(journal, point) or None
+            if wait_for(covered,
+                        time.monotonic() + STARVE_RECOVER) is None:
+                note('recovery-journal', 'monitor-starvation-failed',
+                     'the settled recovery command never journaled')
+    except Exception as exc:
+        note('recovery-command', 'monitor-starvation-failed',
+             'the submission lane never answered a command after the '
+             'hold: ' + str(exc)[:150])
+    try:
+        scan_status, _ = _request_status('POST', base + '/scan',
+                                         {'scans': 1})
+    except Exception:
+        scan_status = None
+    recovery['scan_status'] = scan_status
+    if scan_status != 409:
+        note('recovery-scan', 'monitor-starvation-failed',
+             'the paced monitor\'s documented POST /scan refusal '
+             'never answered after the hold — the submission lane '
+             'never freed: ' + str(scan_status))
+    last_tick = ticks[-1] if ticks else None
+
+    def resumed():
+        snap = _try_snapshot(ctx, base)
+        if not isinstance(snap, dict) or last_tick is None:
+            return None
+        return snap.get('tick') if isinstance(snap.get('tick'), int) \
+            and snap['tick'] > last_tick else None
+    if last_tick is not None \
+            and wait_for(resumed,
+                         time.monotonic() + STARVE_RECOVER) is None:
+        note('recovery-scans', 'monitor-starvation-failed',
+             'the pace-driven scans never resumed after the hold')
+    last_aligned = tracking['aligned']
+
+    def converged():
+        report = _try_role(ctx, peer_base)
+        if (report or {}).get('role') != 'standby':
+            return None
+        aligned = _tracking_aligned(report)
+        if aligned is None or last_aligned is not None \
+                and aligned <= last_aligned:
+            return None
+        return aligned
+    if not tracking['lost'] \
+            and wait_for(converged,
+                         time.monotonic() + STARVE_RECOVER) is None:
+        note('recovery-tracking', 'monitor-starvation-failed',
+             'the standby\'s checkpoint pulls never resumed landing '
+             'after the hold')
+    roles = {}
+    for name in (active, peer):
+        report = _try_role(ctx, ctx[name])
+        roles[name] = (report or {}).get('role')
+    if roles[active] is None:
+        note('roles-active', 'monitor-starvation-failed',
+             'the field owner\'s /role never answered after the '
+             'hold')
+    elif roles[active] != 'active':
+        note('roles-active', 'monitor-starvation-nondeterministic',
+             'the field owner left active role: '
+             + str(roles[active]))
+    if roles[peer] is None:
+        note('roles-peer', 'monitor-starvation-failed',
+             'the armed standby\'s /role never answered after the '
+             'hold')
+    elif roles[peer] != 'standby' and 'peer-moved' not in violations:
+        note('roles-peer', 'monitor-starvation-nondeterministic',
+             'the armed standby left standby role: '
+             + str(roles[peer]))
+    recovery['roles'] = roles
+    evidence.update({
+        'connections': STARVE_CONNECTIONS,
+        'armed_miss_budget': ctx.get('failover_misses'),
+        'stats': stats, 'snaps': snaps, 'tracking': tracking,
+        'fencing': fencing, 'recovery': recovery,
+        'violations': {key: name for key, (name, _)
+                       in violations.items()}})
+    evidence['digest'] = {
+        'reads': {path: ('starved' if not e['answered']
+                         else 'bounded'
+                         if e['within'] == e['answered'] else 'late')
+                  for path, e in stats.items()},
+        'scans': ('advanced'
+                  if ticks and ticks[-1] > ticks[0] else 'stalled'),
+        'tracking': ('lost' if tracking['lost']
+                     else 'regressed' if 'regressed' in violations
+                     else 'advanced'
+                     if tracking['first'] is not None
+                     and tracking['aligned'] - tracking['first']
+                     >= STARVE_PULL_ADVANCE
+                     else 'stalled'),
+        'fencing': ('unanswered' if not fencing['answered']
+                    else 'breached' if fencing['unfenced']
+                    else 'fenced'),
+        'journal': 'clean' if journal_clean else 'transitioned',
+        'recovery': ('settled'
+                     if recovery.get('settled') == 'applied'
+                     and 'recovery-scan' not in violations
+                     else 'unsettled'),
+        'roles': ('moved'
+                  if {roles[active], roles[peer]}
+                  - {'active', 'standby', None}
+                  else 'unanswered' if None in (roles[active],
+                                                roles[peer])
+                  else 'unchanged')}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_monitor_starvation(ctx):
+    """Saturate the settled active's monitor with incomplete request
+    bodies — the #624 reproduction's pinning shape — and prove the
+    serving lane keeps answering through the hold on the armed rig:
+    the liveness reads inside the declared bound, the tracking
+    standby's checkpoint pulls landing, neither peer transitioning,
+    the field's writer claim fencing probes; then closing the set
+    restores the submission lane's command and scan serving."""
+    case = Case('monitor-starvation',
+                'Serving lane survives incomplete-body saturation',
+                'with the armed tracking standby settled, the '
+                'saturating set of incomplete-body connections '
+                'against the active\'s monitor leaves GET /role, '
+                '/snapshot, and /checkpoint answering inside the '
+                'declared ' + str(LATENCY_BOUND) + 's bound while '
+                'the standby\'s checkpoint pulls keep landing — no '
+                'role transition or field_claim_lost on either peer '
+                'and the plant\'s writer claim fencing third-party '
+                'probes — and closing the set restores full command '
+                'and scan serving: a receipted command settling '
+                'applied and the pace-driven scans resuming, the '
+                'pair\'s roles unchanged; two consecutive passes '
+                'produce identical digests')
+    try:
+        if ctx.get('plant') is None:
+            return case.finish('inconclusive',
+                               'no simulated plant endpoint — the '
+                               'fencing probes cannot run')
+        deadline = time.monotonic() + STARVE_SETTLE
+        active = wait_for(lambda: _settled_active(ctx), deadline)
+        if active is None:
+            return case.finish('failed',
+                               'no peer reports role=active')
+        if active != 'active':
+            return case.finish(
+                'inconclusive', 'the pair\'s roles are already '
+                'switched — the armed standby no longer tracks the '
+                'peer this leg starves')
+        peer = wait_for(lambda: _tracking_peer(ctx, active), deadline)
+        if peer != 'standby':
+            return case.finish(
+                'inconclusive', 'no armed tracking standby — the '
+                '--auto-promote heartbeat half of the contract '
+                'cannot run')
+        base = ctx[active]
+        _, signals = http_json('GET', base + '/signals')
+        target = _writable_bool_point(signals)
+        if target is None or target.get('point') is None:
+            return case.finish('failed', 'no writable boolean point '
+                               'for the recovery command')
+        point = target['point']
+        snap = _try_snapshot(ctx, base) or {}
+        baseline = _point_value(snap, point)
+        value = baseline if isinstance(baseline, bool) else True
+        floors = {}
+        for name in (active, peer):
+            try:
+                _, journal = http_json('GET', ctx[name] + '/journal')
+            except Exception as exc:
+                return case.finish('inconclusive',
+                                   name + '\'s journal floor never '
+                                   'served: ' + str(exc)[:200])
+            entries = _journal_list(journal)
+            floors[name] = (entries[-1].get('seq') or 0) \
+                if entries else 0
+        digests = []
+        for number in (1, 2):
+            digest, violations, evidence = _starvation_pass(
+                ctx, active, peer, point, value, floors)
+            ref = save_evidence(
+                ctx['evidence_dir'],
+                'monitor-starvation-pass-' + str(number) + '.json',
+                evidence)
+            case.evidence('file', ref, 'starvation pass '
+                          + str(number) + ' — the held window\'s '
+                          'sampled verdicts, the fencing probes, and '
+                          'the recovery')
+            if violations:
+                failed = any(name == 'monitor-starvation-failed'
+                             for name, _ in violations.values())
+                diagnostic = 'monitor-starvation-failed' if failed \
+                    else 'monitor-starvation-nondeterministic'
+                return case.finish(
+                    'failed', diagnostic + ': ' + '; '.join(
+                        detail for _, detail in
+                        list(violations.values())[:4]))
+            digests.append(digest)
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'monitor-starvation-nondeterministic: the '
+                'two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two starvation passes, identical digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The unclaimed-field inline re-arm contract (WW-LCM-001's continuity
+# clause, WW-OPS-003's field-confidence clause, the settled #621
+# behavior the qax-20260918-008 run verified on this rig): a field
+# write refused `unclaimed` while no claim stands is a recoverable
+# ownerless window, not supersession — the recorded owner re-arms
+# inline through one conditional, non-preempting `ensure_writer` and
+# the write lands without field_claim_lost or demotion, while a write
+# refused under another standing claim still fences and demotes. The
+# leg opens that window deliberately: a dedicated attachment's
+# `claim_writer` preempts the standing claim and its `release_writer`
+# hands it back in the same breath, so the field sits unclaimed
+# behind the owner's live connection — then the watch proves the
+# owner's next scan re-armed in place (its writes keep landing, its
+# role and journals unmoved, the fencing-loss ledger empty) and that
+# the re-armed claim is real: a foreign attachment's conditional
+# ensure and write probes stay fenced. The claim ops stay on the raw
+# client — `claim_writer` is an op `dcs-plant-ctl` does not expose,
+# and the tool's conditional claim could never preempt the owner into
+# the window — while the census and field reads ride the shipped
+# tool. The named diagnostics are unclaimed-rearm-failed and
+# unclaimed-rearm-nondeterministic; two consecutive passes must
+# produce identical digests.
+
+UNCLAIMED_REARM_SETTLE = 30    # bound on the pair reporting settled
+UNCLAIMED_REARM_POLL = 0.4     # cadence watching the owner mid-window
+UNCLAIMED_REARM_ROUNDS = 6     # polls through the post-window watch
+UNCLAIMED_REARM_DEADLINE = 15  # bound on the anchor and landing waits
+# The dedicated attachment's foreign owner token — never a
+# controller's pinned token nor the tool's "dcs-pltc": the preempting
+# claim that opens the ownerless window behind the standing owner's
+# live connection.
+UNCLAIMED_REARM_FOREIGN = 0x7161_2d72_6561_726d  # "qa-rearm"
+
+
+def _write_fenced(response):
+    """Whether a write probe's answer is the point-level fencing
+    verdict — `{"kind":"io","error":{"fenced":N}}` — the refusal the
+    standing claim gives a non-holder's write (the `step` probe's
+    named `fenced` kind has no point-level counterpart)."""
+    error = (response or {}).get('error') or {}
+    inner = error.get('error')
+    return error.get('kind') == 'io' and isinstance(inner, dict) \
+        and 'fenced' in inner
+
+
+def _unclaimed_rearm_pass(ctx, active, peer, watch, probe_point):
+    """One induction pass: the dedicated attachment's preempt-and-
+    release opens the ownerless window behind the field owner's live
+    connection, then the watch proves the recorded owner re-armed
+    inline — its write landing, its role and journals unmoved — and
+    the foreign probes prove the re-armed claim is real. Returns
+    (digest, violations, evidence): digest is the pass's normalized
+    verdict record, identical across clean passes; violations is
+    {key: (diagnostic, detail)} in first-seen order."""
+    base, peer_base = ctx[active], ctx[peer]
+    violations = {}
+    evidence = {'watch_point': watch, 'probe_point': probe_point}
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'unclaimed-rearm-failed', detail)
+
+    # The audit positions the window must leave untouched: each peer's
+    # journal floor, the fencing-loss ledger the owner's io_health
+    # keeps, the watched field output's stamp, and the standing
+    # claim's fencing answer.
+    floors = {}
+    for name in (active, peer):
+        _, journal = http_json('GET', ctx[name] + '/journal')
+        entries = _journal_list(journal)
+        floors[name] = (entries[-1].get('seq') or 0) if entries else 0
+    snap0 = _try_snapshot(ctx, base) or {}
+    ledger0 = (snap0.get('io_health') or {}).get('failed_writes') or 0
+    sample0 = _probe_sample(ctx, watch)
+    probe0 = _try_plant(ctx, {'op': 'step', 'dt': 0})
+    evidence['baseline'] = {'floors': floors, 'field': sample0,
+                            'failed_writes': ledger0, 'probe': probe0,
+                            'tick': snap0.get('tick')}
+    if probe0 is None:
+        raise ConnectionError('the simulated plant never answered '
+                              'the baseline fencing probe')
+    if not _fenced(probe0):
+        failed('baseline-claim', 'the field held no standing writer '
+               'claim at pass start — a third attachment\'s mutation '
+               'probe answered ' + json.dumps(probe0)[:300])
+
+    # The induction: claim_writer preempts unconditionally, the
+    # same-breath release_writer empties the holder set — the field
+    # sits unclaimed while the recorded owner's connection stays
+    # live, the #621 reproduction's window.
+    stream = _plant_connect(ctx)
+    released = False
+    try:
+        claim = _plant_request(stream, {'op': 'claim_writer',
+                                        'owner': UNCLAIMED_REARM_FOREIGN})
+        evidence['claim'] = claim
+        verdict = claim.get('result')
+        if verdict == 'claimed_shared':
+            note('claim-shared', 'unclaimed-rearm-nondeterministic',
+                 'the preempting claim joined a live foreign holder '
+                 '— a leaked attachment shares the induction token: '
+                 + json.dumps(claim)[:200])
+        elif verdict != 'done':
+            raise ConnectionError('the preempting claim was refused: '
+                                  + json.dumps(claim)[:300])
+        release = _plant_request(stream, {'op': 'release_writer'})
+        evidence['release'] = release
+        released = release.get('result') == 'done'
+        if not released:
+            raise ConnectionError('the claim hand-back was refused: '
+                                  + json.dumps(release)[:300])
+
+        # The window observed from the released attachment itself:
+        # `unclaimed` while the ownerless window still stands,
+        # `fenced` once the owner's re-arm already landed — both the
+        # fail-closed field; only a mutation answer is the defect.
+        window = _plant_request(stream, {'op': 'step', 'dt': 0})
+        evidence['window_probe'] = window
+        kind = _probe_error(window)
+        if kind not in ('unclaimed', 'fenced'):
+            failed('window-open', 'the field accepted a third-party '
+                   'mutation with no claim standing: '
+                   + json.dumps(window)[:300])
+
+        # The landing anchor: the watched output's stamp at release
+        # time — the first post-window write must stamp past it, and
+        # only the recorded owner's re-arm can land one.
+        anchor = wait_for(lambda: _probe_sample(ctx, watch),
+                          time.monotonic() + UNCLAIMED_REARM_DEADLINE,
+                          interval=UNCLAIMED_REARM_POLL)
+        if not isinstance(anchor, dict) \
+                or not isinstance(anchor.get('tick'), int):
+            raise ConnectionError('the field read anchoring the '
+                                  'landing check never answered a '
+                                  'stamped sample')
+        anchor = anchor['tick']
+
+        # The watch: the owner re-arms and its write lands, the pair's
+        # roles hold, the ledger stays empty, and third-party probes
+        # meet the fail-closed field throughout.
+        rounds = []
+        landed = role_moved = ledger_grew = False
+        answered = 0
+        last_field = anchor
+        for index in range(UNCLAIMED_REARM_ROUNDS):
+            report = _try_role(ctx, base)
+            partner = _try_role(ctx, peer_base)
+            snap = _try_snapshot(ctx, base)
+            sample = _probe_sample(ctx, watch)
+            probe = _try_plant(ctx, {'op': 'step', 'dt': 0})
+            health = (snap or {}).get('io_health') or {}
+            ftick = (sample or {}).get('tick')
+            rounds.append({'owner': (report or {}).get('role'),
+                           'peer': (partner or {}).get('role'),
+                           'tick': (snap or {}).get('tick'),
+                           'field_tick': ftick,
+                           'failed_writes':
+                               health.get('failed_writes'),
+                           'probe': _probe_error(probe)})
+            if report is None and partner is None and snap is None:
+                if index + 1 < UNCLAIMED_REARM_ROUNDS:
+                    time.sleep(UNCLAIMED_REARM_POLL)
+                continue  # a dropped poll — one lost observation
+            answered += 1
+            if report is not None and report.get('role') != 'active':
+                failed('owner-moved', 'the field owner left '
+                       'role=active through the unclaimed window — '
+                       'the refused write demoted it instead of '
+                       're-arming inline: '
+                       + json.dumps(report)[:300])
+                role_moved = True
+                break
+            if partner is not None \
+                    and partner.get('role') != 'standby':
+                failed('peer-moved', 'the tracking peer reported a '
+                       'spurious role change through the window: '
+                       + json.dumps(partner)[:300])
+                role_moved = True
+                break
+            if (health.get('failed_writes') or 0) > ledger0:
+                ledger_grew = True
+                failed('ledger-grew', 'the fencing-loss ledger grew '
+                       'through the window — io_health.failed_writes '
+                       + str(health.get('failed_writes'))
+                       + ' over the baseline ' + str(ledger0))
+            if probe is not None and not _fenced(probe) \
+                    and _probe_error(probe) != 'unclaimed':
+                failed('probe-wrote', 'a third-party mutation probe '
+                       'wrote through during the watch: '
+                       + json.dumps(probe)[:300])
+            if isinstance(ftick, int) and isinstance(anchor, int) \
+                    and ftick > anchor:
+                landed = True
+                last_field = ftick
+            if index + 1 < UNCLAIMED_REARM_ROUNDS:
+                time.sleep(UNCLAIMED_REARM_POLL)
+        evidence['watch'] = rounds
+        if answered == 0:
+            raise ConnectionError('the pair\'s monitors never '
+                                  'answered through the watch')
+        if not landed:
+            failed('write-stalled', 'the owner\'s write never landed '
+                   'through the unclaimed window — the inline re-arm '
+                   'dropped it or never ran (field tick held at '
+                   + str(anchor) + ')')
+
+        # The journal audit: no field_claim_lost and no role
+        # transition above either peer's floor — the fencing-loss
+        # ledger stays empty per the settled contract.
+        journal_clean = True
+        for name in (active, peer):
+            try:
+                _, journal = http_json(
+                    'GET', ctx[name] + '/journal?since='
+                    + str(floors[name]))
+            except Exception as exc:
+                journal_clean = False
+                failed('journal-' + name, name + '\'s journal never '
+                       'served the post-window audit: '
+                       + str(exc)[:200])
+                continue
+            for entry in _journal_list(journal):
+                event = entry.get('event') or {}
+                if 'field_claim_lost' in event:
+                    journal_clean = False
+                    failed('claim-journal-' + name, name + ' journaled '
+                           'field_claim_lost through the window — the '
+                           'owner fenced instead of re-arming')
+                if 'role_changed' in event:
+                    journal_clean = False
+                    failed('role-journal-' + name, name + ' journaled '
+                           'a role transition through the window')
+
+        # The re-arm produced a real claim: a fresh probe fences, the
+        # foreign attachment's conditional ensure is refused, and its
+        # write probe stays fenced — while the owner's writes keep
+        # landing after them.
+        fence = _try_plant(ctx, {'op': 'step', 'dt': 0})
+        evidence['rearm_probe'] = fence
+        if fence is None:
+            raise ConnectionError('the plant never answered the '
+                                  'post-window fencing probe')
+        if _probe_error(fence) == 'unclaimed':
+            failed('never-rearmed', 'the field stayed unclaimed — '
+                   'the recorded owner never re-armed its claim')
+        elif not _fenced(fence):
+            failed('rearm-open', 'the field answered a third-party '
+                   'probe without the re-armed claim\'s fencing: '
+                   + json.dumps(fence)[:300])
+        ensure = _plant_request(stream, {'op': 'ensure_writer',
+                                         'owner': UNCLAIMED_REARM_FOREIGN})
+        evidence['foreign_ensure'] = ensure
+        if not _fenced(ensure):
+            failed('foreign-ensure', 'a foreign attachment\'s '
+                   'conditional claim was admitted past the re-armed '
+                   'claim — the re-arm produced no real claim: '
+                   + json.dumps(ensure)[:300])
+        probe_sample = _probe_sample(ctx, probe_point)
+        if not isinstance(probe_sample, dict):
+            raise ConnectionError('the field read sizing the foreign '
+                                  'write probe never answered')
+        value = probe_sample.get('value') or {'bool': True}
+        write = _plant_request(stream, {'op': 'write',
+                                        'point': probe_point,
+                                        'value': value})
+        evidence['foreign_write'] = write
+        if not _write_fenced(write):
+            failed('foreign-write', 'a foreign attachment\'s write '
+                   'probe was not fenced under the re-armed claim: '
+                   + json.dumps(write)[:300])
+
+        def advancing():
+            _try_snapshot(ctx, base)  # the owner's scans keep running
+            sample_ = _probe_sample(ctx, watch)
+            if not isinstance(sample_, dict):
+                return None
+            return sample_ if isinstance(sample_.get('tick'), int) \
+                and sample_['tick'] > last_field else None
+        sustained = wait_for(advancing,
+                             time.monotonic() + UNCLAIMED_REARM_DEADLINE,
+                             interval=UNCLAIMED_REARM_POLL)
+        evidence['sustained'] = sustained
+        if sustained is None:
+            failed('writes-stalled', 'the owner\'s writes stopped '
+                   'landing after the foreign probes — the re-armed '
+                   'claim fences its own owner')
+    finally:
+        stream.close()
+        if not released:
+            # Best effort: a stranded foreign claim would fence the
+            # owner's re-arm — re-open the ownerless window through a
+            # fresh attachment so the recorded owner can reclaim.
+            try:
+                restore = _plant_connect(ctx)
+                try:
+                    _plant_request(restore, {'op': 'claim_writer',
+                                             'owner':
+                                             UNCLAIMED_REARM_FOREIGN})
+                    _plant_request(restore, {'op': 'release_writer'})
+                finally:
+                    restore.close()
+            except Exception:
+                pass  # an unreachable plant is the pass's own verdict
+        # Best effort: the launch role layout for the legs behind this
+        # one — a rig that demoted the owner or moved the peer gets
+        # the settled active/standby pair back; a clean pass moves
+        # nothing, so neither restore fires.
+        if (_try_role(ctx, base) or {}).get('role') != 'active':
+            try:
+                http_json('POST', base + '/promote')
+            except Exception:
+                pass
+        if (_try_role(ctx, peer_base) or {}).get('role') != 'standby':
+            try:
+                http_json('POST', peer_base + '/demote')
+            except Exception:
+                pass
+
+    evidence['digest'] = {
+        'baseline': 'fenced' if _fenced(probe0) else 'unfenced',
+        'claim': 'shared' if verdict == 'claimed_shared'
+                 else 'granted' if verdict == 'done' else 'refused',
+        'window': 'closed' if kind in ('unclaimed', 'fenced')
+                  else 'open',
+        'writes': 'landed' if landed else 'stalled',
+        'roles': 'unchanged' if not role_moved else 'moved',
+        'ledger': 'empty' if not ledger_grew else 'grew',
+        'journal': 'clean' if journal_clean else 'transitioned',
+        'fence': ('fenced' if _fenced(fence)
+                  else 'unclaimed'
+                  if _probe_error(fence) == 'unclaimed' else 'open'),
+        'foreign': 'fenced' if _fenced(ensure) else 'admitted',
+        'foreign-write': 'fenced' if _write_fenced(write)
+                         else 'landed',
+        'sustained': 'landing' if sustained is not None else 'stalled'}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_unclaimed_rearm(ctx):
+    """Open the unclaimed window behind the field owner's live
+    connection — a dedicated attachment's preempt-and-release — and
+    prove the recorded owner's next scan re-arms inline: the write
+    lands, the owner stays active, nothing journals, the ledger
+    stays empty, and the re-armed claim fences foreign probes."""
+    case = Case('unclaimed-rearm',
+                'The unclaimed field re-arms the owner inline',
+                'with the deployed pair settled and the field-owning '
+                'peer holding the plant\'s writer claim, a dedicated '
+                'attachment\'s claim_writer/release_writer opens the '
+                'ownerless window behind the owner\'s live '
+                'connection — the #621 reproduction — and the '
+                'owner\'s next scan re-arms inline through one '
+                'conditional ensure_writer: its field write keeps '
+                'landing, it reports active throughout, no '
+                'field_claim_lost or role transition journals, and '
+                'the fencing-loss ledger stays empty; the re-armed '
+                'claim then fences a foreign attachment\'s '
+                'ensure_writer and write probes while the owner\'s '
+                'writes keep landing, and the rig returns to its '
+                'launch claim state and roles; two consecutive '
+                'passes produce identical digests')
+    try:
+        if not ctx.get('plant') or ctx.get('plant_ctl') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no plant endpoint or '
+                               'plant_ctl seam — the claim ops and '
+                               'field reads cannot run')
+        deadline = time.monotonic() + UNCLAIMED_REARM_SETTLE
+        active = wait_for(lambda: _settled_active(ctx), deadline)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        peer = 'standby' if active == 'active' else 'active'
+        report = wait_for(lambda: _try_role(ctx, ctx[peer]), deadline)
+        if report is None:
+            return case.finish('inconclusive', 'the pair\'s other '
+                               'endpoint never answered /role — the '
+                               'peer-stability half cannot run')
+        if report.get('role') != 'standby':
+            return case.finish('inconclusive', 'the pair never '
+                               'settled — ' + peer + ' reports '
+                               + str(report.get('role')))
+        case.observe('field owner: ' + active + ' (' + ctx[active]
+                     + '); watching peer ' + peer)
+
+        field_out = _field_out_points(ctx)
+        if not field_out:
+            return case.finish('inconclusive', 'the simulated plant '
+                               'serves no field output to watch the '
+                               'owner\'s writes on')
+        watch = min(field_out)
+        field_in = sorted(_field_inputs(ctx))
+        probe_point = field_in[0] if field_in else watch
+        case.observe('watching field out point ' + str(watch)
+                     + '; foreign write probe on point '
+                     + str(probe_point))
+
+        digests = []
+        for number in (1, 2):
+            digest, violations, evidence = _unclaimed_rearm_pass(
+                ctx, active, peer, watch, probe_point)
+            ref = save_evidence(ctx['evidence_dir'],
+                                'unclaimed-rearm-pass-'
+                                + str(number) + '.json', evidence)
+            case.evidence('file', ref, 're-arm pass ' + str(number)
+                          + ' — the induction, the watch rounds, the '
+                          'fencing legs, and the normalized digest')
+            if violations:
+                failed = any(name == 'unclaimed-rearm-failed'
+                             for name, _ in violations.values())
+                diagnostic = 'unclaimed-rearm-failed' if failed \
+                    else 'unclaimed-rearm-nondeterministic'
+                return case.finish(
+                    'failed', diagnostic + ': ' + '; '.join(
+                        detail for _, detail in
+                        list(violations.values())[:4]))
+            digests.append(digest)
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'unclaimed-rearm-nondeterministic: the two '
+                'passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two unclaimed-window passes, identical digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
@@ -10075,7 +11034,12 @@ def scenario_dead_peer_latency(ctx):
 # restored window: it isolates ctrl-a — the source ctrl-b and its
 # driven third peer pull from — restores it before the armed failover
 # bound, and removes the driven peer, so the launch roles still hold
-# for the cases that follow. The duty-rotation case shares that
+# for the cases that follow. The monitor-starvation case runs in the
+# same armed window: it needs ctrl-b — the only peer launched
+# --auto-promote — as the tracking standby whose checkpoint pulls
+# measure the starved ctrl-a monitor, and it leaves the launch roles
+# untouched, so it must run before the tune case's a->b switch. The
+# duty-rotation case shares that
 # restored window: it cycles demand through the writable maintenance
 # points, runs its own mid-cycle a->b switch for the carried rotation
 # position, and fails back to the launch roles before the force case.
@@ -10119,13 +11083,19 @@ def scenario_dead_peer_latency(ctx):
 # by then keeps it through the outage and recovery the scenario
 # drives. The field-fault case is self-contained on either role
 # layout — including the post-recovery rig — and leaves the rig as it
-# found it. The dcs-ctl case closes the schedule: it observes the
+# found it. The unclaimed-rearm case is the same shape: its
+# preempt-and-release induction opens the ownerless window behind
+# whichever peer owns the field, watches the recorded owner's inline
+# re-arm and the fencing it restores, and leaves the claim state and
+# launch roles as found. The dcs-ctl case closes the schedule: it
+# observes the
 # post-failover role layout and perturbs nothing earlier cases
 # established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_operator_command, scenario_controller_restart,
              scenario_source_restart, scenario_stale_freshness,
-             scenario_dead_peer_latency, scenario_duty_rotation,
+             scenario_dead_peer_latency,
+             scenario_monitor_starvation, scenario_duty_rotation,
              scenario_force_carryover,
              scenario_backup_health, scenario_lag_staging,
              scenario_parameter_tune_carryover, scenario_failover,
@@ -10135,7 +11105,8 @@ SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_evidence_capture, scenario_served_interface,
              scenario_force_release, scenario_consumer_schedule,
              scenario_command_admission, scenario_plant_link_loss,
-             scenario_field_fault, scenario_dcs_ctl)
+             scenario_field_fault, scenario_unclaimed_rearm,
+             scenario_dcs_ctl)
 
 
 def run_all(ctx, timeline):

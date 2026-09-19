@@ -671,7 +671,7 @@ fn wired() -> (SimDriver, PointMap, Vec<Box<dyn Component>>) {
 fn snapshot() -> TelemetrySnapshot {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     executor.snapshot()
 }
 
@@ -764,7 +764,7 @@ fn reported_parameters_match_each_kinds_declared_set() {
 fn reported_values_equal_the_checkpointed_fields() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // Every reported value is what the same run's checkpoint persists
     // for the component — the standby and the faceplate read one
@@ -787,7 +787,7 @@ fn reported_values_equal_the_checkpointed_fields() {
 fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // A receipted tune on the `pid` instance reports its new value in
     // the next snapshot under the declared name.
@@ -796,7 +796,7 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
         name: "kp".to_string(),
         value: Value::Float(3.5),
     });
-    executor.scan().unwrap();
+    executor.scan();
     let pid = &executor.snapshot().parameters[2];
     assert_eq!(pid.name, "pid");
     assert_eq!(pid.values["kp"], Value::Float(3.5));
@@ -806,7 +806,7 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let checkpoint = executor.checkpoint();
     let (sim, point_map, components) = wired();
     let mut restored = Executor::restore(&sim, point_map, components, &checkpoint, None).unwrap();
-    restored.scan().unwrap();
+    restored.scan();
     assert_eq!(
         restored.snapshot().parameters,
         executor.snapshot().parameters
@@ -848,7 +848,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // verdict carries the same refusal the receipted path settles.
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     let snapshot = executor.snapshot();
     let seq = snapshot
@@ -868,7 +868,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // `advance {count: 9}` lands past the table's last step: the run
     // completes and the same scan's probe reports the standing refusal.
     executor.submit_command(invoke("seq", "advance", &[("count", Value::Int(9))]));
-    executor.scan().unwrap();
+    executor.scan();
     let snapshot = executor.snapshot();
     assert_eq!(
         verdict(&snapshot, "seq", "advance"),
@@ -886,7 +886,7 @@ fn a_completed_sequencer_publishes_advances_standing_refusal() {
     // `reset` re-opens `advance`: the next scan's probe reports it
     // invocable again — the verdicts track checkpointed run state.
     executor.submit_command(invoke("seq", "reset", &[]));
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         verdict(&executor.snapshot(), "seq", "advance"),
         Some(&CommandVerdict {

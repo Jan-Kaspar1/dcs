@@ -112,7 +112,8 @@
 //! checkpoint is the heartbeat miss the failover budget counts. Each
 //! pull also announces the pulling monitor's own address
 //! (`GET /checkpoint?peer=`), so the serving instance learns where its
-//! successor lives. There,
+//! successor lives — an announce the serving side accepts only when it
+//! names the pulling connection's own source address. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -222,7 +223,7 @@ use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
-use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
+use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -1136,6 +1137,13 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
+                        for receipt in peer.take_superseded_commands() {
+                            eprintln!(
+                                "standby: pending command superseded at tick {}: {:?}",
+                                peer.tick().0,
+                                receipt.command
+                            );
+                        }
                         let scanned = peer.scan();
                         // Transitions the scan itself produced — a
                         // fenced write's claim loss and the demotion it
@@ -1279,15 +1287,17 @@ fn main() -> ExitCode {
 /// the configured `--standby`/`--peer` target when set, else the monitor
 /// address a tracking peer announced through its `?peer=` pulls — the
 /// follow-peer half that lets a demoted launched active find its
-/// successor without a restart. The puller follows the resolved source,
-/// respawning when it changes, and announces this monitor's own address
-/// on every pull so the serving peer learns where to track back. A
+/// successor without a restart, the serving side accepting the
+/// announce only as the pulling connection's own source address. The
+/// puller follows the resolved source, respawning when it changes, and
+/// announces this monitor's own address on every pull so the serving
+/// peer learns where to track back. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(SocketAddr, CheckpointPuller)>,
-) -> Result<Tick, ScanError> {
+) -> Tick {
     if let Some(source) = monitor.tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
             *puller = Some((
@@ -1338,7 +1348,7 @@ fn report_tracking(report: &TrackReport, active: SocketAddr) {
 /// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Result<Tick, ScanError>,
+    scan: impl FnMut() -> Tick,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -1369,9 +1379,9 @@ fn run_monitored(
 /// `persist` feeds `--state-file`: the run's transferable state is
 /// persisted at the end of every completed scan cycle — after the scan
 /// and the plant step, so a resumed run re-enters the loop at exactly
-/// this point — and a write failure fails the run like a scan or step
-/// failure does: a controller that cannot persist its recovery state
-/// exits naming the file rather than running on without it. On a
+/// this point — and a write failure fails the run like a step failure
+/// does: a controller that cannot persist its recovery state exits
+/// naming the file rather than running on without it. On a
 /// monitored run the closure routes through
 /// [`Monitor::persist_state`], so the cycle-end write and a command's
 /// admission-boundary write serialize on the same lock and can never
@@ -1385,7 +1395,7 @@ fn run_monitored(
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Result<Tick, ScanError>,
+    mut scan: impl FnMut() -> Tick,
     snapshot: impl Fn() -> TelemetrySnapshot,
     persist: impl Fn(&Path) -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
@@ -1396,9 +1406,7 @@ fn scan_loop(
     let mut scanned = 0_u64;
     loop {
         let started = Instant::now();
-        if let Err(error) = scan() {
-            return fail(format!("scan {} failed: {error}", snapshot().tick.0));
-        }
+        scan();
         if let Err(error) = step() {
             return fail(error);
         }

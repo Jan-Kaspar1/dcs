@@ -325,7 +325,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         observe(&executor, &mut scans);
         match scan {
             // Pump 1's stroke pulse — five rising edges the counter

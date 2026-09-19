@@ -66,8 +66,8 @@
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
 //! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
-//! `refusal-failed`, `takeover-failed`, and the
-//! `surface-mismatch` paths
+//! `refusal-failed`, `takeover-failed`, `peer-announce-failed`, and
+//! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -411,6 +411,28 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     assert!(
         stdout.contains("expect-applied: reported, refusal-failed"),
         "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's peer-announce leg ran and held: the foreign
+    // ?peer= announce was refused while the checkpoint read answered,
+    // the demoted peer reconverged tracking on its real successor, and
+    // the landed-announce case reported its named diagnostic.
+    let announce_line = stdout
+        .lines()
+        .find(|line| line.contains("peer-announce-digest"))
+        .unwrap_or_else(|| panic!("the peer-announce leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "checkpoint answered at tick",
+        "tracking its successor",
+        "roles restored",
+    ] {
+        assert!(
+            announce_line.contains(phrase),
+            "the peer-announce digest names no '{phrase}' evidence: {announce_line}"
+        );
+    }
+    assert!(
+        stdout.contains("landed-announce: reported, peer-announce-failed"),
+        "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
     assert!(
         stdout.contains("== consumers =="),

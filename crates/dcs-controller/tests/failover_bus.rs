@@ -247,7 +247,7 @@ impl Reference<'_> {
     /// each bank's clock advances once, the cadence the pair's field
     /// owner keeps through `FanoutDriver::step`'s per-backend hooks.
     fn owned_tick(&mut self) -> TelemetrySnapshot {
-        self.executor.scan().unwrap();
+        self.executor.scan();
         self.field.step(DT_F64).unwrap();
         self.executor.snapshot()
     }
@@ -257,7 +257,7 @@ impl Reference<'_> {
     /// registers keep.
     fn orphaned_tick(&mut self) -> TelemetrySnapshot {
         self.gate.close();
-        self.executor.scan().unwrap();
+        self.executor.scan();
         self.gate.open();
         self.executor.snapshot()
     }
