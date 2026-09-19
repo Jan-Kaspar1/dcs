@@ -9189,8 +9189,7 @@ class CtlFeed:
     answers each argv the way the real binary would against the
     post-failover rig — reads print the served payloads and exit 0,
     receipted subcommands print the receipt and exit nonzero on a
-    named rejection — while http_json covers the raw liveness gate and
-    the resources read the unavailable-command probe selects through.
+    named rejection — while http_json covers the raw liveness gate.
     Fault flags stage each named failure the issue calls out."""
 
     COMPONENTS = ({'name': 'digital-input:12', 'kind': 'digital-input'},
@@ -9203,11 +9202,18 @@ class CtlFeed:
         self.tick = 0
         self.next_seq = 1
         self.journal = []
+        self.receipts_log = []  # the executor's settled-receipt log
         self.calls = []      # the recorded (addr, argv) transcript
         self.binaries = []   # the binary path each invocation ran
         # Fault injection for the named-failure cases.
         self.role_mismatch = False     # the CLI's role reads both standby
         self.missing_kind = False      # the schema read drops an instance
+        self.resources_misses = False  # the resources view drops an instance
+        self.resources_entry_wrong = False  # a named entry mismatches
+        self.events_map_broken = False  # the keyed events view drops a key
+        self.receipts_missing = False  # the receipt log loses the invoke
+        self.history_empty = False     # the point retains no samples
+        self.no_bound_measurement = False  # no measurement binds a point
         self.command_fails = False     # receipted submissions die transport-side
         self.no_journal_entry = False  # the settlement never journals
         self.wrong_actor = False       # the journaled receipt loses the actor
@@ -9246,11 +9252,34 @@ class CtlFeed:
             return self._ok([entry for entry in self.journal
                              if entry['seq'] > since])
         if args[0] == 'events':
-            component = args[1]
-            if self.no_events:
-                return self._ok([])
-            return self._ok([entry for entry in self.journal
-                             if self._attributed(entry, component)])
+            if len(args) == 1:
+                keyed = {record['name']: self._events_for(record['name'])
+                         for record in self.COMPONENTS}
+                if self.events_map_broken:
+                    keyed.pop('motor:21', None)
+                return self._ok(keyed)
+            entry = self._view_entry(args[1])
+            if entry is None:
+                return '', 1, 'dcs-ctl: ' + addr \
+                    + ': no served component named ' + repr(args[1])
+            return self._ok(entry['events'])
+        if args[0] == 'resources':
+            if len(args) == 1:
+                return self._ok(self._view())
+            entry = self._view_entry(args[1])
+            if entry is None:
+                return '', 1, 'dcs-ctl: ' + addr \
+                    + ': no served component named ' + repr(args[1])
+            return self._ok(entry)
+        if args == ['receipts']:
+            return self._ok(self.receipts_log)
+        if args[0] == 'history':
+            points = [int(args[index + 1])
+                      for index, arg in enumerate(args)
+                      if arg == '--point']
+            return self._ok([{'point': point,
+                              'samples': self._samples(point)}
+                             for point in points])
         # Receipted subcommands — `write`, `set-parameter`, `invoke`:
         # the receipt prints to stdout; a named rejection exits 1.
         actor = None
@@ -9277,11 +9306,19 @@ class CtlFeed:
                 + next(iter(refused))
         # An accepted command journals its applied echo at the promised
         # tick; a rejected receipt is already final and echoes verbatim —
-        # the real executor's durable record. `carryover` injects the
+        # the real executor's durable record. The receipt log mirrors
+        # the same settled outcome. `carryover` injects the
         # entry a checkpoint-adopted receipt re-journals on this peer —
         # an earlier leg's identical command under its own actor —
         # landing above the consumer's pre-submission cursor, ahead of
         # this submission's own settlement.
+        settled = dict(receipt)
+        if refused is None:
+            settled['outcome'] = {'applied': {'tick': self.tick + 1}}
+        if self.wrong_actor:
+            settled['actor'] = 'qa-lane'
+        if not self.receipts_missing:
+            self.receipts_log.append(settled)
         if not self.no_journal_entry:
             if self.carryover is not None:
                 self.journal.append({'seq': self.next_seq,
@@ -9290,11 +9327,6 @@ class CtlFeed:
                                          'receipt': self.carryover}}})
                 self.next_seq += 1
                 self.carryover = None
-            settled = dict(receipt)
-            if refused is None:
-                settled['outcome'] = {'applied': {'tick': self.tick + 1}}
-            if self.wrong_actor:
-                settled['actor'] = 'qa-lane'
             self.journal.append({'seq': self.next_seq, 'tick': self.tick,
                                  'event': {'command_settled': {
                                      'receipt': settled}}})
@@ -9357,12 +9389,15 @@ class CtlFeed:
         return None
 
     def _interface(self, kind):
-        """One kind's declared interface — a writable-bool write, an
-        unavailable non-writable write (the unavailable probe's
-        target), a parameter tune, and the emitted settled-event
-        entry."""
+        """One kind's declared interface — a bound measurement, a
+        writable-bool write, an unavailable non-writable write (the
+        unavailable probe's target), a parameter tune, and the emitted
+        settled-event entry."""
+        measurement = {'name': 'in', 'kind': 'bool'}
+        if not self.no_bound_measurement:
+            measurement['point'] = 302
         return {'version': 1, 'kind': kind,
-                'measurements': [{'name': 'in', 'kind': 'bool'}],
+                'measurements': [measurement],
                 'configuration': [], 'state': [],
                 'commands': [
                     {'name': 'write_value:in', 'point': 302,
@@ -9402,17 +9437,64 @@ class CtlFeed:
             'components': [dict(record) for record in self.COMPONENTS]}
 
     def _resources(self, record):
+        interface = self._interface(record['kind'])
         commands = []
-        for spec in self._interface(record['kind'])['commands']:
+        for spec in interface['commands']:
             available = spec.get('adapted') != 'write_value' \
                 or spec.get('point') in self.WRITABLE
             commands.append({'name': spec['name'], 'available': available,
                              'refusal': None if available else
                              'point ' + str(spec.get('point'))
                              + ' is not writable'})
-        return {'name': record['name'], 'kind': record['kind'],
-                'measurements': [], 'configuration': [], 'state': [],
-                'commands': commands, 'events': []}
+        measurements = [{'name': spec['name'], 'point': spec.get('point'),
+                         'sample': {'value': {'bool': True},
+                                    'quality': {'good': {}},
+                                    'tick': self.tick}}
+                        for spec in interface['measurements']]
+        entry = {'name': record['name'], 'kind': record['kind'],
+                 'measurements': measurements, 'configuration': [],
+                 'state': [], 'commands': commands,
+                 'events': self._events_for(record['name'])}
+        if self.resources_entry_wrong:
+            entry['commands'] = []
+        return entry
+
+    def _view(self):
+        """The served ResourceView every resources/events read derives
+        from — one live record per component instance."""
+        records = self.COMPONENTS[:1] if self.resources_misses \
+            else self.COMPONENTS
+        return {'publication': self.tick, 'tick': self.tick,
+                'components': [self._resources(record)
+                               for record in records]}
+
+    def _view_entry(self, name):
+        """The named instance's ComponentResources — the lookup
+        `resources <component>`/`events <component>` share."""
+        for record in self.COMPONENTS:
+            if record['name'] == name:
+                return self._resources(record)
+        return None
+
+    def _events_for(self, name):
+        """One instance's attributed events — the retained journal
+        tail the served view attributes to it."""
+        if self.no_events:
+            return []
+        return [entry for entry in self.journal
+                if self._attributed(entry, name)]
+
+    def _samples(self, point):
+        """The retained samples a `history --point` read answers for
+        a declared point."""
+        if self.history_empty or point not in self.KINDS:
+            return []
+        value = {'bool': True} if self.KINDS[point] == 'bool' \
+            else {'float': 1.0}
+        return [{'seq': seq,
+                 'sample': {'value': value, 'quality': {'good': {}},
+                            'tick': seq}}
+                for seq in (1, 2, 3)]
 
     def _attributed(self, entry, name):
         """The per-component events attribution, mirroring the served
@@ -9433,8 +9515,7 @@ class CtlFeed:
         return component == name or point in bound
 
     # The raw channel the scenario still crosses — the pair's liveness
-    # gate and the resources read the unavailable probe selects
-    # through.
+    # gate; every served-resource read rides the binary seam now.
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('/')[2]
         path = '/' + url.split('/', 3)[3]
@@ -9442,10 +9523,6 @@ class CtlFeed:
         if (method, route) == ('GET', '/role'):
             return 200, {'role': 'active' if host == 'ctrl-b:2'
                          else 'standby', 'tick': self.tick}
-        if (method, route) == ('GET', '/resources'):
-            return 200, {'publication': self.tick, 'tick': self.tick,
-                         'components': [self._resources(record)
-                                        for record in self.COMPONENTS]}
         raise AssertionError('unexpected request %s %s' % (method, url))
 
 
@@ -9491,8 +9568,10 @@ class DcsCtlTests(unittest.TestCase):
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
-        for name in ('dcs-ctl-roles', 'dcs-ctl-schema', 'dcs-ctl-invoke',
+        for name in ('dcs-ctl-roles', 'dcs-ctl-schema',
+                     'dcs-ctl-resources', 'dcs-ctl-invoke',
                      'dcs-ctl-journal', 'dcs-ctl-events',
+                     'dcs-ctl-receipts', 'dcs-ctl-history',
                      'dcs-ctl-refusals', 'dcs-ctl-transcript'):
             self.assertTrue((self.evidence / (name + '.json')).is_file(),
                             name)
@@ -9500,13 +9579,20 @@ class DcsCtlTests(unittest.TestCase):
             (self.evidence / 'dcs-ctl-transcript.json').read_text())
         argvs = [entry['argv'] for entry in transcript]
         # The consumer contract end to end: role on both endpoints, the
-        # picked command with the declared actor, the journal and
-        # events reads, and both refusal probes.
+        # served-resource reads, the picked command with the declared
+        # actor, the journal and events reads, receipts and history,
+        # and both refusal probes.
         self.assertIn(['ctrl-a:1', 'role'], argvs)
         self.assertIn(['ctrl-b:2', 'role'], argvs)
+        self.assertIn(['ctrl-b:2', 'resources'], argvs)
+        self.assertIn(['ctrl-b:2', 'resources', 'digital-input:12'],
+                      argvs)
         self.assertIn(['ctrl-b:2', 'write', '302', 'true',
                        '--actor', scenarios.CTL_ACTOR], argvs)
+        self.assertIn(['ctrl-b:2', 'events'], argvs)
         self.assertIn(['ctrl-b:2', 'events', 'digital-input:12'], argvs)
+        self.assertIn(['ctrl-b:2', 'receipts'], argvs)
+        self.assertIn(['ctrl-b:2', 'history', '--point', '302'], argvs)
         self.assertIn(['ctrl-b:2', 'invoke', 'digital-input:12',
                        'dcs-ctl-undeclared', '--actor',
                        scenarios.CTL_ACTOR], argvs)
@@ -9520,14 +9606,16 @@ class DcsCtlTests(unittest.TestCase):
         self.assertEqual(refusals['undeclared']['exit'], 1)
         self.assertEqual(refusals['unavailable']['exit'], 1)
 
-    def test_two_runs_produce_identical_transcript(self):
+    def test_two_runs_produce_identical_evidence(self):
         record = self.run_scenario()
-        first = (self.evidence / 'dcs-ctl-transcript.json').read_text()
+        first = {path.name: path.read_text()
+                 for path in self.evidence.iterdir()}
         self.evidence = self.evidence.parent / 'evidence-2'
         self.evidence.mkdir()
         self.feed = CtlFeed()
         again = self.run_scenario()
-        second = (self.evidence / 'dcs-ctl-transcript.json').read_text()
+        second = {path.name: path.read_text()
+                  for path in self.evidence.iterdir()}
         self.assertEqual(record['outcome'], 'passed', record)
         self.assertEqual(again['outcome'], 'passed', again)
         self.assertEqual(first, second)
@@ -9545,6 +9633,53 @@ class DcsCtlTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('misses declared kinds', record.get('detail', ''))
         self.assertIn('motor', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_resources_missing_component_fails(self):
+        self.feed.resources_misses = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('one kind-matched record per declared component',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_resources_entry_mismatch_fails(self):
+        self.feed.resources_entry_wrong = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('does not mirror the served interface',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_keyed_events_missing_component_fails(self):
+        self.feed.events_map_broken = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('keyed events read', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_receipts_missing_invoke_fails(self):
+        self.feed.receipts_missing = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('receipt log never recorded',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_history_without_samples_fails(self):
+        self.feed.history_empty = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('retains no served samples',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_bound_measurement_is_inconclusive(self):
+        self.feed.no_bound_measurement = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('no served measurement binds a point',
+                      record.get('detail', ''))
         report.validate_scenario(record)
 
     def test_missing_receipt_fails(self):
