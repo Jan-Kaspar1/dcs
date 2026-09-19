@@ -164,7 +164,11 @@ pub struct Checkpoint {
     /// the tracking peer's log to the active's, so the pair presents
     /// one continuous audit trail across a switchover — evictions the
     /// source already made showing on the peer as the same numbering
-    /// gap; entries still `Accepted` at capture
+    /// gap — except the contiguous tail of the restoring run's own
+    /// log this window's high-water never reached: those receipts are
+    /// submissions the capture predates, not entries the line dropped,
+    /// so the restore keeps them suspended rather than settling their
+    /// absence as a verdict; entries still `Accepted` at capture
     /// re-queue on the restoring run — verbatim, past the pending
     /// queue's admission bound: carried run state is not new admission,
     /// so a command taken over between its submission boundary and its

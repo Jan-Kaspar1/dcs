@@ -659,6 +659,35 @@ fn resources_print_the_served_live_resource_view() {
             Some("I/O point PointId(50) is not declared writable")
         );
 
+        // The `KindDeclared` probe's published verdict joins the same
+        // read: `advance` landing the table's last step completes the
+        // run, and the served state turns unavailable carrying the
+        // kind's standing refusal — the text a refused submission's
+        // receipt settles — while `reset` stays available.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "advance"])).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        ctl_ok(addr, &["scan", "1"]);
+        let seq: dcs_core::ComponentResources =
+            serde_json::from_value(ctl_ok(addr, &["resources", "seq"])).unwrap();
+        let advance = seq
+            .commands
+            .iter()
+            .find(|command| command.name == "advance")
+            .unwrap();
+        assert!(!advance.available, "{advance:?}");
+        assert_eq!(
+            advance.refusal.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert!(
+            seq.commands
+                .iter()
+                .find(|command| command.name == "reset")
+                .unwrap()
+                .available
+        );
+
         // A name the served registry does not carry fails the
         // invocation naming it — the same lookup `events <component>`
         // performs, never a rejection.

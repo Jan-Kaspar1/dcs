@@ -59,9 +59,11 @@ semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 `Dockerfile.plant` packages the `dcs-plant-server` binary — the shared
 simulated plant of `dcs-sim-net` — the same way: a
 `rust:1.98.1-bookworm` build stage runs
-`cargo build --release --locked -p dcs-plant`, and a
-`debian:bookworm-slim` runtime stage carries only the resulting binary,
-executed as the same non-root user. A second Dockerfile, rather than a
+`cargo build --release --locked -p dcs-plant -p dcs-sim-net`, and a
+`debian:bookworm-slim` runtime stage carries the resulting server
+binary plus `dcs-plant-ctl`, the plant-side wire-protocol tool, beside
+it for `docker exec` perturbation of the running plant — executed as
+the same non-root user. A second Dockerfile, rather than a
 build-arg-parameterized shared one, keeps each image a self-contained,
 statically inspectable artifact; the two files are deliberately kept in
 lockstep. Together with the controller image it completes the
@@ -195,7 +197,10 @@ http://localhost:8080/?peer=localhost:8081
 
 The page polls `GET /role` on both peers, renders the settled-active
 peer's telemetry plus per-peer pair health, and submits commands only
-to the peer reporting `active`.
+to the peer reporting `active`. The plant image also ships
+`dcs-plant-ctl`, the plant-side tool `docs/architecture.md` records —
+`docker exec dcs-plant dcs-plant-ctl dcs-plant:9001 <command>` perturbs
+the running plant's field points for a live demonstration.
 
 ### Demonstrating a promotion
 

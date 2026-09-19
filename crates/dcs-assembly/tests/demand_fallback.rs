@@ -107,7 +107,7 @@ fn bool_at(executor: &Executor, point: PointId) -> bool {
 /// last `step` made current: the tick-`t` entry is first read at scan
 /// `t + 1`.
 fn scan(executor: &mut Executor, driver: &FanoutDriver) {
-    executor.scan().unwrap();
+    executor.scan();
     driver.step(0.1).unwrap();
 }
 

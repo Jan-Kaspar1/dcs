@@ -185,7 +185,7 @@ impl Reference<'_> {
     /// so a model with two `sim-tcp` devices steps the shared plant
     /// twice — the reference replays that cadence exactly.
     fn owned_tick(&mut self) -> TelemetrySnapshot {
-        self.executor.scan().unwrap();
+        self.executor.scan();
         for _ in 0..2 {
             self.plant.step(DT_F64).unwrap();
         }
@@ -196,7 +196,7 @@ impl Reference<'_> {
     /// the plant's clock holds — the field the orphaned pair plant keeps.
     fn orphaned_tick(&mut self) -> TelemetrySnapshot {
         self.gate.close();
-        self.executor.scan().unwrap();
+        self.executor.scan();
         self.gate.open();
         self.executor.snapshot()
     }
