@@ -89,7 +89,7 @@ pub use divergence::{
 };
 pub use executor::{
     ComponentStatus, DEFAULT_COMMAND_QUEUE_CAPACITY, DEFAULT_RECEIPT_LOG_CAPACITY, Executor,
-    LinkError, PointMap, PointSpec, ScanError, WiringError,
+    LinkError, PointMap, PointSpec, WiringError,
 };
 pub use gate::WriteGate;
 pub use peer::{ApplyError, Peer, RoleChange, SourceRestart, TrackReport, Transfer};

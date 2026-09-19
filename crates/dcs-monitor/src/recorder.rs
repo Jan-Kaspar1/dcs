@@ -22,8 +22,9 @@
 //!   declared event) — which the resource view's per-instance
 //!   `events` joins beside the journal tail.
 //!
-//! A scan aborted by a [`ScanError`](dcs_runtime::ScanError) is not
-//! recorded: the run ends at it. Both streams evict oldest-first past the
+//! Every scan completes — field faults degrade into `io_health` and held
+//! `Bad` samples rather than aborting — so recording always follows a
+//! completed scan. Both streams evict oldest-first past the
 //! configured capacity and number entries with never-reused `seq`s, so
 //! consumers detect eviction as a numbering gap. `record_scan` also
 //! returns the materialized snapshot — the monitor publishes it into the

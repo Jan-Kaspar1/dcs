@@ -56,7 +56,7 @@ pub mod two_kinds;
 use dcs_blocks::{AnalogInput, DigitalOutput, ParameterError, Pid, Scaling};
 use dcs_core::{IoDriver, IoError, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_model::{ComponentId, DeviceId, Endpoint, LoadError, PlantModel, PortRef, ValidationError};
-use dcs_runtime::{Component, Executor, PointMap, ScanError, WiringError};
+use dcs_runtime::{Component, Executor, PointMap, WiringError};
 use dcs_sim::{
     ChannelId, ChannelMap, ConfigError, FirstOrderLag, Loopback, PointBinding, ProcessElement,
     SimDriver,
@@ -150,8 +150,6 @@ pub enum DemoError {
     Config(ConfigError),
     /// A component's declared I/O did not match the point map.
     Wiring(WiringError),
-    /// A scan's output phase failed.
-    Scan(ScanError),
     /// A driver access failed.
     Io(IoError),
 }
@@ -205,7 +203,6 @@ impl fmt::Display for DemoError {
             Self::Parameter(error) => write!(f, "{error}"),
             Self::Config(error) => write!(f, "channel map rejected: {error}"),
             Self::Wiring(error) => write!(f, "executor wiring rejected: {error}"),
-            Self::Scan(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -219,7 +216,6 @@ impl std::error::Error for DemoError {
             Self::Parameter(error) => Some(error),
             Self::Config(error) => Some(error),
             Self::Wiring(error) => Some(error),
-            Self::Scan(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None,
         }
@@ -247,12 +243,6 @@ impl From<ConfigError> for DemoError {
 impl From<WiringError> for DemoError {
     fn from(error: WiringError) -> Self {
         Self::Wiring(error)
-    }
-}
-
-impl From<ScanError> for DemoError {
-    fn from(error: ScanError) -> Self {
-        Self::Scan(error)
     }
 }
 
@@ -664,7 +654,7 @@ pub fn run(source: &str, scans: u64) -> Result<Run, DemoError> {
 
     let mut levels = Vec::with_capacity(scans as usize);
     for _ in 0..scans {
-        executor.scan()?;
+        executor.scan();
         sim.step(SCAN_PERIOD);
         let Value::Float(raw) = sim.read(level)?.value else {
             unreachable!("a validated lag output is always a Float point")

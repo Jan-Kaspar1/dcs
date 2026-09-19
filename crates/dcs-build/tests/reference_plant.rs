@@ -23,15 +23,34 @@
 //! kind-declared command's structured receipt through `POST /command`,
 //! a kind-emitted event's arrival in the consumer-visible record, and
 //! the served registry document's structural conformance to the
-//! fetched record artifact —
-//! the `consumers` stage,
-//! which replays that driven run under each consumer schedule (no UI,
-//! polling, a stalled reader, churn, malformed/flooded traffic, a UI
+//! fetched record artifact — the `pair` stage, which runs the
+//! manifest-declared standby pair on the released tooling: the second
+//! controller converging to `tracking`, scans driven through
+//! `POST /scan` keeping the peers identical, a receipted
+//! `demote`/`promote` switching the roles, and the run continuing
+//! bumplessly with the adopted receipts and the durable journal
+//! files' transition records intact — plus the pair contract's
+//! refusal half: `POST /promote` before the standby's first transfer
+//! answering the named `not_converged` refusal with no field hand-off,
+//! a receipted write to the tracking standby answering the named
+//! `not_active` rejection with no phantom effect or audit, and the
+//! same promote succeeding once the standby tracks — plus the pair
+//! contract's takeover leg: with the pair tracking and the pump group
+//! holding a duty demand, receipted `p101-mode`/`p101-hand`/`p101-oos`
+//! writes through the active's `POST /command` producing the declared
+//! manual leg — group-demand exclusion, the hand-driven run under the
+//! thermal/moisture guards, a plant-protocol protection input's proven
+//! fault and managed alarm, the out-of-service inhibit, and the
+//! restore returning the pump to group control with each attributed
+//! transition journaled in order — the `consumers`
+//! stage, which replays that driven run under each consumer schedule
+//! (no UI, polling, a stalled reader, churn, malformed/flooded
+//! traffic, a UI
 //! process restart) requiring identical digests, the `ctl` stage,
 //! which exercises the released `dcs-ctl` operator CLI's receipted
 //! `invoke` path, read subcommands, and named refusal modes against
-//! the same driven run, and the `upgrade`
-//! stage, which repins the materialized tree to the checkout's `HEAD`
+//! the same driven run, and the `upgrade` stage, which repins the
+//! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
 //!
@@ -46,7 +65,9 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, and the `surface-mismatch` paths
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `refusal-failed`, `takeover-failed`, `peer-announce-failed`, and
+//! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -348,6 +369,71 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
         "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
     );
+    // The pair stage ran and held: the manifest-declared standby
+    // converged to tracking, the receipted demote/promote switched the
+    // roles, the run continued bumplessly, and each peer's durable
+    // journal file carried the transition records — its digest line
+    // reports the evidence, and the broken-peer-flag case reported its
+    // named diagnostic.
+    assert!(
+        stdout.contains("== pair =="),
+        "the pair stage did not run:\n{stdout}"
+    );
+    let pair_line = stdout
+        .lines()
+        .find(|line| line.contains("pair-digest"))
+        .unwrap_or_else(|| panic!("the pair leg reported no digest:\n{stdout}"));
+    for phrase in ["switched at tick", "persisted journal records"] {
+        assert!(
+            pair_line.contains(phrase),
+            "the pair digest names no '{phrase}' evidence: {pair_line}"
+        );
+    }
+    assert!(
+        stdout.contains("broken-peer-flag: reported, pair-failed"),
+        "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's refusal half ran and held: the pre-transfer
+    // promote answered not_converged, the standby-directed write
+    // answered not_active, and the same promote succeeded once
+    // tracking — its digest line reports the evidence, and the
+    // doctored applied-expectation case reported its named diagnostic.
+    let refusal_line = stdout
+        .lines()
+        .find(|line| line.contains("refusal-digest"))
+        .unwrap_or_else(|| panic!("the refusal leg reported no digest:\n{stdout}"));
+    for phrase in ["not_converged", "not_active", "promoted at tick"] {
+        assert!(
+            refusal_line.contains(phrase),
+            "the refusal digest names no '{phrase}' evidence: {refusal_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-applied: reported, refusal-failed"),
+        "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's peer-announce leg ran and held: the foreign
+    // ?peer= announce was refused while the checkpoint read answered,
+    // the demoted peer reconverged tracking on its real successor, and
+    // the landed-announce case reported its named diagnostic.
+    let announce_line = stdout
+        .lines()
+        .find(|line| line.contains("peer-announce-digest"))
+        .unwrap_or_else(|| panic!("the peer-announce leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "checkpoint answered at tick",
+        "tracking its successor",
+        "roles restored",
+    ] {
+        assert!(
+            announce_line.contains(phrase),
+            "the peer-announce digest names no '{phrase}' evidence: {announce_line}"
+        );
+    }
+    assert!(
+        stdout.contains("landed-announce: reported, peer-announce-failed"),
+        "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -498,6 +584,164 @@ fn a_divergent_rig_definition_reports_rig_mismatch() {
         String::from_utf8_lossy(&output.stderr).contains("rig-mismatch"),
         "expected the rig-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A standby wired at a peer that never serves is the `pair-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, so the remote stand-in is not needed.
+/// The driver's `broken-peer-flag` tamper wires the tracking peer's
+/// `--standby` flag at an address nothing serves; the leg must refuse
+/// the run naming the lost convergence, which the check reports as
+/// `pair-failed` — never a silently unconverged pass.
+#[test]
+fn a_broken_peer_flag_reports_pair_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-pair-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/pair.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "broken-peer-flag",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the redundant-pair leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a broken peer flag passed the pair leg"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
+        "expected the lost-convergence evidence, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A doctored refusal leg asserting the standby-directed write settles
+/// `applied` is the `refusal-failed` diagnostic — exercised against a
+/// copied tree at script level with the locally built tooling, the
+/// same seam the broken-peer-flag test uses. The driver's
+/// `expect-applied` tamper flips the leg's own expectation; the
+/// tracking standby's honest `not_active` rejection must fail it
+/// naming the actual answer — never a silently unrefused pass.
+#[test]
+fn a_doctored_write_expectation_reports_refusal_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-refusal-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/refusal.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-applied",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the role-gated refusal leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored write expectation passed the refusal leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
+        "expected the named not_active evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored takeover leg asserting the pump still follows the
+/// group while `mode` stands manual is the `takeover-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag and
+/// refusal tests use. The driver's `follows-group` tamper flips the
+/// leg's own expectation; the honest manual selection — the auto leg
+/// reporting manual with the delivered command off the group's
+/// request — must fail it naming the actual readings, never a
+/// silently unexercised pass.
+#[test]
+fn a_doctored_follows_group_expectation_reports_takeover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-takeover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/takeover.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "follows-group",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the manual-takeover leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored follows-group expectation passed the takeover leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not follow the group"),
+        "expected the named follows-group evidence, got:\n{stderr}"
     );
 }
 
@@ -698,7 +942,9 @@ print("tamper cases report named mismatches")
 /// the declared one is caught by the earlier emit and fingerprint
 /// stages. A served registry missing a declared component, drifting a
 /// kind, or dropping a declared resource; a declared command answering
-/// no receipt, a refused one, or never settling `applied`; and a
+/// no receipt, a refused one, never settling `applied`, or serving an
+/// availability verdict adrift of the published one (in either
+/// direction, or refused without the kind's named reason); and a
 /// kind-emitted event absent from the journal or the per-instance
 /// resource view each report the named mismatches `ci/check.sh` turns
 /// into `surface-mismatch`.
@@ -825,6 +1071,50 @@ assert any(
     "step_completed" in f and "sequencer:39" in f for f in failures
 ), failures
 
+# A kind-declared command's served availability verdict: the honest
+# states report no mismatches in either direction, an invocable verdict
+# served unavailable (and the reverse) is named, and a refused verdict
+# served without the kind's named reason is named.
+command = {
+    "name": "advance",
+    "request": [{"name": "count", "kind": "int"}],
+    "adapted": "declared",
+    "availability": "kind_declared",
+}
+def resources_with(state):
+    return {"components": [
+        {"name": "sequencer:39", "commands": [dict({"name": "advance"}, **state)]}
+    ]}
+
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": True},
+) == []
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "the sequence has run to its end; reset restarts it"}),
+    {"sequencer:39": False},
+) == []
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "not now"}),
+    {"sequencer:39": True},
+)
+assert any("advance" in f and "expected True" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "expected False" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "named refusal" in f for f in failures), failures
+
 print("registry, receipt, and event tamper cases report named mismatches")
 "#,
         )
@@ -837,4 +1127,52 @@ print("registry, receipt, and event tamper cases report named mismatches")
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The release contract's named-diagnostic vocabulary must resolve
+/// every `<leg>-unchecked` self-check diagnostic `ci/check.sh` emits —
+/// an operator or tool reading a self-check failure resolves the name
+/// against the declared contract, so an emitted name the vocabulary
+/// does not declare is an unnamed diagnostic by another name. An
+/// emitted `<stem>-unchecked` is covered when the contract declares
+/// the name itself, or when the declared `<leg>-unchecked` convention
+/// covers it — the convention entry present and the leg's own
+/// `<stem>` or `<stem>-failed` diagnostic declared.
+#[test]
+fn the_contract_declares_every_emitted_unchecked_diagnostic() {
+    let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
+    let contract = std::fs::read_to_string(root().join("docs/release-contract.md")).unwrap();
+    let declared = |name: &str| contract.contains(&format!("`{name}`"));
+    // The emitted set: every `fail "<name>-unchecked:` the script can
+    // report — the first token of a fail message is its diagnostic.
+    let mut emitted: Vec<String> = Vec::new();
+    for line in check.lines() {
+        let mut rest = line;
+        while let Some(start) = rest.find("fail \"") {
+            rest = &rest[start + "fail \"".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.ends_with("-unchecked") && !emitted.contains(&name) {
+                emitted.push(name);
+            }
+        }
+    }
+    assert!(
+        !emitted.is_empty(),
+        "ci/check.sh emits no -unchecked self-check diagnostics"
+    );
+    // The convention entry itself must be declared for it to cover a
+    // name the vocabulary does not enumerate verbatim.
+    let convention = declared("<leg>-unchecked");
+    for name in &emitted {
+        let stem = name.strip_suffix("-unchecked").unwrap();
+        assert!(
+            declared(name)
+                || (convention && (declared(stem) || declared(&format!("{stem}-failed")))),
+            "the contract's named-diagnostic vocabulary covers neither \
+             the emitted {name} nor its leg"
+        );
+    }
 }
