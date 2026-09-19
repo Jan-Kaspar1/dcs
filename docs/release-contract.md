@@ -273,7 +273,14 @@ controller converging to `tracking` through `GET /role`, scans driven
 through `POST /scan` keeping the peers' images identical, a receipted
 `demote`/`promote` switching the roles, and the run continuing
 bumplessly with the adopted receipts and the durable journal files'
-transition records intact — the `consumers` stage, which replays that driven run
+transition records intact — the stage's negotiation leg then launching
+a third released standby on a foreign-fingerprint model document and
+asserting the deployed pair degrades honestly: the peer reporting the
+named non-converged `degraded` state through `GET /role`, `POST
+/promote` answering `409 not_converged` carrying that state, the
+active's writes, receipts, and journal undisturbed throughout, and a
+control peer on the pair's own model converging and promoting
+normally — the `consumers` stage, which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -342,6 +349,8 @@ The checks' failures are named diagnostics:
 | `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `pair-failed` | The redundant-pair leg did not hold: the manifest-declared standby did not converge to `tracking`, the peers' images or adopted receipt logs diverged, the receipted `demote`/`promote` switch did not answer its named reports or refusals, the run did not continue bumplessly, or a declared `--state-file`/`--journal-file` path was not honored — the durable records missing the run's transitions or `seq` order. Reported by the reference plant's `ci/check.sh`. |
 | `pair-nondeterministic` | Two passes of the redundant-pair leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `negotiation-failed` | The checkpoint-negotiation leg did not hold: the standby launched on a foreign-fingerprint model document did not report the named non-converged `degraded` state through `GET /role` for the observation window, `POST /promote` against it did not answer `409 not_converged` carrying that state, the field owner's receipts or journal showed disturbance from the refused attempt, the foreign peer's teardown left the declared pair diverged, or the control peer on the pair's own model did not converge and promote — the refusal a mismatched deployment must answer honestly. Reported by the reference plant's `ci/check.sh`, with the leg's evidence lines on stderr. |
+| `negotiation-nondeterministic` | Two passes of the checkpoint-negotiation leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |

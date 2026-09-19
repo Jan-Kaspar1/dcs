@@ -85,7 +85,24 @@
 #                switches the roles, and the run continues bumplessly
 #                with the adopted receipts and the durable journal
 #                files' transition records intact; two passes produce
-#                identical digests (pair-failed, pair-nondeterministic)
+#                identical digests (pair-failed, pair-nondeterministic).
+#                The stage's negotiation leg (ci/negotiation.py) then
+#                proves the deployed pair degrades honestly on the
+#                misconfiguration a customer writing their own
+#                manifests can produce: a third released
+#                dcs-controller launched --standby <active> on a
+#                foreign document — the emitted model doctored inside
+#                MODEL_VERSION to a fingerprint the pair does not
+#                serve, without --revised — reports the named
+#                non-converged negotiation state through GET /role for
+#                the observation window, POST /promote against it
+#                answers the named refusal, and the active's field
+#                writes, receipts, and journal stay undisturbed; the
+#                foreign peer tears down before later legs and a
+#                control peer on the pair's own model converges and
+#                promotes normally; two passes produce identical
+#                digests (negotiation-failed,
+#                negotiation-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -665,13 +682,62 @@ fi
     || fail "pair-unchecked: the broken-peer-flag case did not report its named diagnostic: $out"
 echo "  broken-peer-flag: reported, pair-failed"
 
+# The negotiation leg: the checkpoint-negotiation refusal a
+# misconfigured deployment earns — the consumer-side half of
+# WW-LCM-001's named rejection of incompatible state. A third released
+# controller launches --standby at the pair's field owner on a
+# foreign-fingerprint document — the emitted model doctored inside
+# MODEL_VERSION, launched without --revised, exactly the manifest
+# mistake a customer writing their own manifests can produce. The peer
+# must report standby plus the named degraded negotiation state
+# through GET /role for the whole observation window — the pulled
+# checkpoint's fingerprint named against its own — while the declared
+# pair's images stay identical and the field owner's tick advances;
+# POST /promote against it must answer the named refusal — 409
+# not_converged carrying the degraded state, never a silent or wrong
+# verdict — leaving the peer's reported state untouched. The active
+# stays undisturbed throughout: the receipt log identical to the
+# pre-attempt baseline and the journal's window additions carrying no
+# role, fencing, divergence, restart, or command records. The foreign
+# peer tears down before the declared pair's convergence is re-proven,
+# and the control leg — the same third controller on the pair's own
+# model — converges to tracking and promotes normally, proving the
+# refusal names the negotiation failure rather than a rig defect. Two
+# passes must produce identical digests.
+run_negotiation() {
+    python3 ci/negotiation.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_negotiation)" \
+    || fail "negotiation-failed: the checkpoint-negotiation leg did not hold — its evidence lines are above"
+SECOND="$(run_negotiation)" \
+    || fail "negotiation-failed: the checkpoint-negotiation leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "negotiation-nondeterministic: two negotiation-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: requiring convergence on the foreign-fingerprint
+# peer must surface the named diagnostic — the leg reporting the
+# degraded negotiation state it actually saw, never a silent pass.
+if out="$(run_negotiation --tamper expect-tracking 2>&1)"; then
+    fail "negotiation-unchecked: an expect-tracking pass succeeded — the leg never noticed the wrong expectation"
+fi
+[[ "$out" == *"never reported tracking"* && "$out" == *"degraded"* ]] \
+    || fail "negotiation-unchecked: the expect-tracking case did not report the degraded negotiation state it saw: $out"
+echo "  expect-tracking: reported, negotiation-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/pair.py \
-        ci/restart.py ci/schema_conformance.py ci/simulate.py README.md; do
+for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/negotiation.py \
+        ci/pair.py ci/restart.py ci/schema_conformance.py ci/simulate.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

@@ -29,7 +29,13 @@
 //! `POST /scan` keeping the peers identical, a receipted
 //! `demote`/`promote` switching the roles, and the run continuing
 //! bumplessly with the adopted receipts and the durable journal
-//! files' transition records intact —
+//! files' transition records intact — the stage's negotiation leg
+//! then launching a third released standby on a foreign-fingerprint
+//! model document: the peer reporting the named non-converged
+//! `degraded` state through `GET /role`, `POST /promote` answering
+//! `409 not_converged`, the active undisturbed throughout, and a
+//! control peer on the pair's own model converging and promoting
+//! normally —
 //! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
@@ -52,8 +58,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`, and the
-//! `surface-mismatch` paths
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `negotiation-failed`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -379,6 +385,29 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("broken-peer-flag: reported, pair-failed"),
         "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
+    // The negotiation leg ran and held: the foreign-model standby
+    // reported the named degraded negotiation state naming both
+    // fingerprints, its promote drew the named refusal, the control
+    // peer on the pair's own model settled active, and the
+    // expect-tracking case reported the degraded state it saw.
+    let negotiation_line = stdout
+        .lines()
+        .find(|line| line.contains("negotiation-digest"))
+        .unwrap_or_else(|| panic!("the negotiation leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "degraded",
+        "promote refused not_converged",
+        "settled active",
+    ] {
+        assert!(
+            negotiation_line.contains(phrase),
+            "the negotiation digest names no '{phrase}' evidence: {negotiation_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-tracking: reported, negotiation-failed"),
+        "the negotiation leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -581,6 +610,59 @@ fn a_broken_peer_flag_reports_pair_failed() {
         String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
         "expected the lost-convergence evidence, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Requiring convergence on the negotiation leg's foreign-model
+/// standby is the `negotiation-failed` evidence — exercised against a
+/// copied tree at script level with the locally built tooling, so the
+/// remote stand-in is not needed. The driver's `expect-tracking`
+/// tamper flips the observation window's assertion to require
+/// `tracking`; the leg must refuse the pass naming the degraded
+/// negotiation state the peer actually reported — never a silently
+/// accepted run.
+#[test]
+fn a_wrong_negotiation_expectation_reports_the_degraded_state() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-negotiation-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/negotiation.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-tracking",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the checkpoint-negotiation leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a wrong convergence expectation passed the negotiation leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("never reported tracking") && stderr.contains("degraded"),
+        "expected the degraded negotiation report the peer served, got:\n{stderr}"
     );
 }
 

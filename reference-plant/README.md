@@ -40,6 +40,12 @@ ci/restart.py          the restart-recovery leg — the driven
 ci/pair.py             the redundant-pair leg — the manifest-declared
                        standby pair run, switched, and checked against
                        its persisted state and journal files
+ci/negotiation.py      the checkpoint-negotiation leg — a third
+                       released controller launched --standby at the
+                       pair's active on a foreign-fingerprint model
+                       document, asserting the named non-converged
+                       state, the refused promote, and the
+                       undisturbed active
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -223,6 +229,27 @@ behavioral exercise, not just its static agreement. A violated
 contract fails `pair-failed`; two passes must produce the identical
 `pair-digest`, a divergence failing `pair-nondeterministic`.
 
+The stage's negotiation leg then proves the deployed pair degrades
+honestly on the misconfiguration writing your own manifests can
+produce: `ci/negotiation.py` launches a third released
+`dcs-controller` as `--standby <active>` on a foreign document — the
+emitted model doctored inside `MODEL_VERSION` to a fingerprint the
+running pair does not serve, without `--revised` — and drives scans
+through `POST /scan`. For the whole observation window the peer must
+report `standby` plus the named `degraded` negotiation state — the
+pulled checkpoint's model fingerprint named against its own —
+`POST /promote` against it must answer the named refusal, `409
+not_converged` carrying that state rather than a silent or wrong
+verdict, and the field owner's writes, receipt log, and journal must
+stay undisturbed: the refusal is the honest answer to a mismatched
+deployment, never a silent adoption or a disturbed pair. The foreign
+peer tears down before the later legs run, and a control peer — the
+same third controller on the pair's own model — converges and promotes
+normally, so the refusal names the negotiation failure rather than a
+rig defect. A violated contract fails `negotiation-failed`; two
+passes must produce the identical `negotiation-digest`, a divergence
+failing `negotiation-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -391,6 +418,10 @@ two restart-leg passes diverging is `restart-resume-nondeterministic`;
 a declared pair failing to converge, switch, or keep its journaled
 record is `pair-failed`; two pair-leg passes diverging is
 `pair-nondeterministic`;
+a foreign-model standby failing to report its named negotiation
+state, a promote against it answering anything but the named refusal,
+or the attempt disturbing the active is `negotiation-failed`; two
+negotiation-leg passes diverging is `negotiation-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
