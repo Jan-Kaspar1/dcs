@@ -62,7 +62,13 @@
 //! it at the run's own tick, carrying the offset every later checkpoint
 //! lands under, and the boundary queues one [`SourceRestart`] for the
 //! journal rather than silently rewinding scans the run already ran
-//! and recorded.
+//! and recorded. The carried offset is re-evaluated on each apply
+//! against the run's live lead over the stream — it covers at most the
+//! gap that remains and clears when the stream recovers to the run's
+//! tick — so a tracking apply can hold or realign the run's clock but
+//! never land it ahead of both clocks, the bound that keeps two
+//! mutually tracking peers' offsets from compounding into each other's
+//! served ticks.
 //!
 //! The field-ownership claim installed by
 //! [`with_field_claim`](Peer::with_field_claim) runs at every transition
@@ -140,7 +146,10 @@ pub struct Peer<'d> {
     /// run's generation; a regressed stream — the source restarted
     /// cold or was replaced — resets it so the apply lands at the
     /// run's current tick rather than rewinding scans the run already
-    /// ran and journaled.
+    /// ran and journaled. Re-evaluated against the run's live lead on
+    /// every apply — see [`stream_offset`](Self::stream_offset) — so a
+    /// recovering tracked stream shrinks it to the gap that remains
+    /// and clears it at the run's own tick.
     tick_offset: u64,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
@@ -850,7 +859,11 @@ impl<'d> Peer<'d> {
     /// means. A checkpoint on the tracked line itself — a repeat or a
     /// post-miss catch-up, which may still lag the run's tick — keeps
     /// the standing offset: that realignment is the line's own, not a
-    /// new generation.
+    /// new generation. Kept, but re-evaluated — the offset covers at
+    /// most the run's live lead over the stream
+    /// ([`stream_offset`](Self::stream_offset)), so an apply can hold
+    /// the run's tick or realign it backward but never land it ahead
+    /// of both clocks.
     ///
     /// A field-owning instance refuses with [`ApplyError::OwnsField`]: a
     /// checkpoint landing on the active would clobber the run it is
@@ -1018,6 +1031,19 @@ impl<'d> Peer<'d> {
     /// same-generation pull keeps the standing offset, and a first
     /// alignment at or above the run's tick lands at the checkpoint's
     /// own.
+    ///
+    /// The standing offset is re-evaluated against the run's live lead
+    /// on every same-generation apply rather than carried verbatim: it
+    /// exists to keep the run's clock monotone across the restart that
+    /// seeded it, so it may cover at most the gap that remains. A
+    /// tracked stream still below the run's tick lands the apply at
+    /// the run's tick — never ahead of it — and one that has recovered
+    /// to or past the run's tick clears the offset entirely, so the
+    /// run's clock rejoins the stream's domain. A stale offset can
+    /// therefore realign the run backward onto the line or hold it in
+    /// place, but it can never land the apply ahead of both clocks —
+    /// the bound that keeps two mutually tracking peers' seeded
+    /// offsets from feeding back into each other's served ticks.
     fn stream_offset(&self, checkpoint: &Checkpoint) -> (u64, bool) {
         let run = self.executor.tick();
         let regressed = match self.aligned {
@@ -1029,7 +1055,11 @@ impl<'d> Peer<'d> {
         } else if self.aligned.is_none() {
             (0, false)
         } else {
-            (self.tick_offset, false)
+            (
+                self.tick_offset
+                    .min(run.0.saturating_sub(checkpoint.tick.0)),
+                false,
+            )
         }
     }
 
@@ -3416,14 +3446,17 @@ mod tests {
             }]
         );
 
-        // The new generation's stream lands at tick + offset — the run
-        // stays monotone while tracking the restarted source upward.
+        // The new generation's stream lands at tick + offset — but the
+        // offset covers only the run's live lead over the stream: the
+        // apply holds the run's clock in place rather than injecting
+        // the stream's delta, and the stored offset shrinks to the gap
+        // that remains.
         restarted.run(1);
         peer.apply(&restarted.checkpoint()).unwrap();
-        assert_eq!(peer.tick(), Tick(10));
+        assert_eq!(peer.tick(), Tick(9));
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
         peer.scan();
-        assert_eq!(peer.tick(), Tick(11));
+        assert_eq!(peer.tick(), Tick(10));
         assert!(peer.take_source_restarts().is_empty());
 
         // A second cold start regresses the stream again: another
@@ -3432,15 +3465,28 @@ mod tests {
         let mut again = executor(&again_driver);
         again.run(1);
         peer.apply(&again.checkpoint()).unwrap();
-        assert_eq!(peer.tick(), Tick(11));
+        assert_eq!(peer.tick(), Tick(10));
         assert_eq!(
             peer.take_source_restarts(),
             vec![SourceRestart {
-                tick: Tick(11),
+                tick: Tick(10),
                 was_aligned: Some(Tick(2)),
                 resumed_at: Tick(1),
             }]
         );
+
+        // Once the tracked stream recovers to the run's tick the
+        // seeded offset clears entirely: the apply lands at the
+        // stream's own tick — no residual lead — and tracking
+        // continues in the stream's domain from there.
+        again.run(11);
+        peer.apply(&again.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(12));
+        assert_eq!(peer.aligned_tick(), Some(Tick(12)));
+        again.run(1);
+        peer.apply(&again.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(13));
+        assert!(peer.take_source_restarts().is_empty());
     }
 
     /// The demoted-peer half of the finding — the driven-failover
@@ -3514,6 +3560,78 @@ mod tests {
         assert_eq!(peer.tick(), Tick(5));
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));
         assert!(peer.take_source_restarts().is_empty());
+    }
+
+    /// QA finding `mutual-tracking-regressed-offset-ratchets-run-tick`:
+    /// under mutual tracking — two standby peers applying each other's
+    /// checkpoints, the transient every demote creates — a regressed
+    /// apply that seeds a nonzero `tick_offset` must never feed back:
+    /// each apply lands the run at the tracked tick or holds it at its
+    /// own, never ahead of both, so alternating applies keep both run
+    /// ticks bounded by the scan count instead of compounding each
+    /// peer's served tick into the other's.
+    #[test]
+    fn a_seeded_offset_cannot_ratchet_mutually_tracking_peers() {
+        let driver_a = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate_a = WriteGate::closed(&driver_a);
+        let mut a = Peer::standby(executor(&gate_a), Some(&gate_a));
+        let driver_b = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate_b = WriteGate::closed(&driver_b);
+        let mut b = Peer::standby(executor(&gate_b), Some(&gate_b));
+
+        // Mutual tracking at cadence: one scan and one apply of the
+        // peer's checkpoint per cycle on each side — the dual-standby
+        // shape a demote creates while the standing standby still
+        // tracks. Both run ticks stay on the shared line.
+        for _ in 0..5 {
+            a.scan();
+            b.scan();
+            a.apply(&b.checkpoint()).unwrap();
+            b.apply(&a.checkpoint()).unwrap();
+        }
+        assert_eq!(a.tick(), b.tick());
+
+        // A regressed apply on each peer — the resumed pull landing a
+        // source tick below the alignment — seeds each generation
+        // offset; both runs hold their own ticks rather than rewinding.
+        let cold_driver_a = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut cold_a = executor(&cold_driver_a);
+        cold_a.run(1);
+        a.apply(&cold_a.checkpoint()).unwrap();
+        assert_eq!(a.take_source_restarts().len(), 1);
+        let cold_driver_b = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut cold_b = executor(&cold_driver_b);
+        cold_b.run(1);
+        b.apply(&cold_b.checkpoint()).unwrap();
+        assert_eq!(b.take_source_restarts().len(), 1);
+
+        // The mutual cycle resumes. Without the offset's re-evaluation
+        // each apply lands at the peer's served tick plus the standing
+        // offset and serves the sum back — the positive-feedback
+        // ratchet the finding measured at ~1e3 ticks/s against a ~10/s
+        // cadence. Bounded: each peer's run tick stays within the
+        // pair's maximum plus the scans that actually ran.
+        let start = a.tick().0.max(b.tick().0);
+        const CYCLES: u64 = 50;
+        for _ in 0..CYCLES {
+            a.scan();
+            b.scan();
+            a.apply(&b.checkpoint()).unwrap();
+            b.apply(&a.checkpoint()).unwrap();
+        }
+        assert!(
+            a.tick().0 <= start + CYCLES && b.tick().0 <= start + CYCLES,
+            "run ticks must stay bounded by the scan count, not compound: a={} b={} bound={}",
+            a.tick().0,
+            b.tick().0,
+            start + CYCLES
+        );
+        assert!(
+            (a.tick().0 as i64 - b.tick().0 as i64).abs() <= 1,
+            "mutual peers track within scan cadence of each other: a={} b={}",
+            a.tick().0,
+            b.tick().0
+        );
     }
 
     /// QA finding `demote-boundary-pending-command-lost-or-phantom-applied`,
