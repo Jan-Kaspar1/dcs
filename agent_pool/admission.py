@@ -37,11 +37,20 @@ def classify(receipt, text):
 
     Returns (category, retry_after_seconds). Provider signals in the
     transcript tail are honored only for failed invocations — a clean
-    exit is 'success' even if its output merely mentions rate limits,
-    and a timeout receipt wins over any transcript wording.
+    exit is 'success' even if its output merely mentions rate limits.
+    A timeout receipt wins over transcript wording, except when the tail
+    carries a provider 'stream error' event — opencode freezes after a
+    rate-limited stream and the runner's timeout then masks the real
+    cause, so that specific event still scopes the cooldown.
     """
     receipt = receipt or {}
     if receipt.get('status') == 'timeout':
+        tail = (text or '')[-16000:].lower()
+        if 'stream error' in tail:
+            if any(word in tail for word in RATE_WORDS):
+                return 'rate', None
+            if any(word in tail for word in ENDPOINT_WORDS):
+                return 'endpoint', None
         return 'timeout', None
     code = receipt.get('returncode', receipt.get('exit_code', -1))
     if code == 0:
