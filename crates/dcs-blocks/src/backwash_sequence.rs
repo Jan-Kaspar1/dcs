@@ -597,7 +597,9 @@ impl BackwashSequence {
                 params::invalid(
                     &name,
                     &format!("step_{index}_advance"),
-                    format!("expected 0 (timed), 1 (measured), or 2 (first of), found {advance_code}"),
+                    format!(
+                        "expected 0 (timed), 1 (measured), or 2 (first of), found {advance_code}"
+                    ),
                 )
             })?;
             // The measured-mode entries are required when `advance`
@@ -609,7 +611,8 @@ impl BackwashSequence {
                     parameter: format!("step_{index}_bound"),
                 });
             }
-            let meas = match params::optional_u64(&name, parameters, &format!("step_{index}_meas"))? {
+            let meas = match params::optional_u64(&name, parameters, &format!("step_{index}_meas"))?
+            {
                 Some(selection) if selection >= 1 && selection as usize <= measurements => {
                     Some(selection as usize - 1)
                 }
@@ -617,7 +620,9 @@ impl BackwashSequence {
                     return Err(params::invalid(
                         &name,
                         &format!("step_{index}_meas"),
-                        format!("must select a bound meas input in 1..={measurements}, found {selection}"),
+                        format!(
+                            "must select a bound meas input in 1..={measurements}, found {selection}"
+                        ),
                     ));
                 }
                 None if advance != AdvanceMode::Timed => {
@@ -748,7 +753,10 @@ impl Component for BackwashSequence {
     fn io_requirements(&self) -> Vec<IoRequirement> {
         let mut requirements =
             Vec::with_capacity(7 + self.inputs.meas.len() + 9 + self.steps.len());
-        requirements.push(IoRequirement::input::<bool>("trig_time", self.inputs.trig_time));
+        requirements.push(IoRequirement::input::<bool>(
+            "trig_time",
+            self.inputs.trig_time,
+        ));
         requirements.push(IoRequirement::input::<bool>(
             "trig_headloss",
             self.inputs.trig_headloss,
@@ -765,14 +773,29 @@ impl Component for BackwashSequence {
         requirements.push(IoRequirement::input::<bool>("abort", self.inputs.abort));
         requirements.push(IoRequirement::input::<bool>("fault", self.inputs.fault));
         for (index, meas) in self.inputs.meas.iter().enumerate() {
-            requirements.push(IoRequirement::input::<f64>(format!("meas_{index + 1}"), *meas));
+            requirements.push(IoRequirement::input::<f64>(
+                format!("meas_{}", index + 1),
+                *meas,
+            ));
         }
-        requirements.push(IoRequirement::output::<bool>("request", self.outputs.request));
+        requirements.push(IoRequirement::output::<bool>(
+            "request",
+            self.outputs.request,
+        ));
         requirements.push(IoRequirement::output::<bool>("active", self.outputs.active));
-        requirements.push(IoRequirement::output::<bool>("pending", self.outputs.pending));
+        requirements.push(IoRequirement::output::<bool>(
+            "pending",
+            self.outputs.pending,
+        ));
         requirements.push(IoRequirement::output::<bool>("done", self.outputs.done));
-        requirements.push(IoRequirement::output::<bool>("aborted", self.outputs.aborted));
-        requirements.push(IoRequirement::output::<bool>("overrun", self.outputs.overrun));
+        requirements.push(IoRequirement::output::<bool>(
+            "aborted",
+            self.outputs.aborted,
+        ));
+        requirements.push(IoRequirement::output::<bool>(
+            "overrun",
+            self.outputs.overrun,
+        ));
         requirements.push(IoRequirement::output::<i64>(
             "trigger_source",
             self.outputs.trigger_source,
@@ -781,7 +804,7 @@ impl Component for BackwashSequence {
         requirements.push(IoRequirement::output::<f64>("out", self.outputs.out));
         for (index, phase) in self.outputs.phases.iter().enumerate() {
             requirements.push(IoRequirement::output::<bool>(
-                format!("phase_{index + 1}"),
+                format!("phase_{}", index + 1),
                 *phase,
             ));
         }
@@ -898,13 +921,11 @@ impl Component for BackwashSequence {
             self.elapsed += 1;
             let bound = Self::tick_bound(&reported_step);
             let timed_out = self.elapsed >= bound;
-            overran =
-                reported_step.advance == AdvanceMode::Measured && timed_out && !satisfied;
+            overran = reported_step.advance == AdvanceMode::Measured && timed_out && !satisfied;
             let advance = match reported_step.advance {
                 AdvanceMode::Timed => timed_out,
                 AdvanceMode::Measured => {
-                    satisfied
-                        || (timed_out && reported_step.on_overrun == OverrunPolicy::Advance)
+                    satisfied || (timed_out && reported_step.on_overrun == OverrunPolicy::Advance)
                 }
                 AdvanceMode::FirstOf => satisfied || timed_out,
             };
@@ -1024,7 +1045,8 @@ impl Component for BackwashSequence {
             describe::parameter("on_fault_step", ValueKind::Int, Some(step_range)),
             describe::parameter("on_fault_policy", ValueKind::Int, Some(BINARY_CODE_RANGE)),
         ];
-        for index in 1..=count {
+        for (index, entry) in self.steps.iter().enumerate() {
+            let index = index + 1;
             parameters.push(describe::parameter(
                 &format!("step_{index}_ticks"),
                 ValueKind::Int,
@@ -1040,16 +1062,24 @@ impl Component for BackwashSequence {
                 ValueKind::Int,
                 Some(ADVANCE_RANGE),
             ));
-            parameters.push(describe::parameter(
-                &format!("step_{index}_bound"),
-                ValueKind::Float,
-                Some(describe::FINITE_F64),
-            ));
-            parameters.push(describe::parameter(
-                &format!("step_{index}_meas"),
-                ValueKind::Int,
-                Some(meas_range),
-            ));
+            // The conditional measured entries declare only where the
+            // step carries them — the same condition
+            // `report_parameters` reports under, so the faceplate and
+            // the drift guards read one vocabulary.
+            if entry.bound.is_some() {
+                parameters.push(describe::parameter(
+                    &format!("step_{index}_bound"),
+                    ValueKind::Float,
+                    Some(describe::FINITE_F64),
+                ));
+            }
+            if entry.meas.is_some() {
+                parameters.push(describe::parameter(
+                    &format!("step_{index}_meas"),
+                    ValueKind::Int,
+                    Some(meas_range),
+                ));
+            }
             parameters.push(describe::parameter(
                 &format!("step_{index}_on_overrun"),
                 ValueKind::Int,
@@ -1212,7 +1242,10 @@ impl Component for BackwashSequence {
         );
         for (index, entry) in self.steps.iter().enumerate() {
             let index = index + 1;
-            parameters.insert(format!("step_{index}_ticks"), Value::Int(entry.ticks as i64));
+            parameters.insert(
+                format!("step_{index}_ticks"),
+                Value::Int(entry.ticks as i64),
+            );
             parameters.insert(format!("step_{index}_out"), Value::Float(entry.value));
             parameters.insert(
                 format!("step_{index}_advance"),
@@ -1357,10 +1390,10 @@ impl Component for BackwashSequence {
             let bound_field = format!("step_{index}_bound");
             let bound = match (state.get(&bound_field), self.steps[index - 1].bound) {
                 (Some(value), _) => {
-                    let bound = f64::try_from(*value).map_err(|_| StateError::InvalidValue {
+                    let bound = f64::try_from(value).map_err(|_| StateError::InvalidValue {
                         element: self.name.clone(),
                         field: bound_field.clone(),
-                        value: *value,
+                        value,
                     })?;
                     if !bound.is_finite() {
                         return Err(invalid(&bound_field, Value::Float(bound)));
@@ -1378,10 +1411,10 @@ impl Component for BackwashSequence {
             let meas_field = format!("step_{index}_meas");
             let meas = match (state.get(&meas_field), self.steps[index - 1].meas) {
                 (Some(value), constructed) => {
-                    let selection = i64::try_from(*value).map_err(|_| StateError::InvalidValue {
+                    let selection = i64::try_from(value).map_err(|_| StateError::InvalidValue {
                         element: self.name.clone(),
                         field: meas_field.clone(),
-                        value: *value,
+                        value,
                     })?;
                     if !(1..=self.inputs.meas.len() as i64).contains(&selection) {
                         return Err(invalid(&meas_field, Value::Int(selection)));
@@ -1506,8 +1539,7 @@ impl Component for BackwashSequence {
 mod tests {
     use super::*;
     use crate::testutil::TestIo;
-    use dcs_core::{Direction, ParameterDescriptor, PortDescriptor, Quality, QualityReason};
-    use std::collections::BTreeMap;
+    use dcs_core::{Direction, Quality, QualityReason};
 
     const TRIG_TIME: PointId = PointId(500);
     const TRIG_HEADLOSS: PointId = PointId(501);
@@ -1543,7 +1575,13 @@ mod tests {
         }
     }
 
-    fn measured(value: f64, meas: usize, bound: f64, ticks: u64, on_overrun: OverrunPolicy) -> BackwashStep {
+    fn measured(
+        value: f64,
+        meas: usize,
+        bound: f64,
+        ticks: u64,
+        on_overrun: OverrunPolicy,
+    ) -> BackwashStep {
         BackwashStep {
             ticks,
             value,
@@ -1657,7 +1695,11 @@ mod tests {
                 Direction::Out,
                 Sample::good(Value::Int(0), Tick::ZERO),
             ),
-            (STEP, Direction::Out, Sample::good(Value::Int(0), Tick::ZERO)),
+            (
+                STEP,
+                Direction::Out,
+                Sample::good(Value::Int(0), Tick::ZERO),
+            ),
             (
                 OUT,
                 Direction::Out,
@@ -1748,7 +1790,15 @@ mod tests {
 
         // The trig_time edge arms the request the same scan; ungranted,
         // the sequence sits on step 1 without banking.
-        drive(&mut block, &io, 1, [true, false, false, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         assert_eq!(int(&io, SOURCE), 1);
         assert!(!boolean(&io, ACTIVE));
@@ -1780,7 +1830,15 @@ mod tests {
     fn grant_falling_mid_step_pauses_the_table() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         assert_eq!(int(&io, STEP), 1);
 
         // The grant drops after one banked scan: the count stands and
@@ -1801,7 +1859,15 @@ mod tests {
     fn measured_step_advances_when_its_input_crosses_the_bound() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 2);
@@ -1828,7 +1894,15 @@ mod tests {
         // scan, well before its two-tick duration.
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         feed(&io, MEAS_1, Value::Float(60.0), 4);
@@ -1844,26 +1918,42 @@ mod tests {
         // A fresh run reaching step 3 with the bound never met takes
         // the tick bound instead — no overrun, `2` is a plain duration.
         let mut block = component();
-        let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
-        drive(&mut block, &io, 2, [false; 4], true, false, false);
-        drive(&mut block, &io, 3, [false; 4], true, false, false);
-        feed(&io, MEAS_1, Value::Float(60.0), 4);
-        drive(&mut block, &io, 4, [false; 4], true, false, false);
+        let fresh = self::io();
+        drive(
+            &mut block,
+            &fresh,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
+        drive(&mut block, &fresh, 2, [false; 4], true, false, false);
+        drive(&mut block, &fresh, 3, [false; 4], true, false, false);
+        feed(&fresh, MEAS_1, Value::Float(60.0), 4);
+        drive(&mut block, &fresh, 4, [false; 4], true, false, false);
         for tick in 5..=6 {
-            drive(&mut block, &io, tick, [false; 4], true, false, false);
-            assert_eq!(int(&io, STEP), 3, "tick={tick}");
-            assert!(!boolean(&io, OVERRUN), "tick={tick}");
+            drive(&mut block, &fresh, tick, [false; 4], true, false, false);
+            assert_eq!(int(&fresh, STEP), 3, "tick={tick}");
+            assert!(!boolean(&fresh, OVERRUN), "tick={tick}");
         }
-        drive(&mut block, &io, 7, [false; 4], true, false, false);
-        assert_eq!(int(&io, STEP), 4);
+        drive(&mut block, &fresh, 7, [false; 4], true, false, false);
+        assert_eq!(int(&fresh, STEP), 4);
     }
 
     #[test]
     fn measured_overrun_hold_stands_past_the_timeout_until_satisfied() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 2);
@@ -1908,7 +1998,15 @@ mod tests {
         let io = io();
 
         // Step 1's single scan completes inside the arming scan.
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 2);
         assert!(!boolean(&io, OVERRUN));
@@ -1928,7 +2026,15 @@ mod tests {
     fn the_table_runs_to_done_and_request_releases_the_grant() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         feed(&io, MEAS_1, Value::Float(60.0), 3);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
@@ -1951,7 +2057,15 @@ mod tests {
 
         // A fresh edge re-arms from step 1 — a trigger still standing
         // through the wash does not: only its new edge counts.
-        drive(&mut block, &io, 8, [false, true, false, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            8,
+            [false, true, false, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         assert!(!boolean(&io, DONE));
         assert_eq!(int(&io, STEP), 1);
@@ -1982,7 +2096,15 @@ mod tests {
         // Simultaneous edges resolve in declaration order — time wins.
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, true, false, true], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, true, false, true],
+            true,
+            false,
+            false,
+        );
         assert_eq!(int(&io, SOURCE), 1);
     }
 
@@ -1999,20 +2121,44 @@ mod tests {
         let io = io();
 
         // An automatic edge latches `pending` instead of requesting.
-        drive(&mut block, &io, 1, [false, false, true, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [false, false, true, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, PENDING));
         assert!(!boolean(&io, REQUEST));
         assert_eq!(int(&io, SOURCE), 0);
 
         // A second automatic edge keeps the first source.
-        drive(&mut block, &io, 2, [true, false, false, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            2,
+            [true, false, false, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, PENDING));
         assert!(!boolean(&io, REQUEST));
 
         // The operator edge releases the latch: the request arms with
         // the captured automatic source — the recorded reason.
         drive(&mut block, &io, 3, [false; 4], false, false, false);
-        drive(&mut block, &io, 4, [false, false, false, true], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            4,
+            [false, false, false, true],
+            true,
+            false,
+            false,
+        );
         assert!(!boolean(&io, PENDING));
         assert!(boolean(&io, REQUEST));
         assert_eq!(int(&io, SOURCE), 3);
@@ -2027,18 +2173,34 @@ mod tests {
             config(AutoStart::Pending, FaultPolicy::Hold),
         )
         .unwrap();
-        let io = io();
-        drive(&mut block, &io, 1, [false, false, false, true], false, false, false);
-        assert!(boolean(&io, REQUEST));
-        assert!(!boolean(&io, PENDING));
-        assert_eq!(int(&io, SOURCE), 4);
+        let fresh = self::io();
+        drive(
+            &mut block,
+            &fresh,
+            1,
+            [false, false, false, true],
+            false,
+            false,
+            false,
+        );
+        assert!(boolean(&fresh, REQUEST));
+        assert!(!boolean(&fresh, PENDING));
+        assert_eq!(int(&fresh, SOURCE), 4);
     }
 
     #[test]
     fn abort_drives_the_declared_step_and_drops_the_request() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 1);
 
@@ -2057,7 +2219,15 @@ mod tests {
         drive(&mut block, &io, 4, [false; 4], false, false, false);
         assert!(boolean(&io, ABORTED));
         assert_eq!(int(&io, STEP), 4);
-        drive(&mut block, &io, 5, [false, false, false, true], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            5,
+            [false, false, false, true],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         assert!(!boolean(&io, ABORTED));
         assert_eq!(int(&io, STEP), 1);
@@ -2068,7 +2238,15 @@ mod tests {
     fn abort_while_queued_ungranted_releases_the_request() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         drive(&mut block, &io, 2, [false; 4], false, true, false);
         assert!(!boolean(&io, REQUEST));
@@ -2080,7 +2258,15 @@ mod tests {
     fn fault_hold_policy_parks_at_the_fault_step_keeping_the_grant() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 2);
@@ -2098,7 +2284,15 @@ mod tests {
         // The table parks at the held step while the fault stands — an
         // operator edge alone does not resume it.
         drive(&mut block, &io, 5, [false; 4], true, false, true);
-        drive(&mut block, &io, 6, [false, false, false, true], true, false, true);
+        drive(
+            &mut block,
+            &io,
+            6,
+            [false, false, false, true],
+            true,
+            false,
+            true,
+        );
         assert_eq!(int(&io, STEP), 4);
         assert!(boolean(&io, REQUEST));
         assert!(!boolean(&io, ACTIVE));
@@ -2107,7 +2301,15 @@ mod tests {
         // table from the held step — step 4's single scan completes the
         // run on the next stepping scan.
         drive(&mut block, &io, 7, [false; 4], true, false, false);
-        drive(&mut block, &io, 8, [false, false, false, true], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            8,
+            [false, false, false, true],
+            true,
+            false,
+            false,
+        );
         assert_eq!(int(&io, STEP), 4);
         drive(&mut block, &io, 9, [false; 4], true, false, false);
         assert!(boolean(&io, DONE));
@@ -2126,7 +2328,15 @@ mod tests {
         )
         .unwrap();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
 
         // A proven fault under policy 1 drives `abort_step`, asserts
@@ -2139,7 +2349,15 @@ mod tests {
 
         // A fresh trigger re-queues the filter — a new run from step 1.
         drive(&mut block, &io, 4, [false; 4], true, false, false);
-        drive(&mut block, &io, 5, [false, true, false, false], false, false, false);
+        drive(
+            &mut block,
+            &io,
+            5,
+            [false, true, false, false],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         assert!(!boolean(&io, ABORTED));
         assert_eq!(int(&io, STEP), 1);
@@ -2166,7 +2384,15 @@ mod tests {
             Quality::Bad(QualityReason::CommunicationFault)
         );
 
-        drive(&mut block, &io, 2, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            2,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         drive(&mut block, &io, 4, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 2);
@@ -2204,18 +2430,20 @@ mod tests {
         assert_eq!(int(&io, STEP), 2);
         assert!(boolean(&io, OVERRUN));
 
-        // A non-Good `grant` holds the table mid-step.
+        // A non-Good `grant` holds the table mid-step even with the
+        // measured bound satisfied — feed it directly rather than
+        // through `drive`, which always presents `grant` Good.
         feed(&io, MEAS_1, Value::Float(60.0), 9);
-        io.feed(
-            GRANT,
-            Sample::new(
-                Value::Bool(true),
-                Quality::Bad(QualityReason::CommunicationFault),
-                Tick(9),
-            ),
-        );
-        drive(&mut block, &io, 9, [false; 4], true, false, false);
-        // `drive` re-feeds `grant` Good — feed the Bad sample after it.
+        for point in [
+            TRIG_TIME,
+            TRIG_HEADLOSS,
+            TRIG_TURBIDITY,
+            TRIG_OPERATOR,
+            ABORT,
+            FAULT,
+        ] {
+            io.feed(point, Sample::good(Value::Bool(false), Tick(9)));
+        }
         io.feed(
             GRANT,
             Sample::new(
@@ -2232,8 +2460,11 @@ mod tests {
             Quality::Bad(QualityReason::CommunicationFault)
         );
 
-        // A recovered grant steps again.
+        // A recovered grant steps again — the satisfied bound advances
+        // on the stepping scan, the next scan reports the successor.
         drive(&mut block, &io, 10, [false; 4], true, false, false);
+        assert_eq!(int(&io, STEP), 2);
+        drive(&mut block, &io, 11, [false; 4], true, false, false);
         assert_eq!(int(&io, STEP), 3);
     }
 
@@ -2245,7 +2476,15 @@ mod tests {
         // Arm on turbidity, step into the measured step, and stand it
         // in overrun — the capture carries the held request, the armed
         // source, the banked count, and the overrun stand.
-        drive(&mut block, &io, 1, [false, false, true, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [false, false, true, false],
+            true,
+            false,
+            false,
+        );
         drive(&mut block, &io, 2, [false; 4], true, false, false);
         drive(&mut block, &io, 3, [false; 4], true, false, false);
         for tick in 4..=7 {
@@ -2284,7 +2523,15 @@ mod tests {
         )
         .unwrap();
         let io = io();
-        drive(&mut pending_block, &io, 1, [false, true, false, false], false, false, false);
+        drive(
+            &mut pending_block,
+            &io,
+            1,
+            [false, true, false, false],
+            false,
+            false,
+            false,
+        );
         let state = pending_block.capture_state();
         assert_eq!(state.get("pending"), Some(Value::Bool(true)));
         assert_eq!(state.get("pending_source"), Some(Value::Int(2)));
@@ -2297,24 +2544,40 @@ mod tests {
         )
         .unwrap();
         standby.restore_state(&state).unwrap();
-        drive(&mut standby, &io, 2, [false, false, false, true], false, false, false);
+        drive(
+            &mut standby,
+            &io,
+            2,
+            [false, false, false, true],
+            false,
+            false,
+            false,
+        );
         assert!(boolean(&io, REQUEST));
         assert_eq!(int(&io, SOURCE), 2);
 
         // The fault-hold stand: parked at `on_fault_step`, request kept.
         let mut block = component();
-        let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
-        drive(&mut block, &io, 2, [false; 4], true, false, true);
+        let fresh = self::io();
+        drive(
+            &mut block,
+            &fresh,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
+        drive(&mut block, &fresh, 2, [false; 4], true, false, true);
         let state = block.capture_state();
         assert_eq!(state.get("fault_hold"), Some(Value::Bool(true)));
         assert_eq!(state.get("step"), Some(Value::Int(4)));
         let mut standby = component();
         standby.restore_state(&state).unwrap();
-        drive(&mut standby, &io, 3, [false; 4], true, false, false);
-        assert_eq!(int(&io, STEP), 4);
-        assert!(boolean(&io, REQUEST));
-        assert!(!boolean(&io, ACTIVE));
+        drive(&mut standby, &fresh, 3, [false; 4], true, false, false);
+        assert_eq!(int(&fresh, STEP), 4);
+        assert!(boolean(&fresh, REQUEST));
+        assert!(!boolean(&fresh, ACTIVE));
     }
 
     #[test]
@@ -2360,7 +2623,7 @@ mod tests {
         ));
         assert!(matches!(
             block.restore_state(&StateMap::new()),
-            Err(StateError::MissingField { ref field, .. }) if field == "step"
+            Err(StateError::MissingField { ref field, .. }) if field == "step_count"
         ));
     }
 
@@ -2458,7 +2721,15 @@ mod tests {
     fn tuning_applies_at_the_scan_boundary() {
         let mut block = component();
         let io = io();
-        drive(&mut block, &io, 1, [true, false, false, false], true, false, false);
+        drive(
+            &mut block,
+            &io,
+            1,
+            [true, false, false, false],
+            true,
+            false,
+            false,
+        );
 
         // The reported step's `out` retune lands on the next scan.
         block
@@ -2534,8 +2805,9 @@ mod tests {
         assert_eq!(port("phase_4").direction, Direction::Out);
 
         // The declared parameter vocabulary mirrors the
-        // `from_parameters` key set: the five scalars plus six entries
-        // per declared step.
+        // `from_parameters` key set: the five scalars plus the
+        // per-step entries — four on the timed steps, six where the
+        // measured modes add `bound`/`meas`.
         let names: Vec<&str> = descriptor
             .parameters
             .iter()
@@ -2551,8 +2823,9 @@ mod tests {
                 "on_fault_policy"
             ]
         );
-        assert_eq!(names.len(), 5 + 4 * 6);
+        assert_eq!(names.len(), 5 + 4 + 6 + 6 + 4);
         assert!(names.contains(&"step_2_bound"));
+        assert!(!names.contains(&"step_1_bound"));
         assert!(names.contains(&"step_4_on_overrun"));
     }
 

@@ -78,7 +78,11 @@
 //! - [`BackwashCoordinator`] — shared-supply backwash arbitration: an
 //!   ordered request queue and an exclusive held grant gated by the
 //!   declared permissives, with a declared queue policy and operator
-//!   reorder.
+//!   reorder;
+//! - [`BackwashSequence`] — the per-filter backwash step contract:
+//!   timed and measured step advance with declared overrun policy, the
+//!   coordinator grant handshake, attributed triggers with an
+//!   auto-start permission, and the declared abort/fault-step paths.
 //!
 //! Components usable with the model-driven registry expose a `KIND`
 //! constant naming the component kind the registry maps onto their
@@ -95,6 +99,7 @@ mod alarm_monitor;
 mod analog_input;
 mod analog_output;
 mod backwash_coordinator;
+mod backwash_sequence;
 mod bool_gate;
 mod bool_latching_alarm;
 mod counter;
@@ -129,6 +134,10 @@ pub use analog_output::{AnalogOutput, RawOutput};
 pub use backwash_coordinator::{
     BackwashCoordinator, BackwashCoordinatorConfig, CoordinatorOutputs, FilterIo, PermissiveInputs,
     QueuePolicy, QueuedState,
+};
+pub use backwash_sequence::{
+    AdvanceMode, AutoStart, BackwashSequence, BackwashSequenceConfig, BackwashSequenceInputs,
+    BackwashSequenceOutputs, BackwashStep, FaultPolicy, OverrunPolicy,
 };
 pub use bool_gate::{BoolGate, GateOperation};
 pub use bool_latching_alarm::BoolLatchingAlarm;
@@ -197,6 +206,7 @@ pub const KINDS: &[&str] = &[
     FlowPacedRatio::KIND,
     DeviationMonitor::KIND,
     BackwashCoordinator::KIND,
+    BackwashSequence::KIND,
 ];
 
 #[cfg(test)]

@@ -17,12 +17,12 @@ use std::collections::BTreeSet;
 
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec,
+    BackwashSequenceSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
+    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
+    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
 use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
 use dcs_core::IoDriver;
@@ -774,6 +774,134 @@ fn backwash_coordinator_rejects_a_missing_declared_parameter() {
     ));
 }
 
+/// The `backwash-sequence` plant: the four triggers, `grant` and
+/// `fault` plus the two `meas_<i>` measured inputs on the device, the
+/// writable internal `trig_operator`/`abort` points decisions 58-59
+/// prescribe, and internal carriers for the handshake, status, and
+/// `phase_<n>` outputs.
+fn backwash_sequence_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let time_raw = plant.channel::<bool>(sim, "trig-time", Direction::In);
+    let headloss_raw = plant.channel::<bool>(sim, "trig-headloss", Direction::In);
+    let turbidity_raw = plant.channel::<bool>(sim, "trig-turbidity", Direction::In);
+    let grant_raw = plant.channel::<bool>(sim, "grant", Direction::In);
+    let fault_raw = plant.channel::<bool>(sim, "fault", Direction::In);
+    let meas_1_raw = plant.channel::<f64>(sim, "meas-1", Direction::In);
+    let meas_2_raw = plant.channel::<f64>(sim, "meas-2", Direction::In);
+
+    let trig_time = plant.field_input::<bool>(PointId(10), time_raw, false);
+    let trig_headloss = plant.field_input::<bool>(PointId(11), headloss_raw, false);
+    let trig_turbidity = plant.field_input::<bool>(PointId(12), turbidity_raw, false);
+    let grant = plant.field_input::<bool>(PointId(13), grant_raw, false);
+    let fault = plant.field_input::<bool>(PointId(14), fault_raw, false);
+    let meas_1 = plant.field_input::<f64>(PointId(15), meas_1_raw, false);
+    let meas_2 = plant.field_input::<f64>(PointId(16), meas_2_raw, false);
+    // The operator start/abort surface — writable internal `In`
+    // points so writes ride the journaled receipted path.
+    let trig_operator = plant.internal_input::<bool>(PointId(17), false, true);
+    let abort = plant.internal_input::<bool>(PointId(18), false, true);
+
+    let sequence = plant.add(BackwashSequenceSpec::new(parameters_map, 2, 3));
+    // `meas`/`phase` borrow `sequence` — bind them before the `Sink`
+    // fields move below.
+    let phases = [sequence.phase(1), sequence.phase(2), sequence.phase(3)];
+    let meas_1_port = sequence.meas(1);
+    let meas_2_port = sequence.meas(2);
+    plant.connect(trig_time, sequence.trig_time);
+    plant.connect(trig_headloss, sequence.trig_headloss);
+    plant.connect(trig_turbidity, sequence.trig_turbidity);
+    plant.connect(trig_operator, sequence.trig_operator);
+    plant.connect(grant, sequence.grant);
+    plant.connect(abort, sequence.abort);
+    plant.connect(fault, sequence.fault);
+    plant.connect(meas_1, meas_1_port);
+    plant.connect(meas_2, meas_2_port);
+    for (index, phase) in [40u64, 41, 42].into_iter().zip(phases) {
+        let carrier = plant.internal_output::<bool>(PointId(index), false);
+        plant.connect(&phase, carrier);
+    }
+    for (index, output) in [
+        sequence.request,
+        sequence.active,
+        sequence.pending,
+        sequence.done,
+        sequence.aborted,
+        sequence.overrun,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let carrier = plant.internal_output::<bool>(PointId(30 + index as u64), false);
+        plant.connect(&output, carrier);
+    }
+    let source = plant.internal_output::<i64>(PointId(36), 0);
+    plant.connect(&sequence.trigger_source, source);
+    let step = plant.internal_output::<i64>(PointId(37), 0);
+    plant.connect(&sequence.step, step);
+    let out = plant.internal_output::<f64>(PointId(38), 0.0);
+    plant.connect(&sequence.out, out);
+    plant
+}
+
+fn backwash_sequence_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("step_count", Value::Int(3)),
+        ("auto_start", Value::Int(0)),
+        ("abort_step", Value::Int(3)),
+        ("on_fault_step", Value::Int(3)),
+        ("on_fault_policy", Value::Int(0)),
+        ("step_1_ticks", Value::Int(2)),
+        ("step_1_out", Value::Float(10.0)),
+        ("step_1_advance", Value::Int(0)),
+        ("step_1_on_overrun", Value::Int(0)),
+        ("step_2_ticks", Value::Int(3)),
+        ("step_2_out", Value::Float(20.0)),
+        ("step_2_advance", Value::Int(1)),
+        ("step_2_bound", Value::Float(50.0)),
+        ("step_2_meas", Value::Int(1)),
+        ("step_2_on_overrun", Value::Int(1)),
+        ("step_3_ticks", Value::Int(3)),
+        ("step_3_out", Value::Float(30.0)),
+        ("step_3_advance", Value::Int(2)),
+        ("step_3_bound", Value::Float(1.0)),
+        ("step_3_meas", Value::Int(2)),
+        ("step_3_on_overrun", Value::Int(0)),
+    ])
+}
+
+#[test]
+fn backwash_sequence_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(backwash_sequence_plant(backwash_sequence_parameters()));
+    assert_eq!(model.components[0].kind, BackwashSequenceSpec::KIND);
+    assert_eq!(
+        model.components[0].ports.len(),
+        7 + 2 + 9 + 3,
+        "the port set covers the scalars, both meas inputs, and every phase"
+    );
+}
+
+#[test]
+fn backwash_sequence_step_table_is_checked_at_assembly() {
+    // `declared_parameters() -> None` like `sequencer` — the
+    // `step_<n>_*` keys are indexed by `step_count` and the per-step
+    // advance mode, so the kind's `from_parameters` is the authority:
+    // a measured step missing `step_2_meas` surfaces as a named
+    // component failure when the emitted document assembles.
+    let mut parameters_map = backwash_sequence_parameters();
+    parameters_map.remove("step_2_meas");
+    let model = backwash_sequence_plant(parameters_map).build().unwrap();
+    let driver = sim_driver(&model).unwrap();
+    let error = assemble(&model, &dcs_controller::registry(), &driver).unwrap_err();
+    match &error {
+        AssemblyError::Component { detail, .. } => assert!(
+            detail.contains("step_2_meas"),
+            "the failure should name the missing entry, found {detail}"
+        ),
+        _ => panic!("expected a component construction failure, found {error:?}"),
+    }
+}
+
 /// The registry-enumeration coverage check: every kind the standard
 /// registry serves has a `dcs-build` spec, and no spec names a kind the
 /// registry does not serve. A kind registered without a spec fails
@@ -813,6 +941,7 @@ fn every_registered_kind_has_a_spec() {
         FlowPacedRatioSpec::KIND,
         DeviationMonitorSpec::KIND,
         BackwashCoordinatorSpec::KIND,
+        BackwashSequenceSpec::KIND,
     ]
     .into_iter()
     .collect();

@@ -4,13 +4,14 @@
 //! `TelemetrySnapshot` serde-roundtrips.
 
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
-    DigitalInput, DigitalOutput, Edge, EdgeTrigger, FilterIo, GateOperation, GroupOutputs,
-    Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
-    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer,
-    Valve,
+    AdvanceMode, AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, AutoStart,
+    BackwashCoordinator, BackwashCoordinatorConfig, BackwashSequence, BackwashSequenceConfig,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BoolGate, BoolLatchingAlarm,
+    CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FaultPolicy,
+    FilterIo, GateOperation, GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter,
+    Motor, OverrideSelect, OverrunPolicy, PermissiveInputs, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RotationPolicy, Scaling,
+    Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer, Valve,
 };
 use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
@@ -351,12 +352,67 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            BackwashSequence::new(
+                "bws",
+                BackwashSequenceInputs {
+                    trig_time: point(&mut specs, 280, Direction::In, ValueKind::Bool),
+                    trig_headloss: point(&mut specs, 281, Direction::In, ValueKind::Bool),
+                    trig_turbidity: point(&mut specs, 282, Direction::In, ValueKind::Bool),
+                    trig_operator: point(&mut specs, 283, Direction::In, ValueKind::Bool),
+                    grant: point(&mut specs, 284, Direction::In, ValueKind::Bool),
+                    abort: point(&mut specs, 285, Direction::In, ValueKind::Bool),
+                    fault: point(&mut specs, 286, Direction::In, ValueKind::Bool),
+                    meas: vec![point(&mut specs, 287, Direction::In, ValueKind::Float)],
+                },
+                BackwashSequenceOutputs {
+                    request: point(&mut specs, 290, Direction::Out, ValueKind::Bool),
+                    active: point(&mut specs, 291, Direction::Out, ValueKind::Bool),
+                    pending: point(&mut specs, 292, Direction::Out, ValueKind::Bool),
+                    done: point(&mut specs, 293, Direction::Out, ValueKind::Bool),
+                    aborted: point(&mut specs, 294, Direction::Out, ValueKind::Bool),
+                    overrun: point(&mut specs, 295, Direction::Out, ValueKind::Bool),
+                    trigger_source: point(&mut specs, 296, Direction::Out, ValueKind::Int),
+                    step: point(&mut specs, 297, Direction::Out, ValueKind::Int),
+                    out: point(&mut specs, 298, Direction::Out, ValueKind::Float),
+                    phases: vec![
+                        point(&mut specs, 300, Direction::Out, ValueKind::Bool),
+                        point(&mut specs, 301, Direction::Out, ValueKind::Bool),
+                    ],
+                },
+                vec![
+                    BackwashStep {
+                        ticks: 2,
+                        value: 10.0,
+                        advance: AdvanceMode::Timed,
+                        bound: None,
+                        meas: None,
+                        on_overrun: OverrunPolicy::Advance,
+                    },
+                    BackwashStep {
+                        ticks: 3,
+                        value: 20.0,
+                        advance: AdvanceMode::Measured,
+                        bound: Some(50.0),
+                        meas: Some(0),
+                        on_overrun: OverrunPolicy::Hold,
+                    },
+                ],
+                BackwashSequenceConfig {
+                    auto_start: AutoStart::Direct,
+                    abort_step: 1,
+                    on_fault_step: 1,
+                    on_fault_policy: FaultPolicy::Hold,
+                },
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 25] = [
+const EXPECTED_KINDS: [&str; 26] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -382,6 +438,7 @@ const EXPECTED_KINDS: [&str; 25] = [
     EdgeTrigger::KIND,
     BoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
+    BackwashSequence::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every

@@ -2489,3 +2489,218 @@ impl Spec for BackwashCoordinatorSpec {
         }
     }
 }
+
+/// Spec for the `backwash-sequence` kind: the per-filter backwash step
+/// contract — timed and measured step advance with the declared overrun
+/// policy, the coordinator grant handshake (`request`/`grant`/`done`/
+/// `aborted`/`active`), the attributed trigger set with the declared
+/// auto-start permission, and the abort/fault-step paths.
+///
+/// The port set is not static: an instance declares
+/// [`meas`](Self::meas) measured inputs and [`steps`](Self::steps)
+/// table steps, and [`ports`](Spec::ports) emits `trig_time`,
+/// `trig_headloss`, `trig_turbidity`, `trig_operator`, `grant`,
+/// `abort`, `fault` (`In`, `Bool`), then `meas_1`…`meas_K` (`In`,
+/// `Float`) — each connected through the instance's
+/// [`meas`](BackwashSequenceInstance::meas) handle — then `request`,
+/// `active`, `pending`, `done`, `aborted`, `overrun` (`Out`, `Bool`),
+/// `trigger_source` (`Out`, `Int`), `step` (`Out`, `Int`), `out`
+/// (`Out`, `Float`), then `phase_1`…`phase_N` (`Out`, `Bool`) — each
+/// connected through [`phase`](BackwashSequenceInstance::phase).
+/// Mirrors the descriptor's `io_requirements` order.
+///
+/// Parameters: the map is indexed by `step_count` — `step_count` plus
+/// `auto_start`, `abort_step`, `on_fault_step`, `on_fault_policy`, and
+/// per step `step_<n>_ticks`, `step_<n>_out`, `step_<n>_advance`, the
+/// measured modes' `step_<n>_bound`/`step_<n>_meas`, and
+/// `step_<n>_on_overrun` — so like `sequencer` the declared set is not
+/// statically enumerable and `declared_parameters` reports `None`;
+/// the kind's `from_parameters` checks the map at assembly.
+pub struct BackwashSequenceSpec {
+    /// The instance's parameter map: `step_count` plus the scalar codes
+    /// and the per-step `step_<n>_*` entries.
+    pub parameters: Parameters,
+    /// How many `meas_<i>` measured inputs the instance binds — the
+    /// bound `step_<n>_meas` selections resolve against `1..=K`.
+    pub meas: usize,
+    /// How many steps the instance's table declares — the
+    /// `phase_<n>` port family's bound, equal to the `step_count`
+    /// parameter.
+    pub steps: usize,
+}
+
+/// Typed port handles for a `backwash-sequence` instance.
+pub struct BackwashSequenceInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `trig_time` port (`In`, `Bool`): the elapsed-run-time trigger.
+    pub trig_time: Sink<bool>,
+    /// `trig_headloss` port (`In`, `Bool`): the terminal-headloss
+    /// trigger.
+    pub trig_headloss: Sink<bool>,
+    /// `trig_turbidity` port (`In`, `Bool`): the effluent-turbidity
+    /// trigger.
+    pub trig_turbidity: Sink<bool>,
+    /// `trig_operator` port (`In`, `Bool`): the operator start — wire
+    /// it to a writable internal `In` point so writes ride the
+    /// journaled receipted path.
+    pub trig_operator: Sink<bool>,
+    /// `grant` port (`In`, `Bool`): the coordinator's exclusive supply
+    /// grant, the run permissive.
+    pub grant: Sink<bool>,
+    /// `abort` port (`In`, `Bool`): the operator abort — a writable
+    /// internal `In` point like `trig_operator`.
+    pub abort: Sink<bool>,
+    /// `fault` port (`In`, `Bool`): the per-filter equipment-fault
+    /// aggregate.
+    pub fault: Sink<bool>,
+    /// `request` port (`Out`, `Bool`): the armed backwash request —
+    /// wire it to the coordinator's `request_i`.
+    pub request: Source<bool>,
+    /// `active` port (`Out`, `Bool`): stepping-under-grant report.
+    pub active: Source<bool>,
+    /// `pending` port (`Out`, `Bool`): the `auto_start = 1`
+    /// armed-but-held latch.
+    pub pending: Source<bool>,
+    /// `done` port (`Out`, `Bool`): the table ran to its end.
+    pub done: Source<bool>,
+    /// `aborted` port (`Out`, `Bool`): an abort path fired.
+    pub aborted: Source<bool>,
+    /// `overrun` port (`Out`, `Bool`): a measured step stands past its
+    /// tick bound.
+    pub overrun: Source<bool>,
+    /// `trigger_source` port (`Out`, `Int`): the held attribution code
+    /// — `0` none, `1` time, `2` headloss, `3` turbidity, `4` operator.
+    pub trigger_source: Source<i64>,
+    /// `step` port (`Out`, `Int`): the reported position, 1-based.
+    pub step: Source<i64>,
+    /// `out` port (`Out`, `Float`): the reported step's
+    /// `step_<n>_out`.
+    pub out: Source<f64>,
+}
+
+impl BackwashSequenceInstance {
+    /// The `index`th measured input (`meas_1`…`meas_K`, where `K` is
+    /// the spec's [`meas`](BackwashSequenceSpec::meas)): an `In`,
+    /// `Float` port — the signals `step_<n>_meas` selects among. An
+    /// `index` outside `1..=K` names a port the instance does not
+    /// declare, and [`build`](crate::PlantBuilder::build) reports the
+    /// connection.
+    pub fn meas(&self, index: usize) -> Sink<f64> {
+        Sink::port(self.id, &format!("meas_{index}"))
+    }
+
+    /// Step `index`'s phase flag (`phase_1`…`phase_N`, where `N` is the
+    /// spec's [`steps`](BackwashSequenceSpec::steps)): an `Out`, `Bool`
+    /// port asserting while `step` reports `index` — the equipment
+    /// commands' composition surface. An `index` outside `1..=N` names
+    /// a port the instance does not declare, and
+    /// [`build`](crate::PlantBuilder::build) reports the connection.
+    pub fn phase(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("phase_{index}"))
+    }
+}
+
+impl BackwashSequenceSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "backwash-sequence";
+
+    /// A spec for an instance binding `meas` measured inputs and
+    /// declaring `steps` table steps, carrying `parameters` as its
+    /// parameter map.
+    ///
+    /// The map must carry `step_count` (`Int`, at least 1, equal to
+    /// `steps`), `auto_start`, `abort_step`, `on_fault_step`,
+    /// `on_fault_policy` (`Int` codes), and per step `step_<n>_ticks`
+    /// (`Int`), `step_<n>_out` (`Float`), `step_<n>_advance` (`Int` in
+    /// `0..=2`), `step_<n>_on_overrun` (`Int` in `0..=1`), plus
+    /// `step_<n>_bound` (`Float`) and `step_<n>_meas` (`Int` in
+    /// `1..=meas`) for the measured modes — checked by the kind's
+    /// `from_parameters` at assembly, not by
+    /// [`build`](crate::PlantBuilder::build).
+    pub fn new(parameters: Parameters, meas: usize, steps: usize) -> Self {
+        Self {
+            parameters,
+            meas,
+            steps,
+        }
+    }
+}
+
+impl Spec for BackwashSequenceSpec {
+    type Instance = BackwashSequenceInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("trig_time", Direction::In, ValueKind::Bool),
+            port("trig_headloss", Direction::In, ValueKind::Bool),
+            port("trig_turbidity", Direction::In, ValueKind::Bool),
+            port("trig_operator", Direction::In, ValueKind::Bool),
+            port("grant", Direction::In, ValueKind::Bool),
+            port("abort", Direction::In, ValueKind::Bool),
+            port("fault", Direction::In, ValueKind::Bool),
+        ];
+        for index in 1..=self.meas {
+            ports.push(port(
+                &format!("meas_{index}"),
+                Direction::In,
+                ValueKind::Float,
+            ));
+        }
+        ports.push(port("request", Direction::Out, ValueKind::Bool));
+        ports.push(port("active", Direction::Out, ValueKind::Bool));
+        ports.push(port("pending", Direction::Out, ValueKind::Bool));
+        ports.push(port("done", Direction::Out, ValueKind::Bool));
+        ports.push(port("aborted", Direction::Out, ValueKind::Bool));
+        ports.push(port("overrun", Direction::Out, ValueKind::Bool));
+        ports.push(port("trigger_source", Direction::Out, ValueKind::Int));
+        ports.push(port("step", Direction::Out, ValueKind::Int));
+        ports.push(port("out", Direction::Out, ValueKind::Float));
+        for index in 1..=self.steps {
+            ports.push(port(
+                &format!("phase_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+        }
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        // The step-table keys are indexed by the instance's
+        // `step_count` and the per-step advance modes: no static set
+        // exists, so the map goes unchecked at `build` (the
+        // `sequencer` treatment).
+        None
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BackwashSequenceInstance {
+            id,
+            trig_time: Sink::port(id, "trig_time"),
+            trig_headloss: Sink::port(id, "trig_headloss"),
+            trig_turbidity: Sink::port(id, "trig_turbidity"),
+            trig_operator: Sink::port(id, "trig_operator"),
+            grant: Sink::port(id, "grant"),
+            abort: Sink::port(id, "abort"),
+            fault: Sink::port(id, "fault"),
+            request: Source::port(id, "request"),
+            active: Source::port(id, "active"),
+            pending: Source::port(id, "pending"),
+            done: Source::port(id, "done"),
+            aborted: Source::port(id, "aborted"),
+            overrun: Source::port(id, "overrun"),
+            trigger_source: Source::port(id, "trigger_source"),
+            step: Source::port(id, "step"),
+            out: Source::port(id, "out"),
+        }
+    }
+}

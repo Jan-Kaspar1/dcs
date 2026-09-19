@@ -18,25 +18,27 @@ use std::collections::BTreeSet;
 
 use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
-    AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator,
-    BackwashCoordinatorConfig, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter,
-    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FilterIo,
-    FlowPacedRatio, FlowPacedRatioConfig, GateOperation, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy,
-    Scaling, Sequencer, SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain,
-    ThresholdOutputs, Timer, Totalizer, Valve,
+    AdvanceMode, AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, AutoStart,
+    BackwashCoordinator, BackwashCoordinatorConfig, BackwashSequence, BackwashSequenceConfig,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BoolGate, BoolLatchingAlarm,
+    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger,
+    FailoverSelect, FaultPolicy, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation,
+    GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect,
+    OverrunPolicy, PermissiveInputs, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
+    QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy, Scaling, Sequencer,
+    SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer,
+    Totalizer, Valve,
 };
 use dcs_build::Spec;
 use dcs_build::specs::{
-    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec, BoolGateSpec,
-    BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec,
-    EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec, InterlockSpec, LatchingAlarmSpec,
-    ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec, PidSpec, PumpGroupSpec,
-    RateLimiterSpec, SequencerSpec, SignalFilterSpec, SrLatchSpec, ThresholdChainSpec, TimerSpec,
-    TotalizerSpec, ValveSpec,
+    AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec,
+    BackwashSequenceSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec,
+    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
+    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
+    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
+    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
 };
-use dcs_core::{ComponentDescriptor, PointId, ValueKind};
+use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
 use dcs_runtime::Component;
 
 /// Asserts `spec` declares the same kind string and ports `descriptor`
@@ -476,6 +478,172 @@ fn specs_match_registered_kinds_descriptors() {
         &BackwashCoordinatorSpec::new(Default::default(), 2, false),
         &coordinator(None).describe(),
     ));
+    // `backwash-sequence`'s parameter set is indexed by `step_count`
+    // and each step's advance mode — like `sequencer`, the spec's
+    // recorded treatment is `declared_parameters() -> None`. The
+    // `meas_i`/`phase_i` port families are instance-dependent — `K`
+    // and `N` are the spec's `meas`/`steps`. The descriptor's
+    // step-table parameters are pinned here, so a `describe` drift
+    // still fails.
+    let sequence = BackwashSequence::new(
+        "bws",
+        BackwashSequenceInputs {
+            trig_time: point(1),
+            trig_headloss: point(2),
+            trig_turbidity: point(3),
+            trig_operator: point(4),
+            grant: point(5),
+            abort: point(6),
+            fault: point(7),
+            meas: vec![point(10), point(11)],
+        },
+        BackwashSequenceOutputs {
+            request: point(20),
+            active: point(21),
+            pending: point(22),
+            done: point(23),
+            aborted: point(24),
+            overrun: point(25),
+            trigger_source: point(26),
+            step: point(27),
+            out: point(28),
+            phases: vec![point(30), point(31), point(32)],
+        },
+        vec![
+            BackwashStep {
+                ticks: 2,
+                value: 10.0,
+                advance: AdvanceMode::Timed,
+                bound: None,
+                meas: None,
+                on_overrun: OverrunPolicy::Advance,
+            },
+            BackwashStep {
+                ticks: 3,
+                value: 20.0,
+                advance: AdvanceMode::Measured,
+                bound: Some(50.0),
+                meas: Some(0),
+                on_overrun: OverrunPolicy::Hold,
+            },
+            BackwashStep {
+                ticks: 1,
+                value: 30.0,
+                advance: AdvanceMode::Timed,
+                bound: None,
+                meas: None,
+                on_overrun: OverrunPolicy::Advance,
+            },
+        ],
+        BackwashSequenceConfig {
+            auto_start: AutoStart::Direct,
+            abort_step: 2,
+            on_fault_step: 2,
+            on_fault_policy: FaultPolicy::Hold,
+        },
+    )
+    .unwrap();
+    let sequence_spec = BackwashSequenceSpec::new(Default::default(), 2, 3);
+    covered.insert(check_interface(&sequence_spec, &sequence.describe()));
+    assert!(
+        sequence_spec.declared_parameters().is_none(),
+        "backwash-sequence's parameter set is not statically enumerable"
+    );
+    let step_range = ParameterRange {
+        min: Value::Int(1),
+        max: Value::Int(3),
+    };
+    let code_range = |max: i64| ParameterRange {
+        min: Value::Int(0),
+        max: Value::Int(max),
+    };
+    let meas_range = ParameterRange {
+        min: Value::Int(1),
+        max: Value::Int(2),
+    };
+    let sequence_parameters: Vec<(String, _, _)> = sequence
+        .describe()
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), parameter.kind, parameter.range))
+        .collect();
+    assert_eq!(
+        sequence_parameters,
+        vec![
+            ("step_count".to_string(), ValueKind::Int, Some(POSITIVE_INT)),
+            (
+                "auto_start".to_string(),
+                ValueKind::Int,
+                Some(code_range(1))
+            ),
+            ("abort_step".to_string(), ValueKind::Int, Some(step_range)),
+            (
+                "on_fault_step".to_string(),
+                ValueKind::Int,
+                Some(step_range)
+            ),
+            (
+                "on_fault_policy".to_string(),
+                ValueKind::Int,
+                Some(code_range(1))
+            ),
+            (
+                "step_1_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            ("step_1_out".to_string(), ValueKind::Float, Some(FINITE_F64)),
+            (
+                "step_1_advance".to_string(),
+                ValueKind::Int,
+                Some(code_range(2))
+            ),
+            (
+                "step_1_on_overrun".to_string(),
+                ValueKind::Int,
+                Some(code_range(1))
+            ),
+            (
+                "step_2_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            ("step_2_out".to_string(), ValueKind::Float, Some(FINITE_F64)),
+            (
+                "step_2_advance".to_string(),
+                ValueKind::Int,
+                Some(code_range(2))
+            ),
+            (
+                "step_2_bound".to_string(),
+                ValueKind::Float,
+                Some(FINITE_F64)
+            ),
+            ("step_2_meas".to_string(), ValueKind::Int, Some(meas_range)),
+            (
+                "step_2_on_overrun".to_string(),
+                ValueKind::Int,
+                Some(code_range(1))
+            ),
+            (
+                "step_3_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            ("step_3_out".to_string(), ValueKind::Float, Some(FINITE_F64)),
+            (
+                "step_3_advance".to_string(),
+                ValueKind::Int,
+                Some(code_range(2))
+            ),
+            (
+                "step_3_on_overrun".to_string(),
+                ValueKind::Int,
+                Some(code_range(1))
+            ),
+        ],
+        "backwash-sequence's indexed parameter vocabulary drifted"
+    );
 
     // The coverage guard: the table must pin exactly the kinds the
     // standard registry serves — the checked-in `dcs_blocks::KINDS`
@@ -614,6 +782,62 @@ fn bool_gate_spec_tracks_input_count() {
         );
         check(
             &BoolGateSpec::new(Default::default(), inputs),
+            &component.describe(),
+        );
+    }
+}
+
+#[test]
+fn backwash_sequence_spec_tracks_meas_and_step_counts() {
+    // The `meas_i` and `phase_i` families are instance-dependent: the
+    // spec's port list must follow the constructed component's.
+    let config = BackwashSequenceConfig {
+        auto_start: AutoStart::Direct,
+        abort_step: 0,
+        on_fault_step: 0,
+        on_fault_policy: FaultPolicy::Hold,
+    };
+    for (meas, steps) in [(1usize, 1usize), (2, 3), (4, 2)] {
+        let table: Vec<BackwashStep> = (0..steps)
+            .map(|n| BackwashStep {
+                ticks: n as u64 + 1,
+                value: 10.0 + n as f64,
+                advance: AdvanceMode::Timed,
+                bound: None,
+                meas: None,
+                on_overrun: OverrunPolicy::Advance,
+            })
+            .collect();
+        let component = BackwashSequence::new(
+            "bws",
+            BackwashSequenceInputs {
+                trig_time: point(1),
+                trig_headloss: point(2),
+                trig_turbidity: point(3),
+                trig_operator: point(4),
+                grant: point(5),
+                abort: point(6),
+                fault: point(7),
+                meas: (0..meas as u64).map(|n| point(10 + n)).collect(),
+            },
+            BackwashSequenceOutputs {
+                request: point(20),
+                active: point(21),
+                pending: point(22),
+                done: point(23),
+                aborted: point(24),
+                overrun: point(25),
+                trigger_source: point(26),
+                step: point(27),
+                out: point(28),
+                phases: (0..steps as u64).map(|n| point(30 + n)).collect(),
+            },
+            table,
+            config,
+        )
+        .unwrap();
+        check_interface(
+            &BackwashSequenceSpec::new(Default::default(), meas, steps),
             &component.describe(),
         );
     }
