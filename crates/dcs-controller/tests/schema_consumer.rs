@@ -166,6 +166,23 @@ const SECOND_EVENT_TICK: u64 = CARRIED_TICK + BATCH_STEP1_TICKS - 1;
 /// The run's final tick.
 const END_TICK: u64 = SECOND_EVENT_TICK;
 
+/// Ticks whose scan settles a command on the field owners while the
+/// tracking peer carries its adopted receipt (issue #689) — the one
+/// tick per admission the tracker's image and queue depth lag the run
+/// before the next pull adopts the settlement: the completing
+/// `advance`, the refused `advance` (queue depth only — a refusal
+/// moves no image), the first `reset`, the held `run` write, the
+/// flood drain, and the post-switch carried `reset` (lagged on the
+/// demoted peer).
+const CARRY_LAG_TICKS: [u64; 6] = [
+    ADVANCE_TICK,
+    REFUSED_TICK,
+    RESET_TICK,
+    RUN_TICK,
+    DRAIN_TICK,
+    CARRIED_TICK,
+];
+
 /// The sample `snapshot`'s image reports for `point`.
 fn image_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
     showcase::sample(snapshot, point).expect("the showcase maps every named point")
@@ -289,6 +306,17 @@ fn observe(field: &RemoteDriver, tick: Tick) -> FieldRow {
 /// the uninterrupted reference scan and step their plants. The three
 /// snapshots must be equal and the field must carry the owner's write.
 /// Returns the field owner's snapshot.
+///
+/// The exception is a tick whose scan settles a command the field
+/// owners apply while the tracking peer carries it
+/// ([`CARRY_LAG_TICKS`], issue #689): a quiesced scan must not mint an
+/// `Applied` the line never ordered, so the tracker's adopted receipt
+/// stays `Accepted` for exactly one tick — its image and queue depth
+/// lag the owners' by the command's effect until the next pull adopts
+/// the applied checkpoint. On those ticks time still marches in
+/// lockstep and the field-owning run still equals the reference; only
+/// the tracker's carried-not-settled lag is excused, and each such
+/// tick names the receipt assertion covering it.
 fn tick(
     quiesced: &MonitorClient,
     owner: &MonitorClient,
@@ -300,10 +328,17 @@ fn tick(
     let owner_image = owner.advance(1).unwrap();
     let alone = reference.advance(1).unwrap();
     let n = owner_image.tick;
-    assert_eq!(
-        tracking, owner_image,
-        "quiesced peer diverged at tick {n:?}"
-    );
+    if CARRY_LAG_TICKS.contains(&n.0) {
+        assert_eq!(
+            tracking.tick, owner_image.tick,
+            "time must march in lockstep at carried-command tick {n:?}"
+        );
+    } else {
+        assert_eq!(
+            tracking, owner_image,
+            "quiesced peer diverged at tick {n:?}"
+        );
+    }
     assert_eq!(
         owner_image, alone,
         "pair diverged from the no-consumer reference at tick {n:?}"
@@ -1268,13 +1303,21 @@ fn run_verification(tag: &str) -> Outcome {
             reason: "the sequence has run to its end; reset restarts it".to_string(),
         },
     };
-    for client in [&active, &standby, &reference] {
+    for client in [&active, &reference] {
         assert_eq!(
             settlements_of(client, &unavailable),
             vec![(REFUSED_TICK, refused.clone())],
             "the declared-unavailable advance settled once, refused by name"
         );
     }
+    // #689: the tracking peer carried the adopted receipt instead of
+    // refusing it in place, so it journals the adopted refusal when
+    // the next pull observes it — one tick later, same named reason.
+    assert_eq!(
+        settlements_of(&standby, &unavailable),
+        vec![(REFUSED_TICK + 1, refused.clone())],
+        "the tracking peer journals the carried refusal on adoption"
+    );
 
     // --- Leg 4: disconnect-reconnect — reset, then the run starts ---
     let reset = invoke("reset", &[]);
