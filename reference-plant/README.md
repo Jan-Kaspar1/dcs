@@ -224,13 +224,17 @@ point-command verbs on every `In` port; every kind-declared command a
 served interface carries — the exercise `sequencer`'s `advance` and
 `reset` — must answer a structured receipt through `POST /command`'s
 `invoke` variant and settle `applied` through the journaled
-`command_settled` record; every kind-emitted event — the sequencer's
-`step_completed` — must reach the consumer-visible record once the run
-drives its declaring component to emission, appearing in `GET
-/journal`'s `event_emitted` entries and the instance-attributed
-`events` of `GET /resources`; the snapshot's `descriptors` must cover
-every composed component; and `GET /journal` must answer the run's
-recorded transitions. A divergence fails `surface-mismatch`.
+`command_settled` record; `GET /resources` must join each
+`kind_declared` command's published availability verdict — `advance`
+reporting `available` mid-table, then `available: false` carrying the
+kind's named refusal once the run completes the table; every
+kind-emitted event — the sequencer's `step_completed` — must reach the
+consumer-visible record once the run drives its declaring component to
+emission, appearing in `GET /journal`'s `event_emitted` entries and
+the instance-attributed `events` of `GET /resources`; the snapshot's
+`descriptors` must cover every composed component; and `GET /journal`
+must answer the run's recorded transitions. A divergence fails
+`surface-mismatch`.
 
 The stage then checks the served `GET /schema` document itself against
 the fetched release-record artifact — `ci/schema_conformance.py` runs
@@ -471,8 +475,11 @@ through `dcs-ctl receipts` and journaled as `command_settled`. The leg
 asserts the read subcommands answer the served contract — `signals`,
 `schema`, `snapshot`, `events`, `resources` — that `resources` reports
 the per-command availability beside the named refusals (the unwritable
-bound point's `not declared writable`, the completed table's
-`command_refused` in the attributed events), that the kind-emitted
+bound point's `not declared writable`, the completed table's `advance`
+reporting `available: false` carrying the kind's named refusal — the
+published verdict joined into the command state — with the refused
+submission's `command_refused` receipt in the attributed events), that
+the kind-emitted
 `step_completed` reaches `dcs-ctl events`, and that the refusal modes
 exit nonzero naming the failure: an undeclared command answers
 `unknown_command`, a malformed `invoke` argument fails its
