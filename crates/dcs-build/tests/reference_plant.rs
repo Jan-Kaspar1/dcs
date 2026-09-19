@@ -942,7 +942,9 @@ print("tamper cases report named mismatches")
 /// the declared one is caught by the earlier emit and fingerprint
 /// stages. A served registry missing a declared component, drifting a
 /// kind, or dropping a declared resource; a declared command answering
-/// no receipt, a refused one, or never settling `applied`; and a
+/// no receipt, a refused one, never settling `applied`, or serving an
+/// availability verdict adrift of the published one (in either
+/// direction, or refused without the kind's named reason); and a
 /// kind-emitted event absent from the journal or the per-instance
 /// resource view each report the named mismatches `ci/check.sh` turns
 /// into `surface-mismatch`.
@@ -1068,6 +1070,50 @@ failures = simulate.resource_event_misses(
 assert any(
     "step_completed" in f and "sequencer:39" in f for f in failures
 ), failures
+
+# A kind-declared command's served availability verdict: the honest
+# states report no mismatches in either direction, an invocable verdict
+# served unavailable (and the reverse) is named, and a refused verdict
+# served without the kind's named reason is named.
+command = {
+    "name": "advance",
+    "request": [{"name": "count", "kind": "int"}],
+    "adapted": "declared",
+    "availability": "kind_declared",
+}
+def resources_with(state):
+    return {"components": [
+        {"name": "sequencer:39", "commands": [dict({"name": "advance"}, **state)]}
+    ]}
+
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": True},
+) == []
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "the sequence has run to its end; reset restarts it"}),
+    {"sequencer:39": False},
+) == []
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "not now"}),
+    {"sequencer:39": True},
+)
+assert any("advance" in f and "expected True" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "expected False" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "named refusal" in f for f in failures), failures
 
 print("registry, receipt, and event tamper cases report named mismatches")
 "#,

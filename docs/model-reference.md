@@ -337,7 +337,14 @@ declared retention (see `journaled` above). `GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
-its live values, command availability, and attributed events.
+its live values, command availability, and attributed events. The
+served availability is live per rule: a `kind_declared` command joins
+the snapshot `command_verdicts` section's published standing verdict —
+`available` while the kind's probe permits invocation, `false` carrying
+the kind's named refusal reason where it refuses — while
+`bound_point_writable` answers live from the point's mark and `always`
+is unconditionally invocable. The verdict is advisory: submissions
+settle through the receipted path either way.
 
 Some kinds are variable-arity: the declared `ports` set fixes the
 instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;

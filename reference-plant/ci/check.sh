@@ -63,7 +63,9 @@
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
 #                component, the kind-declared commands answering
-#                structured receipts through POST /command, and the
+#                structured receipts through POST /command and
+#                reporting their published availability verdicts
+#                through GET /resources in both directions, and the
 #                kind-emitted events reaching the journal and the
 #                per-instance resource view — matches the emitted
 #                model's declaration, in the same deterministic
@@ -224,8 +226,9 @@
 #   DCS_REV      the pinned revision (default: the release-line rev
 #                this repository's manifest records — the v0.2.0
 #                commit whose tooling serves the interface registry,
-#                declared commands, and emitted events the surface
-#                stage proves).
+#                declared commands and their live availability
+#                verdicts, and emitted events the surface stage
+#                proves).
 #   DCS_UPGRADE_REV
 #                the later compatible revision the upgrade stage repins
 #                to (default: $DCS_REV — a same-revision repin, still
@@ -684,7 +687,7 @@ python3 ci/simulate.py \
     --model model/plant.json \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
-    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, emitted events — does not match the emitted model's declared surface"
+    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, their availability verdicts, emitted events — does not match the emitted model's declared surface"
 
 # The served GET /schema document against the fetched record artifact's
 # declared structure — the consumer-side required-keys/field-shape
