@@ -93,9 +93,7 @@ pub(crate) fn resource_view(
             component
                 .verdicts
                 .iter()
-                .map(move |verdict| {
-                    ((component.name.as_str(), verdict.name.as_str()), verdict)
-                })
+                .map(move |verdict| ((component.name.as_str(), verdict.name.as_str()), verdict))
         })
         .collect();
     let components = snapshot
