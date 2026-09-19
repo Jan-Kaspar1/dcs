@@ -190,6 +190,25 @@
 #                the pair's launch roles then restore; two passes
 #                produce identical digests (peer-announce-failed,
 #                peer-announce-nondeterministic)
+#                The stage's command-availability leg,
+#                ci/availability.py on the same declared deployment:
+#                with the pair tracking, the active's GET /resources
+#                command rows audited self-consistent — every
+#                available: false row carrying a named refusal, every
+#                available row none — every served-unavailable
+#                bound-point-writable command submitted through the
+#                active's POST /command settling a named rejection
+#                rather than applied, the declared-bound probes'
+#                receipts naming the same refusal the row served, a
+#                served-available command settling applied into both
+#                peers' adopted receipt log, the emitted model's
+#                kind-declared advance exercised in both directions
+#                where the tooling publishes verdicts — its standing
+#                refusal carried verbatim through the settled
+#                command_refused — and the tracking standby's
+#                /resources reporting identical verdicts throughout;
+#                two passes produce identical digests
+#                (availability-failed, availability-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -1033,12 +1052,66 @@ fi
     || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
 echo "  landed-announce: reported, peer-announce-failed"
 
+# The pair contract's command-availability leg, on the same
+# manifest-declared deployment: ci/availability.py converges the pair,
+# then proves the per-command availability verdicts the active's
+# GET /resources serves agree with what the receipted path settles —
+# the consumer-facing honesty the served-interface contract owes
+# (WW-ENG-003, WW-FND-003): every command row self-consistent — an
+# available: false row carrying a named refusal, an available row none
+# — every served-unavailable bound-point-writable command submitted
+# through the active's POST /command settling a named rejection rather
+# than applied, each declared-bound probe's receipt naming the same
+# refusal the row served, and one served-available command settling
+# applied identically into both peers' adopted receipt log. The
+# emitted model's kind-declared advance is exercised in both
+# directions where the tooling publishes verdicts — invocable
+# mid-table, then the kind's named refusal carried verbatim through
+# the settled command_refused once the table completes — and the
+# tracking standby's /resources must report identical verdicts
+# throughout: the same-adopted-state rule means availability never
+# diverges across the pair. Two passes must produce identical digests.
+run_availability() {
+    python3 ci/availability.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_availability)" \
+    || fail "availability-failed: the command-availability leg did not hold — its evidence lines are above"
+SECOND="$(run_availability)" \
+    || fail "availability-failed: the command-availability leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "availability-nondeterministic: two availability-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a served-available command settling a refusal —
+# the available probe submitted to the tracking standby's role gate —
+# and a standby reporting different verdicts must each surface the
+# named diagnostic rather than pass silently.
+for tamper in refused-available diverged-standby; do
+    if out="$(run_availability --tamper "$tamper" 2>&1)"; then
+        fail "availability-unchecked: a $tamper passed the availability leg"
+    fi
+    case "$tamper" in
+        refused-available) evidence="expected an accepted receipt" ;;
+        diverged-standby) evidence="availability diverged across the pair" ;;
+    esac
+    [[ "$out" == *"$evidence"* ]] \
+        || fail "availability-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, availability-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/burst_order.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
+for file in ci/availability.py ci/burst_order.py ci/consumers.py \
+        ci/ctl.py ci/deploy_rig.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/restart.py ci/schema_conformance.py \
