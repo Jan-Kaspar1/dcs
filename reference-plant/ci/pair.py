@@ -117,10 +117,12 @@ def closed_port():
     return f"{address[0]}:{address[1]}"
 
 
-def spawn_peer(controller, model, dt, plant_addr, standby, files):
+def spawn_peer(controller, model, dt, plant_addr, standby, files, auto_promote=None):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
-    owner), `files` the controller's declared persistence paths under
+    owner), `auto_promote` the manifest's declared failover budget
+    arming that standby's self-promotion (None leaves promotion
+    manual), `files` the controller's declared persistence paths under
     the leg's scratch directory. Returns `(process, monitor_url,
     preamble)`: `monitor_url` is None when the process exits before
     reporting a listener — the preamble then carries the startup
@@ -138,6 +140,8 @@ def spawn_peer(controller, model, dt, plant_addr, standby, files):
     ]
     if standby is not None:
         argv += ["--standby", standby]
+    if auto_promote is not None:
+        argv += ["--auto-promote", str(auto_promote)]
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
@@ -557,7 +561,7 @@ class PairRig:
         return record
 
 
-def launch_pair(args, manifest, tamper=None):
+def launch_pair(args, manifest, tamper=None, auto_promote=None):
     """Resolve the declared standby pair and launch it on the released
     tooling — the bring-up the pair-stage legs share: each
     controller's declared persistence instantiated under a
@@ -569,7 +573,10 @@ def launch_pair(args, manifest, tamper=None):
     spawn's startup refusal reported through `Abort`. `manifest` is
     the manifest path or `manifest_pair`'s resolved `(manifest, duty,
     standby)` — callers resolving it themselves keep their own
-    no-pair wording. Returns the PairRig."""
+    no-pair wording. `auto_promote`, when given, arms the spawned
+    standby's `--auto-promote` flag — the manifest's declared
+    `failover_budget` carried to the invocation. Returns the
+    PairRig."""
     declared = (
         manifest_pair(manifest)
         if isinstance(manifest, (str, os.PathLike))
@@ -614,6 +621,7 @@ def launch_pair(args, manifest, tamper=None):
             rig.plant_addr,
             target,
             rig.standby_files,
+            auto_promote=auto_promote,
         )
         if rig.standby_url is None:
             raise Abort(
