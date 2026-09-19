@@ -45,7 +45,12 @@ prevent — plus the served per-command availability verdicts: an
 inconsistent `available`/`refusal` row, a served-unavailable command
 that applies anyway or settles a different reason than the row
 served, a served-available command settling refused, a tracking
-peer's diverged verdicts, and the empty-row inconclusive path."""
+peer's diverged verdicts, the empty-row inconclusive path — and the
+demote-raced settlement audit: an admission journaled both applied
+and superseded, a raced admission that vanishes unsettled, a
+superseded value minted on the fenced image, an adopted log
+disagreeing with its journal, refused switch steps, and the
+unconverged or unreachable peer."""
 import copy
 import io
 import json
@@ -3192,10 +3197,15 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_lag_staging) + 1,
             order.index(scenarios.scenario_standby_loss))
-        # The standby-loss leg shares the same restored window and
-        # still runs ahead of the tune case's a->b switch.
+        # The standby-loss and demote-settle legs share the same
+        # restored window and still run ahead of the tune case's a->b
+        # switch.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
+            order.index(scenarios.scenario_demote_settle_uniqueness))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_settle_uniqueness)
+            + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
@@ -8974,6 +8984,469 @@ class UnclaimedRearmTests(unittest.TestCase):
                 record = self.run_scenario(feed=feed)
             finally:
                 plant.close()
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class DemoteSettlePeer:
+    """One endpoint of the settle pair: role, tracking posture, its
+    adopted receipt log, the journaled settlements it has already
+    recorded, and the served image."""
+
+    def __init__(self, name):
+        self.name = name
+        self.role = 'standby'  # active | standby | demoting | promoting
+        self.tracking = False
+        self.tick = 0
+        self.attempts = 0      # submission high-water — the adopted
+                               # window's coverage
+        self.receipts = []     # the peer's served receipt log
+        self.journal = []
+        self.next_seq = 1
+        self.image = {}        # served writable-point values
+        self.phantom = {}      # values the fenced image minted — the
+                               # phantom-application doctor's residue
+        self.journaled = set()  # (command, actor) keys already settled
+
+
+class DemoteSettleFeed:
+    """A stubbed pair for the demote-settle-uniqueness leg: ctrl-a owns
+    the field at launch, ctrl-b tracks. Every endpoint call is one
+    scan — the owner applies its pending admissions at the boundary
+    and journals their settlements, the demote closes the gate so a
+    still-accepted admission suspends, the promote's final-sync
+    transfer carries the demoted log across, and a tracking peer's
+    adoption journals the line's verdict — applied for the admissions
+    the carry landed, superseded for the ones the adopted window
+    passed. Doctor flags stage each named defect the issue calls
+    out."""
+
+    POINTS = (302, 300, 301, 332, 333, 334)
+    SIGNALS = [{'point': point,
+                'name': 'p101-oos' if point == 302
+                        else 'pt-' + str(point),
+                'direction': 'in', 'value_type': 'bool',
+                'writable': True} for point in POINTS]
+
+    def __init__(self):
+        self.a = DemoteSettlePeer('a')
+        self.a.role = 'active'
+        self.b = DemoteSettlePeer('b')
+        self.b.tracking = True
+        # The doctors staging each named defect.
+        self.double_settle = False    # an admission journals applied
+                                      # AND superseded
+        self.drop_carry = False       # the last raced admission misses
+                                      # the carry — settles superseded
+        self.drop_admission = False   # the raced admissions vanish —
+                                      # no settle anywhere
+        self.phantom_apply = False    # a superseded admission's value
+                                      # lands on the demoted image
+        self.diverge_logs = False     # the demoted peer's adopted log
+                                      # disagrees with its journal
+        self.demote_refused = False   # every demote is refused
+        self.promote_refused = False  # every promote is refused
+        self.no_tracking = False      # the standby never converges
+        self.no_active = False        # no peer reports active
+        self.unreachable = False      # ctrl-b's monitor never answers
+        self._doubled = False
+
+    def _peers(self):
+        return {'a': self.a, 'b': self.b}
+
+    def _other(self, peer):
+        return self.b if peer.name == 'a' else self.a
+
+    @staticmethod
+    def _key(receipt):
+        return json.dumps([receipt.get('command'),
+                           receipt.get('actor')], sort_keys=True)
+
+    def _mark(self, peer, event):
+        peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
+                             'event': event})
+        peer.next_seq += 1
+
+    def _settle(self, peer, receipt):
+        """One receipt's terminal journaling — the recorder's
+        outcome-diff: journaled once per peer per admission."""
+        key = self._key(receipt)
+        if key in peer.journaled:
+            return
+        peer.journaled.add(key)
+        self._mark(peer, {'command_settled': {'receipt':
+                                              dict(receipt)}})
+
+    def _observe(self, peer):
+        """The scan's receipt diff: every terminal outcome the log
+        newly carries journals on this peer."""
+        for receipt in peer.receipts:
+            if 'accepted' not in receipt['outcome']:
+                self._settle(peer, receipt)
+
+    def _apply(self, peer):
+        """The owner's scan boundary: pending admissions apply and
+        settle."""
+        for receipt in peer.receipts:
+            if 'accepted' not in receipt['outcome']:
+                continue
+            write = receipt['command']['write_value']
+            receipt['outcome'] = {'applied': {'tick': peer.tick}}
+            peer.image[write['point']] = write['value']['bool']
+            self._settle(peer, receipt)
+
+    def _adopt(self, peer, other):
+        """The tracking pull: the active successor's log replaces the
+        peer's own; suspended admissions the carry landed journal the
+        line's verdict, the ones the adopted window passed settle
+        superseded, and anything beyond the window stays suspended."""
+        if other.role != 'active':
+            return
+        suspended = [receipt for receipt in peer.receipts
+                     if 'accepted' in receipt['outcome']]
+        peer.receipts = copy.deepcopy(other.receipts)
+        peer.attempts = other.attempts
+        peer.image = dict(other.image)
+        for receipt in suspended:
+            if any(self._key(carried) == self._key(receipt)
+                   for carried in peer.receipts):
+                continue            # carried — the adopted copy
+                                    # journals the line's verdict
+            if self.drop_admission:
+                continue            # the admission vanishes unsettled
+            if receipt['index'] < peer.attempts:
+                self._settle(peer, {
+                    'command': receipt['command'],
+                    'actor': receipt.get('actor'),
+                    'index': receipt['index'],
+                    'outcome': {'rejected': {'reason': {
+                        'superseded': {
+                            'point': receipt['command']
+                            ['write_value']['point']}}}}})
+                if self.phantom_apply:
+                    # The demoted run's fenced image minted the write
+                    # the journal superseded — and keeps showing it
+                    # past the adopted image.
+                    write = receipt['command']['write_value']
+                    peer.phantom[write['point']] = \
+                        write['value']['bool']
+            else:
+                peer.receipts.append(receipt)
+        peer.image.update(peer.phantom)
+        self._observe(peer)
+        if self.double_settle and not self._doubled:
+            raced = [receipt for receipt in peer.receipts
+                     if 'applied' in receipt['outcome']
+                     and str(receipt.get('actor'))
+                     .startswith('qa-lane-settle')]
+            if raced:
+                self._doubled = True
+                receipt = raced[0]
+                # The #685 defect: the same admission journaled
+                # superseded beside its applied settle.
+                self._mark(peer, {'command_settled': {'receipt': {
+                    'command': receipt['command'],
+                    'actor': receipt.get('actor'),
+                    'index': receipt.get('index'),
+                    'outcome': {'rejected': {'reason': {
+                        'superseded': {
+                            'point': receipt['command']
+                            ['write_value']['point']}}}}}}})
+        if self.diverge_logs:
+            raced = [receipt for receipt in peer.receipts
+                     if str(receipt.get('actor'))
+                     .startswith('qa-lane-settle')
+                     and 'applied' in receipt['outcome']]
+            if raced:
+                raced[0]['outcome'] = {'rejected': {'reason': {
+                    'superseded': {
+                        'point': raced[0]['command']
+                        ['write_value']['point']}}}}
+
+    def _advance(self, peer, adopt=True):
+        """One completed scan: pending role transitions settle, the
+        owner applies its pending admissions, and a tracking peer
+        pulls the active successor's checkpoint."""
+        peer.tick += 1
+        if peer.role == 'demoting':
+            peer.role = 'standby'
+            peer.tracking = True
+            self._mark(peer, {'role_changed': {'from': 'demoting',
+                                               'to': 'standby'}})
+        elif peer.role == 'promoting':
+            peer.role = 'active'
+            self._mark(peer, {'role_changed': {'from': 'promoting',
+                                               'to': 'active'}})
+        if peer.role == 'active':
+            self._apply(peer)
+        elif peer.role == 'standby' and peer.tracking and adopt:
+            self._adopt(peer, self._other(peer))
+        self._observe(peer)
+
+    def _raise(self, code, body):
+        raise urllib.error.HTTPError(
+            'http://pair', code, 'refused', None,
+            io.BytesIO(json.dumps(body).encode()))
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('://', 1)[1].split(':')[0]
+        peer = self._peers()[host.split('-', 1)[1]]
+        if self.unreachable and peer.name == 'b':
+            raise urllib.error.URLError('unreachable')
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        if (method, route) == ('POST', '/demote'):
+            # The gate closes at the request boundary: the demote
+            # lands before the quiesced scans that follow it.
+            if peer.role != 'active' or self.demote_refused:
+                self._raise(409, {'not_active': {}})
+            peer.role = 'demoting'
+            self._advance(peer, adopt=False)
+            return 200, {'role': 'demoting'}
+        self._advance(
+            peer,
+            adopt=not (method == 'POST' and route == '/promote'))
+        if (method, route) == ('GET', '/role'):
+            role = 'standby' if peer.name == 'a' and self.no_active \
+                else peer.role
+            report = {'role': role, 'tick': peer.tick}
+            if role == 'standby':
+                report['sync'] = {'tracking': {'aligned': peer.tick}} \
+                    if peer.tracking and not self.no_tracking \
+                    else {'unsynchronized': {}}
+            return 200, report
+        if (method, route) == ('GET', '/signals'):
+            return 200, {'points': list(self.SIGNALS),
+                         'components': []}
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, {'tick': peer.tick, 'points': [
+                {'point': point, 'direction': 'in',
+                 'sample': {'value': {'bool': peer.image.get(point,
+                                                           False)},
+                            'quality': 'good', 'tick': peer.tick}}
+                for point in self.POINTS]}
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(peer.receipts)
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1]) if '=' in query else 0
+            return 200, [dict(entry) for entry in peer.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/command'):
+            receipt = {'command': (body or {}).get('command'),
+                       'actor': (body or {}).get('actor'),
+                       'index': peer.attempts,
+                       'outcome': {'accepted': {
+                           'apply_tick': peer.tick + 1}}}
+            if peer.role != 'active':
+                receipt['outcome'] = {'rejected': {'reason': {
+                    'not_active': {}}}}
+                self._settle(peer, receipt)
+            else:
+                peer.attempts += 1
+                peer.receipts.append(receipt)
+            # The wire answer is the admission's snapshot — later
+            # scans settling the logged receipt do not rewrite it.
+            return 200, copy.deepcopy(receipt)
+        if (method, route) == ('POST', '/promote'):
+            if peer.role == 'active':
+                self._raise(409, {'already_active': {}})
+            if not peer.tracking or self.promote_refused:
+                self._raise(409, {'not_converged': {
+                    'sync': {'unsynchronized': {}}}})
+            other = self._other(peer)
+            # The promote boundary's final-sync transfer: the demoted
+            # peer's whole log — settled receipts and the suspended
+            # admissions the carry still owes a verdict.
+            peer.receipts = copy.deepcopy(other.receipts)
+            peer.attempts = other.attempts
+            peer.image = dict(other.image)
+            if self.drop_carry or self.drop_admission:
+                pending = [receipt for receipt in peer.receipts
+                           if 'accepted' in receipt['outcome']]
+                doomed = pending if self.drop_admission \
+                    else pending[-1:]
+                for receipt in doomed:
+                    peer.receipts.remove(receipt)
+            peer.role = 'promoting'
+            return 200, {'role': 'promoting'}
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class DemoteSettleTests(unittest.TestCase):
+    """The demote-settle-uniqueness leg against the stubbed pair: a
+    clean rig passes with identical digests and evidence — raced
+    admissions settling either legal single outcome — each doctored
+    defect reports the named diagnostic, and an unreachable peer is
+    inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = DemoteSettleFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence)}
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'DEMOTE_SETTLE_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_SETTLE_AUDIT', 2.0), \
+                patch.object(scenarios, 'DEMOTE_SETTLE_POLL', 0.001):
+            return scenarios.scenario_demote_settle_uniqueness(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The restored pre-switch window behind the standby-loss case —
+        # the settled tracking pair ahead of the tune case's a->b
+        # switch.
+        self.assertLess(
+            order.index(scenarios.scenario_standby_loss),
+            order.index(scenarios.scenario_demote_settle_uniqueness))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_settle_uniqueness)
+            + 1,
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-settle-uniqueness'),
+            scenarios.scenario_demote_settle_uniqueness)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-settle-signals.json',
+                     'demote-settle-pass-1.json',
+                     'demote-settle-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('demote-settle-pass-1.json',
+                               'demote-settle-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertEqual(passes[0]['digest']['outcomes'], 'single')
+        self.assertEqual(passes[0]['digest']['roles'], 'restored')
+        report.validate_scenario(record)
+
+    def test_superseded_admission_is_a_legal_single_outcome(self):
+        self.feed.drop_carry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        passed = json.loads(
+            (self.evidence / 'demote-settle-pass-1.json').read_text())
+        outcomes = {
+            scenarios._outcome_key(receipt)
+            for audit in passed['audit'] if audit['window']
+            for entries in audit['window']['journaled'].values()
+            for receipt in entries}
+        self.assertIn('rejected:superseded', outcomes, outcomes)
+        report.validate_scenario(record)
+
+    def test_double_settled_admission_reports_nondeterministic(self):
+        self.feed.double_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-nondeterministic'),
+            record['detail'])
+        report.validate_scenario(record)
+
+    def test_vanished_admission_reports_failed(self):
+        self.feed.drop_admission = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-failed'), record['detail'])
+        self.assertIn('terminal journaled outcome', record['detail'])
+        report.validate_scenario(record)
+
+    def test_phantom_application_reports_nondeterministic(self):
+        self.feed.drop_carry = True
+        self.feed.phantom_apply = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-nondeterministic'),
+            record['detail'])
+        self.assertIn('application the journal never settled',
+                      record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverged_logs_report_nondeterministic(self):
+        self.feed.diverge_logs = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-nondeterministic'),
+            record['detail'])
+        self.assertIn('adopted log', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demote_reports_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-failed'), record['detail'])
+        self.assertIn('demote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_promote_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_active_reports_failed(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_pair_reports_inconclusive(self):
+        self.feed.no_tracking = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'outcomes': 'single'}, {}, {'pass': 1}),
+                       ({'outcomes': 'diverged'}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_demote_settle_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-settle-uniqueness-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            feed = DemoteSettleFeed()
+            evidence = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence.mkdir()
+            self.evidence = evidence
+            record = self.run_scenario(feed=feed)
             runs.append((record, {p.name: p.read_text()
                                   for p in evidence.iterdir()}))
         self.assertEqual(runs[0], runs[1])
