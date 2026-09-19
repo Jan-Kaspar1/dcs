@@ -16,7 +16,12 @@
 //! - the **served history rings** — the per-point [`HistorySample`]
 //!   retention `GET /history` reads;
 //! - the **served journal** — the [`JournalEntry`] retention
-//!   `GET /journal` reads; and
+//!   `GET /journal` reads;
+//! - the **routed emission stores** — the bounded
+//!   [`EventRecord`](dcs_core::EventRecord) ring `History`-declared
+//!   emissions land in and the latest-emission view `Latest`-declared
+//!   emissions stand in, both joined into `GET /resources`'s
+//!   per-instance `events` beside the journal tail; and
 //! - the **receipt mirror** — the latest-value copy `GET /receipts`
 //!   answers, refreshed wherever the control-plane lock changes the
 //!   log so a between-scans submission stays immediately visible.
@@ -37,8 +42,8 @@
 //! the store's overload accounting as of each publish.
 
 use dcs_core::{
-    CommandReceipt, HistorySample, JournalEntry, PointHistory, PointId, PublicationHealth, Sample,
-    TelemetrySnapshot, Tick,
+    CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
+    PointHistory, PointId, PublicationHealth, Sample, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -73,6 +78,10 @@ pub struct Publication {
     /// the event delta, including entries the control plane journaled
     /// between scans.
     pub journal: Vec<JournalEntry>,
+    /// The routed emission records appended since the previous
+    /// publication — the `History`/`Latest` classes' delta beside the
+    /// journal's, in routed-append order.
+    pub events: Vec<EventRecord>,
 }
 
 /// The named gap a lagging publication consumer observes: the seqs its
@@ -129,6 +138,22 @@ struct Inner {
     rings: BTreeMap<PointId, Ring>,
     /// Served journal entries, oldest first.
     journal: VecDeque<JournalEntry>,
+    /// The bounded event-history ring: `History`-retained emission
+    /// records, oldest first — the diagnostic stream the resource
+    /// view's `events` joins beside the journal tail.
+    event_history: VecDeque<EventRecord>,
+    /// The latest-emission view: the newest `Latest`-retained record
+    /// per (component, event) identity — each newer emission
+    /// supersedes the last. Bounded by the declared event surface:
+    /// one entry per identity a kind declares.
+    latest_events: BTreeMap<(String, String), EventRecord>,
+    /// Routed emission records appended since the last publish — the
+    /// next publication's event delta, drained there.
+    pending_events: VecDeque<EventRecord>,
+    /// The `seq` the next routed emission takes — one stream numbering
+    /// both routed classes, never reused, so ring eviction reads as a
+    /// numbering gap like the journal's.
+    next_event_seq: u64,
     /// The latest receipt-log mirror — refreshed wherever the
     /// control-plane lock changes the log, so `GET /receipts` answers
     /// the log as it stands, not as of the last scan.
@@ -153,6 +178,39 @@ struct Inner {
     history_capacity: usize,
     /// Journal retention bound.
     journal_capacity: usize,
+    /// Event-history retention bound — the `History`-retained ring's.
+    event_history_capacity: usize,
+}
+
+impl Inner {
+    /// Stamps `event` with the routed stream's next `seq` and `tick`,
+    /// appends the record to the pending event delta — bounded like
+    /// the ring — and returns it for the caller's store.
+    fn route(&mut self, event: EmittedEvent, retention: EventRetention, tick: Tick) -> EventRecord {
+        let record = EventRecord {
+            seq: self.next_event_seq,
+            tick,
+            retention,
+            event,
+        };
+        self.next_event_seq += 1;
+        self.pending_events.push_back(record.clone());
+        while self.pending_events.len() > self.event_history_capacity {
+            self.pending_events.pop_front();
+        }
+        record
+    }
+}
+
+/// The store's routed-event streams — what [`Store::routed_events`]
+/// fetches for the resource view's per-instance `events` join.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct RoutedEvents {
+    /// The retained `History` ring's records, oldest first.
+    pub history: Vec<EventRecord>,
+    /// The `Latest` view's standing records — the newest emission per
+    /// (component, event) identity — in identity order.
+    pub latest: Vec<EventRecord>,
 }
 
 /// The publication store's shared handle — a monitor and its recorder
@@ -173,6 +231,7 @@ impl Store {
         history_capacity: usize,
         journal_capacity: usize,
         window_capacity: usize,
+        event_history_capacity: usize,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -180,6 +239,10 @@ impl Store {
                 window: VecDeque::new(),
                 rings: BTreeMap::new(),
                 journal: VecDeque::new(),
+                event_history: VecDeque::new(),
+                latest_events: BTreeMap::new(),
+                pending_events: VecDeque::new(),
+                next_event_seq: 1,
                 receipts: Arc::new(Vec::new()),
                 pending_history: BTreeMap::new(),
                 pending_journal: VecDeque::new(),
@@ -189,6 +252,7 @@ impl Store {
                 window_capacity,
                 history_capacity,
                 journal_capacity,
+                event_history_capacity,
             })),
         }
     }
@@ -230,6 +294,44 @@ impl Store {
         inner.pending_journal.push_back(entry);
         while inner.pending_journal.len() > inner.journal_capacity {
             inner.pending_journal.pop_front();
+        }
+    }
+
+    /// Routes a `History`-retained emission: stamped with the routed
+    /// stream's next `seq` and the producing scan's `tick`, appended
+    /// to the bounded event-history ring — evicting oldest-first past
+    /// the declared bound — and to the pending event delta the next
+    /// publication drains.
+    pub(crate) fn push_event_history(&self, event: EmittedEvent, tick: Tick) {
+        let mut inner = self.inner.lock().unwrap();
+        let record = inner.route(event, EventRetention::History, tick);
+        inner.event_history.push_back(record);
+        while inner.event_history.len() > inner.event_history_capacity {
+            inner.event_history.pop_front();
+        }
+    }
+
+    /// Routes a `Latest`-retained emission: stamped like the ring's
+    /// records and stood as the newest record for its (component,
+    /// event) identity — superseding the previous one — also appended
+    /// to the pending event delta the next publication drains.
+    pub(crate) fn push_latest_event(&self, event: EmittedEvent, tick: Tick) {
+        let mut inner = self.inner.lock().unwrap();
+        let key = (event.component.clone(), event.event.clone());
+        let record = inner.route(event, EventRetention::Latest, tick);
+        inner.latest_events.insert(key, record);
+    }
+
+    /// The served routed-event streams in one fetch: the retained
+    /// `History` ring, oldest first, and the `Latest` view — the
+    /// newest standing record per (component, event) identity — keyed
+    /// by identity order. The resource view joins both beside the
+    /// journal tail.
+    pub(crate) fn routed_events(&self) -> RoutedEvents {
+        let inner = self.inner.lock().unwrap();
+        RoutedEvents {
+            history: inner.event_history.iter().cloned().collect(),
+            latest: inner.latest_events.values().cloned().collect(),
         }
     }
 
@@ -283,6 +385,7 @@ impl Store {
                 })
                 .collect(),
             journal: inner.pending_journal.drain(..).collect(),
+            events: inner.pending_events.drain(..).collect(),
         });
         inner.window.push_back(publication.clone());
         while inner.window.len() > inner.window_capacity {
@@ -401,5 +504,113 @@ impl Store {
             depth: inner.window.len() as u64,
             window: inner.window_capacity as u64,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcs_core::{EventValue, IoHealth, Value};
+    use std::collections::BTreeMap;
+
+    /// A bare snapshot — the publication only carries it.
+    fn snapshot(tick: Tick) -> TelemetrySnapshot {
+        TelemetrySnapshot {
+            tick,
+            points: Vec::new(),
+            components: Vec::new(),
+            descriptors: Vec::new(),
+            io_health: IoHealth::default(),
+            forces: Vec::new(),
+            parameters: Vec::new(),
+            command_queue: Default::default(),
+            command_verdicts: Vec::new(),
+            publication: None,
+        }
+    }
+
+    /// One emission of `event` from `component` carrying `n` — the
+    /// routed store's test fixture.
+    fn emission(component: &str, event: &str, n: i64) -> EmittedEvent {
+        EmittedEvent {
+            event: event.to_string(),
+            component: component.to_string(),
+            fields: [("n".to_string(), EventValue::Value(Value::Int(n)))]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn history_emissions_evict_oldest_first_at_the_bound() {
+        // A two-slot ring keeps the newest records; the never-reused
+        // seqs show the evicted stretch as a numbering gap.
+        let store = Store::new(0, 0, 4, 2);
+        for n in 1..=4 {
+            store.push_event_history(emission("em", "shift", n), Tick(n as u64));
+        }
+        let routed = store.routed_events();
+        assert_eq!(
+            routed
+                .history
+                .iter()
+                .map(|record| (record.seq, record.tick))
+                .collect::<Vec<_>>(),
+            vec![(3, Tick(3)), (4, Tick(4))]
+        );
+        assert!(
+            routed
+                .history
+                .iter()
+                .all(|record| record.retention == EventRetention::History)
+        );
+    }
+
+    #[test]
+    fn latest_emissions_stand_one_record_per_identity() {
+        // Each newer emission supersedes the identity's standing
+        // record; a second identity sits beside it. The standing
+        // record carries the superseding emission's seq and tick.
+        let store = Store::new(0, 0, 4, 8);
+        for n in 1..=3 {
+            store.push_latest_event(emission("em", "beat", n), Tick(n as u64));
+        }
+        store.push_latest_event(emission("other", "beat", 9), Tick(4));
+
+        let routed = store.routed_events();
+        assert_eq!(routed.latest.len(), 2);
+        let em = &routed.latest[0];
+        assert_eq!(em.event.component, "em");
+        assert_eq!(em.event.event, "beat");
+        assert_eq!((em.seq, em.tick), (3, Tick(3)));
+        assert_eq!(
+            em.event.fields["n"],
+            EventValue::Value(Value::Int(3)),
+            "the newest emission superseded"
+        );
+        assert_eq!(routed.latest[1].event.component, "other");
+        // Both classes draw on the one routed-event stream's seqs.
+        assert!(routed.latest.iter().map(|record| record.seq).eq([3, 4]));
+    }
+
+    #[test]
+    fn routed_emissions_ride_the_publication_delta() {
+        // Every routed emission — both classes — appends to the event
+        // delta the next publication drains, in routed order.
+        let store = Store::new(0, 0, 4, 8);
+        store.push_event_history(emission("em", "shift", 1), Tick(1));
+        store.push_latest_event(emission("em", "beat", 1), Tick(1));
+        let publication = store.publish(Tick(1), snapshot(Tick(1)), &[]);
+        assert_eq!(
+            publication
+                .events
+                .iter()
+                .map(|record| (record.retention, record.seq))
+                .collect::<Vec<_>>(),
+            vec![(EventRetention::History, 1), (EventRetention::Latest, 2)]
+        );
+        // Drained: the next publication carries no stale delta.
+        let publication = store.publish(Tick(2), snapshot(Tick(2)), &[]);
+        assert!(publication.events.is_empty());
     }
 }

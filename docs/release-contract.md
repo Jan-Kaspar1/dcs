@@ -36,6 +36,7 @@ of this repository.
 | `dcs-controller` binary | The generic controller; `--check` is the consumer's assemble-check (load, validate, resolve devices, construct components — no scan). | `cargo install --git <repo> --tag v<X.Y.Z> dcs-controller`, or the container image below |
 | `dcs-controller` image | The generic controller container (`Dockerfile`); runs any operator-supplied model (decision 46). | Image digest: `dcs-controller@sha256:<digest>` recorded in the release record; or `docker build` at the tag |
 | `dcs-plant-server` image | The shared simulated-plant container (`Dockerfile.plant`) for the consumer's simulation runs. | Image digest recorded in the release record; or `docker build -f Dockerfile.plant` at the tag |
+| `dcs-ctl` CLI | The shipped operator CLI for the monitor contract — `invoke` submits a kind-declared command through the bounded receipted path with `--actor` attribution; `resources`/`schema`/`events`/`snapshot`/`signals`/`receipts`/`journal`/`history`/`role` read the served block-interface surface; `write`/`set-parameter`/`force`/`unforce`/`promote`/`demote`/`scan` cover the rest of the receipted and role surface. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-monitor` — the binary ships in the `dcs-monitor` package — or a binary built from the tag |
 | Plant-model JSON Schema | `dcs-model schema`'s emitted draft 2020-12 schema for non-Rust tooling (decision 40). | Recorded in the release record at `docs/releases/<tag>/plant-model.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Served-registry JSON Schema | `dcs-model interface-schema`'s emitted draft 2020-12 schema for the `GET /schema` block-interface registry document (decision 82's served contract) — a non-Rust consumer checks the served surface against it. | Recorded in the release record at `docs/releases/<tag>/block-interfaces.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Deployment manifest | The consumer-owned deployment declaration — the documented shape below. | A file in the consumer repository pinning the release's artifacts |
@@ -252,17 +253,48 @@ directory outside the workspace, rewrites only the dependency remote
 to the same `file://` stand-in — the recorded `rev` pin untouched —
 and runs the template's own `ci/check.sh` end to end, including its
 git-only lockfile assertion, its released-tooling stage against
-locally built binaries, the manifest fingerprint check, two runs
+locally built binaries — `validate`/`lint`/`--check` acceptance, the
+`dcs-model schema` and `interface-schema` emissions pinned
+byte-identical to the release record's schema artifacts fetched from
+the pinned revision through the same git remote, `dcs-model diff`
+legs over a doctored compatible revision and the identical document,
+and `summary`/`signal-index` outputs recorded as run evidence — the
+manifest fingerprint check, two runs
 of the scripted simulation, the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
-declaration — the `consumers` stage, which replays that driven run
+declaration, and the `GET /schema` document's structural conformance
+to the fetched block-interfaces artifact (a required-keys/field-shape
+check in stdlib-only python — full draft-2020-12 validation of the
+served document stays workspace-side, where the `jsonschema`
+dependency exists) — the `pair` stage, which runs the
+manifest-declared standby pair on the released tooling: the second
+controller converging to `tracking` through `GET /role`, scans driven
+through `POST /scan` keeping the peers' images identical, a receipted
+`demote`/`promote` switching the roles, and the run continuing
+bumplessly with the adopted receipts and the durable journal files'
+transition records intact — plus the pair contract's refusal half on
+the same declared deployment: `POST /promote` on a freshly launched
+standby before its first transfer answering the named `not_converged`
+refusal with no field hand-off, a receipted write against a declared
+writable point submitted to the tracking standby's monitor answering
+the named `not_active` rejection with the point unchanged in the
+active's served snapshot and no command-side journal entry on either
+peer recording it as anything but the refusal, and the same promote
+succeeding once the standby tracks — the active's field writes,
+receipts, and journal undisturbed throughout — the `consumers` stage,
+which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
 requiring identical output and receipt digests across the schedules
-and across two passes — and the `upgrade` stage, which repins the
-materialized tree to the checkout's `HEAD` and re-runs the pipeline
+and across two passes — the `ctl` stage, which drives the same run
+through the released `dcs-ctl` operator CLI: `invoke` settling an
+applied receipt visible through `receipts` and the journal,
+`resources` reporting the per-command availability and the named
+refusals, the read subcommands answering the served contract, and the
+refusal modes exiting nonzero — and the `upgrade` stage, which repins
+the materialized tree to the checkout's `HEAD` and re-runs the pipeline
 under the repin, requiring byte-identical emitted bytes and refusing
 the named incompatible crossings. Its negative cases prove the
 template's new stage names surface as the diagnostics below.
@@ -303,6 +335,9 @@ The checks' failures are named diagnostics:
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |
+| `schema-drift` | `dcs-model schema` or `dcs-model interface-schema` at the pinned rev did not emit the release record's recorded artifact bytes (`plant-model.schema.json` / `block-interfaces.schema.json`) — the emitted schema drifted from what the release record pins. Reported by the reference plant's `ci/check.sh`. |
+| `schema-mismatch` | The driven run's `GET /schema` document failed the recorded artifact's structural conformance — a required field absent or mistyped, a vocabulary outside its `enum`/`const`, or an undeclared field under `additionalProperties: false`. Reported by the reference plant's `ci/check.sh`. |
+| `diff-mismatch` | A `dcs-model diff` leg's expectation failed — a revised document's actual differences went unnamed, the identical document reported differences, or a document outside `MODEL_VERSION` was diffed instead of refused. Reported by the reference plant's `ci/check.sh`. |
 | `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
 | `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
 | `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — the deployment declaration no longer names the approved model. Reported by the reference plant's `ci/check.sh`. |
@@ -311,6 +346,22 @@ The checks' failures are named diagnostics:
 | `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the `GET /schema` block-interface registry's coverage of the declared kinds, a kind-declared command's structured receipt through `POST /command`, a kind-emitted event's arrival in `GET /journal`/`GET /resources`, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
 | `consumer-interference` | A consumer schedule changed the driven run's outputs or command receipts, or the schedule's own evidence failed — a consumer met a server fault, a held response arrived incomplete, malformed traffic went unrefused, or a restarted UI process found no freshness metadata. Reported by the reference plant's `ci/check.sh`, naming the schedule. |
 | `consumer-nondeterministic` | Two passes of the consumer-schedule stage produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `restart-resume-failed` | The restart-recovery leg did not hold: the relaunched controller did not resume at the persisted tick (a missing state file's cold start included), its leg outcomes, receipts, or field image diverged from the uninterrupted reference pass, the journal's `seq` order did not continue across the run-boundary marker, or an unparseable state file failed startup without the named refusal. Reported by the reference plant's `ci/check.sh`. |
+| `restart-resume-nondeterministic` | Two passes of the restart-recovery leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `ctl-failed` | The released `dcs-ctl` leg did not hold against the driven run: an `invoke` did not settle its applied receipt through `receipts` and the journal, `resources` did not report a command's availability or its named refusal, a refusal mode exited zero or unnamed, or a read subcommand did not answer the served contract. Reported by the reference plant's `ci/check.sh`, with the leg's evidence lines on stderr. |
+| `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `pair-failed` | The redundant-pair leg did not hold: the manifest-declared standby did not converge to `tracking`, the peers' images or adopted receipt logs diverged, the receipted `demote`/`promote` switch did not answer its named reports or refusals, the run did not continue bumplessly, or a declared `--state-file`/`--journal-file` path was not honored — the durable records missing the run's transitions or `seq` order. Reported by the reference plant's `ci/check.sh`. |
+| `pair-nondeterministic` | Two passes of the redundant-pair leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `refusal-failed` | The pair contract's refusal half did not hold: a `POST /promote` on the freshly launched standby before its first transfer did not answer the named `not_converged` refusal or handed the field off, a receipted write to the tracking standby's monitor did not answer the named `not_active` rejection — or moved the point in the active's served snapshot, entered a peer's adopted receipt log, or left a journal entry recording it as anything but the refusal — the same promote did not succeed once the standby tracked, or the active's field writes, receipts, or journal did not run undisturbed. Reported by the reference plant's `ci/check.sh`. |
+| `refusal-nondeterministic` | Two passes of the role-gated refusal leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `takeover-failed` | The pair contract's manual-takeover leg did not hold: a receipted `mode`/`hand`/`oos` write did not answer `accepted` or settle `applied` into both peers' adopted log, the pump's delivered command did not leave the group's `cmd_1` on the manual selection or the pump-group status did not reflect the exclusion, the operator demand did not run the pump under the declared thermal/moisture guards, the plant-protocol protection input did not assert the proven fault and its managed alarm, the out-of-service write did not assert the maintenance inhibit, the restore did not return the pump to group control, or the served journal did not carry each attributed transition in order. Reported by the reference plant's `ci/check.sh`. |
+| `takeover-nondeterministic` | Two passes of the manual-takeover leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `force-carryover-failed` | The pair contract's force-carryover leg did not hold: a receipted `force_point` on a declared writable `In` point did not answer `accepted` or settle `applied` into both peers' adopted log, the snapshot's `forces` entry or the `Uncertain(Substituted)` sample did not appear on a peer while tracking, the promoted peer did not keep the force — the `forces` entry dropped or the sample no longer the forced value at substituted quality — a receipted `unforce_point` on the new active did not settle `applied`, empty the `forces` list, and resume the point's unforced serve, or the pair was not left in its declared roles. Reported by the reference plant's `ci/check.sh`. |
+| `force-carryover-nondeterministic` | Two passes of the force-carryover leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `force-release-failed` | The pair contract's force-release leg did not hold: a receipted `force_point` on a declared writable `In` point did not answer `accepted`, settle `applied` at the applying scan's tick into both peers' adopted log, or leave the `Uncertain(Substituted)` sample badged on both peers across scans, the journaled settlement missing from the active's record; a receipted `unforce_point` did not settle `applied` at the release's apply tick, empty the `forces` set, and resume the point's live serve — the held image re-stamped `Good`, never re-substituted; the restore write did not land the pre-force held value; the promoted peer resurrected the released force or dropped a settled receipt; the pair was not restored to its launch roles; or the field owner's durable journal file did not carry each attributed transition in `seq` order with the standby's adopted log answering the same receipts. Reported by the reference plant's `ci/check.sh`. |
+| `force-release-nondeterministic` | Two passes of the force-release leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `peer-announce-failed` | The pair contract's peer-announce leg did not hold: a foreign `GET /checkpoint?peer=<addr>` naming a source the pulling connection does not own disturbed the checkpoint read or landed as the demotion tracking source — the demoted field owner stranding `unsynchronized` instead of reconverging `tracking` on its real successor — or the pair was not left in its declared roles. Reported by the reference plant's `ci/check.sh`. |
+| `peer-announce-nondeterministic` | Two passes of the peer-announce leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |

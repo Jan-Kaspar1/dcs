@@ -114,6 +114,9 @@ fn mixed_kind_fixture_assembles_scans_and_routes() {
             .unwrap()
             .build()
             .unwrap();
+        // The remote plant fails closed while unclaimed: the fan-out's
+        // field-facing backend claims it under this run's token.
+        driver.claim_field_writer(1).unwrap();
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
 
         // The point space is one surface: the setpoint write lands on the
@@ -140,7 +143,7 @@ fn mixed_kind_fixture_assembles_scans_and_routes() {
         // The cross-backend field wire carries the valve command onto the
         // remote level point at each step, so the loop closes over TCP.
         for _ in 0..400 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         let Value::Float(valve) = driver.read(VALVE).unwrap().value else {
@@ -171,7 +174,7 @@ fn two_backend_run_matches_single_backend_reference() {
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1);
         }
         serde_json::to_string(&executor.snapshot()).unwrap()
@@ -186,10 +189,11 @@ fn two_backend_run_matches_single_backend_reference() {
             .unwrap()
             .build()
             .unwrap();
+        driver.claim_field_writer(1).unwrap();
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         executor.snapshot()
@@ -323,7 +327,7 @@ fn sim_only_model_still_builds_through_the_registry() {
     let mut executor = assemble(&model, &registry(), &driver).unwrap();
     driver.write(SETPOINT, Value::Float(50.0)).unwrap();
     for _ in 0..200 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
     }
     let Value::Float(level) = driver.read(LEVEL_RAW).unwrap().value else {
@@ -375,7 +379,7 @@ fn executor_snapshot_reports_the_remote_point() {
             .unwrap();
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         server.driver().write(LEVEL_RAW, Value::Float(9.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         let point = snapshot
             .points

@@ -97,6 +97,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('dangerous', spec['command'])
         self.assertNotIn('smart', spec['command'])
 
+    def test_spawn_selects_opencode_backend(self):
+        clone = self.runtime.prepare_clone('worker-01')
+        self.runtime.opencode = '/bin/true'
+        metadata = self.runtime.spawn('worker-01', clone, 'test prompt',
+                                      model='opencode/muse-spark-1.3-contributor-free',
+                                      resume_session='ignored-for-opencode')
+        spec = json.loads((Path(metadata['invocation']) / 'spec.json').read_text())
+        self.assertEqual(spec['command'][:4], ['/bin/true', 'run', '--model',
+                                               'opencode/muse-spark-1.3-contributor-free'])
+        self.assertIn('--auto', spec['command'])
+        self.assertNotIn('--resume', spec['command'])
+        self.assertNotIn('swe-2-high', spec['command'])
+        deadline = time.monotonic() + 5
+        while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
+            time.sleep(.05)
+
+    def test_spawn_uses_configured_devin_model(self):
+        clone = self.runtime.prepare_clone('worker-01')
+        self.runtime.devin = '/bin/true'
+        metadata = self.runtime.spawn('worker-01', clone, 'test', model='swe-2-medium')
+        spec = json.loads((Path(metadata['invocation']) / 'spec.json').read_text())
+        self.assertIn('swe-2-medium', spec['command'])
+        self.assertIn('--prompt-file', spec['command'])
+        deadline = time.monotonic() + 5
+        while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
+            time.sleep(.05)
+
     def test_lost_process_is_not_success(self):
         result = self.runtime.poll({'pid': 999999999, 'identity': 'missing',
                                     'receipt': str(self.root / 'missing.json')})

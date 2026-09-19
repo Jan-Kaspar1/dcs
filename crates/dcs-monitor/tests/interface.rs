@@ -385,6 +385,7 @@ fn the_page_carries_the_generic_five_category_renderers() {
             "data-category=\\\"events\\\"",
             "none declared",
             "no recent events",
+            "entry.retention",
             "unwired",
             "no sample",
             "EVENT_LIMIT",

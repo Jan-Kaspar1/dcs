@@ -27,6 +27,9 @@
 //!   and their `unacknowledged` latches hold until the operator acks;
 //! - a `Bad` primary level flips the failover to the backup
 //!   measurement and raises its alarm;
+//! - a `Bad` backup while the primary serves leaves `backup_active`
+//!   down but raises `backup_unhealthy` and its alarm — the
+//!   standby-loss annunciation issue #502 calls for;
 //! - the manual-takeover path drives `p101-cmd` from the operator's
 //!   `hand` request while the group no longer requests that pump;
 //! - a `Disconnected` run contact proves the motor fault, drops the
@@ -164,6 +167,7 @@ struct Scan {
     below_cutoff: bool,
     high_level: bool,
     backup_active: bool,
+    backup_unhealthy: bool,
     none_available: bool,
     all_faulted: bool,
     /// The group's `cmd_i` requests, per pump.
@@ -178,6 +182,8 @@ struct Scan {
     lal_unack: bool,
     ba_alarm: bool,
     ba_unack: bool,
+    buh_alarm: bool,
+    buh_unack: bool,
     na_alarm: bool,
     na_unack: bool,
     pw_alarm: bool,
@@ -334,6 +340,7 @@ fn run() -> Run {
             below_cutoff: bool_(sample(layout.below_cutoff)),
             high_level: bool_(sample(layout.high_level)),
             backup_active: bool_(sample(layout.backup_active)),
+            backup_unhealthy: bool_(sample(layout.backup_unhealthy)),
             none_available: bool_(sample(layout.none_available)),
             all_faulted: bool_(sample(layout.all_faulted)),
             group_cmd: [
@@ -354,6 +361,8 @@ fn run() -> Run {
             lal_unack: bool_(sample(layout.low_level_alarm.unacknowledged)),
             ba_alarm: bool_(sample(layout.backup_active_alarm.alarm)),
             ba_unack: bool_(sample(layout.backup_active_alarm.unacknowledged)),
+            buh_alarm: bool_(sample(layout.backup_unhealthy_alarm.alarm)),
+            buh_unack: bool_(sample(layout.backup_unhealthy_alarm.unacknowledged)),
             na_alarm: bool_(sample(layout.none_available_alarm.alarm)),
             na_unack: bool_(sample(layout.none_available_alarm.unacknowledged)),
             pw_alarm: bool_(sample(layout.power_fail_alarm.alarm)),
@@ -366,7 +375,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         observe(&executor, &mut scans);
         match scan {
             // Pump-down phase done — drop the inflow below zero so the
@@ -503,6 +512,21 @@ fn run() -> Run {
                 sim.write(layout.pumps[0].thermal, Value::Bool(false))
                     .unwrap();
             }
+            // The issue-#502 leg: the backup transmitter goes Bad while
+            // the primary keeps serving — the failover stays on the
+            // primary and the standby-health carrier and its alarm
+            // annunciate the lost redundancy.
+            106 => sim
+                .inject_fault(
+                    layout.level_backup,
+                    Fault::Quality(Quality::Bad(QualityReason::DeviceFault)),
+                )
+                .unwrap(),
+            110 => ack(&mut executor, &layout.backup_unhealthy_alarm),
+            112 => {
+                release_ack(&mut executor, &layout.backup_unhealthy_alarm);
+                sim.clear_fault(layout.level_backup).unwrap();
+            }
             _ => {}
         }
         driver.step(DT).unwrap();
@@ -586,6 +610,7 @@ fn journaled_marks_the_durable_record_points() {
         layout.below_cutoff,
         layout.high_level,
         layout.backup_active,
+        layout.backup_unhealthy,
         layout.none_available,
         layout.all_faulted,
     ];
@@ -605,6 +630,7 @@ fn journaled_marks_the_durable_record_points() {
         &layout.high_level_alarm,
         &layout.low_level_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -841,6 +867,30 @@ fn scripted_run_shows_the_closed_station_loop() {
             .any(|scan| scan.p1_thermal_alarm && scan.p1_thermal_unack)
     );
     assert!(scans[103..].iter().all(|scan| !scan.p1_thermal_unack));
+
+    // The issue-#502 leg: a Bad backup while the primary serves leaves
+    // `backup_active` down but raises `backup_unhealthy` and its alarm,
+    // latching unacknowledged until the scan-110 ack; recovery drops
+    // the carrier.
+    assert!(
+        scans[106..112].iter().all(|scan| scan.backup_unhealthy),
+        "backup_unhealthy must stand while the unused backup is Bad"
+    );
+    assert!(
+        scans[106..113].iter().all(|scan| !scan.backup_active),
+        "the primary keeps serving — backup_active must stay down"
+    );
+    assert!(
+        scans[107..112]
+            .iter()
+            .any(|scan| scan.buh_alarm && scan.buh_unack)
+    );
+    assert!(scans[110..].iter().all(|scan| !scan.buh_unack));
+    assert!(
+        scans[112..].iter().all(|scan| !scan.backup_unhealthy),
+        "a healthy backup must clear the indication"
+    );
+    assert!(scans[113..].iter().all(|scan| !scan.buh_alarm));
 
     // Duty rotates between cycles: the first pump-down's duty holder is
     // not the later one's.
@@ -1101,6 +1151,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
     );
     for alarm in [
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -1120,6 +1171,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
         &layout.high_level_alarm,
         &layout.low_level_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -1184,6 +1236,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
     assert!(writable(model, layout.low_level_alarm.shelve.unwrap()));
     for alarm in [
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,

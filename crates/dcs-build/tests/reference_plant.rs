@@ -7,7 +7,13 @@
 //! exactly that commit — and runs the tree's own `ci/check.sh`
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
-//! released-tooling acceptance, the manifest fingerprint check, the
+//! released-tooling acceptance — plus the contract's remaining
+//! `dcs-model` surfaces: `schema` and `interface-schema` emissions
+//! byte-pinned to the release record's artifacts fetched through the
+//! stand-in remote at the pinned rev, `diff` legs over a doctored
+//! compatible revision and the identical document, and
+//! `summary`/`signal-index` recorded as run evidence — the manifest
+//! fingerprint check, the
 //! rig-definition consistency check asserting `deploy/compose.yaml`
 //! instantiates `deploy/manifest.json`, the deterministic scripted
 //! simulation, the served operator surface —
@@ -15,12 +21,36 @@
 //! against the emitted model's declaration, plus the `GET /schema`
 //! block-interface registry's coverage of every declared component, a
 //! kind-declared command's structured receipt through `POST /command`,
-//! and a kind-emitted event's arrival in the consumer-visible record —
-//! the `consumers` stage,
-//! which replays that driven run under each consumer schedule (no UI,
-//! polling, a stalled reader, churn, malformed/flooded traffic, a UI
-//! process restart) requiring identical digests, and the `upgrade`
-//! stage, which repins the materialized tree to the checkout's `HEAD`
+//! a kind-emitted event's arrival in the consumer-visible record, and
+//! the served registry document's structural conformance to the
+//! fetched record artifact — the `pair` stage, which runs the
+//! manifest-declared standby pair on the released tooling: the second
+//! controller converging to `tracking`, scans driven through
+//! `POST /scan` keeping the peers identical, a receipted
+//! `demote`/`promote` switching the roles, and the run continuing
+//! bumplessly with the adopted receipts and the durable journal
+//! files' transition records intact — plus the pair contract's
+//! refusal half: `POST /promote` before the standby's first transfer
+//! answering the named `not_converged` refusal with no field hand-off,
+//! a receipted write to the tracking standby answering the named
+//! `not_active` rejection with no phantom effect or audit, and the
+//! same promote succeeding once the standby tracks — plus the pair
+//! contract's takeover leg: with the pair tracking and the pump group
+//! holding a duty demand, receipted `p101-mode`/`p101-hand`/`p101-oos`
+//! writes through the active's `POST /command` producing the declared
+//! manual leg — group-demand exclusion, the hand-driven run under the
+//! thermal/moisture guards, a plant-protocol protection input's proven
+//! fault and managed alarm, the out-of-service inhibit, and the
+//! restore returning the pump to group control with each attributed
+//! transition journaled in order — the `consumers`
+//! stage, which replays that driven run under each consumer schedule
+//! (no UI, polling, a stalled reader, churn, malformed/flooded
+//! traffic, a UI
+//! process restart) requiring identical digests, the `ctl` stage,
+//! which exercises the released `dcs-ctl` operator CLI's receipted
+//! `invoke` path, read subcommands, and named refusal modes against
+//! the same driven run, and the `upgrade` stage, which repins the
+//! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
 //!
@@ -34,7 +64,10 @@
 //! from `docs/release-contract.md` — this test surfaces them verbatim —
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
-//! `scenario-failed`, `rig-mismatch`, and the `surface-mismatch` paths
+//! `scenario-failed`, `rig-mismatch`, `schema-drift`,
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `refusal-failed`, `takeover-failed`, `peer-announce-failed`, and
+//! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -65,8 +98,8 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, and `dcs-plant-server` — are built for the check's
-/// `DCS_TOOLS` substitution.
+/// `dcs-controller`, `dcs-plant-server`, and `dcs-ctl` — are built for
+/// the check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -78,6 +111,8 @@ fn build_tools() -> PathBuf {
             "dcs-controller",
             "-p",
             "dcs-plant",
+            "-p",
+            "dcs-monitor",
         ])
         .current_dir(root())
         .output()
@@ -295,6 +330,110 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the surface stage proved no {phrase}: {surface_line}"
         );
     }
+    // The extended tooling and surface legs ran and held: the recorded
+    // schema artifacts were fetched and emitted byte-identically, the
+    // diff legs named the doctored revision's change and none on the
+    // identical document, summary and signal-index landed in the run's
+    // evidence, the served registry document conformed to the record's
+    // declared structure, and each leg's own doctored case reported its
+    // named diagnostic.
+    for line in [
+        "emit the v0.2.0 record's artifacts byte-identically",
+        "a drifted record artifact refused: schema-drift",
+        "diff over the doctored compatible revision",
+        "changed signal 10010",
+        "diff over the identical document",
+        "no changes",
+        "failed diff expectations refused: diff-mismatch",
+        "dcs-model summary (sha256",
+        "dcs-model signal-index (sha256",
+        "conforms to the recorded schema artifact",
+        "missing-required refused: schema-mismatch",
+        "mistyped-required refused: schema-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the check transcript lacks '{line}':\n{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("== restart =="),
+        "the restart stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("restart-digest"),
+        "the restart leg reported no digest:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("missing-state-file: reported, restart-resume-failed")
+            && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
+        "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
+    );
+    // The pair stage ran and held: the manifest-declared standby
+    // converged to tracking, the receipted demote/promote switched the
+    // roles, the run continued bumplessly, and each peer's durable
+    // journal file carried the transition records — its digest line
+    // reports the evidence, and the broken-peer-flag case reported its
+    // named diagnostic.
+    assert!(
+        stdout.contains("== pair =="),
+        "the pair stage did not run:\n{stdout}"
+    );
+    let pair_line = stdout
+        .lines()
+        .find(|line| line.contains("pair-digest"))
+        .unwrap_or_else(|| panic!("the pair leg reported no digest:\n{stdout}"));
+    for phrase in ["switched at tick", "persisted journal records"] {
+        assert!(
+            pair_line.contains(phrase),
+            "the pair digest names no '{phrase}' evidence: {pair_line}"
+        );
+    }
+    assert!(
+        stdout.contains("broken-peer-flag: reported, pair-failed"),
+        "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's refusal half ran and held: the pre-transfer
+    // promote answered not_converged, the standby-directed write
+    // answered not_active, and the same promote succeeded once
+    // tracking — its digest line reports the evidence, and the
+    // doctored applied-expectation case reported its named diagnostic.
+    let refusal_line = stdout
+        .lines()
+        .find(|line| line.contains("refusal-digest"))
+        .unwrap_or_else(|| panic!("the refusal leg reported no digest:\n{stdout}"));
+    for phrase in ["not_converged", "not_active", "promoted at tick"] {
+        assert!(
+            refusal_line.contains(phrase),
+            "the refusal digest names no '{phrase}' evidence: {refusal_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-applied: reported, refusal-failed"),
+        "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's peer-announce leg ran and held: the foreign
+    // ?peer= announce was refused while the checkpoint read answered,
+    // the demoted peer reconverged tracking on its real successor, and
+    // the landed-announce case reported its named diagnostic.
+    let announce_line = stdout
+        .lines()
+        .find(|line| line.contains("peer-announce-digest"))
+        .unwrap_or_else(|| panic!("the peer-announce leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "checkpoint answered at tick",
+        "tracking its successor",
+        "roles restored",
+    ] {
+        assert!(
+            announce_line.contains(phrase),
+            "the peer-announce digest names no '{phrase}' evidence: {announce_line}"
+        );
+    }
+    assert!(
+        stdout.contains("landed-announce: reported, peer-announce-failed"),
+        "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -303,6 +442,25 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("identical across every schedule and both passes"),
         "the consumer schedules did not produce identical digests:\n{stdout}",
     );
+    assert!(
+        stdout.contains("== ctl =="),
+        "the ctl stage did not run:\n{stdout}"
+    );
+    let ctl_line = stdout
+        .lines()
+        .find(|line| line.contains("ctl-digest") && line.contains("identical"))
+        .unwrap_or_else(|| panic!("the ctl stage reported no digest:\n{stdout}"));
+    for phrase in ["receipted submissions", "named refusals"] {
+        let index = ctl_line
+            .find(phrase)
+            .unwrap_or_else(|| panic!("the ctl digest names no '{phrase}' count: {ctl_line}"));
+        let count: usize = ctl_line[..index]
+            .split_whitespace()
+            .next_back()
+            .and_then(|token| token.parse().ok())
+            .unwrap_or_else(|| panic!("the '{phrase}' count is not a number: {ctl_line}"));
+        assert!(count > 0, "the ctl stage proved no {phrase}: {ctl_line}");
+    }
 }
 
 /// The `upgrade` stage is the executable assertion of the documented
@@ -427,6 +585,264 @@ fn a_divergent_rig_definition_reports_rig_mismatch() {
         "expected the rig-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A standby wired at a peer that never serves is the `pair-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, so the remote stand-in is not needed.
+/// The driver's `broken-peer-flag` tamper wires the tracking peer's
+/// `--standby` flag at an address nothing serves; the leg must refuse
+/// the run naming the lost convergence, which the check reports as
+/// `pair-failed` — never a silently unconverged pass.
+#[test]
+fn a_broken_peer_flag_reports_pair_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-pair-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/pair.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "broken-peer-flag",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the redundant-pair leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a broken peer flag passed the pair leg"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
+        "expected the lost-convergence evidence, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A doctored refusal leg asserting the standby-directed write settles
+/// `applied` is the `refusal-failed` diagnostic — exercised against a
+/// copied tree at script level with the locally built tooling, the
+/// same seam the broken-peer-flag test uses. The driver's
+/// `expect-applied` tamper flips the leg's own expectation; the
+/// tracking standby's honest `not_active` rejection must fail it
+/// naming the actual answer — never a silently unrefused pass.
+#[test]
+fn a_doctored_write_expectation_reports_refusal_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-refusal-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/refusal.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-applied",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the role-gated refusal leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored write expectation passed the refusal leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
+        "expected the named not_active evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored takeover leg asserting the pump still follows the
+/// group while `mode` stands manual is the `takeover-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag and
+/// refusal tests use. The driver's `follows-group` tamper flips the
+/// leg's own expectation; the honest manual selection — the auto leg
+/// reporting manual with the delivered command off the group's
+/// request — must fail it naming the actual readings, never a
+/// silently unexercised pass.
+#[test]
+fn a_doctored_follows_group_expectation_reports_takeover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-takeover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/takeover.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "follows-group",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the manual-takeover leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored follows-group expectation passed the takeover leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not follow the group"),
+        "expected the named follows-group evidence, got:\n{stderr}"
+    );
+}
+
+/// A served registry document diverging from the recorded artifact's
+/// declared structure is the `schema-mismatch` diagnostic — exercised
+/// at script level against the consumer-side conformance check, the
+/// same seam the rig-definition test uses. The artifact is the release
+/// record's checked-in `block-interfaces.schema.json`; a structurally
+/// conforming document passes, a missing required field fails, and a
+/// mistyped required field fails.
+#[test]
+fn a_structurally_divergent_served_document_reports_schema_mismatch() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-schema-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let schema = root().join("docs/releases/v0.2.0/block-interfaces.schema.json");
+    let script = root().join("reference-plant/ci/schema_conformance.py");
+    let conforming = serde_json::json!({
+        "publication": 0,
+        "tick": 0,
+        "interfaces": [{
+            "name": "kind:1",
+            "interface": {
+                "version": 1,
+                "kind": "kind",
+                "measurements": [],
+                "configuration": [],
+                "state": [],
+                "commands": [],
+                "events": [],
+            },
+        }],
+    });
+    let conform = |document: &serde_json::Value| {
+        let path = dir.join("document.json");
+        std::fs::write(&path, serde_json::to_string(document).unwrap()).unwrap();
+        Command::new("python3")
+            .arg(&script)
+            .arg("--schema")
+            .arg(&schema)
+            .arg("--document")
+            .arg(&path)
+            .output()
+            .expect("python3 runs the schema-conformance check")
+    };
+    let output = conform(&conforming);
+    assert!(
+        output.status.success(),
+        "a conforming document failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A required top-level field dropped.
+    let mut missing = conforming.clone();
+    missing.as_object_mut().unwrap().remove("tick");
+    let output = conform(&missing);
+    assert!(
+        !output.status.success(),
+        "a document missing a required field passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("schema-mismatch") && stderr.contains("tick"),
+        "expected the schema-mismatch diagnostic naming the field, got:\n{stderr}"
+    );
+    // A required field mistyped — a string where the schema declares
+    // an integer.
+    let mut mistyped = conforming.clone();
+    mistyped["tick"] = serde_json::json!("not-a-tick");
+    let output = conform(&mistyped);
+    assert!(
+        !output.status.success(),
+        "a document mistyping a required field passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("schema-mismatch") && stderr.contains("tick"),
+        "expected the schema-mismatch diagnostic naming the field, got:\n{stderr}"
+    );
+    // A nested required field dropped inside a served interface.
+    let mut nested = conforming.clone();
+    nested["interfaces"][0]["interface"]
+        .as_object_mut()
+        .unwrap()
+        .remove("events");
+    let output = conform(&nested);
+    assert!(
+        !output.status.success(),
+        "a document missing a nested required field passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("schema-mismatch"),
+        "expected the schema-mismatch diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold

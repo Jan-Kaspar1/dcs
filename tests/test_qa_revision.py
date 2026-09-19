@@ -2,7 +2,11 @@
 is deterministic, additive, collision-guarded, and produces a document
 that validates and lints clean — including against the run's real
 mounted fixture, whose maximum declared point id the added point must
-stay below so assembly's synthesized-link allocation does not shift."""
+stay below so assembly's synthesized-link allocation does not shift —
+and the checked-in incompatible post-derivation step's coverage: it
+retypes exactly the spec's named carried point, rewires its connection
+ends onto the named same-kind point so the document still validates,
+and refuses every spec violation with a named RevisionError."""
 import json
 import tempfile
 import unittest
@@ -173,6 +177,146 @@ class RecipeDerivationTests(unittest.TestCase):
                                               Path(tmp) / 'out.json')
             with self.assertRaises(revision.RevisionError):
                 revision.load_recipe(missing)
+
+
+class IncompatibleDerivationTests(unittest.TestCase):
+    """The checked-in incompatible post-derivation step: it must
+    produce a document that still validates and loads — the carryover
+    crossing, not the model load, is what refuses — while retyping
+    exactly the spec's named carried point."""
+
+    def _spec(self, **overrides):
+        spec = {'retype_io_point': {'id': 300, 'value_type': 'int',
+                                    'initial': {'int': 0},
+                                    'rewire_to': 301}}
+        spec.update(overrides)
+        return spec
+
+    def _wired_document(self):
+        """A mounted model whose writable internal point 300 feeds a
+        component port — the carried-point shape the checked-in spec
+        retypes — with 301 as a same-kind rewire target."""
+        document = _document()
+        document['io_points'].append(
+            {'id': 301, 'direction': 'in', 'value_type': 'bool',
+             'writable': True, 'initial': {'bool': False}})
+        document['components'] = [
+            {'id': 20, 'kind': 'bool-gate',
+             'ports': [{'name': 'in', 'direction': 'in',
+                        'value_type': 'bool'}]}]
+        document['connections'] = [
+            {'from': {'point': 300},
+             'to': {'port': {'component': 20, 'name': 'in'}}}]
+        return document
+
+    def test_checked_in_spec_loads_and_names_the_retype(self):
+        spec = revision.load_incompatible()
+        retype = spec['retype_io_point']
+        self.assertEqual(retype['id'], 302)
+        self.assertEqual(retype['value_type'], 'int')
+        self.assertEqual(retype['initial'], {'int': 0})
+        self.assertEqual(retype['rewire_to'], 900)
+        # The refusal is named in the spec's own description.
+        self.assertIn('302', spec['description'])
+        self.assertIn('retype', spec['description'].lower())
+
+    def test_apply_retypes_and_rewires(self):
+        document = self._wired_document()
+        applied = revision.apply_incompatible(document, self._spec())
+        incompatible = applied['document']
+        points = {p['id']: p for p in incompatible['io_points']}
+        self.assertEqual(points[300]['value_type'], 'int')
+        self.assertEqual(points[300]['initial'], {'int': 0})
+        # The retyped point stays a writable internal in-point — the
+        # carried set — and its wiring moved onto the same-kind 301.
+        self.assertTrue(points[300]['writable'])
+        self.assertNotIn('channel', points[300])
+        self.assertEqual(applied['retyped_point'], 300)
+        self.assertEqual(applied['rewired_connections'], 1)
+        connection = incompatible['connections'][0]
+        self.assertEqual(connection['from']['point'], 301)
+        # The input document is untouched.
+        self.assertEqual(document['io_points'][1]['value_type'],
+                         'bool')
+        self.assertEqual(document['connections'][0]['from']['point'],
+                         300)
+
+    def test_fixture_derivation_lints_clean_and_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / 'a.json'
+            second = Path(tmp) / 'b.json'
+            info = revision.derive_incompatible_model(FIXTURE, first)
+            revision.derive_incompatible_model(FIXTURE, second)
+            self.assertEqual(first.read_bytes(),
+                             second.read_bytes())
+            document = json.loads(first.read_text())
+            self.assertEqual(revision.lint(document), [])
+            points = {p['id']: p for p in document['io_points']}
+            self.assertEqual(points[302]['value_type'], 'int')
+            self.assertTrue(points[302]['writable'])
+            self.assertEqual(points[900]['value_type'], 'bool')
+            # No connection end still names the retyped point.
+            for connection in document['connections']:
+                for end in ('from', 'to'):
+                    endpoint = connection.get(end) or {}
+                    self.assertNotEqual(endpoint.get('point'), 302)
+            self.assertEqual(info['retyped_point'], 302)
+            self.assertEqual(info['added_points'], [900])
+            self.assertGreater(info['rewired_connections'], 0)
+
+    def test_unknown_retype_point_rejected(self):
+        spec = self._spec()
+        spec['retype_io_point']['id'] = 4242
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(self._wired_document(), spec)
+
+    def test_channel_bound_retype_rejected(self):
+        # A field point is not the carried set — the checkpoint's
+        # internal section never crosses it.
+        spec = self._spec()
+        spec['retype_io_point']['id'] = 10
+        spec['retype_io_point']['rewire_to'] = 301
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(self._wired_document(), spec)
+
+    def test_same_kind_retype_rejected(self):
+        spec = self._spec()
+        spec['retype_io_point']['value_type'] = 'bool'
+        spec['retype_io_point']['initial'] = {'bool': False}
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(self._wired_document(), spec)
+
+    def test_mismatched_initial_rejected(self):
+        spec = self._spec()
+        spec['retype_io_point']['initial'] = {'bool': True}
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(self._wired_document(), spec)
+
+    def test_unknown_rewire_target_rejected(self):
+        spec = self._spec()
+        spec['retype_io_point']['rewire_to'] = 4242
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(self._wired_document(), spec)
+
+    def test_wrong_kind_rewire_target_rejected(self):
+        document = self._wired_document()
+        document['io_points'][2]['value_type'] = 'float'
+        document['io_points'][2]['initial'] = {'float': 0.0}
+        with self.assertRaises(revision.RevisionError):
+            revision.apply_incompatible(document, self._spec())
+
+    def test_malformed_spec_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / 'bad.json'
+            bad.write_text(json.dumps({'retype_io_point':
+                                       {'id': 300}}))
+            with self.assertRaises(revision.RevisionError):
+                revision.load_incompatible(bad)
+            bad.write_text(json.dumps({'unknown': 1}))
+            with self.assertRaises(revision.RevisionError):
+                revision.load_incompatible(bad)
+            with self.assertRaises(revision.RevisionError):
+                revision.load_incompatible(Path(tmp) / 'nope.json')
 
 
 class LintTests(unittest.TestCase):

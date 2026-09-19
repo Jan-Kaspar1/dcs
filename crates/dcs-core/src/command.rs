@@ -111,7 +111,10 @@ pub enum Command {
     /// `Out` point refuses at submission with the named reason — and the
     /// release lands at the same scan boundary every command uses: the
     /// applying scan's input phase already reads the driver again for a
-    /// field point, or resumes the held-value rule for an internal one.
+    /// field point, or resumes the held-value rule for an internal one —
+    /// its held sample, the force's last stamp, re-stamped
+    /// [`Quality::Good`](crate::Quality::Good) rather than left claiming
+    /// substituted data.
     /// Releasing a point that is not forced applies as a no-op — the
     /// release is idempotent so an operator never needs the current force
     /// set to issue one.
@@ -333,6 +336,19 @@ pub enum CommandError {
         /// The pending-command queue's declared capacity.
         capacity: usize,
     },
+    /// The run the command applied onto was superseded out of the field:
+    /// the shared field's single-writer claim already belonged to another
+    /// attachment when the superseded peer's scan boundary settled the
+    /// command, so the change reached an image the field never saw and
+    /// the demotion reconciles the settlement rather than reporting an
+    /// `applied` the surviving owner does not carry. `point` is the
+    /// command's target, not a point at fault; a command targeting a
+    /// component rather than a point carries `None`. Resubmit to the peer
+    /// now owning the field.
+    Superseded {
+        /// The point the command targeted, when it targeted a point.
+        point: Option<PointId>,
+    },
 }
 
 impl CommandError {
@@ -344,7 +360,9 @@ impl CommandError {
             | CommandError::NotWritable { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. } => Some(*point),
-            CommandError::NotActive { point, .. } | CommandError::QueueFull { point, .. } => *point,
+            CommandError::NotActive { point, .. }
+            | CommandError::QueueFull { point, .. }
+            | CommandError::Superseded { point } => *point,
             _ => None,
         }
     }
@@ -473,6 +491,20 @@ impl fmt::Display for CommandError {
                     f,
                     "command refused: the pending-command queue is full \
                      (capacity {capacity}); resubmit once a scan drains it"
+                ),
+            },
+            CommandError::Superseded { point } => match point {
+                Some(point) => write!(
+                    f,
+                    "command on I/O point {point:?} superseded: the peer lost the field's \
+                     single-writer claim before the command took effect; resubmit to the \
+                     peer now owning the field"
+                ),
+                None => write!(
+                    f,
+                    "command superseded: the peer lost the field's single-writer claim \
+                     before the command took effect; resubmit to the peer now owning \
+                     the field"
                 ),
             },
         }
@@ -848,6 +880,14 @@ mod tests {
                     point: None,
                     capacity: 64,
                 },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded {
+                    point: Some(PointId(7)),
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None },
             },
         ] {
             let receipt = CommandReceipt {

@@ -350,9 +350,15 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // same-origin. Under a pair, every refresh polls GET /role on each peer,
 // the data endpoints are read from the peer reporting "active" — one
 // logical controller — and the other peer contributes pair health only.
-// Commands submit only to the settled-active peer; a "not_active"
-// rejection means the command landed mid-transition, so roles are
-// re-polled and the command retried once. Beside the pair's role and
+// Two peers reporting "active" at once is the dual-active split-brain
+// that contract makes impossible: the pair summary names it as a
+// redundancy fault rather than rendering the pair healthy, the view
+// holds its current source rather than re-homing between claimants,
+// and commands find no unique target — nothing is sent while the
+// fault stands. Commands submit only to the settled-active peer; a
+// "not_active" rejection means the command landed mid-transition, so
+// roles are re-polled and the command retried once. Beside the pair's
+// role and
 // convergence reporting the I/O-health pane renders the snapshot's
 // io_health section — the executor's boundary counters and attributed
 // last fault, the driver's volunteered link diagnostics, and the pacing
@@ -416,9 +422,15 @@ for (const raw of urlParams.getAll("peer")) {
 // on every command submission as the attributed envelope's actor (see
 // postCommand). Declared, not authenticated; null submits unattributed.
 const operator = urlParams.get("operator");
-// Per-peer last-polled state: { report: RoleReport | null, error } —
-// error non-null is the named unreachable redundancy fault.
-const peerState = peers.map(() => ({ report: null, error: null }));
+// Per-peer last-polled state: { report: RoleReport | null, error,
+// unsyncedSince } — error non-null is the named unreachable redundancy
+// fault; unsyncedSince is the convergence-grace clock pairHealth reads
+// (epoch ms of the first still-unsynchronized report, else null).
+const peerState = peers.map(() => ({
+  report: null,
+  error: null,
+  unsyncedSince: null,
+}));
 // Index of the peer currently sourcing the logical view's data.
 let source = 0;
 
@@ -588,6 +600,28 @@ function pointName(point) {
   return meta ? meta.name + " (point " + point + ")" : "point " + point;
 }
 
+// The wall-clock grace a peer reporting "unsynchronized" gets before
+// pairHealth names it a redundancy fault — the transient a fresh or
+// newly demoted standby legitimately occupies while its first tracking
+// pulls land at the documented pull-per-scan cadence. Past it the peer
+// cannot demonstrate convergence — a demoted peer with no checkpoint
+// source stays unsynchronized forever and can never be promoted back —
+// and the pair has no failover coverage to call healthy.
+const CONVERGENCE_GRACE_MS = 5000;
+
+// The convergence-grace clock pairHealth reads: a report of
+// "unsynchronized" starts or continues the peer's run; any converged
+// sync state — and the unreachable fault, which pairHealth already
+// names on its own — ends it. Called wherever a role poll lands.
+function noteSyncAge(state) {
+  if (state.error === null && state.report !== null &&
+      state.report.sync === "unsynchronized") {
+    state.unsyncedSince = state.unsyncedSince || Date.now();
+  } else {
+    state.unsyncedSince = null;
+  }
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -602,6 +636,7 @@ async function pollRoles() {
     } catch (error) {
       peerState[i].error = String(error);
     }
+    noteSyncAge(peerState[i]);
   }));
   selectSource();
 }
@@ -609,11 +644,14 @@ async function pollRoles() {
 // The logical view reads from the peer reporting settled "active".
 // During a switchover a "promoting" peer already owns the field and is
 // becoming active, so it sources the view until it settles; otherwise the
-// previous source stays while it remains reachable.
+// previous source stays while it remains reachable. Under the dual-active
+// fault the current source is held while it is one of the claimants —
+// pairHealth names the fault; re-homing the view between two reported
+// actives would only flap the displays without resolving which is real.
 function selectSource() {
   const reachable = i => peerState[i].error === null && peerState[i].report !== null;
-  let next = peerState.findIndex((state, i) =>
-    reachable(i) && state.report.role === "active");
+  const actives = activePeers();
+  let next = actives.includes(source) ? source : (actives.length > 0 ? actives[0] : -1);
   if (next < 0) next = peerState.findIndex((state, i) =>
     reachable(i) && state.report.role === "promoting");
   if (next < 0) {
@@ -638,12 +676,35 @@ function switchSource(next) {
   feed.stale = null;
 }
 
-// The index of a peer reporting settled "active" — the only legitimate
-// command target — or -1 while the pair is mid-transition or its active
-// is lost.
+// The indices of the peers reporting settled "active" — the legitimate
+// command target when exactly one does.
+function activePeers() {
+  const actives = [];
+  peerState.forEach((state, i) => {
+    if (state.error === null && state.report &&
+        state.report.role === "active") actives.push(i);
+  });
+  return actives;
+}
+
+// The index of the pair's unique settled-active peer — the only
+// legitimate command target — or -1 while the pair is mid-transition,
+// its active is lost, or the dual-active fault stands: two reported
+// actives are a split-brain no command may arbitrate by picking one.
 function activePeer() {
-  return peerState.findIndex(state =>
-    state.error === null && state.report && state.report.role === "active");
+  const actives = activePeers();
+  return actives.length === 1 ? actives[0] : -1;
+}
+
+// The not-sent verdict a control surfaces when submitCommand found no
+// legitimate target: no settled-active peer mid-transition, or the
+// dual-active fault leaving no unique one.
+function noActiveVerdict() {
+  const actives = activePeers().length;
+  return actives > 1
+    ? "not sent: " + actives + " peers report role active — the " +
+      "dual-active fault leaves no unique command target"
+    : "not sent: no peer reports role active — the pair is mid-transition";
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
@@ -661,21 +722,27 @@ function describeSync(sync) {
   }
   if ("reinitialized" in sync) {
     const report = sync.reinitialized.report;
+    const reverted = (report.reverted_tuning || []).length;
     return "reinitialized under revised model at tick " + report.resumed_at +
       " (" + report.carried.length + " carried, " +
-      report.dropped.length + " dropped)";
+      report.dropped.length + " dropped" +
+      (reverted > 0 ? ", " + reverted + " reverted" : "") + ")";
   }
   return JSON.stringify(sync);
 }
 
 // The pair's redundancy health for either the pair section or an
-// overview card: the active peer's name plus the named redundancy
-// faults — an unreachable peer, a degraded or diverged standby
-// convergence, or no peer reporting active. These are pair health,
-// never plant faults.
+// overview card: the reported-active peers' names plus the named
+// redundancy faults — an unreachable peer, a degraded or diverged
+// standby convergence, a peer still reporting "unsynchronized" past
+// CONVERGENCE_GRACE_MS, no peer reporting active, or more than one
+// reporting it. Two actives is the dual-active split-brain the
+// one-logical-controller contract makes impossible — an alarmable
+// state the summary names rather than presenting the pair as healthy.
+// These are pair health, never plant faults.
 function pairHealth(pairPeers, states) {
   const faults = [];
-  let activeName = null;
+  const actives = [];
   pairPeers.forEach((peer, i) => {
     const state = states[i];
     if (state.error !== null) {
@@ -684,7 +751,13 @@ function pairHealth(pairPeers, states) {
       return;
     }
     if (state.report === null) return;
-    if (state.report.role === "active") activeName = peer.name;
+    if (state.report.role === "active") actives.push(peer.name);
+    if (state.report.sync === "unsynchronized" &&
+        state.unsyncedSince != null &&
+        Date.now() - state.unsyncedSince >= CONVERGENCE_GRACE_MS) {
+      faults.push(peer.name + " has not converged: unsynchronized " +
+        "past the convergence grace");
+    }
     if (state.report.sync && typeof state.report.sync === "object") {
       if ("degraded" in state.report.sync) {
         faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
@@ -695,13 +768,16 @@ function pairHealth(pairPeers, states) {
       }
     }
   });
-  if (activeName === null) faults.push("no peer reports role active");
-  return { activeName, faults };
+  if (actives.length === 0) faults.push("no peer reports role active");
+  if (actives.length > 1) {
+    faults.push("dual-active: " + actives.join(", ") +
+      " report role active — split-brain leaves no unique controller");
+  }
+  return { activeName: actives.length === 1 ? actives[0] : null, actives, faults };
 }
 
 // The pair's redundancy summary line, from pairHealth's verdict.
-function pairSummary() {
-  const health = pairHealth(peers, peerState);
+function pairSummary(health) {
   return health.faults.length === 0
     ? "redundant pair healthy — active on " + health.activeName
     : "redundancy fault: " + health.faults.join("; ");
@@ -729,9 +805,9 @@ function renderPair() {
       "</td></tr>";
   }).join("");
   const summary = document.getElementById("pair-summary");
-  summary.textContent = pairSummary();
-  summary.className = activePeer() >= 0 &&
-    peerState.every(state => state.error === null) ? "good" : "bad";
+  const health = pairHealth(peers, peerState);
+  summary.textContent = pairSummary(health);
+  summary.className = health.faults.length === 0 ? "good" : "bad";
 }
 
 // ---- Feed state ----
@@ -819,9 +895,9 @@ function renderFeed() {
 
 // Parses one ?pair= value — `[name=]host:port[,host:port],…` — into a
 // card's pair record, or null for a value naming no peers. The record
-// carries the card's whole polled state: per-peer {report, error} like
-// the pair view's peerState, the snapshot-source index, and the source
-// peer's last snapshot or its fetch error.
+// carries the card's whole polled state: per-peer {report, error,
+// unsyncedSince} like the pair view's peerState, the snapshot-source
+// index, and the source peer's last snapshot or its fetch error.
 function parsePairSpec(raw) {
   const eq = raw.indexOf("=");
   const spec = eq >= 0 ? raw.slice(eq + 1) : raw;
@@ -837,7 +913,7 @@ function parsePairSpec(raw) {
   return {
     name: name === "" ? pairPeers[0].name : name,
     peers: pairPeers,
-    state: pairPeers.map(() => ({ report: null, error: null })),
+    state: pairPeers.map(() => ({ report: null, error: null, unsyncedSince: null })),
     source: 0,
     snapshot: null,
     snapshotError: null,
@@ -845,13 +921,19 @@ function parsePairSpec(raw) {
 }
 
 // The card's snapshot source follows the pair view's selection rule:
-// the peer reporting settled active, then a promoting peer, then the
-// previous source while it stays reachable, then any reachable peer.
+// the peer reporting settled active — holding the current source while
+// it is one of several claimants under the dual-active fault — then a
+// promoting peer, then the previous source while it stays reachable,
+// then any reachable peer.
 function selectPairSource(pair) {
   const reachable = i =>
     pair.state[i].error === null && pair.state[i].report !== null;
-  let next = pair.state.findIndex((state, i) =>
-    reachable(i) && state.report.role === "active");
+  const actives = [];
+  pair.state.forEach((state, i) => {
+    if (reachable(i) && state.report.role === "active") actives.push(i);
+  });
+  let next = actives.includes(pair.source) ? pair.source
+    : (actives.length > 0 ? actives[0] : -1);
   if (next < 0) next = pair.state.findIndex((state, i) =>
     reachable(i) && state.report.role === "promoting");
   if (next < 0) {
@@ -877,6 +959,7 @@ async function pollPairCard(pair) {
     } catch (error) {
       pair.state[i].error = String(error);
     }
+    noteSyncAge(pair.state[i]);
   }));
   selectPairSource(pair);
   pair.snapshot = null;
@@ -991,7 +1074,7 @@ function pairCardMarkup(pair) {
   return "<section class=\"pair-card" + (faulted ? " faulted" : "") + "\">" +
     "<h3><a href=\"" + esc(pairHref(pair)) + "\">" + esc(pair.name) + "</a></h3>" +
     "<p>active peer: <span class=\"active-peer\">" +
-      (health.activeName === null ? "none reported" : esc(health.activeName)) +
+      (health.actives.length === 0 ? "none reported" : esc(health.actives.join(", "))) +
       "</span></p>" +
     "<table><thead><tr><th>Peer</th><th>Role</th><th>Standby sync</th>" +
       "<th>Tick</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>" +
@@ -1846,10 +1929,15 @@ function commandTable(component, specs, states, resources) {
     "</div>";
 }
 
-// The recent-events list: the component's retained journal tail —
-// point transitions on its bound points, its commands' settled
-// receipts, its step failures, and its kind-emitted events — rendered
-// through the same describeEvent the journal pane uses, newest last.
+// The recent-events list: the component's attributed event record —
+// the retained journal tail (point transitions on its bound points,
+// its commands' settled receipts, its step failures, its
+// Journal-retained and undeclared kind emissions) beside its routed
+// History/Latest emission records — rendered through the same
+// describeEvent the journal pane uses, newest last. The store column
+// reads the entry's `retention` mark — journal | history | latest —
+// telling the durable record from the diagnostic streams; entries
+// from a pre-marker document render under the journal they are.
 function eventList(events) {
   const recent = (events || []).slice(-EVENT_LIMIT);
   return "<div class=\"res\" data-category=\"events\">" +
@@ -1857,10 +1945,11 @@ function eventList(events) {
     (recent.length === 0
       ? "<p class=\"res-empty\">no recent events</p>"
       : "<table class=\"ports\"><thead><tr>" +
-        "<th>Seq</th><th>Tick</th><th>Event</th>" +
+        "<th>Seq</th><th>Tick</th><th>Store</th><th>Event</th>" +
         "</tr></thead><tbody>" +
         recent.map(entry =>
           "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+          "</td><td>" + esc(entry.retention || "journal") +
           "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>"
         ).join("") + "</tbody></table>") +
     "</div>";
@@ -2022,7 +2111,7 @@ async function submitInterfaceCommand(button) {
   const verdict = answer && answer.outcome
     ? describeOutcome(answer.outcome)
     : answer === null
-      ? "not sent: no peer reports role active"
+      ? noActiveVerdict()
       : String(answer);
   setCommandStatus(component, name, {
     text: verdict,
@@ -2707,7 +2796,15 @@ function describeEventField(field) {
 // {"step_failed": ...} | {"event_emitted": {event: {event, component,
 // fields}}} — the kind-declared event's durable record — |
 // {"role_changed": {from, to}} |
-// {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
+// {"divergence_detected": {mismatches}} |
+// {"divergence_resolved": {compared}} — the compared points a clean
+// resync stood on; a diverged verdict clears only on that fully-read
+// same-tick evidence, so an empty list marks an entry an older build
+// journaled — |
+// {"reinitialized": {report}} |
+// {"source_restarted": {was_aligned, resumed_at}} — the tracked
+// stream's generation boundary — | {"run_boundary": {run}} — a new
+// process lifetime's marker on a restarted journal file.
 function describeEvent(event) {
   if ("point_changed" in event) {
     const change = event.point_changed;
@@ -2744,8 +2841,34 @@ function describeEvent(event) {
         pointName(m.point) + " (staged " + formatValue(m.staged) +
         ", field " + formatValue(m.field) + ")").join(", ");
   }
+  if ("divergence_resolved" in event) {
+    const compared = event.divergence_resolved.compared;
+    if (compared.length === 0) {
+      // Reachable only in a journal an older build wrote: a clear now
+      // always stands on the fully-read same-tick comparison below.
+      return "standby divergence cleared — no same-tick field " +
+        "comparison stands behind the clear";
+    }
+    return "standby divergence resolved: staged outputs match the " +
+      "field at " + compared.map(m =>
+        pointName(m.point) + " (staged " + formatValue(m.staged) +
+        ", field " + formatValue(m.field) + ")").join(", ");
+  }
+  if ("source_restarted" in event) {
+    const restart = event.source_restarted;
+    return "tracking source restarted: resumed at tick " +
+      restart.resumed_at +
+      (restart.was_aligned === null || restart.was_aligned === undefined
+        ? ""
+        : " (was aligned to " + restart.was_aligned + ")");
+  }
+  if ("run_boundary" in event) {
+    return "run " + event.run_boundary.run + " began — a new process " +
+      "lifetime; later entries carry its own tick domain";
+  }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;
+    const reverted = report.reverted_tuning || [];
     return "standby reinitialized under revised model at tick " +
       report.resumed_at + ": carried " +
       report.carried.map(c => pointName(c.point)).join(", ") +
@@ -2755,6 +2878,12 @@ function describeEvent(event) {
             : d.output_point ? pointName(d.output_point.point)
             : d.component ? "component " + d.component.name
             : "driver state").join(", ")
+        : "") +
+      (reverted.length > 0
+        ? "; reverted tuning " + reverted.map(r =>
+            r.component + "." + r.parameter + " " +
+            formatValue(r.checkpointed) + " → " +
+            formatValue(r.declared)).join(", ")
         : "");
   }
   if ("event_emitted" in event) {
@@ -2942,8 +3071,7 @@ async function submitCommand(command) {
     target = activePeer();
   }
   if (target < 0) {
-    receipt.textContent =
-      "not sent: no peer reports role active — the pair is mid-transition";
+    receipt.textContent = noActiveVerdict();
     return null;
   }
   let answer = await postCommand(peers[target].base, command);
@@ -2993,7 +3121,7 @@ async function submitParameter(button) {
   const verdict = answer && answer.outcome
     ? describeOutcome(answer.outcome)
     : answer === null
-      ? "not sent: no peer reports role active"
+      ? noActiveVerdict()
       : String(answer);
   setParamStatus(component, name, {
     text: (parsed.warnings.length > 0

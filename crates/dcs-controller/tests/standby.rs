@@ -98,7 +98,7 @@ fn standby_with_local_sim_continues_the_actives_run_identically() {
         // Free-running before the first transfer leaves the standby
         // diverged — the checkpoint is what aligns it.
         for _ in 0..3 {
-            standby.scan().unwrap();
+            standby.scan();
             standby_plant.step(DT);
         }
 
@@ -138,7 +138,7 @@ fn standby_with_local_sim_continues_the_actives_run_identically() {
                 );
             }
             let reference = active_client.advance(1).unwrap();
-            standby.scan().unwrap();
+            standby.scan();
             active_plant.step(DT);
             standby_plant.step(DT);
             assert_eq!(standby.snapshot(), reference, "tick {tick}");
@@ -177,6 +177,10 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
     thread::scope(|scope| {
         scope.spawn(|| plant.serve());
         let _plant = ShutdownOnDrop(&plant);
+        // The field fails closed while unclaimed: the active's
+        // mutations ride this attachment's claim — taken once the
+        // plant is serving, before the first scan.
+        active_driver.claim_writer(1).unwrap();
         scope.spawn(|| monitor.serve());
         let _monitor = ShutdownOnDrop(&monitor);
 
@@ -202,7 +206,7 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
         let mut last_reference = None;
         for tick in (N + 1)..=(N + M) {
             let reference = active_client.advance(1).unwrap();
-            standby.scan().unwrap();
+            standby.scan();
             active_driver.step(DT).unwrap();
             assert_eq!(standby.snapshot(), reference, "tick {tick}");
             last_reference = Some(reference);
@@ -304,7 +308,7 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
 
         // The standby keeps scanning its last-known state meanwhile, and
         // the next good transfer reconverges it.
-        standby.scan().unwrap();
+        standby.scan();
         standby_plant.step(DT);
         for _ in 0..7 {
             active_client.advance(1).unwrap();
@@ -320,7 +324,7 @@ fn failed_and_mismatched_transfers_leave_a_recoverable_degraded_state() {
         // And the reconverged run again continues identically.
         for tick in 13..=20 {
             let reference = active_client.advance(1).unwrap();
-            standby.scan().unwrap();
+            standby.scan();
             active_plant.step(DT);
             standby_plant.step(DT);
             assert_eq!(standby.snapshot(), reference, "tick {tick}");

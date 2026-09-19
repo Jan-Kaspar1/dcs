@@ -7,7 +7,7 @@
 //! Usage: `dcs-controller <model-file> [--check] [--ticks N]
 //!         [--scan-ms MS] [--dt T] [--listen ADDR] [--standby ADDR]
 //!         [--remote ADDR] [--driven] [--auto-promote N]
-//!         [--state-file PATH] [--journal-file PATH]`
+//!         [--owner-token N] [--state-file PATH] [--journal-file PATH]`
 //!
 //! `--check` is the engineering compile-check: the model is loaded,
 //! validated, and assembled through the standard registries — device
@@ -54,8 +54,15 @@
 //! `GET /checkpoint` serves — versioned and fingerprinted per the
 //! checkpoint-versioning decision — is written to `PATH` at the end of
 //! every completed scan cycle, after the scan and the plant step, by
-//! write-then-rename so a crash mid-write cannot leave a torn file. When
-//! `PATH` exists at startup the run resumes from it: the checkpoint is
+//! write-then-rename so a crash mid-write cannot leave a torn file.
+//! A second write boundary keeps the command path honest: `POST
+//! /command`'s accepted admission persists the just-captured
+//! checkpoint — receipt log included — before the `200` answers, so a
+//! restart between admission and the applying scan re-queues the
+//! carried `Accepted` receipt instead of losing the command with no
+//! audit trace, the same guarantee the checkpoint contract gives a
+//! promoted standby.
+//! When `PATH` exists at startup the run resumes from it: the checkpoint is
 //! applied to the freshly assembled executor before pacing begins, so
 //! the next scan continues the interrupted run tick-for-tick. Resume is
 //! all-or-nothing, the checkpoint-restore rule — an unreadable or
@@ -97,7 +104,16 @@
 //! `--standby ADDR --listen ADDR` pulls checkpoints from the active at
 //! the first address, one per scan cycle, applies each to its running
 //! executor — aligning at the checkpointed tick and continuing
-//! deterministically — and serves its own monitor at the second, where
+//! deterministically — and serves its own monitor at the second. The
+//! fetch runs on a dedicated pull thread ([`CheckpointPuller`]), each
+//! scan cycle consuming the latest completed pull non-blockingly: an
+//! unreachable or wedged active stalls neither the scan cadence nor
+//! the monitor's request serving, and a cycle whose pull produced no
+//! checkpoint is the heartbeat miss the failover budget counts. Each
+//! pull also announces the pulling monitor's own address
+//! (`GET /checkpoint?peer=`), so the serving instance learns where its
+//! successor lives — an announce the serving side accepts only when it
+//! names the pulling connection's own source address. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -106,6 +122,50 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//!
+//! Demotion is the launch asymmetry the follow-peer half of the
+//! tracking contract closes: a launched active never named a peer —
+//! `--standby` is the only peer address the CLI used to take — yet a
+//! `POST /demote` turns it into a standby that must track *something*
+//! or strand `unsynchronized` and unpromotable forever. The demoted
+//! peer's checkpoint source is therefore resolved per scan cycle: the
+//! configured `--peer ADDR` when given — "active now, but here is my
+//! peer for later" — else the address the tracking peer announced
+//! through its pulls. Either way the demoted instance pulls, applies,
+//! and reconverges like any standby, and a later `POST /promote`
+//! fails back without a restart. A field owner with neither — nothing
+//! configured and no peer ever announced — refuses `POST /demote`
+//! outright (`no_tracking_source`) rather than silently marooning
+//! itself.
+//!
+//! The field's single-writer claim is taken at every transition into
+//! field ownership — a promotion, and a launched active's startup:
+//! `Peer::active` claims the shared plant's write arbitration before
+//! the gate lifts, so the field is fenced for this owner from the
+//! first scan rather than open to every attachment until the first
+//! promotion. Because the claim preempts unconditionally and outlives
+//! a dead holder, the startup activation is deliberately the run's
+//! last local step — journal replay, monitor bind, and peer-address
+//! resolution all run first, so a process that cannot finish starting
+//! never leaves a stale claim fencing the field's standing owner. The
+//! claim rides under a per-process owner token —
+//! `--owner-token N` pins it when an external attachment must share the
+//! owner's claim (a test harness driving plant stimuli); otherwise a
+//! fresh token is generated per process. Pinning a second *controller*
+//! to the same token is a misconfiguration: both instances' claims
+//! succeed — the field cannot tell a same-owner attachment from a peer
+//! reusing the token — but the plant server flags each shared grant
+//! `claimed_shared` and this instance warns, because two controllers on
+//! one token both write and step, defeating the single-writer fencing
+//! promotion relies on. A claim the field refuses —
+//! or a launch that cannot reach it — fails startup with the named
+//! `FieldClaimFailed`. And a claim preempted mid-run — a rogue
+//! `claim_writer`, or a promote posted before the old peer was demoted
+//! — demotes the superseded owner at its first fenced write: the gate
+//! re-closes and the reported role settles to `standby`, with
+//! `field_claim_lost` and the role changes journaled — a fenced active
+//! degrades instead of exiting, so a misordered promotion or a
+//! restarted superseded process cannot crash-loop the pair.
 //!
 //! Rolling a revised plant model into production, per the rolling
 //! model-revision decision: start the standby with `--revised` against
@@ -132,6 +192,19 @@
 //! model whose field-facing devices cannot arbitrate a single writer
 //! refuses `--auto-promote` at startup; manual promotion still works.
 //!
+//! The one active-loss case the pair cannot heal itself, per the
+//! dead-active recovery decision: the active dies holding the field
+//! claim while its standby is not converged — `POST /promote` answers
+//! `not_converged` and no checkpoint will ever arrive to change that.
+//! The recorded recovery is restart-as-active: relaunch the controller
+//! on the same model without `--standby`, and the launched active's
+//! unconditional startup claim preempts the dead owner's token — a
+//! surviving `--state-file` resumes the run at its last persisted
+//! cycle, and the standby reconverges on the new active's checkpoint
+//! stream where its tracking source resolves. There is deliberately no
+//! force-promote and no operator claim-release: a standby that never
+//! proved it tracks the field is never a writer.
+//!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
 //! address as `?peer=<host:port>` — e.g.
@@ -145,13 +218,13 @@
 //! Load, validation, and assembly failures exit nonzero naming the
 //! offending model element.
 
-use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
+use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
-use dcs_monitor::{Driven, Monitor, MonitorClient, MonitorConfig};
-use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
-use dcs_sim_net::RemoteDriver;
+use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
+use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate};
+use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -184,19 +257,49 @@ impl Driver {
     /// backends — the shared field's clock belongs to the owner, so a
     /// remote-attached standby steps nothing and a fan-out standby
     /// leaves `sim-tcp` backends to the active.
+    ///
+    /// Field trouble is not a run failure: a dead or fenced attachment
+    /// degrades the cycle — the scan's io_health already counted its
+    /// boundary failures — and the run continues so the monitor keeps
+    /// serving the outage. Only a refused step — a malformed `dt` — is
+    /// a run defect and stays fatal.
     fn step(&self, dt: f64, owns_field: bool) -> Result<(), String> {
         match (self, owns_field) {
-            (Self::Local(fanout), true) => fanout
-                .step(dt)
-                .map_err(|error| format!("plant step failed: {error}")),
-            (Self::Local(fanout), false) => fanout
-                .step_local(dt)
-                .map_err(|error| format!("plant step failed: {error}")),
-            (Self::Remote(remote), true) => remote
-                .step(dt)
-                .map(|_| ())
-                .map_err(|error| format!("plant step failed: {error}")),
+            (Self::Local(fanout), true) => degrade_step(fanout.step(dt)),
+            (Self::Local(fanout), false) => degrade_step(fanout.step_local(dt)),
+            (Self::Remote(remote), true) => match remote.step(dt) {
+                Ok(_) => Ok(()),
+                Err(RemoteError::InvalidRequest(detail)) => {
+                    Err(format!("plant step failed: {detail}"))
+                }
+                Err(error) => {
+                    eprintln!("plant step degraded: {error}");
+                    Ok(())
+                }
+            },
             (Self::Remote(_), false) => Ok(()),
+        }
+    }
+
+    /// Forgets this instance's recorded field-ownership claim — the
+    /// demotion counterpart of [`claim_writer`](Self::claim_writer):
+    /// after it, a re-attaching field driver does not re-arm a claim
+    /// this peer gave up, so a restarted plant's empty arbitration stays
+    /// free for the peer that legitimately owns the field.
+    fn release_claim(&self) {
+        match self {
+            Self::Remote(remote) => remote.release_claim(),
+            Self::Local(fanout) => fanout.release_field_claims(),
+        }
+    }
+
+    /// Whether this driver's surface reaches the shared field — a
+    /// remote attachment or a fan-out declaring field-facing devices —
+    /// so its write-ownership claim means something.
+    fn has_shared_field(&self) -> bool {
+        match self {
+            Self::Remote(_) => true,
+            Self::Local(fanout) => fanout.has_field_backend(),
         }
     }
 
@@ -204,11 +307,27 @@ impl Driver {
     /// fencing claim every promotion runs before the gate lifts, so the
     /// field itself refuses a superseded owner's writes. A purely local
     /// simulated model has no shared field to claim and answers `Ok`.
+    ///
+    /// A grant the field flags `Shared` still holds — the token cannot
+    /// tell this instance's own second attachment from a peer process
+    /// pinned to the same token — but the sharing is warned about: two
+    /// controllers on one `--owner-token` both write and step, silently
+    /// defeating the arbitration this claim exists to provide.
     fn claim_writer(&self, owner: u64) -> Result<(), String> {
         match self {
-            Self::Remote(remote) => remote
-                .claim_writer(owner)
-                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+            Self::Remote(remote) => match remote.claim_writer(owner) {
+                Ok(ClaimGrant::Exclusive) => Ok(()),
+                Ok(ClaimGrant::Shared) => {
+                    eprintln!(
+                        "warning: field write-ownership claim for owner token {owner} is \
+                         shared with another live attachment — expected only for a \
+                         deliberate same-owner attachment; a second controller pinned to \
+                         the same --owner-token defeats single-writer fencing"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+            },
             Self::Local(fanout) => fanout
                 .claim_field_writer(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -228,6 +347,35 @@ impl Driver {
                 .map(|device| device.0.to_string())
                 .collect(),
         }
+    }
+}
+
+/// A local backend step result under the same rule [`Driver::step`]
+/// applies to the remote attachment: a field failure — the backend
+/// answered [`StepError::Backend`], or a cross-backend wire's I/O fault
+/// [`StepError::Route`] — degrades the cycle instead of failing the run;
+/// anything else is a refusal and stays fatal.
+fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
+    match stepped {
+        Err(StepError::Backend { backend, detail }) => {
+            eprintln!("plant step degraded on {backend}: {detail}");
+            Ok(())
+        }
+        Err(StepError::Route(error)) => {
+            eprintln!("plant step degraded on a cross-backend wire: {error}");
+            Ok(())
+        }
+        Err(error) => Err(format!("plant step failed: {error}")),
+        Ok(()) => Ok(()),
+    }
+}
+
+/// Reports the field-ownership claim a launched active's deferred
+/// startup activation just took — the line every field-owning startup
+/// logs once the claim holds.
+fn report_claim(driver: &Driver, owner: u64) {
+    if driver.has_shared_field() {
+        eprintln!("field write-ownership claim held under owner token {owner}");
     }
 }
 
@@ -264,6 +412,10 @@ struct Options {
     /// Run as a standby pulling checkpoints from the active at this
     /// monitoring address.
     standby: Option<String>,
+    /// Run as the active, but name the peer this instance tracks if it
+    /// is later demoted — "active now, but here is my peer for later".
+    /// Mutually exclusive with `--standby`.
+    peer: Option<String>,
     /// Attach to the shared simulated plant at this `dcs-sim-net`
     /// address instead of building a local `SimDriver`.
     remote: Option<String>,
@@ -282,7 +434,8 @@ struct Options {
     /// degrading on the mismatch.
     revised: bool,
     /// Persist the run's checkpoint to this file at the end of every
-    /// scan cycle, and resume from it at startup when it exists — the
+    /// scan cycle and at each accepted command's admission boundary,
+    /// and resume from it at startup when it exists — the
     /// restart-recovery path for a controller with no redundant peer.
     state_file: Option<PathBuf>,
     /// Persist the transition journal to this append-only file and
@@ -290,13 +443,22 @@ struct Options {
     /// restart. Requires `--listen`: the journal's recorder lives in
     /// the monitor.
     journal_file: Option<PathBuf>,
+    /// Pin this instance's field-ownership token instead of generating
+    /// a fresh per-process one — so an external attachment can claim
+    /// under the same token and share the owner's field access (a test
+    /// harness driving plant stimuli through its own sim-net
+    /// connection). Pinning a second controller to the same token is a
+    /// misconfiguration the plant server flags `claimed_shared` and
+    /// this instance warns about.
+    owner_token: Option<u64>,
 }
 
 const USAGE: &str = "\
 Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
-                      [--remote ADDR] [--driven] [--auto-promote N]
-                      [--revised] [--state-file PATH] [--journal-file PATH]
+                      [--peer ADDR] [--remote ADDR] [--driven]
+                      [--auto-promote N] [--owner-token N] [--revised]
+                      [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -319,6 +481,11 @@ controller scan.
                   its monitoring address ADDR and apply one per scan;
                   combines with --listen, whose POST /promote is the
                   switchover action
+  --peer ADDR     run as the active, but name the peer's monitoring
+                  address this instance tracks if it is later demoted
+                  — so a demoted active reconverges and stays
+                  promotable. Mutually exclusive with --standby;
+                  requires --listen
   --revised       declare this standby's model a deliberate revision of
                   the active's: a pulled checkpoint whose model
                   fingerprint differs crosses the boundary under the
@@ -342,9 +509,20 @@ controller scan.
                   field-facing devices to arbitrate a single writer —
                   sim-tcp does through the plant server's claim, sim-bus
                   through the device server's
+  --owner-token N
+                  pin this instance's field-ownership token to N instead
+                  of generating a fresh per-process one — so an external
+                  attachment claiming under the same token shares the
+                  owner's field access (a test harness driving plant
+                  stimuli through its own sim-net connection). Never pin
+                  two controllers to the same token: both would write and
+                  step the shared plant, defeating single-writer fencing;
+                  the plant server flags such duplicate-owner claims and
+                  this instance warns on a shared grant
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
-                  every scan cycle — atomically, by write-then-rename —
+                  every scan cycle and at each accepted command's
+                  admission boundary — atomically, by write-then-rename —
                   and resume from it at startup when it exists: a file
                   that cannot be resumed (unreadable, unparseable, an
                   unsupported format version, or a fingerprint/structural
@@ -374,12 +552,14 @@ impl Options {
         let mut dt = None;
         let mut listen = None;
         let mut standby = None;
+        let mut peer = None;
         let mut remote = None;
         let mut driven = false;
         let mut auto_promote = None;
         let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
+        let mut owner_token = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -411,6 +591,7 @@ impl Options {
                 }
                 "--listen" => listen = Some(value("--listen")?),
                 "--standby" => standby = Some(value("--standby")?),
+                "--peer" => peer = Some(value("--peer")?),
                 "--remote" => remote = Some(value("--remote")?),
                 "--driven" => driven = true,
                 "--revised" => revised = true,
@@ -424,6 +605,13 @@ impl Options {
                 "--state-file" => state_file = Some(PathBuf::from(value("--state-file")?)),
                 "--journal-file" => {
                     journal_file = Some(PathBuf::from(value("--journal-file")?));
+                }
+                "--owner-token" => {
+                    owner_token = Some(
+                        value("--owner-token")?
+                            .parse::<u64>()
+                            .map_err(|error| format!("invalid --owner-token value: {error}"))?,
+                    );
                 }
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -448,12 +636,14 @@ impl Options {
                 ("--dt", dt.is_some()),
                 ("--listen", listen.is_some()),
                 ("--standby", standby.is_some()),
+                ("--peer", peer.is_some()),
                 ("--remote", remote.is_some()),
                 ("--driven", driven),
                 ("--auto-promote", auto_promote.is_some()),
                 ("--revised", revised),
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
+                ("--owner-token", owner_token.is_some()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -488,6 +678,22 @@ impl Options {
                     .to_string(),
             );
         }
+        if peer.is_some() {
+            if standby.is_some() {
+                return Err(
+                    "--peer names the tracking peer of a launched active; it does not \
+                     combine with --standby, which already runs as the tracking peer"
+                        .to_string(),
+                );
+            }
+            if listen.is_none() {
+                return Err(
+                    "--peer requires --listen: the demotion it answers and the tracking \
+                     announcements live on the monitor"
+                        .to_string(),
+                );
+            }
+        }
         if driven {
             if listen.is_none() {
                 return Err(
@@ -519,12 +725,14 @@ impl Options {
             dt,
             listen,
             standby,
+            peer,
             remote,
             driven,
             auto_promote,
             revised,
             state_file,
             journal_file,
+            owner_token,
         })
     }
 }
@@ -574,6 +782,21 @@ fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, S
         .apply(&checkpoint)
         .map_err(|error| format!("cannot resume from state file {}: {error}", path.display()))?;
     Ok(true)
+}
+
+/// The `--state-file` persist hooked onto command admission: an
+/// accepted command is durable run state before its `200` receipt
+/// answers — the checkpoint's receipt log carries the admission, so a
+/// restart between admission and the applying scan re-queues it rather
+/// than losing it unaudited. This is the same write the cycle end
+/// performs, fired at the admission boundary; every write rides the
+/// monitor's shared lock so the two can never interleave into a stale
+/// overwrite.
+fn command_persist(options: &Options) -> Option<CommandPersist> {
+    let path = options.state_file.clone()?;
+    Some(Box::new(move |checkpoint| {
+        write_state_file(&path, checkpoint)
+    }))
 }
 
 /// Persists `checkpoint` as `path`'s new contents: write to a sibling
@@ -714,16 +937,25 @@ fn main() -> ExitCode {
 
     // The role machine: a --standby instance tracks its active's
     // checkpoints gate-closed until promoted; anything else owns the
-    // field from the start. Every promotion — manual or the
-    // `--auto-promote` failover — first takes the field's
-    // write-ownership claim under this instance's token, so the shared
-    // plant itself refuses a superseded peer's writes.
-    let owner = owner_token();
+    // field from the start. The field's write-ownership claim is taken
+    // under this instance's token at every transition into field
+    // ownership — a launched active's startup activation, and every
+    // promotion — so the shared plant itself refuses every attachment
+    // not holding the claim. The startup activation is deliberately
+    // deferred to the run's last local step: the claim preempts
+    // unconditionally and outlives a dead holder, so it runs only after
+    // every fallible startup step — journal replay, monitor bind,
+    // peer-address resolution — has proven this process can serve; a
+    // starter that fails earlier leaves no stale claim fencing the
+    // field's standing owner.
+    let owner = options.owner_token.unwrap_or_else(owner_token);
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
         None => Peer::active(executor, gate.as_ref()),
     };
-    let peer = peer.with_field_claim(|| driver.claim_writer(owner));
+    let peer = peer
+        .with_field_claim(|| driver.claim_writer(owner))
+        .with_field_release(|| driver.release_claim());
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -733,7 +965,7 @@ fn main() -> ExitCode {
     // checkpoint through the documented carryover rule rather than
     // degrading on the mismatch the fingerprint gate would otherwise
     // report.
-    let peer = match options.revised {
+    let mut peer = match options.revised {
         true => peer.with_revision(),
         false => peer,
     };
@@ -761,7 +993,7 @@ fn main() -> ExitCode {
     // requests, tick by tick, without a wall clock.
     if options.driven {
         let addr = options.listen.as_deref().unwrap();
-        let track = match &options.standby {
+        let track = match options.standby.as_deref().or(options.peer.as_deref()) {
             Some(active) => match resolve(active) {
                 Ok(active) => Some(active),
                 Err(error) => return fail(error),
@@ -775,6 +1007,10 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
+        let monitor = match command_persist(&options) {
+            Some(persist) => monitor.with_command_persist(persist),
+            None => monitor,
+        };
         let monitor = monitor.driven(Driven {
             track,
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
@@ -788,6 +1024,21 @@ fn main() -> ExitCode {
                 Ok(())
             })),
         });
+        // A launched active owns the field from startup: activation
+        // runs the same claim-then-lift sequence a promotion does —
+        // the plant's single-writer claim under this instance's token
+        // first, the gate second — deferred to here, after every
+        // fallible local startup step (the track address resolved, the
+        // journal replayed, the monitor bound), so a starter that
+        // cannot serve never lands the preemptive claim on the field's
+        // standing owner. A claim the field refuses is a named startup
+        // failure, not an unfenced run.
+        if options.standby.is_none() {
+            if let Err(error) = monitor.activate() {
+                return fail(format!("{error}"));
+            }
+            report_claim(&driver, owner);
+        }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
         return ExitCode::SUCCESS;
@@ -802,7 +1053,6 @@ fn main() -> ExitCode {
             Ok(active_addr) => active_addr,
             Err(error) => return fail(error),
         };
-        let client = MonitorClient::new(active_addr);
         match &options.listen {
             Some(addr) => {
                 let monitor = match Monitor::bind_paced_peer_with(
@@ -816,29 +1066,20 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = match command_persist(&options) {
+                    Some(persist) => monitor.with_command_persist(persist),
+                    None => monitor,
+                };
                 // The promotion boundary runs one final pull against the
                 // tracking source, so a command the active admitted up
                 // to the promote request is carried.
                 let monitor = monitor.with_standby_source(active_addr);
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
+                let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || {
-                        // The standby's per-scan tracking: one pull, the
-                        // miss accounting, and the promote-on-budget
-                        // sequence — `Peer::track_once` under the
-                        // monitor's lock, its queued transitions
-                        // journaled by the recorder; the report is the
-                        // loop's log lines.
-                        let report = monitor.track_cycle(|| {
-                            client
-                                .checkpoint()
-                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
-                        });
-                        report_tracking(&report, active_addr);
-                        monitor.paced_scan()
-                    },
+                    || tracked_cycle(&monitor, &mut puller),
                     step,
                     &options,
                     period.unwrap(),
@@ -848,6 +1089,11 @@ fn main() -> ExitCode {
                 // Without a monitor nothing external can promote this
                 // standby — only the armed failover path can — and the
                 // RefCell lets the two loop closures share the peer.
+                // There is also no monitor address to announce on the
+                // pulls — the serving peer could not track this one
+                // back anyway, since a monitorless standby serves no
+                // checkpoint endpoint.
+                let mut puller = CheckpointPuller::new(active_addr, None);
                 let peer = std::cell::RefCell::new(peer);
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
@@ -856,12 +1102,11 @@ fn main() -> ExitCode {
                         // The same tracking cycle the monitored loop
                         // runs through `track_cycle`, here directly on
                         // the peer; without a recorder the transition
-                        // queues drain into the log instead.
-                        let report = peer.track_once(|| {
-                            client
-                                .checkpoint()
-                                .map_err(|error| format!("fetch from {active_addr}: {error}"))
-                        });
+                        // queues drain into the log instead. The pull
+                        // consumes the fetch worker's latest result —
+                        // the network wait itself runs off the scan
+                        // cycle's critical path.
+                        let report = peer.track_once(|| puller.poll());
                         report_tracking(&report, active_addr);
                         for divergence in peer.take_divergences() {
                             eprintln!(
@@ -869,8 +1114,22 @@ fn main() -> ExitCode {
                                 divergence.tick.0, divergence.mismatches
                             );
                         }
+                        for resolution in peer.take_resolutions() {
+                            eprintln!(
+                                "standby: divergence resolved at tick {} — compared {:?}",
+                                resolution.tick.0, resolution.compared
+                            );
+                        }
                         for reinitialized in peer.take_reinitializations() {
                             eprintln!("standby: {reinitialized}");
+                        }
+                        for restart in peer.take_source_restarts() {
+                            eprintln!(
+                                "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
+                                restart.tick.0,
+                                restart.resumed_at.0,
+                                restart.was_aligned.map(|tick| tick.0)
+                            );
                         }
                         for change in peer.take_role_changes() {
                             eprintln!(
@@ -878,10 +1137,34 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        peer.scan()
+                        for receipt in peer.take_superseded_commands() {
+                            eprintln!(
+                                "standby: pending command superseded at tick {}: {:?}",
+                                peer.tick().0,
+                                receipt.command
+                            );
+                        }
+                        let scanned = peer.scan();
+                        // Transitions the scan itself produced — a
+                        // fenced write's claim loss and the demotion it
+                        // drove — log at the boundary they happened,
+                        // not a cycle late.
+                        for change in peer.take_role_changes() {
+                            eprintln!(
+                                "standby: role {} -> {} at tick {}",
+                                change.from, change.to, change.tick.0
+                            );
+                        }
+                        for loss in peer.take_fencing_losses() {
+                            eprintln!(
+                                "standby: field write-ownership claim lost at tick {}: {:?} fenced",
+                                loss.tick.0, loss.point
+                            );
+                        }
+                        scanned
                     },
                     || peer.borrow().snapshot(),
-                    || peer.borrow().checkpoint(),
+                    |path| write_state_file(path, &peer.borrow().checkpoint()),
                     step,
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
@@ -903,32 +1186,92 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = match command_persist(&options) {
+                    Some(persist) => monitor.with_command_persist(persist),
+                    None => monitor,
+                };
+                // A --peer launched active names its tracking source up
+                // front — where this instance pulls checkpoints if it is
+                // demoted — ahead of anything a tracking peer announces
+                // through its pulls.
+                let monitor = match &options.peer {
+                    Some(peer) => match resolve(peer) {
+                        Ok(peer) => monitor.with_standby_source(peer),
+                        Err(error) => return fail(error),
+                    },
+                    None => monitor,
+                };
+                // The launched active's deferred startup activation —
+                // the same claim-then-lift sequence the driven path
+                // runs: the preemptive field claim lands only now, the
+                // journal replayed, the monitor bound, and the peer
+                // address resolved, so a startup that failed earlier
+                // left no stale claim fencing the field's standing
+                // owner. A claim the field refuses is a named startup
+                // failure, not an unfenced run.
+                if let Err(error) = monitor.activate() {
+                    return fail(format!("{error}"));
+                }
+                report_claim(&driver, owner);
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
                 eprintln!("listening on {}", monitor.local_addr());
                 // Demotion may re-quiesce this instance mid-run, so the
-                // plant step consults the role each scan.
+                // plant step consults the role each scan — and the scan
+                // cycle itself tracks a checkpoint source once demoted:
+                // the configured --peer, or the address the tracking peer
+                // announced through its pulls.
                 let step = || driver.step(dt, monitor.owns_field());
+                let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || monitor.paced_scan(),
+                    || tracked_cycle(&monitor, &mut puller),
                     step,
                     &options,
                     period.unwrap(),
                 )
             }
             None => {
+                // The launched active's startup activation — the same
+                // claim-then-lift sequence the monitored paths defer to
+                // their last startup step: nothing fallible stands
+                // between here and the scan loop, so the preemptive
+                // claim runs only now that startup can no longer abort.
+                if let Err(error) = peer.activate() {
+                    return fail(format!("{error}"));
+                }
+                report_claim(&driver, owner);
                 // The RefCell lets the two loop closures share the peer;
                 // the loop is single-threaded, so the borrows never
-                // overlap. No monitor means no demotion path, so the
-                // field ownership below never changes.
+                // overlap. No monitor means no *operator* demotion
+                // path, but a write the field fenced still demotes this
+                // peer mid-run — the scan closure logs the claim loss
+                // and the transition it drove, and the step consults
+                // the role each cycle so a demoted peer stops stepping
+                // a shared plant it no longer owns.
                 let peer = std::cell::RefCell::new(peer);
                 scan_loop(
-                    || peer.borrow_mut().scan(),
+                    || {
+                        let mut peer = peer.borrow_mut();
+                        let scanned = peer.scan();
+                        for loss in peer.take_fencing_losses() {
+                            eprintln!(
+                                "field write-ownership claim lost at tick {}: {:?} fenced",
+                                loss.tick.0, loss.point
+                            );
+                        }
+                        for change in peer.take_role_changes() {
+                            eprintln!(
+                                "role {} -> {} at tick {}",
+                                change.from, change.to, change.tick.0
+                            );
+                        }
+                        scanned
+                    },
                     || peer.borrow().snapshot(),
-                    || peer.borrow().checkpoint(),
-                    || driver.step(dt, true),
+                    |path| write_state_file(path, &peer.borrow().checkpoint()),
+                    || driver.step(dt, peer.borrow().owns_field()),
                     || peer.borrow_mut().record_scan_overrun(),
                     &options,
                     period,
@@ -936,6 +1279,36 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// One paced scan cycle behind the monitor: the tracking pull first —
+/// while the peer does not own the field and a checkpoint source exists
+/// — then the scan itself. The source is re-resolved every cycle:
+/// the configured `--standby`/`--peer` target when set, else the monitor
+/// address a tracking peer announced through its `?peer=` pulls — the
+/// follow-peer half that lets a demoted launched active find its
+/// successor without a restart, the serving side accepting the
+/// announce only as the pulling connection's own source address. The
+/// puller follows the resolved source, respawning when it changes, and
+/// announces this monitor's own address on every pull so the serving
+/// peer learns where to track back. A
+/// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
+/// the pull, so the puller's fetch thread idles until a demotion.
+fn tracked_cycle(
+    monitor: &Monitor<'_>,
+    puller: &mut Option<(SocketAddr, CheckpointPuller)>,
+) -> Tick {
+    if let Some(source) = monitor.tracking_source() {
+        if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
+            *puller = Some((
+                source,
+                CheckpointPuller::new(source, Some(monitor.local_addr())),
+            ));
+        }
+        let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
+        report_tracking(&report, source);
+    }
+    monitor.paced_scan()
 }
 
 /// The standby loop's presentation half of a tracking cycle: logs what
@@ -975,7 +1348,7 @@ fn report_tracking(report: &TrackReport, active: SocketAddr) {
 /// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Result<Tick, ScanError>,
+    scan: impl FnMut() -> Tick,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -985,7 +1358,7 @@ fn run_monitored(
         let result = scan_loop(
             scan,
             || monitor.snapshot(),
-            || monitor.checkpoint(),
+            |path| monitor.persist_state(|checkpoint| write_state_file(path, checkpoint)),
             step,
             || monitor.record_scan_overrun(),
             options,
@@ -1003,12 +1376,16 @@ fn run_monitored(
 /// `--ticks` bound, the snapshot reporting, and the wall-clock pacing
 /// are identical either way.
 ///
-/// `checkpoint` feeds `--state-file`: the run's transferable state is
+/// `persist` feeds `--state-file`: the run's transferable state is
 /// persisted at the end of every completed scan cycle — after the scan
 /// and the plant step, so a resumed run re-enters the loop at exactly
-/// this point — and a write failure fails the run like a scan or step
-/// failure does: a controller that cannot persist its recovery state
-/// exits naming the file rather than running on without it.
+/// this point — and a write failure fails the run like a step failure
+/// does: a controller that cannot persist its recovery state exits
+/// naming the file rather than running on without it. On a
+/// monitored run the closure routes through
+/// [`Monitor::persist_state`], so the cycle-end write and a command's
+/// admission-boundary write serialize on the same lock and can never
+/// interleave into a stale overwrite.
 ///
 /// `overrun` is the paced loop's feed for the snapshot's
 /// `io_health.scan_overruns`: a cycle whose wall-clock elapsed reaches
@@ -1018,9 +1395,9 @@ fn run_monitored(
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Result<Tick, ScanError>,
+    mut scan: impl FnMut() -> Tick,
     snapshot: impl Fn() -> TelemetrySnapshot,
-    checkpoint: impl Fn() -> Checkpoint,
+    persist: impl Fn(&Path) -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
     mut overrun: impl FnMut(),
     options: &Options,
@@ -1029,14 +1406,12 @@ fn scan_loop(
     let mut scanned = 0_u64;
     loop {
         let started = Instant::now();
-        if let Err(error) = scan() {
-            return fail(format!("scan {} failed: {error}", snapshot().tick.0));
-        }
+        scan();
         if let Err(error) = step() {
             return fail(error);
         }
         if let Some(path) = &options.state_file
-            && let Err(error) = write_state_file(path, &checkpoint())
+            && let Err(error) = persist(path)
         {
             return fail(error);
         }

@@ -139,7 +139,7 @@ use dcs_core::{
     ValueKind,
 };
 use dcs_model::{LoadError, PlantModel};
-use dcs_runtime::{Executor, ScanError};
+use dcs_runtime::Executor;
 use dcs_sim::{Fault, ProcessElement};
 use std::fmt;
 
@@ -442,8 +442,6 @@ pub enum ShowcaseError {
     Dynamics(serde_json::Error),
     /// Device resolution, component construction, or wiring failed.
     Assembly(AssemblyError),
-    /// A scan's output phase failed.
-    Scan(ScanError),
     /// The driver failed to step the simulated plant.
     Step(StepError),
     /// A driver access — fault injection, a point write, or a point
@@ -457,7 +455,6 @@ impl fmt::Display for ShowcaseError {
             Self::Load(error) => write!(f, "{error}"),
             Self::Dynamics(error) => write!(f, "dynamics document failed to parse: {error}"),
             Self::Assembly(error) => write!(f, "{error}"),
-            Self::Scan(error) => write!(f, "{error}"),
             Self::Step(error) => write!(f, "plant step failed: {error}"),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -470,7 +467,6 @@ impl std::error::Error for ShowcaseError {
             Self::Load(error) => Some(error),
             Self::Dynamics(error) => Some(error),
             Self::Assembly(error) => Some(error),
-            Self::Scan(error) => Some(error),
             Self::Step(error) => Some(error),
             Self::Io(error) => Some(error),
         }
@@ -486,12 +482,6 @@ impl From<LoadError> for ShowcaseError {
 impl From<AssemblyError> for ShowcaseError {
     fn from(error: AssemblyError) -> Self {
         Self::Assembly(error)
-    }
-}
-
-impl From<ScanError> for ShowcaseError {
-    fn from(error: ScanError) -> Self {
-        Self::Scan(error)
     }
 }
 
@@ -600,7 +590,7 @@ fn scan(
     levels: &mut Vec<f64>,
     valve_raws: &mut Vec<f64>,
 ) -> Result<(), ShowcaseError> {
-    executor.scan()?;
+    executor.scan();
     driver.step(SCAN_PERIOD)?;
     let value = executor
         .sample(points::LEVEL_PERCENT)

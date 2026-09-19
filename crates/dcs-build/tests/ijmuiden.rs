@@ -149,6 +149,7 @@ struct Scan {
     manual_active: bool,
     discrepancy: bool,
     backup_active: bool,
+    backup_unhealthy: bool,
     deviating: bool,
     duty_call: bool,
     lag_call: bool,
@@ -181,6 +182,8 @@ struct Scan {
     ror_unack: bool,
     backup_alarm: bool,
     backup_unack: bool,
+    buh_alarm: bool,
+    buh_unack: bool,
     trip_alarm: bool,
     trip_unack: bool,
     bypass_alarm: bool,
@@ -310,6 +313,7 @@ fn run() -> Run {
                     manual_active: bool_(sample(&snapshot, layout.manual_active)),
                     discrepancy: bool_(sample(&snapshot, layout.discrepancy)),
                     backup_active: bool_(sample(&snapshot, layout.backup_active)),
+                    backup_unhealthy: bool_(sample(&snapshot, layout.backup_unhealthy)),
                     deviating: bool_(sample(&snapshot, layout.deviating)),
                     duty_call: bool_(sample(&snapshot, layout.duty_call)),
                     lag_call: bool_(sample(&snapshot, layout.lag_call)),
@@ -339,6 +343,11 @@ fn run() -> Run {
                     backup_unack: bool_(sample(
                         &snapshot,
                         layout.backup_active_alarm.unacknowledged,
+                    )),
+                    buh_alarm: bool_(sample(&snapshot, layout.backup_unhealthy_alarm.alarm)),
+                    buh_unack: bool_(sample(
+                        &snapshot,
+                        layout.backup_unhealthy_alarm.unacknowledged,
                     )),
                     trip_alarm: bool_(sample(&snapshot, layout.sis_trip_alarm.alarm)),
                     trip_unack: bool_(sample(&snapshot, layout.sis_trip_alarm.unacknowledged)),
@@ -391,9 +400,17 @@ fn run() -> Run {
                     }
                     // The primary recovers.
                     26 => sim.clear_fault(points::LEVEL).unwrap(),
-                    // The backup-serving annunciation is acknowledged.
-                    28 => ack_unmanaged(&client, &layout.backup_active_alarm),
-                    29 => release_unmanaged(&client, &layout.backup_active_alarm),
+                    // The backup-serving annunciation is acknowledged —
+                    // and the standby-health annunciation the frozen
+                    // repeater already raised.
+                    28 => {
+                        ack_unmanaged(&client, &layout.backup_active_alarm);
+                        ack_unmanaged(&client, &layout.backup_unhealthy_alarm);
+                    }
+                    29 => {
+                        release_unmanaged(&client, &layout.backup_active_alarm);
+                        release_unmanaged(&client, &layout.backup_unhealthy_alarm);
+                    }
                     // Shelving: the request stands past the declared
                     // bound — `shelved` asserts inside it and expires
                     // while the request still stands.
@@ -563,6 +580,7 @@ fn every_alarm_carries_the_rationalization_record() {
         emitted.layout.discrepancy_alarm.component,
         emitted.layout.rate_of_rise_alarm.component,
         emitted.layout.backup_active_alarm.component,
+        emitted.layout.backup_unhealthy_alarm.component,
         emitted.layout.sis_trip_alarm.component,
         emitted.layout.sis_bypass_alarm.component,
         emitted.layout.sis_fault_alarm.component,
@@ -630,6 +648,7 @@ fn journaled_marks_the_durable_record_points() {
         layout.discrepancy,
         layout.deviating,
         layout.backup_active,
+        layout.backup_unhealthy,
         layout.duty_call,
         layout.lag_call,
         layout.below_cutoff,
@@ -672,6 +691,7 @@ fn journaled_marks_the_durable_record_points() {
     for alarm in [
         &layout.rate_of_rise_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.sis_trip_alarm,
         &layout.sis_bypass_alarm,
         &layout.sis_fault_alarm,
@@ -920,10 +940,47 @@ fn scripted_run_shows_the_consequential_annunciation() {
         "the frozen repeater must present stale, not a healthy last-known value"
     );
     assert_eq!(at(schedule::REMOTE_RECOVERY).remote_quality, Quality::Good);
+    // The issue-#502 annunciation: the repeater's stale sample makes
+    // the standby leg unhealthy from the first stale presentation —
+    // before the primary ever fails — and its alarm latches
+    // unacknowledged until the scan-28 ack, clearing on the repeater's
+    // recovery.
+    assert!(
+        scans[..schedule::REMOTE_LAST_UPDATE as usize + 3]
+            .iter()
+            .all(|scan| !scan.backup_unhealthy),
+        "a healthy standby must not annunciate"
+    );
+    assert!(
+        scans[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+            .iter()
+            .all(|scan| scan.backup_unhealthy),
+        "the standby leg must annunciate while the repeater's own sample is untrusted"
+    );
+    assert!(
+        scans[schedule::REMOTE_RECOVERY as usize - 1..SCANS as usize - 1]
+            .iter()
+            .all(|scan| !scan.backup_unhealthy),
+        "the repeater's recovery must clear the indication"
+    );
+    // The playback's last remote update then ages past
+    // `stale_after_ticks` once more — the run's final scan re-asserts
+    // the carrier, tracking the standby leg's real freshness rather
+    // than the incident timeline. The alarm's input is an internal
+    // link, so its re-latch would land one scan past the run's end.
+    assert!(scans.last().unwrap().backup_unhealthy);
+    assert!(scans.iter().any(|scan| scan.buh_alarm && scan.buh_unack));
+    assert!(scans[28..].iter().all(|scan| !scan.buh_unack));
     // The `Bad` primary flips the failover onto that stale repeater —
     // `backup_active` stands and its alarm latches until the scan-28
     // ack; the selected level carries the degraded quality through.
+    // Both flags stand together while the untrusted backup serves.
     assert!(scans[22..26].iter().any(|scan| scan.backup_active));
+    assert!(
+        scans[22..26]
+            .iter()
+            .any(|scan| scan.backup_active && scan.backup_unhealthy)
+    );
     assert!(
         scans
             .iter()
@@ -1251,12 +1308,18 @@ fn every_lifecycle_transition_lands_in_the_durable_record_in_seq_order() {
     assert!(first(layout.sis_bypass, yes) < released(layout.sis_bypass));
 
     // The stale transition lands as the quality record — the frozen
-    // repeater's degradation is durable too.
+    // repeater's degradation is durable too — and the standby-health
+    // carrier and its alarm latch journal their own arc.
     assert!(journal.iter().any(|entry| matches!(
         &entry.event,
         JournalEvent::QualityChanged { point, to, .. }
             if *point == layout.level_remote && *to == Quality::Uncertain(QualityReason::Stale)
     )));
+    assert!(
+        tick_of(layout.backup_unhealthy, yes)
+            <= tick_of(layout.backup_unhealthy_alarm.unacknowledged, yes)
+    );
+    assert!(first(layout.backup_unhealthy, yes) < released(layout.backup_unhealthy));
 
     // Every submitted command settled on record — attributed to the
     // operator — and none were refused.

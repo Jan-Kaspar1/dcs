@@ -25,7 +25,7 @@ use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
 use dcs_runtime::{Peer, WriteGate};
 use dcs_sim::SimDriver;
-use dcs_sim_net::{PlantServer, RemoteDriver};
+use dcs_sim_net::{ClaimGrant, PlantServer, RemoteDriver};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
@@ -150,6 +150,9 @@ struct Outcome {
     diverged_sync: StandbySync,
     /// The journal's `divergence_detected` entries, in order.
     journal: Vec<JournalEntry>,
+    /// The journal's `divergence_resolved` entries, in order — the
+    /// named event a verdict-clearing compare owes the record.
+    resolutions: Vec<JournalEntry>,
     /// The named error `POST /promote` answered while diverged.
     promote_error: SwitchError,
     /// The field's valve while diverged — proof the staged write stayed
@@ -169,19 +172,38 @@ struct Outcome {
 fn run_scenario() -> Outcome {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
+
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     let active_driver = RemoteDriver::connect(plant_addr).unwrap();
     let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
+    let mut active = Peer::active(
         assemble(&model, &registry, &active_gate).unwrap(),
         Some(&active_gate),
-    );
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
     let active_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
     let active_client = MonitorClient::new(active_monitor.local_addr());
@@ -199,14 +221,18 @@ fn run_scenario() -> Outcome {
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
     let standby_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
 
-    thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
+    let outcome = thread::scope(|scope| {
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -319,6 +345,19 @@ fn run_scenario() -> Outcome {
         );
         let resynced_sync = resynced.sync.unwrap();
 
+        // The clear is journaled as its own named event — detection
+        // then resolution then promotion is the auditable sequence —
+        // attributed to the compared tick and carrying the same-tick
+        // comparison the verdict stood on.
+        let resolutions: Vec<JournalEntry> = standby_client
+            .journal(0)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::DivergenceResolved { .. }))
+            .collect();
+        assert_eq!(resolutions.len(), 1, "the clear is journaled once");
+        assert_eq!(resolutions[0].tick, Tick(N + K + 2));
+
         let promoted = standby_client.promote().unwrap();
         assert_eq!(promoted.role, Role::Promoting);
         assert!(standby_gate.is_open());
@@ -326,13 +365,17 @@ fn run_scenario() -> Outcome {
         Outcome {
             diverged_sync,
             journal,
+            resolutions,
             promote_error,
             field_valve,
             staged_valve,
             resynced_sync,
             promoted_role: promoted.role,
         }
-    })
+    });
+    drop(_plant);
+    serving.join().unwrap();
+    outcome
 }
 
 #[test]
@@ -360,6 +403,20 @@ fn skewed_standby_diverges_blocks_promotion_and_resyncs() {
         panic!("journal entry must be divergence_detected");
     };
     assert_eq!(journaled, mismatches);
+    // The resync journals its own entry at the compared tick, carrying
+    // every compared field `Out` point with both sides' values — the
+    // fully-read match the reopen of the promote gate stands on.
+    assert_eq!(outcome.resolutions.len(), 1, "{:?}", outcome.resolutions);
+    assert_eq!(outcome.resolutions[0].tick, Tick(N + K + 2));
+    let JournalEvent::DivergenceResolved { compared } = &outcome.resolutions[0].event else {
+        panic!("journal entry must be divergence_resolved");
+    };
+    assert_eq!(compared.len(), 1, "the fixture's only field Out compares");
+    assert_eq!(compared[0].point, VALVE);
+    assert_eq!(
+        compared[0].staged, compared[0].field,
+        "the resolved comparison's values agree"
+    );
     assert_eq!(
         outcome.resynced_sync,
         StandbySync::Tracking {
@@ -369,11 +426,218 @@ fn skewed_standby_diverges_blocks_promotion_and_resyncs() {
     assert_eq!(outcome.promoted_role, Role::Promoting);
 }
 
+/// The `diverged-tracking-clear-not-journaled` reproduction on the
+/// shared field: a third attachment claims the writer with the active's
+/// token — joining the claim's holders, not fencing the owner — and
+/// writes an `Out` point behind the pair's back. The standby's same-tick
+/// compare reports `diverged` and journals `divergence_detected`; once
+/// the point is written back, the next same-tick compare returns the
+/// peer to `tracking` and the journal records the named
+/// `divergence_resolved` at the compared tick — the audit trail names
+/// the resolution of the divergence it named the detection of.
+#[test]
+fn interposer_field_write_diverges_and_the_clear_journals() {
+    let model = PlantModel::load(TANK_LOOP).unwrap();
+    let registry = registry();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
+    let plant_addr = plant.local_addr().unwrap();
+
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
+
+    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let active_gate = WriteGate::closed(&active_driver);
+    let mut active = Peer::active(
+        assemble(&model, &registry, &active_gate).unwrap(),
+        Some(&active_gate),
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
+    let active_monitor =
+        Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
+    let active_client = MonitorClient::new(active_monitor.local_addr());
+
+    let standby_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let standby_gate = WriteGate::closed(&standby_driver);
+    let standby = Peer::standby(
+        assemble(&model, &registry, &standby_gate).unwrap(),
+        Some(&standby_gate),
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    let standby_monitor =
+        Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
+    let standby_client = MonitorClient::new(standby_monitor.local_addr());
+
+    thread::scope(|scope| {
+        scope.spawn(|| active_monitor.serve());
+        let _active_monitor = ShutdownOnDrop(&active_monitor);
+        scope.spawn(|| standby_monitor.serve());
+        let _standby_monitor = ShutdownOnDrop(&standby_monitor);
+
+        active_client
+            .command(&Command::WriteValue {
+                point: SETPOINT,
+                kind: ValueKind::Float,
+                value: Value::Float(50.0),
+            })
+            .unwrap();
+        for _ in 0..N {
+            active_client.advance(1).unwrap();
+            active_driver.step(DT).unwrap();
+        }
+
+        standby_monitor
+            .apply_checkpoint(&active_client.checkpoint().unwrap())
+            .unwrap();
+        for _ in 0..K {
+            tracking_tick(
+                &active_client,
+                &standby_client,
+                &standby_monitor,
+                &active_driver,
+            );
+            let report = standby_client.role().unwrap();
+            assert!(
+                matches!(report.sync, Some(StandbySync::Tracking { .. })),
+                "healthy standby must stay tracking, got {report:?}"
+            );
+        }
+
+        // The interposer: claiming the active's token answers
+        // `ClaimedShared` — the attachment joins the standing claim's
+        // holders, so its writes pass the field's fence without fencing
+        // the owner. It writes the valve after the active's scan, so the
+        // field stops carrying what either peer staged.
+        let interposer = RemoteDriver::connect(plant_addr).unwrap();
+        assert_eq!(
+            interposer.claim_writer(1).unwrap(),
+            ClaimGrant::Shared,
+            "claiming the standing owner's token joins its holders"
+        );
+        let diverged_tick = Tick(N + K + 1);
+        active_client.advance(1).unwrap();
+        let Value::Float(written) = field_valve(&standby_driver) else {
+            panic!("the fixture's valve is a Float point");
+        };
+        let honest_valve = Value::Float(written);
+        let bent = Value::Float(written + SKEW);
+        interposer.write(VALVE, bent).unwrap();
+        assert_eq!(field_valve(&standby_driver), bent);
+
+        standby_client.advance(1).unwrap();
+        // The staged image the compare reports: identical state and
+        // inputs mean the standby staged what the active wrote.
+        let staged_valve = image_valve(&standby_client);
+        assert_eq!(staged_valve, honest_valve);
+        standby_monitor
+            .apply_checkpoint(&active_client.checkpoint().unwrap())
+            .unwrap();
+        active_driver.step(DT).unwrap();
+
+        let report = standby_client.role().unwrap();
+        assert_eq!(report.tick, diverged_tick);
+        let Some(diverged_sync @ StandbySync::Diverged { mismatches }) = &report.sync else {
+            panic!("the interposer's write must report diverged, got {report:?}");
+        };
+        assert_eq!(
+            mismatches,
+            &[Divergence {
+                point: VALVE,
+                staged: staged_valve,
+                field: bent,
+            }]
+        );
+        let diverged_sync = diverged_sync.clone();
+
+        let journal: Vec<JournalEntry> = standby_client
+            .journal(0)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::DivergenceDetected { .. }))
+            .collect();
+        assert_eq!(journal.len(), 1, "the transition is journaled once");
+        assert_eq!(journal[0].tick, diverged_tick);
+
+        // The promote gate carries the named state while diverged.
+        let (status, body) = standby_client.request("POST", "/promote", None).unwrap();
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(
+            serde_json::from_str::<SwitchError>(&body).unwrap(),
+            SwitchError::NotConverged {
+                sync: diverged_sync
+            }
+        );
+
+        // Write the point back; the next same-tick compare matches and
+        // the peer returns to tracking — journaled as the named
+        // resolution at the compared tick, carrying the compared-point
+        // evidence the reopened gate stands on.
+        interposer.write(VALVE, honest_valve).unwrap();
+        tracking_tick(
+            &active_client,
+            &standby_client,
+            &standby_monitor,
+            &active_driver,
+        );
+        let report = standby_client.role().unwrap();
+        assert!(
+            matches!(report.sync, Some(StandbySync::Tracking { .. })),
+            "the restored field must resync the standby, got {report:?}"
+        );
+        let resolutions: Vec<JournalEntry> = standby_client
+            .journal(0)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::DivergenceResolved { .. }))
+            .collect();
+        assert_eq!(
+            resolutions.len(),
+            1,
+            "the clear is journaled once: {resolutions:?}"
+        );
+        assert_eq!(resolutions[0].tick, Tick(N + K + 2));
+        let JournalEvent::DivergenceResolved { compared } = &resolutions[0].event else {
+            panic!("journal entry must be divergence_resolved");
+        };
+        assert_eq!(compared.len(), 1, "the fixture's only field Out compares");
+        assert_eq!(compared[0].point, VALVE);
+        assert_eq!(
+            compared[0].staged, compared[0].field,
+            "the resolved comparison's values agree"
+        );
+
+        let promoted = standby_client.promote().unwrap();
+        assert_eq!(promoted.role, Role::Promoting);
+    });
+    drop(_plant);
+    serving.join().unwrap();
+}
+
 #[test]
 fn identical_scripted_runs_report_identical_divergence() {
     let first = run_scenario();
     let second = run_scenario();
     assert_eq!(first.journal, second.journal);
+    assert_eq!(first.resolutions, second.resolutions);
     assert_eq!(first.diverged_sync, second.diverged_sync);
     assert_eq!(first.promote_error, second.promote_error);
     assert_eq!(first.staged_valve, second.staged_valve);

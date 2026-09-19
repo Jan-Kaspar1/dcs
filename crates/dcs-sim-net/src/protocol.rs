@@ -84,16 +84,56 @@ pub enum PlantRequest {
     /// owner — one controller's several attachments claim the same
     /// token so all of them write, while a takeover claims a fresh one.
     /// The grant is unconditional: the claim preempts whichever owner
-    /// held it, and it stands until another claim preempts it — never
-    /// released, so a dead owner's silence keeps the field fenced for
-    /// the claimed owner rather than reopening it. Once any owner is
-    /// claimed, `write` and `step` requests from a connection that has
-    /// not itself claimed the current owner are refused; reads, fault
-    /// injection, and `list_points` stay open to every attachment.
+    /// held it, and it stands until another claim preempts it or every
+    /// holder releases it — never released on its own, so a dead
+    /// owner's silence keeps the field fenced for the claimed owner
+    /// rather than reopening it. The field itself fails closed:
+    /// `write` and `step` requests from a connection that does not
+    /// hold the current claim are refused — [`PlantError::Unclaimed`]
+    /// while no claim stands (a fresh or restarted server included),
+    /// [`PlantError::Fenced`] — `IoError::Fenced` for a `write` — once
+    /// another owner does. Reads, fault injection, and `list_points`
+    /// stay open to every attachment.
+    ///
+    /// A grant for the standing owner while another *live* attachment
+    /// already holds the token is answered
+    /// [`PlantResponse::ClaimedShared`] rather than `Done`: the grant
+    /// stands — the token cannot tell one owner's second attachment
+    /// from a second process reusing it — but the sharing is flagged,
+    /// because two field-owning processes pinned to one token defeat
+    /// the arbitration this claim exists to provide.
     ClaimWriter {
         /// The ownership token the claim asserts.
         owner: u64,
     },
+    /// The re-attach half of the write-ownership claim: takes the claim
+    /// for `owner` only while the field is unclaimed or the standing
+    /// claim already names `owner` — the conditional grant a
+    /// reconnecting field owner asserts to re-arm the claim a server
+    /// restart dropped. Unlike [`ClaimWriter`](Self::ClaimWriter) it
+    /// never preempts: while a *different* owner holds the claim the
+    /// request is refused [`PlantError::Fenced`], so a re-attaching
+    /// superseded peer cannot steal the field back from the attachment
+    /// that claimed it during the outage. A granted request also binds
+    /// `owner` to this connection exactly as `claim_writer` does —
+    /// including the [`PlantResponse::ClaimedShared`] flag when the
+    /// token is already held by another live attachment.
+    EnsureWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
+    /// Drop this connection's hold on the write claim. When the
+    /// release empties the claim's holder set the claim itself is
+    /// released and the field returns to `unclaimed`; while other
+    /// holders stand, or the connection holds nothing, nothing changes
+    /// and the answer is `Done`. The claim is persistent by design — a
+    /// holder's disconnect drops only its own hold so a crashed
+    /// owner's claim keeps fencing its stale token — which makes an
+    /// explicit release the tool's counterpart: an attachment that
+    /// claimed conditionally for a mutation (`dcs-plant-ctl`) must
+    /// release afterward rather than leaving a dead token standing
+    /// against the field owner's re-arm.
+    ReleaseWriter,
 }
 
 /// The server's answer to one [`PlantRequest`].
@@ -124,9 +164,22 @@ pub enum PlantResponse {
         points: Vec<PointInfo>,
     },
     /// Answer to [`PlantRequest::Write`], [`PlantRequest::InjectFault`],
-    /// [`PlantRequest::ClearFault`], and [`PlantRequest::ClaimWriter`]:
-    /// the request applied.
+    /// [`PlantRequest::ClearFault`], [`PlantRequest::ReleaseWriter`],
+    /// and the claim requests: the request applied.
     Done,
+    /// Answer to a granted [`PlantRequest::ClaimWriter`] or
+    /// [`PlantRequest::EnsureWriter`] whose `owner` token another live
+    /// attachment already holds. The grant stands — one field owner's
+    /// several attachments claim the same token by design — but the
+    /// sharing is flagged because the token alone cannot distinguish
+    /// that from a second field-owning *process* reusing it, which
+    /// would defeat the single-writer arbitration a promotion relies
+    /// on. `Done` remains the answer when no other live attachment
+    /// holds the token.
+    ClaimedShared {
+        /// The token now held by more than one live attachment.
+        owner: u64,
+    },
     /// The request failed; `error` says why.
     Error {
         /// The failure the server reported.
@@ -161,6 +214,22 @@ pub enum PlantError {
     /// the point's [`IoError::Fenced`], so a driver's write path surfaces
     /// the same named failure a local fenced driver would produce.
     Fenced {
+        /// Why the request was refused.
+        detail: String,
+    },
+    /// The request mutates the shared field but no write-ownership
+    /// claim stands at all — the server is fresh or restarted, or the
+    /// last holder released. The field fails closed rather than
+    /// opening a window any attachment could write through or an
+    /// interposer could claim ahead of the legitimate owner's re-arm.
+    /// Named separately from [`PlantError::Fenced`] so a probe can tell
+    /// "the field is closed until an owner claims" from "another owner
+    /// stands": the first waits for a re-arm, the second means the
+    /// probe's writer is fenced out. A [`PlantRequest::Write`] maps
+    /// this refusal to [`IoError::Fenced`] at the client — the point
+    /// level cannot express "unclaimed" — while a [`PlantRequest::Step`]
+    /// carries the named error.
+    Unclaimed {
         /// Why the request was refused.
         detail: String,
     },
@@ -246,6 +315,8 @@ mod tests {
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
             PlantRequest::ClaimWriter { owner: 42 },
+            PlantRequest::EnsureWriter { owner: 43 },
+            PlantRequest::ReleaseWriter,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -278,6 +349,14 @@ mod tests {
             serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
             r#"{"op":"claim_writer","owner":42}"#
         );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::EnsureWriter { owner: 43 }).unwrap(),
+            r#"{"op":"ensure_writer","owner":43}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReleaseWriter).unwrap(),
+            r#"{"op":"release_writer"}"#
+        );
     }
 
     #[test]
@@ -300,6 +379,7 @@ mod tests {
                 }],
             },
             PlantResponse::Done,
+            PlantResponse::ClaimedShared { owner: 7 },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
@@ -329,6 +409,11 @@ mod tests {
                     detail: "another attachment owns field writes".to_string(),
                 },
             },
+            PlantResponse::Error {
+                error: PlantError::Unclaimed {
+                    detail: "no attachment holds field writes".to_string(),
+                },
+            },
         ];
         for response in responses {
             let json = serde_json::to_string(&response).unwrap();
@@ -340,6 +425,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantResponse::Done).unwrap(),
             r#"{"result":"done"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::ClaimedShared { owner: 7 }).unwrap(),
+            r#"{"result":"claimed_shared","owner":7}"#
         );
         // The point-census payload carries the shared `Direction` as
         // "in"/"out" — the shape the plant protocol has always emitted.
@@ -367,6 +456,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"result":"error","error":{"kind":"io","error":{"unknown_point":4}}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Unclaimed {
+                    detail: "no attachment holds field writes".to_string(),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"unclaimed","detail":"no attachment holds field writes"}}"#
         );
     }
 

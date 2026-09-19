@@ -5,10 +5,14 @@
 
 use dcs_core::{Command, CommandOutcome, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_monitor::MonitorClient;
-use std::io::{BufRead, BufReader, Read};
-use std::net::SocketAddr;
-use std::process::{Child, Command as Process, Stdio};
+use std::io::Read;
+use std::path::Path;
+use std::process::Command as Process;
 use std::time::{Duration, Instant};
+
+mod support;
+
+use support::{Spawned, listening_on, spawn, spawn_piped};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 const TANK_LOOP: &str = concat!(
@@ -18,37 +22,21 @@ const TANK_LOOP: &str = concat!(
 
 /// Spawns the controller on `TANK_LOOP` with `--listen 127.0.0.1:0` plus
 /// `args`, parses the bound address the process announces on stderr, and
-/// returns the child and a ready client. `capture_stdout` pipes stdout
-/// for runs expected to print a final snapshot; unbounded runs null it
-/// so the per-scan JSON lines cannot fill the pipe and stall the scan.
-fn spawn_monitored(args: &[&str], capture_stdout: bool) -> (Child, MonitorClient) {
-    let mut command = Process::new(BINARY);
-    command
-        .arg(TANK_LOOP)
-        .args(args)
-        .arg("--listen")
-        .arg("127.0.0.1:0")
-        .stderr(Stdio::piped())
-        .stdout(if capture_stdout {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let addr: SocketAddr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!(
-                "controller exited before announcing its listener: {:?}",
-                child.wait().unwrap()
-            );
-        }
-        if let Some(addr) = line.trim().strip_prefix("listening on ") {
-            break addr.parse().unwrap();
-        }
+/// returns the spawned process and a ready client. `capture_stdout`
+/// pipes stdout for runs expected to print a final snapshot; unbounded
+/// runs null it so the per-scan JSON lines cannot fill the pipe and
+/// stall the scan.
+fn spawn_monitored(args: &[&str], capture_stdout: bool) -> (Spawned, MonitorClient) {
+    let mut full: Vec<String> = vec![TANK_LOOP.to_string()];
+    full.extend(args.iter().map(|arg| arg.to_string()));
+    full.extend(["--listen".to_string(), "127.0.0.1:0".to_string()]);
+    let spawned = if capture_stdout {
+        spawn_piped(Path::new(BINARY), &full, listening_on)
+    } else {
+        spawn(Path::new(BINARY), &full, listening_on)
     };
-    (child, MonitorClient::new(addr))
+    let client = MonitorClient::new(spawned.addr);
+    (spawned, client)
 }
 
 /// Polls `GET /snapshot` until `until` holds, returning that snapshot.
@@ -81,7 +69,7 @@ fn point_value(snapshot: &TelemetrySnapshot, point: u64) -> Option<Value> {
 
 #[test]
 fn paced_run_serves_snapshots_whose_tick_advances() {
-    let (mut child, client) = spawn_monitored(&["--scan-ms", "20"], false);
+    let (mut spawned, client) = spawn_monitored(&["--scan-ms", "20"], false);
 
     let first = client.snapshot().unwrap();
     let later = wait_for(&client, |s| s.tick > first.tick);
@@ -89,13 +77,13 @@ fn paced_run_serves_snapshots_whose_tick_advances() {
     // The model's point set is served under pacing.
     assert_eq!(later.points.len(), 5);
 
-    child.kill().unwrap();
-    child.wait().unwrap();
+    spawned.child.kill().unwrap();
+    spawned.child.wait().unwrap();
 }
 
 #[test]
 fn command_roundtrips_and_changes_later_output_at_the_scan_boundary() {
-    let (mut child, client) = spawn_monitored(&["--scan-ms", "20"], false);
+    let (mut spawned, client) = spawn_monitored(&["--scan-ms", "20"], false);
     // Let the paced run get going.
     let before = wait_for(&client, |s| s.tick.0 >= 3);
 
@@ -132,13 +120,13 @@ fn command_roundtrips_and_changes_later_output_at_the_scan_boundary() {
         CommandOutcome::Applied { tick: apply_tick }
     );
 
-    child.kill().unwrap();
-    child.wait().unwrap();
+    spawned.child.kill().unwrap();
+    spawned.child.wait().unwrap();
 }
 
 #[test]
 fn scan_requests_are_refused_while_pacing() {
-    let (mut child, client) = spawn_monitored(&["--scan-ms", "20"], false);
+    let (mut spawned, client) = spawn_monitored(&["--scan-ms", "20"], false);
 
     // The documented interleaving: the wall clock owns the scan schedule,
     // so an externally requested scan is refused, not interleaved.
@@ -152,13 +140,13 @@ fn scan_requests_are_refused_while_pacing() {
     let before = client.snapshot().unwrap().tick;
     wait_for(&client, |s| s.tick > before);
 
-    child.kill().unwrap();
-    child.wait().unwrap();
+    spawned.child.kill().unwrap();
+    spawned.child.wait().unwrap();
 }
 
 #[test]
 fn bounded_monitored_run_shuts_down_gracefully() {
-    let (mut child, client) = spawn_monitored(&["--ticks", "5", "--scan-ms", "20"], true);
+    let (mut spawned, client) = spawn_monitored(&["--ticks", "5", "--scan-ms", "20"], true);
 
     // The monitor answers while the run is live.
     client.snapshot().unwrap();
@@ -167,7 +155,7 @@ fn bounded_monitored_run_shuts_down_gracefully() {
     // listener gone — a graceful monitor shutdown, not a killed thread.
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = spawned.child.try_wait().unwrap() {
             break status;
         }
         assert!(
@@ -178,7 +166,8 @@ fn bounded_monitored_run_shuts_down_gracefully() {
     };
     assert!(status.success());
     let mut stdout = String::new();
-    child
+    spawned
+        .child
         .stdout
         .take()
         .unwrap()

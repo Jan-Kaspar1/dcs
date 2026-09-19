@@ -682,6 +682,7 @@ impl Case {
         MonitorConfig {
             history_capacity: self.history_capacity,
             journal_capacity: self.journal_capacity,
+            event_history_capacity: self.journal_capacity,
             publication_capacity: self.publication_capacity,
             journal_file: Some(journal_path.to_path_buf()),
         }
@@ -797,7 +798,7 @@ fn run(case: &Case, with_consumers: bool) -> (Artifacts, ConsumerLog, Duration) 
             Op::Scans(scans) => {
                 for _ in 0..*scans {
                     let start = Instant::now();
-                    monitor.monitor.paced_scan().unwrap();
+                    monitor.monitor.paced_scan();
                     slowest = slowest.max(start.elapsed());
                     // The paced period's stand-in: gives concurrent
                     // consumers a real share of the run's duration.
@@ -974,7 +975,7 @@ fn a_stalled_reader_adds_no_scan_boundary_delay_and_no_liveness_dependency() {
         // lock, so the paced loop's scans complete on schedule.
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..20 {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
         }
         assert!(
             Instant::now() < deadline,
@@ -1099,6 +1100,7 @@ fn bounded_eviction_exposes_named_gaps_never_silent_loss() {
         MonitorConfig {
             history_capacity: 3,
             journal_capacity: 4,
+            event_history_capacity: 4,
             publication_capacity: 3,
             journal_file: None,
         },
@@ -1217,7 +1219,7 @@ fn published_reads_cover_every_execution_mode() {
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
             for _ in 0..3 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             assert_published_surfaces(&monitor, &client, Tick(3));
         });
@@ -1319,10 +1321,10 @@ fn published_reads_cover_every_execution_mode() {
         let first_client = MonitorClient::new(monitor.local_addr());
         let checkpoint = serving(&monitor, || {
             for _ in 0..4 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             first_client.command(&write_value(10, 3.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &first_client, Tick(5));
             monitor.checkpoint()
         });
@@ -1340,15 +1342,15 @@ fn published_reads_cover_every_execution_mode() {
         .unwrap();
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             client.command(&write_value(10, 5.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &client, Tick(7));
             // The served journal is continuous across the restart:
             // the replayed pre-restart entries stand beside the
-            // post-restart ones in one `seq` domain — the restored
-            // run's adopted receipt re-journals at its applied tick,
-            // and the post-restart command settles at tick 7.
+            // post-restart ones in one `seq` domain — the restart's
+            // served boundary entry separates the lifetimes, and the
+            // post-restart command settles at tick 7.
             let journal = client.journal(0).unwrap();
             assert_eq!(journal[0].seq, 1);
             assert!(

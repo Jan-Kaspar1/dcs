@@ -120,7 +120,12 @@ reinitializes every component — the carryover rule moves operator-writable
 internal points, still-declared output image samples, and the force set
 matched by declared point identity, and names each component's captured
 state `DroppedElement::Component` in the carryover report rather than
-restoring it. A revision that wants an instance's state to survive keeps
+restoring it. Runtime tuning reverts with the rest of the component
+state: the report's `reverted_tuning` itemizes, per reinitialized
+component, each descriptor-declared parameter whose checkpointed value
+differed from the revision's declared default — the witnessed record of
+what a receipted `set_parameter` tune did not carry. A revision that
+wants an instance's state to survive keeps
 its declared identity (`<kind>:<id>`) — but only ordinary same-model
 checkpoint convergence restores it; there are no per-kind compatibility
 rules yet.
@@ -347,15 +352,15 @@ let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // The plant side drives the `in` point; each scan publishes the peak.
 driver.write(PointId(1), Value::Float(5.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(1), Value::Float(3.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(2), Value::Bool(true)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(3.0));
 
 // The snapshot carries the instance's descriptor and diagnostics.
@@ -585,7 +590,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -598,6 +603,12 @@ A factory returns one of two `DeviceDriver` contributions:
   plant server's claim, and a field-facing kind that cannot arbitrate
   leaves it `None`, which keeps automatic failover off for models built
   on it (`FanoutDriver::unfenced_field_devices` names such devices).
+  `release` is an optional `ReleaseHook` (`Fn()`) — the demotion
+  counterpart of `claim`: `FanoutDriver::release_field_claims` runs it
+  when the peer gives up ownership so the backend forgets any recorded
+  claim token it would otherwise re-assert on a reconnect. `sim-tcp`
+  installs `RemoteDriver::release_claim` for exactly that — a demoted
+  attachment must not race the new owner back onto a restarted plant.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -780,6 +791,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         }),
         step: None,
         claim: None,
+        release: None,
         inspect: None,
         field_facing: false,
     }))
@@ -843,12 +855,12 @@ let components = ComponentRegistry::new().with(AnalogInput::<f64>::KIND, |spec| 
 let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // `raw` starts at its declared initial 5.0 -> the first scan writes 50.0.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(50.0));
 
 // The plant side moves the input; the next scan follows.
 driver.write(PointId(1), Value::Float(10.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(100.0));
 ```
 
@@ -1249,6 +1261,7 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         io: bus,
         step: None,
         claim: None,
+        release: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1295,7 +1308,7 @@ assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(0.0));
 
 // One exchange ran at the read boundary and the input phase served the
 // fresh latch — while the per-point `read` never transported.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.exchange_count(), 1);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
@@ -1304,7 +1317,7 @@ assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 // it: the one-scan actuation delay.
 driver.write(PointId(2), Value::Float(7.0)).unwrap();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(0.0)));
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
 // The link drops: exchanges fail, each counted once at the boundary,
@@ -1312,14 +1325,14 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // `stale_after_ticks` budget.
 bus.set_link_down(true);
 bus.field_set(PointId(1), Value::Float(9.0)); // unseen until an exchange lands
-executor.scan().unwrap(); // miss 1 of 3: held value, still inside the budget
+executor.scan(); // miss 1 of 3: held value, still inside the budget
 assert_eq!(executor.snapshot().io_health.failed_exchanges, 1);
 assert_eq!(executor.snapshot().io_health.failed_reads, 0);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
 // Miss 2: the held sample's acquisition stamp lags past the declared
 // budget — `Uncertain(Stale)`.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap().quality,
     Quality::Uncertain(QualityReason::Stale)
@@ -1328,7 +1341,7 @@ assert_eq!(
 // Miss 3 reaches `exchange_miss_threshold`: reads escalate to
 // `Disconnected` — an ordinary boundary fault degrading the held value
 // to `Bad`.
-executor.scan().unwrap();
+executor.scan();
 let health = &executor.snapshot().io_health;
 assert_eq!(health.failed_exchanges, 3);
 assert_eq!(health.failed_reads, 1);
@@ -1352,7 +1365,7 @@ assert_eq!(
 // The link returns: the next exchange completes — misses reset, the
 // link recovers, and the field's asserted value lands fresh.
 bus.set_link_down(false);
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap(),
     Sample::good(Value::Float(9.0), Tick(6))
@@ -1365,7 +1378,7 @@ let gate = dcs_runtime::WriteGate::closed(&driver);
 let mut standby = assemble(&model, &ComponentRegistry::new(), &gate).unwrap();
 bus.field_set(PointId(1), Value::Float(2.0));
 gate.write(PointId(2), Value::Float(5.0)).unwrap(); // accepted and dropped
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(standby.sample(PointId(1)).unwrap().value, Value::Float(2.0));
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
@@ -1373,7 +1386,7 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // publish it.
 gate.open();
 gate.write(PointId(2), Value::Float(5.0)).unwrap();
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
 ```
 

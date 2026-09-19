@@ -31,16 +31,18 @@ use dcs_monitor::MonitorClient;
 use dcs_runtime::{Executor, WriteGate};
 use dcs_sim_bus::{BusDriver, LinkError, PointRegister};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    Spawned, image_value, pump, serving_device, spawn, spawn_controller, workspace_binary,
+};
+
 /// The model the rig runs — the shared tank-loop document whose
 /// devices [`bus_model`] re-points at `sim-bus`: level raw (10) and
 /// setpoint (11) in, valve command (20) out, an analog-input scaling
@@ -94,85 +96,12 @@ const AO_POINTS: &[PointRegister] = &[PointRegister {
     kind: ValueKind::Float,
 }];
 
-/// A workspace binary next to the controller under test — workspace
-/// builds produce every member's binaries side by side.
-fn sibling(name: &str) -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the line it
-/// reports on stderr once listening, stderr held open so a later
-/// diagnostic write never meets a closed pipe, and a kill on drop so a
-/// panicking test leaves no stray processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its first stderr line, and extracts the bound
-/// address with `parse` — each binary announces its listener
-/// differently (`listening on <addr>`, `serving device <id> on
-/// <addr>`), so the line's interpretation stays with the caller.
-fn spawn(binary: &Path, args: &[String], parse: impl FnOnce(&str) -> SocketAddr) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    Spawned {
-        child,
-        addr: parse(line.trim()),
-        _stderr: stderr,
-    }
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args, |line| {
-        line.strip_prefix("listening on ")
-            .unwrap_or_else(|| {
-                panic!("expected a `listening on` line from dcs-controller, found {line:?}")
-            })
-            .parse()
-            .unwrap()
-    })
-}
-
 /// A `dcs-sim-bus-device` process serving `model`'s declared `device`
 /// on an ephemeral port: it announces `serving device <id> on <addr>
 /// (declared <listen>)` once bound.
 fn spawn_device(model: &Path, device: u64) -> Spawned {
     spawn(
-        &bus_device(),
+        &workspace_binary("dcs-sim-bus-device"),
         &[
             model.to_str().unwrap().to_string(),
             "--device".to_string(),
@@ -180,23 +109,8 @@ fn spawn_device(model: &Path, device: u64) -> Spawned {
             "--listen".to_string(),
             "127.0.0.1:0".to_string(),
         ],
-        |line| {
-            let prefix = format!("serving device {device} on ");
-            line.strip_prefix(&prefix)
-                .and_then(|rest| rest.split_whitespace().next())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected a `{prefix}<addr>` line from dcs-sim-bus-device, found {line:?}"
-                    )
-                })
-                .parse()
-                .unwrap()
-        },
+        serving_device(device),
     )
-}
-
-fn bus_device() -> PathBuf {
-    sibling("dcs-sim-bus-device")
 }
 
 /// One `dcs-sim-bus-device` process per model device — the shared field
@@ -248,44 +162,6 @@ fn bus_model(dir: &Path, name: &str, address_of: impl Fn(u64) -> String) -> Path
 /// on the register bank and its pre-claim field writer.
 fn attach(addr: SocketAddr, points: &[PointRegister]) -> BusDriver {
     BusDriver::connect(addr, points).unwrap()
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
-}
-
-/// Pumps one accepted connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the
-/// other side so the request/response pair completes and the sockets
-/// close cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
 }
 
 /// A controllable network path for the checkpoint-pull heartbeat: while
@@ -371,7 +247,7 @@ impl Reference<'_> {
     /// each bank's clock advances once, the cadence the pair's field
     /// owner keeps through `FanoutDriver::step`'s per-backend hooks.
     fn owned_tick(&mut self) -> TelemetrySnapshot {
-        self.executor.scan().unwrap();
+        self.executor.scan();
         self.field.step(DT_F64).unwrap();
         self.executor.snapshot()
     }
@@ -381,7 +257,7 @@ impl Reference<'_> {
     /// registers keep.
     fn orphaned_tick(&mut self) -> TelemetrySnapshot {
         self.gate.close();
-        self.executor.scan().unwrap();
+        self.executor.scan();
         self.gate.open();
         self.executor.snapshot()
     }
@@ -412,11 +288,21 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
         reference_devices[&device].addr.to_string()
     });
 
+    // Observers on the banks — the field the run asserts on; the
+    // setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments, so every later
+    // access is a read. `reference_ao` is the register the promoted
+    // peer's writes must equal, stamped tick for stamped tick.
+    let pair_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let pair_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    let reference_ao = attach(reference_devices[&AO_DEVICE].addr, AO_POINTS);
+    pair_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
+
     // The active serves checkpoints; the standby pulls one per requested
     // scan — the heartbeat — with the failover budget armed. Arming is
     // honest here because every field-facing device arbitrates a single
     // writer through its device server's claim.
-    let mut active_process = spawn_controller(&pair_model, &[]);
+    let mut active_process = spawn_controller(&pair_model, &[], DT);
     let standby_process = spawn_controller(
         &pair_model,
         &[
@@ -425,12 +311,14 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
 
     // The reference: the same model in-process against its own device
-    // servers — its gate starts open, the field owner's posture.
+    // servers — its gate starts open, the field owner's posture, and
+    // its banks are never claimed.
     let model = PlantModel::load(&std::fs::read_to_string(&reference_model).unwrap()).unwrap();
     let reference_field = resolve_drivers(&model, &DriverRegistry::standard())
         .unwrap()
@@ -445,15 +333,6 @@ fn run_failover(tag: &str) -> (Vec<(Sample, Sample)>, u64) {
         gate: &reference_gate,
         field: &reference_field,
     };
-
-    // Observers on the banks — the field the run asserts on; the
-    // setpoint lands once, before any claim exists. `reference_ao` is
-    // the register the promoted peer's writes must equal, stamped tick
-    // for stamped tick.
-    let pair_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
-    let pair_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    let reference_ao = attach(reference_devices[&AO_DEVICE].addr, AO_POINTS);
-    pair_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
     reference_field.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     // Phase 1: N converged ticks — the standby tracks the active's
@@ -586,7 +465,13 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
     let pair_model = bus_model(&dir, "pair.json", |device| {
         pair_devices[&device].addr.to_string()
     });
-    let active_process = spawn_controller(&pair_model, &[]);
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments from boot.
+    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    attach(pair_devices[&AI_DEVICE].addr, AI_POINTS)
+        .write(SETPOINT, Value::Float(50.0))
+        .unwrap();
+    let active_process = spawn_controller(&pair_model, &[], DT);
     // The standby's heartbeat path runs through the relay the test cuts.
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
@@ -597,13 +482,10 @@ fn a_transient_missed_pull_neither_promotes_nor_rearms() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    attach(pair_devices[&AI_DEVICE].addr, AI_POINTS)
-        .write(SETPOINT, Value::Float(50.0))
-        .unwrap();
 
     // Converge first.
     for _ in 0..N {
@@ -688,6 +570,7 @@ fn an_unconverged_standby_reports_its_state_and_never_promotes() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let standby = MonitorClient::new(standby_process.addr);
     let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
@@ -723,7 +606,12 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let pair_model = bus_model(&dir, "pair.json", |device| {
         pair_devices[&device].addr.to_string()
     });
-    let active_process = spawn_controller(&pair_model, &[]);
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences these attachments from boot.
+    let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
+    let active_process = spawn_controller(&pair_model, &[], DT);
     let relay = Relay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
         &pair_model,
@@ -733,12 +621,10 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             "--auto-promote".to_string(),
             BUDGET.to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
-    let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
-    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
-    field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
 
     for _ in 0..N {
         standby.advance(1).unwrap();
@@ -751,7 +637,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     relay.partition(true);
     for miss in 1..BUDGET {
         standby.advance(1).unwrap();
-        // Still unclaimed field: the old owner's register writes land.
+        // The old owner's claim still stands: its register writes land.
         active.advance(1).unwrap();
         assert_eq!(standby.role().unwrap().role, Role::Standby, "miss {miss}");
     }
@@ -759,9 +645,11 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     // The budget-th miss promotes the standby: its claim preempts on
     // both device servers, its scan writes, its step advances the
     // banks. From this boundary the old peer is fenced — its next
-    // requested scan's register write is refused with the named
-    // `fenced` error, and the field carries only the new owner's
-    // output.
+    // requested scan's exchange is refused and counted as the named
+    // `fenced` fault while the scan completes degraded, and the verdict
+    // degrades the superseded peer through the demote path rather than
+    // ending its process: the gate re-closes and the reported role
+    // moves to `demoting`.
     let promoted = standby.advance(1).unwrap();
     assert_eq!(
         standby.role().unwrap().role,
@@ -792,24 +680,46 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     );
     assert_eq!(fenced_ai.step(DT_F64), Err(LinkError::Fenced));
 
-    let error = active.advance(1).unwrap_err();
+    // The old peer's requested scan is fenced at the bank — counted as
+    // the named fault while the scan completes degraded — and the
+    // peer survives: the refusal demotes it in place.
+    let fenced_scan = active.advance(1).unwrap();
     assert!(
-        error.to_string().contains("fenced"),
-        "the returning peer's write must fail fenced: {error}"
+        matches!(
+            fenced_scan
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the returning peer's exchange must be refused fenced: {:?}",
+        fenced_scan.io_health
     );
-    // Nothing the fenced scan staged reached the register bank.
+    // Nothing the fenced scan staged reached the register bank — and
+    // the field's verdict demoted the superseded peer in place.
     assert_eq!(field_ao.read(VALVE).unwrap().value, carried);
+    let report = active.role().unwrap();
+    assert_eq!(
+        report.role,
+        Role::Demoting,
+        "the fenced peer must adopt the demote path, not die: {report:?}"
+    );
+    assert_eq!(report.tick, fenced_scan.tick);
 
-    // The link heals — the old peer's monitor answers again and still
-    // reports `active`: fencing is the field's verdict, not a role the
-    // fenced peer adopted. Its writes stay refused — exactly one peer
-    // writes the registers after failover.
+    // The link heals — the demoted peer's monitor answers again — and
+    // its first quiesced scan settles `standby`: the survivable
+    // degraded state. Its writes stay behind the re-closed gate —
+    // exactly one peer writes the registers after failover. The
+    // promoted peer announced itself through its pulls, so the demoted
+    // run's first tracking cycle reconverges on its successor.
     relay.partition(false);
-    assert_eq!(active.role().unwrap().role, Role::Active);
-    let error = active.advance(1).unwrap_err();
+    active.advance(1).unwrap();
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
     assert!(
-        error.to_string().contains("fenced"),
-        "a healed but superseded peer stays fenced: {error}"
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {report:?}"
     );
 
     for tick in 1..=M {
@@ -820,9 +730,11 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
             image_value(&owner, VALVE),
             "tick {tick}: the field must carry only the promoted peer's writes"
         );
-        // And every fresh write attempt by the old peer is refused.
-        let error = active.advance(1).unwrap_err();
-        assert!(error.to_string().contains("fenced"), "tick {tick}: {error}");
+        // The superseded peer keeps scanning and serving — quiesced at
+        // the re-closed gate, alive, and never reaching the banks
+        // again.
+        active.advance(1).unwrap();
+        assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
