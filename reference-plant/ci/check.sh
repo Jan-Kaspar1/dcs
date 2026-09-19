@@ -209,6 +209,26 @@
 #                /resources reporting identical verdicts throughout;
 #                two passes produce identical digests
 #                (availability-failed, availability-nondeterministic)
+#                The stage's report leg, ci/report.py on the same
+#                declared deployment: with the pair tracking, one
+#                managed alarm is driven through its
+#                annunciation/ack/return lifecycle — the level-primary
+#                quality fault annunciating the failover's alarm, the
+#                receipted ack write pairing the annunciation to its
+#                attributed acknowledgment, the cleared instrument
+#                returning it — then the released dcs-alarm-report
+#                computes the declared AlarmReport metric set
+#                (WW-ALM-004) over the field owner's served journal
+#                and, with --journal-file, over its manifest-declared
+#                durable journal file — the emitted model's whole
+#                alarm set computed per instance, the driven
+#                lifecycle's measured counts and response pair
+#                asserted, and the durable file's report answering the
+#                served report's metric set identically; the tool's
+#                refusal modes — an unreachable monitor, an unreadable
+#                journal file — exit nonzero naming the failure; two
+#                passes produce identical digests
+#                (report-failed, report-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -256,10 +276,11 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, `dcs-plant-server`, and `dcs-ctl`
-#                binaries. When unset, the check installs them from
-#                $DCS_REMOTE at $DCS_REV — the contract's `cargo
-#                install --git` mechanism — into a scratch root.
+#                `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
+#                `dcs-alarm-report` binaries. When unset, the check
+#                installs them from $DCS_REMOTE at $DCS_REV — the
+#                contract's `cargo install --git` mechanism — into a
+#                scratch root.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -305,6 +326,18 @@ ensure_tools() {
         rm -rf "$dir"
         return 1
     fi
+    # The delivered binary set — the `dcs-monitor` package ships both
+    # operator tools, `dcs-ctl` and `dcs-alarm-report`; a revision
+    # whose tooling predates one fails the install rather than the
+    # stage that invokes it.
+    local bin
+    for bin in dcs-model dcs-controller dcs-plant-server dcs-ctl \
+            dcs-alarm-report; do
+        if [ ! -x "$dir/bin/$bin" ]; then
+            rm -rf "$dir"
+            return 1
+        fi
+    done
     INSTALL_ROOTS="$INSTALL_ROOTS $dir"
     TOOLS="$dir/bin"
     TOOLS_REV="$1"
@@ -1105,6 +1138,62 @@ for tamper in refused-available diverged-standby; do
     echo "  $tamper: reported, availability-failed"
 done
 
+# The pair contract's alarm-report leg, on the same
+# manifest-declared deployment: ci/report.py converges the pair, then
+# drives one managed alarm through its lifecycle — the level-primary
+# quality fault annunciating the failover's alarm, a receipted `ack`
+# write through the active's POST /command pairing the annunciation to
+# its attributed acknowledgment, the cleared instrument returning it —
+# so the durable record carries one measured episode. The released
+# dcs-alarm-report then computes the declared AlarmReport metric set
+# (WW-ALM-004) twice: over the field owner's served journal, and over
+# its manifest-declared durable journal file — the emitted model's
+# whole alarm set computed per instance, the driven lifecycle's
+# measured counts and response pair asserted, and the file's report
+# answering the served report's metric set identically with only its
+# run-boundary accounting added. The tool's refusal modes — an
+# unreachable monitor and an unreadable journal file — must exit
+# nonzero naming the failure. Two passes must produce identical
+# digests.
+run_report() {
+    python3 ci/report.py \
+        --alarm-report "$TOOLS/dcs-alarm-report" \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+[ -x "$TOOLS/dcs-alarm-report" ] \
+    || fail "report-failed: the release tooling ships no dcs-alarm-report binary"
+FIRST="$(run_report)" \
+    || fail "report-failed: the alarm-report leg did not hold — its evidence lines are above"
+SECOND="$(run_report)" \
+    || fail "report-failed: the alarm-report leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "report-nondeterministic: two report-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: each tamper must surface the named diagnostic —
+# a leg asserting the driven alarm left no activation must fail on the
+# computed report's honest count, and the doctored invocations — a
+# dead monitor address, a missing journal path — must fail the leg
+# naming the refusal, never a silent pass.
+for tamper in expect-quiet unreachable-monitor unreadable-journal; do
+    if out="$(run_report --tamper "$tamper" 2>&1)"; then
+        fail "report-unchecked: a $tamper case passed the report leg"
+    fi
+    case "$tamper" in
+        expect-quiet) expected="expected zero activations" ;;
+        unreachable-monitor) expected="unreachable monitor" ;;
+        unreadable-journal) expected="unreadable journal file" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "report-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, report-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -1114,8 +1203,9 @@ for file in ci/availability.py ci/burst_order.py ci/consumers.py \
         ci/ctl.py ci/deploy_rig.py \
         ci/force_carryover.py ci/force_release.py ci/pair.py \
         ci/peer_announce.py \
-        ci/refusal.py ci/restart.py ci/schema_conformance.py \
-        ci/simulate.py ci/takeover.py README.md; do
+        ci/refusal.py ci/report.py ci/restart.py \
+        ci/schema_conformance.py ci/simulate.py ci/takeover.py \
+        README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
