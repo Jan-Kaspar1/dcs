@@ -1,6 +1,7 @@
 """Explicit local configuration; never select a paid fallback."""
 import json
 from pathlib import Path
+import re
 
 from . import findings
 from . import review
@@ -16,6 +17,39 @@ FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',
                'opencode/mimo-v2.5-free',
                'opencode/nemotron-3-ultra-free',
                'opencode/nemotron-3.5-lightning-free')
+
+def scheduler(raw):
+    """Validate an optional `scheduler` section: named quota groups and timing.
+
+    Each group names the models sharing one provider budget; `initial` is the
+    starting concurrency target, `ceiling` bounds adaptive growth, and
+    `external_slots` reserves headroom for consumers outside this pool.
+    """
+    sched = dict(raw or {})
+    groups = sched.get('groups')
+    if groups is not None:
+        if not isinstance(groups, dict) or not groups:
+            raise ValueError('scheduler.groups must map names to group definitions')
+        for name, group in groups.items():
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+                raise ValueError('Invalid scheduler group name: ' + str(name))
+            models = group.get('models')
+            if not isinstance(models, list) or not models or any(m not in FREE_MODELS for m in models):
+                raise ValueError('scheduler group ' + name + ' needs a non-empty free-model list')
+            if not isinstance(group.get('initial'), int) or group['initial'] < 1:
+                raise ValueError('scheduler group ' + name + ' needs a positive integer initial')
+            if not isinstance(group.get('ceiling'), int) or group['ceiling'] < group['initial']:
+                raise ValueError('scheduler group ' + name + ' needs ceiling >= initial')
+            if not isinstance(group.get('external_slots', 0), int) or group.get('external_slots', 0) < 0:
+                raise ValueError('scheduler group ' + name + ' needs external_slots >= 0')
+    for key in ('quiet_seconds', 'cooldown_seconds', 'max_cooldown_seconds'):
+        if key in sched and (not isinstance(sched[key], (int, float)) or sched[key] <= 0):
+            raise ValueError('scheduler.' + key + ' must be a positive number')
+    if 'max_quota_requeues' in sched and (not isinstance(sched['max_quota_requeues'], int)
+                                        or sched['max_quota_requeues'] < 0):
+        raise ValueError('scheduler.max_quota_requeues must be an integer >= 0')
+    return sched
+
 
 def load(path=None):
     path = Path(path or Path.home() / '.config/dcs-agents/config.json')
@@ -34,6 +68,7 @@ def load(path=None):
     if unknown:
         raise ValueError('model_caps references unpermitted models: ' + ', '.join(unknown))
     config['model_caps'] = caps
+    config['scheduler'] = scheduler(config.get('scheduler'))
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
