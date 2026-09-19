@@ -49,7 +49,11 @@
 //! process restart) requiring identical digests, the `ctl` stage,
 //! which exercises the released `dcs-ctl` operator CLI's receipted
 //! `invoke` path, read subcommands, and named refusal modes against
-//! the same driven run, and the `upgrade` stage, which repins the
+//! the same driven run, the pair contract's report leg, which runs
+//! the released `dcs-alarm-report` over the driven pair's served
+//! journal and manifest-declared durable journal file — the declared
+//! `AlarmReport` metric set asserted, the refusal modes exiting
+//! nonzero — and the `upgrade` stage, which repins the
 //! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -66,7 +70,8 @@
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
 //! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
-//! `refusal-failed`, `takeover-failed`, `peer-announce-failed`, and
+//! `refusal-failed`, `takeover-failed`, `peer-announce-failed`,
+//! `report-failed`/`report-nondeterministic`, and
 //! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -98,8 +103,9 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, `dcs-plant-server`, and `dcs-ctl` — are built for
-/// the check's `DCS_TOOLS` substitution.
+/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
+/// `dcs-alarm-report` — are built for the check's `DCS_TOOLS`
+/// substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -471,6 +477,27 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(line),
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
+    // The pair contract's report leg ran and held: the released
+    // dcs-alarm-report computed the declared AlarmReport metric set
+    // over the field owner's served journal and its manifest-declared
+    // durable journal file — its digest line reports the evidence —
+    // and each doctored case reported its named diagnostic.
+    let report_line = stdout
+        .lines()
+        .find(|line| line.contains("report-digest"))
+        .unwrap_or_else(|| panic!("the report leg reported no digest:\n{stdout}"));
+    for phrase in ["alarm instances", "activations", "response pairs"] {
+        assert!(
+            report_line.contains(phrase),
+            "the report digest names no '{phrase}' evidence: {report_line}"
+        );
+    }
+    for tamper in ["expect-quiet", "unreachable-monitor", "unreadable-journal"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, report-failed")),
+            "the report leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

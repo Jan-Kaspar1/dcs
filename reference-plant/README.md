@@ -105,6 +105,12 @@ ci/failover.py         the pair contract's automatic-failover leg —
                        bumplessly, and the durable journal's
                        transition record audited beside a
                        severed-standby variant reporting no failover
+ci/report.py           the pair contract's alarm-report leg — the
+                       released `dcs-alarm-report` computing the
+                       declared AlarmReport metric set over the
+                       driven pair's served journal and the field
+                       owner's durable journal file, its refusal
+                       modes exiting nonzero
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -178,7 +184,11 @@ The `dcs-monitor` package ships `dcs-ctl`, the released operator CLI —
 journal` reads the running controller's served contract, `invoke`
 submits a component's declared command through the bounded receipted
 path with `--actor` attribution, and `write`/`set-parameter`/`force`/
-`promote`/`demote`/`scan` cover the rest of the operator surface.
+`promote`/`demote`/`scan` cover the rest of the operator surface — and
+`dcs-alarm-report`, the alarm flood and performance report —
+`dcs-alarm-report <addr>` computes the declared `AlarmReport` metric
+set over the served journal, `dcs-alarm-report <addr> --journal-file
+<path>` over the durable journal file.
 
 The stage also exercises the contract's remaining `dcs-model` surfaces.
 The release record's schema artifacts —
@@ -534,6 +544,38 @@ nothing reports a failover. A violated contract fails
 `failover-failed`; two passes must produce the identical
 `failover-digest`, a divergence failing
 `failover-nondeterministic`.
+
+The stage's alarm-report leg — `ci/report.py` on the same declared
+deployment — then proves the released alarm flood and performance
+tool produces the declared `AlarmReport` metric set (WW-ALM-004)
+from the customer's released artifacts, the tooling-side computation
+the flood-and-performance decision promises with no served endpoint
+added. With the pair tracking, the leg drives one managed alarm
+through its lifecycle — a non-Good quality on `level-primary`
+annunciating the failover's managed alarm, a receipted `ack` write
+through the active's `POST /command` pairing the annunciation to its
+attributed acknowledgment, and the cleared instrument returning it —
+then runs `dcs-alarm-report <addr>` against the field owner's
+monitor: the report must cover the emitted model's whole alarm set
+per instance — signal names, bound alarm points, declared
+`priority`/`response_ticks` — measure the driven lifecycle's one
+activation, annunciation, and acknowledgment, carry the response
+pair attributed to the leg's actor within the declared bound, and
+hold its cross-section accounting (the rates section equal to the
+per-instance detail, the priority distribution covering every
+annunciation, the source stretch agreeing with the served journal).
+`dcs-alarm-report <addr> --journal-file <path>` over the field
+owner's manifest-declared durable journal file must answer the
+identical metric set — the file and the bounded served view being
+one record for this run — with only its run-boundary accounting
+added. The tool's refusal modes must exit nonzero naming the
+failure: an unreachable monitor and an unreadable journal file,
+never a silent pass. A violated contract fails `report-failed`; two
+passes must produce the identical `report-digest`, a divergence
+failing `report-nondeterministic`. The leg's doctored cases — an
+expectation asserting the driven alarm left no activation, a dead
+monitor address, and a missing journal path — must each report the
+named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
