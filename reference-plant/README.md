@@ -85,6 +85,16 @@ ci/peer_announce.py    the pair contract's peer-announce leg — a
                        switch reconverging the demoted peer tracking
                        on its real successor, and the pair's launch
                        roles restored
+ci/availability.py     the pair contract's command-availability leg —
+                       the tracking pair's served per-command verdicts
+                       audited self-consistent and identical across the
+                       peers, every served-unavailable bound-point
+                       command probe-submitted through POST /command
+                       settling its named refusal rather than applied,
+                       a served-available command settling applied into
+                       both peers' adopted receipt log, and the
+                       kind-declared advance's refusal exercised where
+                       the tooling publishes verdicts
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -448,6 +458,37 @@ crafted announce naming the pulling connection's own source,
 landing exactly as it would on a controller whose acceptance check
 regressed — must strand the demoted peer and report the named
 diagnostic rather than pass silently.
+
+The stage's command-availability leg — `ci/availability.py` on the
+same declared deployment — then proves the served per-command
+verdicts agree with what the receipted path settles: a read model
+reporting a command invocable while dispatch refuses it — or the
+reverse — is exactly the consumer-facing dishonesty the served
+interface exists to prevent. With the pair tracking, the leg audits
+every `GET /resources` command row the active serves: an
+`available: false` row must carry a named refusal, an `available`
+row none. Every `bound_point_writable` command the row reports
+unavailable is then probe-submitted through the active's `POST
+/command` — each must settle a named rejection rather than
+`applied`, and where the bound point is one the model declares, the
+receipt names the same refusal the row served. One served-available
+command — the exercise program's kind-declared `advance` — must
+settle `applied` identically into both peers' adopted receipt log,
+and where the tooling publishes `command_verdicts` the leg drives
+`advance` to its standing refusal: the row then serves `available:
+false` with the kind's named reason, and a resubmission must settle
+`command_refused` carrying that refusal verbatim. A release
+publishing no verdicts records that coverage limitation in the
+leg's evidence rather than failing on machinery it lacks. The
+tracking standby's `GET /resources` must report identical verdicts
+throughout — the same-adopted-state rule means availability never
+diverges across the pair. A violated contract fails
+`availability-failed`; two passes must produce the identical
+`availability-digest`, a divergence failing
+`availability-nondeterministic`. The leg's doctored cases — a
+served-available command settling a refusal at the standby's role
+gate, and a standby reporting different verdicts — must report the
+named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
