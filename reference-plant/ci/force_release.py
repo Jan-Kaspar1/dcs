@@ -245,11 +245,27 @@ def release_pass(args, tamper):
             )
             raise Abort
         receipt = submit(duty_url, force_command, failures)
-        tracked, owner = pair.tick(standby_url, duty_url, failures)
+        # The settling scans: the duty applies the force at its scan
+        # boundary while the tracker carries its adopted receipt
+        # (issue #689) — a quiesced scan must not mint an `Applied`
+        # the line never ordered — one tick, same time. The
+        # convergence tick then adopts the settlement, so the adopted
+        # audit reads as one log below.
+        tracked_settling = pair.scan(standby_url, failures)
+        owner = pair.scan(duty_url, failures)
+        if tracked_settling["tick"] != owner["tick"]:
+            failures.append(
+                "the force's settling tick advanced the peers to "
+                f"{tracked_settling['tick']} and {owner['tick']}"
+            )
+            raise Abort
         apply_tick = owner["tick"]
         active_sample = force_carryover.assert_force(
             owner, point, forced, "the active's", failures
         )
+        if failures:
+            raise Abort
+        tracked, owner = pair.tick(standby_url, duty_url, failures)
         tracked_sample = force_carryover.assert_force(
             tracked, point, forced, "the tracking peer's", failures
         )
@@ -319,7 +335,17 @@ def release_pass(args, tamper):
         # `write_value` produces. A release that cleared the badge
         # while the substituted value kept serving fails here.
         release = submit(duty_url, unforce_command, failures)
-        tracked, owner = pair.tick(standby_url, duty_url, failures)
+        # The settling scans, as in the force phase: the duty
+        # releases at its boundary while the tracker carries (#689);
+        # the convergence tick adopts it.
+        tracked_settling = pair.scan(standby_url, failures)
+        owner = pair.scan(duty_url, failures)
+        if tracked_settling["tick"] != owner["tick"]:
+            failures.append(
+                "the release's settling tick advanced the peers to "
+                f"{tracked_settling['tick']} and {owner['tick']}"
+            )
+            raise Abort
         apply_tick = owner["tick"]
         sample = force_carryover.point_sample(owner, point)
         if tamper == "expect-standing":
@@ -357,12 +383,15 @@ def release_pass(args, tamper):
                 or sample["tick"] != apply_tick
             ):
                 failures.append(
-                    f"the released point reads {sample} at tick "
-                    f"{apply_tick}, expected the held value {forced} "
-                    "re-stamped good at the release's apply tick"
-                )
+                f"the released point reads {sample} at tick "
+                f"{apply_tick}, expected the held value {forced} "
+                "re-stamped good at the release's apply tick"
+            )
         if failures:
             raise Abort
+        # The convergence tick adopts the release's settlement before
+        # the adopted audit is compared.
+        tracked, owner = pair.tick(standby_url, duty_url, failures)
         receipts = identical_receipts(duty_url, standby_url, failures)
         if applied_at(receipts, unforce_command) != apply_tick:
             failures.append(
@@ -413,7 +442,17 @@ def release_pass(args, tamper):
         # standing between the operator and the point.
         write_command = takeover.write_value(point, control["value"]["bool"])
         receipt = submit(duty_url, write_command, failures)
-        tracked, owner = pair.tick(standby_url, duty_url, failures)
+        # The settling scans, as in the force phase: the duty applies
+        # the restore write while the tracker carries (#689); the
+        # convergence tick adopts it before the audit is compared.
+        tracked_settling = pair.scan(standby_url, failures)
+        owner = pair.scan(duty_url, failures)
+        if tracked_settling["tick"] != owner["tick"]:
+            failures.append(
+                "the restore write's settling tick advanced the peers "
+                f"to {tracked_settling['tick']} and {owner['tick']}"
+            )
+            raise Abort
         apply_tick = owner["tick"]
         sample = force_carryover.point_sample(owner, point)
         if (
@@ -426,6 +465,8 @@ def release_pass(args, tamper):
                 f"expected the pre-force held value {control['value']} "
                 "at good — the live write path did not resume"
             )
+            raise Abort
+        tracked, owner = pair.tick(standby_url, duty_url, failures)
         receipts = identical_receipts(duty_url, standby_url, failures)
         if applied_at(receipts, write_command) != apply_tick:
             failures.append(

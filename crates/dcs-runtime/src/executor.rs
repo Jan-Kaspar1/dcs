@@ -1421,6 +1421,31 @@ impl<'d> Executor<'d> {
         tick
     }
 
+    /// Executes one quiesced scan — the same read → step → write cycle
+    /// as [`scan`](Self::scan) but without the scan-head command
+    /// application.
+    ///
+    /// A peer that does not own the field
+    /// ([`Peer::scan`](crate::Peer::scan)) runs this: an adopted
+    /// still-`Accepted` receipt is carried for a possible promotion, not
+    /// settled here — a quiesced scan must not mint an `Applied` the line
+    /// never ordered. The pending queue and the receipt log pass through
+    /// untouched, so the carried entries settle once at the promoted
+    /// run's first field-owning scan.
+    pub fn scan_quiesced(&mut self) -> Tick {
+        self.tick = Tick(self.tick.0 + 1);
+        let tick = self.tick;
+
+        self.emitted.clear();
+        self.fenced_write = None;
+        self.exchange_image(tick);
+        self.read_inputs(tick);
+        self.step_components(tick);
+        self.probe_command_verdicts();
+        self.write_outputs();
+        tick
+    }
+
     /// Captures the run's transferable state as a [`Checkpoint`].
     ///
     /// The checkpoint bundles the current tick, every component's

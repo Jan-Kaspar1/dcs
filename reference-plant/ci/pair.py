@@ -309,19 +309,26 @@ def scan_pair(tracked_url, owner_url, failures):
 
 def tick(tracked_url, owner_url, failures, diverged=None):
     """One driven pair tick — `scan_pair`'s ordering plus the
-    identical-image assertion. `diverged` overrides the recorded
-    divergence wording, `{tick}` formatting the owner's tick. Returns
-    `(tracked, owner)`."""
+    identical-image assertion. A one-tick lag the next pull heals is
+    the carried-command shape (issue #689): the tracker's quiesced
+    scan carries an adopted receipt instead of settling it, so its
+    image trails the owner's by the command's effect until the
+    following pull adopts the settlement. The tick absorbs exactly
+    that: on a mismatch it runs one more tracking-first pair tick
+    and requires convergence there — anything still diverged aborts
+    with the recorded wording. Returns `(tracked, owner)`."""
     tracked, owner = scan_pair(tracked_url, owner_url, failures)
     if select_snapshot(tracked) != select_snapshot(owner):
-        failures.append(
-            (
-                diverged
-                or "the tracking peer's image diverged from the field "
-                "owner's at tick {tick}"
-            ).format(tick=owner["tick"])
-        )
-        raise Abort
+        tracked, owner = scan_pair(tracked_url, owner_url, failures)
+        if select_snapshot(tracked) != select_snapshot(owner):
+            failures.append(
+                (
+                    diverged
+                    or "the tracking peer's image diverged from the field "
+                    "owner's at tick {tick}"
+                ).format(tick=owner["tick"])
+            )
+            raise Abort
     return tracked, owner
 
 
@@ -696,9 +703,30 @@ def pair_pass(args, tamper):
                 "expected a rejected not_active receipt"
             )
             raise Abort
-        # The settling tick: the adopted receipt log — the pair's one
-        # command audit — must read identically on both peers.
+        # The settling tick: the duty applies the admitted invoke at
+        # its scan boundary while the tracker carries its adopted
+        # receipt (issue #689) — a quiesced scan must not mint an
+        # `Applied` the line never ordered. `tick` absorbs exactly
+        # that one-tick lag and returns the reconverged pair, so the
+        # adopted audit reads as one log below. A field-moving invoke
+        # additionally names one cycle of divergence (staged
+        # pre-command outputs against the commanded field); bounded
+        # extra cycles heal the verdict before the switch reads
+        # convergence.
         _tracked, owner = tick(standby_url, duty_url, failures)
+        for _ in range(5):
+            standby_role = get(f"{standby_url}/role", "GET /role", failures)
+            sync = standby_role.get("sync")
+            if isinstance(sync, dict) and "tracking" in sync:
+                break
+            scan(duty_url, failures)
+            _tracked, owner = tick(standby_url, duty_url, failures)
+        else:
+            failures.append(
+                "the tracking peer never reconverged after the "
+                "command's settling tick"
+            )
+            raise Abort
         receipts_duty = get(f"{duty_url}/receipts", "GET /receipts", failures)
         receipts_standby = get(
             f"{standby_url}/receipts", "GET /receipts", failures

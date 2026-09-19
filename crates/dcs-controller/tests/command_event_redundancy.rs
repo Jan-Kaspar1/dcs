@@ -212,17 +212,39 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     );
 
     // Phase 1: N tracking ticks — each tick the standby pulls the
-    // active's checkpoint, applies it, and scans quiesced, so the peers'
-    // emitted records are the identical-streams proof: at the boundary
-    // after tick 3 the active (and the reference, at its matching
-    // boundary) admits `advance {count: 1}`; the standby's next pull
-    // carries the pending entry and all three apply it at tick 4.
+    // active's checkpoint, applies it, and scans quiesced. At the
+    // boundary after tick 3 the active (and the reference, at its
+    // matching boundary) admits `advance {count: 1}`; the standby's
+    // next pull carries the pending entry but — per #689 — its
+    // quiesced scan must not settle it: the carried receipt stays
+    // `Accepted` on the tracker at tick 4 while the field owners
+    // apply it, so the tracker's sequencer lags by the invoke's
+    // effect for exactly one tick. The tick-5 pull adopts the
+    // applied checkpoint (outcome and advanced component state) and
+    // the run converges — one journaled settle per peer, never a
+    // phantom `Applied` on the gated image.
     for tick in 1..=N {
         let tracked = standby.advance(1).unwrap();
         let owner = active.advance(1).unwrap();
         let alone = reference.advance(1).unwrap();
-        assert_eq!(tracked, owner, "tick {tick}");
-        assert_eq!(owner, alone, "tick {tick}");
+        if tick == 4 {
+            assert_eq!(tracked.tick, owner.tick, "tick {tick}");
+            assert_eq!(owner, alone, "tick {tick}");
+            assert!(
+                matches!(
+                    standby.receipts().unwrap()[0].outcome,
+                    CommandOutcome::Accepted { .. }
+                ),
+                "the quiesced scan carries the adopted invoke (#689)"
+            );
+            assert_eq!(
+                active.receipts().unwrap()[0].outcome,
+                CommandOutcome::Applied { tick: Tick(4) }
+            );
+        } else {
+            assert_eq!(tracked, owner, "tick {tick}");
+            assert_eq!(owner, alone, "tick {tick}");
+        }
         if tick == 3 {
             for client in [&active, &reference] {
                 let receipt = client.command(&invoke("advance", Some(1))).unwrap();
@@ -239,11 +261,26 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     // The adopted receipt log is the pair's one command audit.
     assert_eq!(standby.receipts().unwrap(), active.receipts().unwrap());
     assert_eq!(standby.receipts().unwrap().len(), 1);
-    // The pinned standby-emission semantics: the tracking peer's
-    // journal already carries the same `step_completed` stream at the
-    // same ticks — identical to the field owner's and the reference's.
-    assert_eq!(emitted(&standby), emitted(&active));
-    assert_eq!(emitted(&standby), emitted(&reference));
+    // The pinned standby-emission semantics, as amended by #689: the
+    // tracking peer's journal carries the same `step_completed` stream
+    // at the same ticks — identical to the field owner's and the
+    // reference's — except at tick 4, where the carried (not settled)
+    // invoke leaves the tracker one step behind for exactly one scan.
+    // The tick-5 adoption converges state, so every other tick matches.
+    let emitted_except_tick_4 = |client: &MonitorClient| {
+        emitted(client)
+            .into_iter()
+            .filter(|(tick, _)| *tick != 4)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        emitted_except_tick_4(&standby),
+        emitted_except_tick_4(&active)
+    );
+    assert_eq!(
+        emitted_except_tick_4(&standby),
+        emitted_except_tick_4(&reference)
+    );
 
     // The unsettled-at-promotion case: `reset` is admitted on the
     // active (and the reference) at tick N and stays `Accepted` through
@@ -290,16 +327,30 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 
     // Phase 2: M post-switch ticks. The promoted peer's first scan
     // settles the carried invocation — exactly once — at the same
-    // boundary the demoted peer's own copy and the reference's apply
-    // theirs. Until the post-switch `advance` goes only to the field
-    // owner (submitted after tick N+5, applying at N+6), the demoted
-    // peer's quiesced run stays the uninterrupted reference too.
+    // boundary the reference applies theirs. The demoted peer's own
+    // copy stays carried, not settled (#689): its quiesced scan must
+    // not mint an `Applied` on the fenced image, so at tick N+1 its
+    // sequencer has not taken the reset while the promoted run has —
+    // a one-tick lag the next tracking pull heals by adopting the
+    // applied checkpoint's component state. Until the post-switch
+    // `advance` goes only to the field owner (submitted after tick
+    // N+5, applying at N+6), the demoted peer's quiesced run otherwise
+    // stays the uninterrupted reference.
     for tick in (N + 1)..=(N + M) {
         let quiesced = active.advance(1).unwrap();
         let continued = standby.advance(1).unwrap();
         let alone = reference.advance(1).unwrap();
         assert_eq!(continued, alone, "tick {tick}");
-        if tick <= N + 5 {
+        if tick == N + 1 {
+            assert_eq!(quiesced.tick, continued.tick, "tick {tick}");
+            assert!(
+                matches!(
+                    active.receipts().unwrap()[1].outcome,
+                    CommandOutcome::Accepted { .. }
+                ),
+                "the demoted peer carries the reset (#689)"
+            );
+        } else if tick <= N + 5 {
             assert_eq!(continued, quiesced, "tick {tick}");
         }
         if tick == N + 5 {
@@ -343,10 +394,15 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 
     // The pinned record: the promoted peer's emitted-event stream is
     // the uninterrupted reference run's — every `step_completed` at the
-    // same tick with the same payload — its receipt log is identical,
-    // and the `reset` carried across the boundary settled exactly once
-    // at tick N+1: one receipt, one journaled outcome.
-    assert_eq!(emitted(&standby), emitted(&reference));
+    // same tick with the same payload, save the tick-4 invoke the
+    // tracker carried rather than settled (#689, as in phase 1) — its
+    // receipt log is identical, and the `reset` carried across the
+    // boundary settled exactly once at tick N+1: one receipt, one
+    // journaled outcome.
+    assert_eq!(
+        emitted_except_tick_4(&standby),
+        emitted_except_tick_4(&reference)
+    );
     assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
     assert_eq!(
         settlements_of(&standby, &invoke("reset", None)),

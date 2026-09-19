@@ -1317,8 +1317,23 @@ impl<'d> Peer<'d> {
     /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
     /// before the journaled `CommandSettled` would echo a phantom
     /// application.
+    ///
+    /// A scan that does not own the field runs quiesced
+    /// ([`Executor::scan_quiesced`]): it still reads, steps, writes
+    /// (dropped at the closed gate), and stages its field `Out` image
+    /// for the divergence check — but it applies no commands. An
+    /// adopted still-`Accepted` receipt is carried for a possible
+    /// promotion, not settled here: a quiesced scan must not mint an
+    /// `Applied` the line never ordered, on an image the field never
+    /// sees. The carried entries settle once at the promoted run's
+    /// first field-owning scan.
     pub fn scan(&mut self) -> Tick {
-        let tick = self.executor.scan();
+        let quiesced = !self.owns_field();
+        let tick = if quiesced {
+            self.executor.scan_quiesced()
+        } else {
+            self.executor.scan()
+        };
         if self.owns_field()
             && let Some(point) = self.executor.fenced_write()
         {
@@ -3269,9 +3284,11 @@ mod tests {
     #[test]
     fn final_sync_never_requeues_a_command_the_run_already_settled() {
         // The stale checkpoint's still-`Accepted` view of a receipt
-        // this run already applied is the tracked line lagging, not a
-        // new admission: the suffix rule adopts only entries past the
-        // log's own length, so a settled command never queues again.
+        // this run carries is the tracked line lagging, not a new
+        // admission: the suffix rule adopts only entries past the
+        // log's own length, so a carried command never queues twice —
+        // and the quiesced scan never settles it either. It stays
+        // `Accepted` until the promotion boundary applies it once.
         let field = StubDriver::field(&[]);
         let gate = WriteGate::closed(&field);
         let mut standby = Peer::standby(Clocked::executor(&gate), Some(&gate));
@@ -3280,27 +3297,34 @@ mod tests {
         source.run(2);
         source.submit_command(Clocked::bump(7));
 
-        // The standby's own quiesced scan settles the carried invoke —
-        // `Applied` on its line while the active, stalled at tick 2,
-        // still serves it `Accepted`.
+        // The adopted `Accepted` invoke is carried, not settled: the
+        // quiesced scan leaves the receipt `Accepted` and the run's
+        // count at zero — no phantom `Applied` on an image the field
+        // never saw — while the active, stalled at tick 2, still
+        // serves it `Accepted`.
         standby.apply(&source.checkpoint()).unwrap();
         standby.scan();
-        assert_eq!(
+        assert!(matches!(
             standby.receipts()[0].outcome,
-            CommandOutcome::Applied { tick: Tick(3) }
-        );
-        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
+            CommandOutcome::Accepted { .. }
+        ));
+        assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(0));
 
         standby.final_sync(|| Ok(source.checkpoint()));
         assert_eq!(standby.receipts().len(), 1);
-        assert_eq!(
+        assert!(matches!(
             standby.receipts()[0].outcome,
-            CommandOutcome::Applied { tick: Tick(3) }
-        );
+            CommandOutcome::Accepted { .. }
+        ));
 
         standby.promote().unwrap();
         standby.scan();
-        // Settled once, never re-applied: the count holds at one bump.
+        // Settled once, at the promotion boundary — never re-applied:
+        // the count holds at one bump.
+        assert_eq!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { tick: Tick(4) }
+        );
         assert_eq!(Clocked::count(&standby.checkpoint()), Value::Int(7));
     }
 
@@ -3566,6 +3590,10 @@ mod tests {
         let source_gate = WriteGate::closed(&source_driver);
         let mut source = Peer::standby(Clocked::executor(&source_gate), Some(&source_gate));
         source.apply(&peer.checkpoint()).unwrap();
+        // The successor settles its own admission on the live line: it
+        // promotes first — a quiesced standby scan must not settle it —
+        // then its field-owning scan applies the bump.
+        source.promote().unwrap();
         source.submit_command(Clocked::bump(3));
         source.scan();
 
@@ -3719,8 +3747,11 @@ mod tests {
 
         // The demoted peer's next tracking apply adopts the successor's
         // checkpoint: the carried entry is the same command at the same
-        // submission index — covered — so nothing supersedes and the
-        // adopted pending entry re-queues to settle with the run.
+        // submission index — covered — so nothing supersedes. The
+        // adopted pending entry is carried, not settled: the quiesced
+        // scan leaves it `Accepted` — a gated peer never mints an
+        // `Applied` the line never ordered — and it settles once at
+        // the promoted run's first field-owning scan.
         peer.apply(&source.checkpoint()).unwrap();
         assert!(peer.take_superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
@@ -3729,10 +3760,104 @@ mod tests {
             CommandOutcome::Accepted { .. }
         ));
         peer.scan();
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(0));
+        assert!(peer.take_superseded_commands().is_empty());
+
+        peer.promote().unwrap();
+        peer.scan();
         assert_eq!(
             peer.receipts()[0].outcome,
-            CommandOutcome::Applied { tick: Tick(3) }
+            CommandOutcome::Applied { tick: Tick(4) }
         );
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+    }
+
+    /// QA finding `quiesced-standby-scan-settles-adopted-pending-commands`
+    /// (#689): a standby's quiesced scan must not apply an adopted
+    /// still-`Accepted` internal-point command. Seed the receipt log via
+    /// a checkpoint apply, run one quiesced scan, assert the receipt
+    /// stays `Accepted` and the staged image is untouched; then the
+    /// promoted peer applies the carried command itself — a single
+    /// settle at a tick on or past the promotion boundary.
+    #[test]
+    fn a_quiesced_scan_carries_adopted_pending_commands_for_promotion() {
+        use dcs_core::Command;
+        let point = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                point,
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, map(), Vec::new()).unwrap(),
+            Some(&gate),
+        );
+
+        // The active admits an internal-point write and serves it still
+        // `Accepted` in its checkpoint.
+        let source_driver = StubDriver::field(&[]);
+        let mut source = Executor::new(&source_driver, map(), Vec::new()).unwrap();
+        source.run(2);
+        source.submit_command(Command::WriteValue {
+            point,
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        });
+        let checkpoint = source.checkpoint();
+        assert!(matches!(
+            checkpoint.receipts[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        // Adopt: the standby carries the pending command.
+        standby.apply(&checkpoint).unwrap();
+        assert!(matches!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        // One quiesced scan: no settle, no image mutation — the receipt
+        // stays `Accepted` and nothing queues for the settle journal.
+        standby.scan();
+        assert!(matches!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        assert!(standby.take_superseded_commands().is_empty());
+        assert_eq!(
+            standby.executor().sample(point).map(|sample| sample.value),
+            Some(Value::Float(0.0))
+        );
+
+        // Promotion applies the carried command itself: a single settle
+        // at or past the promotion boundary.
+        let boundary = standby.tick();
+        standby.promote().unwrap();
+        standby.scan();
+        assert_eq!(standby.role(), Role::Active);
+        match standby.receipts()[0].outcome {
+            CommandOutcome::Applied { tick } => assert!(tick >= Tick(boundary.0 + 1)),
+            ref other => panic!("carried command must settle Applied once, got {other:?}"),
+        }
+        assert_eq!(
+            standby.executor().sample(point).map(|sample| sample.value),
+            Some(Value::Float(7.0))
+        );
+        // Never again: the settled outcome stays the log's one entry.
+        standby.scan();
+        assert_eq!(standby.receipts().len(), 1);
+        assert!(matches!(
+            standby.receipts()[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
     }
 }
