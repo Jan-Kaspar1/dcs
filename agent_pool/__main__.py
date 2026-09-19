@@ -9,12 +9,29 @@ import time
 from .config import load
 from .state import State
 
+
+def qa_section(config, state):
+    """status's qa section: persisted counters plus the configured lane state
+    (the dashboard reads routing on/off from here)."""
+    qa = state.qa_summary()
+    try:
+        from . import findings
+        cfg = findings.settings(config)
+        qa.update(enabled=cfg['enabled'], mode=cfg['mode'],
+                  dashboard=cfg['dashboard'])
+    except Exception:
+        pass
+    return qa
+
 def main():
     parser = argparse.ArgumentParser(prog='dcs-agents')
     parser.add_argument('--config')
     commands = parser.add_subparsers(dest='command', required=True)
     for name in ('start', 'pause', 'resume', 'stop', 'status', 'logs', 'run', 'wait-service'):
         commands.add_parser(name)
+    admission_cmd = commands.add_parser('admission')
+    admission_cmd.add_argument('action', nargs='?', choices=('status', 'reset'), default='status')
+    admission_cmd.add_argument('group', nargs='?')
     retry = commands.add_parser('retry')
     retry.add_argument('issue', type=int)
     review_cmd = commands.add_parser('review')
@@ -36,7 +53,21 @@ def main():
     elif args.command == 'stop':
         subprocess.run(['systemctl', '--user', 'stop', 'dcs-agents.service'], check=True)
     elif args.command == 'status':
-        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'review':state.review_summary(), 'jobs':state.jobs()}, indent=2))
+        from .admission import Admission
+        print(json.dumps({'paused':state.paused(), 'pause_reason':state.get('pause_reason'), 'integrity_error':state.get('integrity_error'), 'last_error':state.get('last_error'), 'capacity':state.capacity(), 'merges':state.get('merges',0), 'planner':state.get('planner'), 'admission':Admission(state, config).summary(), 'review':state.review_summary(), 'qa':qa_section(config, state), 'jobs':state.jobs()}, indent=2))
+    elif args.command == 'admission':
+        from .admission import Admission
+        admission = Admission(state, config)
+        if args.action == 'reset':
+            if not args.group:
+                parser.error('admission reset requires a quota group name')
+            try:
+                admission.reset(args.group)
+            except ValueError as exc:
+                parser.error(str(exc) + '; known groups: ' + ', '.join(sorted(admission.groups)))
+            print('Quota group ' + args.group + ' reset to normal admission.')
+        else:
+            print(json.dumps(admission.summary(), indent=2))
     elif args.command == 'review':
         if args.action == 'run':
             if state.paused():
@@ -57,12 +88,11 @@ def main():
     elif args.command == 'upgrade':
         subprocess.run([sys.executable, str(Path(args.source).resolve() / 'scripts/install_agents.py')], check=True)
     elif args.command == 'wait-service':
+        # Keepalive: start the supervisor once, then hold WSL open. Exiting
+        # when the service stops would strand upgrades, which require the stop.
         subprocess.run(['systemctl', '--user', 'start', 'dcs-agents.service'], check=True)
         while True:
-            status = subprocess.run(['systemctl', '--user', 'show', '-p', 'ActiveState', '--value', 'dcs-agents.service'], capture_output=True, text=True).stdout.strip()
-            if status in ('inactive', 'failed'):
-                break
-            time.sleep(10)
+            time.sleep(3600)
 
 if __name__ == '__main__':
     main()

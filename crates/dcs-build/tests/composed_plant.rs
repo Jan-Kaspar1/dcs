@@ -200,11 +200,21 @@ fn composed_plant() -> PlantBuilder {
         parameters([("safe_value", Value::Float(SAFE_VALUE))]),
         1,
     ));
-    let lal = plant.add(LatchingAlarmSpec::new(parameters([
-        ("low_limit", Value::Float(6.0)),
-        ("high_limit", Value::Float(16.0)),
-        ("hysteresis", Value::Float(1.0)),
-    ])));
+    let lal = plant.add(LatchingAlarmSpec::new(
+        parameters([
+            ("low_limit", Value::Float(6.0)),
+            ("high_limit", Value::Float(16.0)),
+            ("hysteresis", Value::Float(1.0)),
+            ("priority", Value::Int(1)),
+            ("class", Value::Int(2)),
+            ("response_ticks", Value::Int(30)),
+        ]),
+        dcs_build::Rationalization {
+            consequence: "c".to_string(),
+            required_action: "a".to_string(),
+            reference: "r".to_string(),
+        },
+    ));
     let seq = plant.add(SequencerSpec::new(parameters([
         ("step_count", Value::Int(2)),
         ("step_1_ticks", Value::Int(2)),
@@ -317,7 +327,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
         observe(&executor);
         match scan {

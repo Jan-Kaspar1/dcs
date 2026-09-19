@@ -6,6 +6,7 @@ members = [
     "crates/dcs-controller",
     "crates/dcs-core",
     "crates/dcs-demo",
+    "crates/dcs-ethercat",
     "crates/dcs-model",
     "crates/dcs-monitor",
     "crates/dcs-plant",
@@ -17,7 +18,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "UNLICENSED"

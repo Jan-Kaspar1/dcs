@@ -98,7 +98,8 @@ pub struct IoFault {
     /// attribution without decoding the error variant.
     pub point: PointId,
     /// The scan boundary that saw the failure: `In` for the input-read
-    /// phase, `Out` for the output-write phase.
+    /// phase — including a failed cyclic exchange, which opens that
+    /// phase — `Out` for the output-write phase.
     pub direction: Direction,
     /// The failure the driver reported.
     pub error: IoError,
@@ -120,11 +121,24 @@ pub struct IoHealth {
     /// also produced a `Bad` input sample.
     pub failed_reads: u64,
     /// Total output writes that failed at the scan's write boundary —
-    /// each also failed its scan with `ScanError`.
+    /// each degraded its scan, which still completed.
     pub failed_writes: u64,
+    /// Cyclic process-image exchanges that failed at the scan's read
+    /// boundary — one per failed `exchange` call on a driver
+    /// implementing the cyclic contract
+    /// ([`IoDriver::cyclic`](crate::IoDriver::cyclic)), counted once
+    /// however many points the image covers. The held input image still
+    /// answers the reads that follow, so a covered point counts nothing
+    /// until the driver's miss threshold escalates its read to an
+    /// ordinary [`failed_reads`](Self::failed_reads) failure. Always `0`
+    /// for a non-cyclic driver; absent from snapshots serialized before
+    /// the cyclic contract existed.
+    #[serde(default)]
+    pub failed_exchanges: u64,
     /// Driver-boundary operations that have failed in a row: every
-    /// failed read or write extends the count and every successful one
-    /// resets it to zero, so it reads as the failure streak ending at
+    /// failed read, write, or cyclic exchange extends the count and
+    /// every successful one resets it to zero, so it reads as the
+    /// failure streak ending at
     /// [`last_error`](Self::last_error).
     pub consecutive_failures: u64,
     /// The most recent driver-boundary failure, with the tick and point
@@ -141,13 +155,125 @@ pub struct IoHealth {
     pub driver: Option<DriverDiagnostics>,
 }
 
+/// The monitoring publication store's report — the read-side overload
+/// surface of the decision that the controller owns execution while UI
+/// delivery is a bounded consumer. A monitor materializes one immutable
+/// read model per completed scan into bounded storage outside the
+/// executor lock and stamps this section onto the snapshot it carries:
+/// consumers read the store's own counters here rather than the
+/// executor's.
+///
+/// `None` on a producer's own `Executor::snapshot` view — the section
+/// exists only where a publication store publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationHealth {
+    /// Read models published since the monitor bound — also the latest
+    /// publication's monotonic sequence: assigned in publish order and
+    /// never reused, so a consumer holding a seq cursor knows how far
+    /// behind the window it has fallen.
+    pub published: u64,
+    /// Publications that aged out of the retained window — the seq
+    /// stretch a lagging seq-cursor consumer can no longer read back
+    /// and so observes as the named gap, coalescing onto the retained
+    /// tail or the latest state. This is the overload counter: it
+    /// moves when scans out-publish the window, never by backpressure
+    /// into execution.
+    pub coalesced: u64,
+    /// Publications the retained window currently holds.
+    pub depth: u64,
+    /// The retained window's configured bound.
+    pub window: u64,
+}
+
+/// The snapshot's command-ingress section: admission metrics for the
+/// executor's bounded pending-command queue — the overload visibility
+/// the bounded-ingress decision requires beside the bound itself.
+///
+/// The counters are the run's command-ingress audit like the receipt
+/// log they measure: the checkpoint carries them, so a peer that
+/// adopted one answers this section identically to the active. The two
+/// queue descriptors are local facts, not carried state: `capacity` is
+/// construction configuration and `depth` is the adopted pending set —
+/// an over-capacity restore reads as `depth >= capacity` until a scan
+/// drains it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandQueueDiagnostics {
+    /// Commands presented for admission — every submission the
+    /// executor's command path received, whether it settled accepted,
+    /// was refused by validation, or was refused by a full queue.
+    pub attempts: u64,
+    /// Submissions that passed validation but were refused because the
+    /// pending queue was already at `capacity` — each answered with a
+    /// `queue_full` rejection receipt and queued nothing.
+    pub full_rejections: u64,
+    /// The declared bound on commands queued awaiting their scan
+    /// boundary.
+    pub capacity: usize,
+    /// Commands currently queued awaiting the next scan boundary.
+    pub depth: usize,
+    /// The deepest the pending queue has run — the high-water mark.
+    pub high_water: usize,
+}
+
+/// One command's standing availability verdict — the probe's answer to
+/// "is this declared `KindDeclared` command invocable at all now".
+///
+/// The verdicts are produced inside the scan boundary — the producer
+/// evaluates each component's availability probe once per declared
+/// [`KindDeclared`](crate::CommandAvailability::KindDeclared) command
+/// after each completed scan — never under a consumer read. They are
+/// advisory only: a submission still validates, queues, and settles
+/// through the receipted path, which remains the sole authority — a
+/// verdict the dispatch disagrees with settles honestly on the receipt
+/// rather than failing the scan or altering the command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandVerdict {
+    /// The command's name — a [`CommandDecl`](crate::CommandDecl) name
+    /// the component's descriptor declares.
+    pub name: String,
+    /// Whether a submission dispatches to the kind's implementation
+    /// now — the probe's standing answer. `true` reports the command
+    /// invocable; dispatch may still refuse argument-dependent or
+    /// kind-invariant reasons, which settle on the receipt.
+    pub available: bool,
+    /// The kind's standing refusal reason when `available` is `false` —
+    /// the same text a refused invocation's
+    /// [`CommandError::CommandRefused`](crate::CommandError) receipt
+    /// carries; absent when `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+}
+
+/// One component's `KindDeclared`-command availability — a
+/// [`TelemetrySnapshot`] `command_verdicts` entry.
+///
+/// `verdicts` covers exactly the commands the component's descriptor
+/// declares [`KindDeclared`](crate::CommandAvailability::KindDeclared):
+/// `Always`-available commands are admissible by construction and
+/// `BoundPointWritable` ones read against the signal index, so neither
+/// takes a probe verdict. A component declaring no `KindDeclared`
+/// commands reports an empty `verdicts`; a kind that does not
+/// implement the probe reports each one `available` — the unconditional
+/// reporting the read model already produced before the section
+/// existed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentCommands {
+    /// The component's name — the join key `components`, `descriptors`,
+    /// and `parameters` share.
+    pub name: String,
+    /// The standing verdict for each `KindDeclared`-declared command,
+    /// in the descriptor's declaration order.
+    #[serde(default)]
+    pub verdicts: Vec<CommandVerdict>,
+}
+
 /// A point-in-time snapshot of a controller run for monitoring consumers.
 ///
 /// A snapshot reports state, not history: each point and each component
 /// appears once, carrying its latest observation. Producers order `points`
 /// by ascending [`PointId`] and `components` by execution order so equal
 /// runs serialize identically.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
     /// The producer's tick when the snapshot was taken; [`Tick::ZERO`]
     /// before the first scan.
@@ -183,6 +309,69 @@ pub struct TelemetrySnapshot {
     /// before the section existed.
     #[serde(default)]
     pub parameters: Vec<ComponentParameters>,
+    /// The command-ingress section: the bounded pending-command queue's
+    /// admission metrics — submissions attempted, full-queue rejections,
+    /// the declared capacity, and the queue's current depth and
+    /// high-water mark — so a monitoring consumer sees command-path
+    /// overload as telemetry rather than as timing failure. Absent from
+    /// snapshots serialized before the bound existed; such a snapshot
+    /// reads back with a zeroed section.
+    #[serde(default)]
+    pub command_queue: CommandQueueDiagnostics,
+    /// The `KindDeclared`-command availability section: one
+    /// [`ComponentCommands`] per registered component in the same
+    /// execution order as `components` and `descriptors`, carrying the
+    /// standing verdicts the producer's post-scan availability probe
+    /// evaluated for each declared
+    /// [`KindDeclared`](crate::CommandAvailability::KindDeclared)
+    /// command. The verdicts are advisory — the receipted command path
+    /// stays the sole authority — and are evaluated at the scan
+    /// boundary, never under a consumer read. Absent from snapshots
+    /// serialized before the section existed; such a snapshot reads
+    /// back with an empty section.
+    #[serde(default)]
+    pub command_verdicts: Vec<ComponentCommands>,
+    /// The serving monitor's publication-store report — the overload
+    /// counters of the bounded read-model storage this snapshot was
+    /// published into. `None` — and absent on the wire — on a
+    /// producer's own snapshot; a monitor stamps it as of the publish
+    /// the snapshot rides. Absent from snapshots serialized before the
+    /// section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationHealth>,
+}
+
+impl PartialEq for TelemetrySnapshot {
+    /// The `publication` section is the serving monitor's own
+    /// bookkeeping — its store's counters, whatever instance answered —
+    /// not run state: two peers of a redundant pair legitimately
+    /// publish different counts, and a restarted peer restarts them.
+    /// Equality is therefore the run's state — every field but that
+    /// section; the destructure names each compared field so a future
+    /// field forces the decision here.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            tick,
+            points,
+            components,
+            descriptors,
+            io_health,
+            forces,
+            parameters,
+            command_queue,
+            command_verdicts,
+            publication: _,
+        } = self;
+        tick == &other.tick
+            && points == &other.points
+            && components == &other.components
+            && descriptors == &other.descriptors
+            && io_health == &other.io_health
+            && forces == &other.forces
+            && parameters == &other.parameters
+            && command_queue == &other.command_queue
+            && command_verdicts == &other.command_verdicts
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +444,8 @@ mod tests {
                             max: Value::Float(10.0),
                         }),
                     }],
+                    commands: Vec::new(),
+                    events: Vec::new(),
                 },
                 ComponentDescriptor {
                     name: "fragile".to_string(),
@@ -262,11 +453,14 @@ mod tests {
                     label: "fragile".to_string(),
                     ports: Vec::new(),
                     parameters: Vec::new(),
+                    commands: Vec::new(),
+                    events: Vec::new(),
                 },
             ],
             io_health: IoHealth {
                 failed_reads: 4,
                 failed_writes: 1,
+                failed_exchanges: 2,
                 consecutive_failures: 2,
                 last_error: Some(IoFault {
                     tick: Tick(3),
@@ -278,6 +472,13 @@ mod tests {
                 driver: Some(DriverDiagnostics {
                     link: LinkState::Disconnected,
                     last_error: Some("no live connection to the plant server".to_string()),
+                    exchange: Some(crate::ExchangeDiagnostics {
+                        attempted: 5,
+                        succeeded: 3,
+                        working_counter_mismatches: 1,
+                        last_exchange_tick: Some(Tick(2)),
+                        missed_deadlines: 1,
+                    }),
                 }),
             },
             forces: vec![ForcedPoint {
@@ -296,6 +497,33 @@ mod tests {
                     values: BTreeMap::new(),
                 },
             ],
+            command_queue: CommandQueueDiagnostics {
+                attempts: 9,
+                full_rejections: 2,
+                capacity: 64,
+                depth: 3,
+                high_water: 6,
+            },
+            command_verdicts: vec![
+                ComponentCommands {
+                    name: "scale".to_string(),
+                    verdicts: vec![CommandVerdict {
+                        name: "advance".to_string(),
+                        available: false,
+                        refusal: Some("the run is complete".to_string()),
+                    }],
+                },
+                ComponentCommands {
+                    name: "fragile".to_string(),
+                    verdicts: Vec::new(),
+                },
+            ],
+            publication: Some(PublicationHealth {
+                published: 7,
+                coalesced: 3,
+                depth: 4,
+                window: 8,
+            }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(
@@ -303,15 +531,29 @@ mod tests {
             snapshot
         );
 
-        // A snapshot serialized before forces and parameter reporting
-        // existed carries neither field and reads back with empty
-        // sections.
+        // A snapshot serialized before forces, parameter reporting, the
+        // publication, command-queue and command-verdict sections, and
+        // the cyclic exchange counters existed carries none of those
+        // fields and reads back with empty sections.
         let mut document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object_mut().unwrap();
         object.remove("forces");
         object.remove("parameters");
+        object.remove("publication");
+        object.remove("command_queue");
+        object.remove("command_verdicts");
+        object
+            .get_mut("io_health")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_exchanges");
         let legacy: TelemetrySnapshot = serde_json::from_value(document).unwrap();
         assert_eq!(legacy.forces, Vec::new());
         assert_eq!(legacy.parameters, Vec::new());
+        assert_eq!(legacy.publication, None);
+        assert_eq!(legacy.io_health.failed_exchanges, 0);
+        assert_eq!(legacy.command_queue, CommandQueueDiagnostics::default());
+        assert_eq!(legacy.command_verdicts, Vec::new());
     }
 }

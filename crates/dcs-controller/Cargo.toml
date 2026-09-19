@@ -17,7 +17,13 @@ dcs-sim-net = { path = "../dcs-sim-net" }
 serde_json = "1.0.151"
 
 [dev-dependencies]
+# The dosing acceptance test addresses the emitted skid's declared
+# points through the builder's layout rather than duplicating ids.
+dcs-build = { path = "../dcs-build" }
 dcs-demo = { path = "../dcs-demo" }
+# The Wago rig test binds the checked-in ethercat document to a fake
+# transport playing the field wiring — the only hardware-free path.
+dcs-ethercat = { path = "../dcs-ethercat" }
 # The sim-bus failover rig observes the register bank and builds the
 # reference run's driver side through BusDriver directly.
 dcs-sim-bus = { path = "../dcs-sim-bus" }

@@ -38,11 +38,12 @@ def is_alive(metadata):
 
 
 class Runtime:
-    def __init__(self, pool_root, state_root, repository, devin='devin', timeout_seconds=7200):
+    def __init__(self, pool_root, state_root, repository, devin='devin', opencode='opencode', timeout_seconds=7200):
         self.pool_root = Path(pool_root).resolve()
         self.state_root = Path(state_root).resolve()
         self.repository = repository
         self.devin = devin
+        self.opencode = opencode
         self.timeout_seconds = timeout_seconds
         self.pool_root.mkdir(parents=True, exist_ok=True)
         self.state_root.mkdir(parents=True, exist_ok=True)
@@ -77,7 +78,7 @@ class Runtime:
             self.run_git(clone, 'switch', '--detach', 'origin/main')
         return clone
 
-    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None):
+    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None, model='swe-2-high'):
         if not re.fullmatch(r'[A-Za-z0-9_-]+', key):
             raise ValueError('Invalid invocation key')
         cwd = Path(cwd).resolve()
@@ -91,11 +92,17 @@ class Runtime:
         invocation.mkdir()
         prompt_path = invocation / 'prompt.txt'
         prompt_path.write_text(prompt)
-        command = [self.devin, '-p', '--model', 'swe-2-high', '--permission-mode',
-                   'dangerous', '--respect-workspace-trust', 'false', '--prompt-file',
-                   str(prompt_path), '--export', str(invocation / 'conversation.json')]
-        if resume_session:
-            command.extend(['--resume', resume_session])
+        if model.startswith('opencode/'):
+            # OpenCode sessions are not resumable through the Devin session id;
+            # repair context is carried by the prompt instead.
+            command = [self.opencode, 'run', '--model', model, '--auto',
+                       '--title', key, prompt]
+        else:
+            command = [self.devin, '-p', '--model', model, '--permission-mode',
+                       'dangerous', '--respect-workspace-trust', 'false', '--prompt-file',
+                       str(prompt_path), '--export', str(invocation / 'conversation.json')]
+            if resume_session:
+                command.extend(['--resume', resume_session])
         spec = {'key': key, 'command': command, 'cwd': str(cwd), 'timeout': timeout or self.timeout_seconds,
                 'receipt': str(invocation / 'receipt.json'), 'log': str(invocation / 'output.log'),
                 'metadata': str(invocation / 'process.json')}

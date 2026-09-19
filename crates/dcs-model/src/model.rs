@@ -44,6 +44,20 @@ pub struct Device {
     pub kind: String,
     /// The device's channels, keyed by channel name.
     pub channels: BTreeMap<String, Channel>,
+    /// Whether the device's kind is hardware-bound: `true` marks a
+    /// device whose kind requires physical field hardware — the model's
+    /// visible evidence that no simulated backend may serve it. The
+    /// kind's registered factory enforces the marker both ways: a
+    /// hardware-bound kind rejects a device that omits it, and a
+    /// simulated kind rejects a device that carries it — so a model
+    /// declaring a hardware kind fails startup if the hardware cannot
+    /// initialize rather than silently falling back to simulation.
+    ///
+    /// Optional like [`IoPoint::writable`]: documents that predate it
+    /// deserialize as `false`, and `false` serializes back without the
+    /// key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hardware: bool,
     /// Kind-specific addressing and configuration parameters for the
     /// device's driver integration — e.g. a remote endpoint. The model
     /// treats them as opaque; the registered device-kind factory
@@ -76,11 +90,11 @@ pub struct ChannelRef {
     pub name: String,
 }
 
-/// `serde` helper for `IoPoint::writable`: the flag follows the
-/// optional-field convention — documents that predate it deserialize as
-/// `false`, and `false` serializes back without the key.
-fn is_false(writable: &bool) -> bool {
-    !*writable
+/// `serde` helper for `IoPoint`'s `writable`/`journaled` flags: they
+/// follow the optional-field convention — documents that predate them
+/// deserialize as `false`, and `false` serializes back without the key.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// A logical I/O point: the unit control logic binds to.
@@ -115,6 +129,18 @@ fn is_false(writable: &bool) -> bool {
 /// the budget. Only field inputs can declare one — the check reads the
 /// driver, so validation rejects the field on an `Out` point and on a
 /// channel-less internal point, which is never driver-read.
+///
+/// `journaled` declares the point's observed value transitions part of
+/// the durable transition journal: the recorder appends a
+/// `point_changed` entry carrying the previous and new values at the
+/// producing scan's tick. The flag is opt-in per point and valid on
+/// `Bool`/`Int` points of either direction — the lifecycle and
+/// managed-state status points (`alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service`), mode changes, and protection-layer
+/// states the record exists for — so validation rejects it on a `Float`
+/// point: a continuously moving measurement belongs to the volatile
+/// history ring, not the low-volume durable record, and an operator's
+/// `Float` write is already durable in its attributed settled receipt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -158,6 +184,16 @@ pub struct IoPoint {
     /// Optional like [`Signal::unit`]; see its note on schema versioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_after_ticks: Option<u64>,
+    /// Whether the point's observed value transitions join the durable
+    /// journal as `point_changed` entries; see the type docs. Valid on
+    /// `Bool`/`Int` points of either direction —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports the
+    /// flag on a `Float` point.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the flag load with `journaled` unset.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub journaled: bool,
 }
 
 impl IoPoint {
@@ -202,6 +238,30 @@ pub struct Signal {
     pub group: Option<String>,
 }
 
+/// An instance's alarm rationalization record — decision 70's prose
+/// half of the alarm contract, carried so the plant model is the master
+/// alarm database: why the alarm exists, what the operator must do, and
+/// where the responding procedure lives.
+///
+/// The numeric half — `priority`, `class`, and `response_ticks` — rides
+/// the instance's `parameters` as descriptor-declared `Int`s; this block
+/// carries the prose. Optional like [`Signal::unit`]; see its note on
+/// schema versioning: documents predating the record load with
+/// `rationalization` unset. Presence is the alarm kinds' contract, not
+/// the model's — a `latching-alarm`'s construction rejects an instance
+/// whose record is absent or whose prose is empty, so validation stays
+/// kind-agnostic while non-alarm kinds may carry or omit the block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rationalization {
+    /// The consequence of the alarm going unanswered — what happens if
+    /// the operator does not respond inside `response_ticks`.
+    pub consequence: String,
+    /// The required operator response to the alarm.
+    pub required_action: String,
+    /// The display or procedure the alarm routes the operator to.
+    pub reference: String,
+}
+
 /// An instantiation of a reusable component kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComponentInstance {
@@ -212,10 +272,28 @@ pub struct ComponentInstance {
     pub kind: String,
     /// Kind-specific parameters, keyed by parameter name.
     pub parameters: BTreeMap<String, Value>,
+    /// The instance's alarm rationalization record — see
+    /// [`Rationalization`]. The alarm kinds require it of their
+    /// instances at construction; other kinds may carry or omit it.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationalization: Option<Rationalization>,
     /// The instance's ports, keyed by port name. These declare the signature
     /// the model wires; the runtime checks it against the component kind's
     /// definition.
     pub ports: BTreeMap<String, Port>,
+}
+
+impl ComponentInstance {
+    /// The instance's diagnostic name — `"<kind>:<id>"`, e.g.
+    /// `"managed-latching-alarm:1"` — the identity the assembled
+    /// component reports as `ComponentDescriptor.name` and
+    /// `ComponentDiagnostics.name`, so served per-instance records join
+    /// against the snapshot's descriptors by this name.
+    pub fn name(&self) -> String {
+        format!("{}:{}", self.kind, self.id.0)
+    }
 }
 
 /// A named component port with a fixed direction and value type.
@@ -493,6 +571,123 @@ mod tests {
         assert_eq!(reloaded.io_points[1].stale_after_ticks, None);
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_journaled_load_unchanged() {
+        // Points without the optional field deserialize `journaled` as
+        // `false`, and `false` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.io_points.iter().all(|point| !point.journaled));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"journaled\""), "{json}");
+    }
+
+    #[test]
+    fn journaled_flag_parses_and_roundtrips() {
+        // `journaled` marks `Bool`/`Int` points of either direction: a
+        // journaled internal `Out` status point is the lifecycle shape —
+        // declare one by dropping the channel, carrying an initial, and
+        // matching the wired port's kind.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[1].channel = None;
+        model.io_points[1].initial = Some(Value::Bool(false));
+        model.io_points[1].value_type = ValueKind::Bool;
+        model.io_points[1].journaled = true;
+        model.components[0].ports.get_mut("out").unwrap().value_type = ValueKind::Bool;
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"journaled\": true"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(!reloaded.io_points[0].journaled);
+        assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    /// The `ethercat` declaration fixture: a hardware-bound device
+    /// carrying the field-bus identity, process-image mapping, and
+    /// startup policy under `Device.parameters`.
+    const ETHERCAT: &str = include_str!("../../dcs-assembly/fixtures/ethercat.json");
+
+    #[test]
+    fn documents_predating_hardware_load_unchanged() {
+        // Devices without the optional field deserialize `hardware` as
+        // `false`, and `false` serializes back without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.devices.iter().all(|device| !device.hardware));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"hardware\""), "{json}");
+    }
+
+    #[test]
+    fn ethercat_fixture_loads_validates_and_roundtrips() {
+        // The hardware-bound declaration: the model layer reads the
+        // marker and leaves the kind-specific parameter grammar to the
+        // kind's factory — the document loads, validates, and
+        // round-trips under MODEL_VERSION unchanged.
+        let model = PlantModel::load(ETHERCAT).unwrap();
+        assert_eq!(model.version, MODEL_VERSION);
+        assert!(model.devices[0].hardware);
+        assert_eq!(model.devices[0].kind, "ethercat");
+        assert!(model.validate().is_empty(), "{:?}", model.validate());
+
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"hardware\": true"), "{json}");
+        assert!(json.contains("\"bus\": \"ecat0\""), "{json}");
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_rationalization_load_unchanged() {
+        // Components without the optional block deserialize
+        // `rationalization` as `None`, and `None` serializes back
+        // without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(
+            model
+                .components
+                .iter()
+                .all(|component| component.rationalization.is_none())
+        );
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"rationalization\""), "{json}");
+    }
+
+    #[test]
+    fn rationalization_block_parses_and_roundtrips() {
+        // The decision-70 record: optional on any instance — here the
+        // minimal fixture's motor carries one — and round-trips with
+        // the document.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.components[0].rationalization = Some(Rationalization {
+            consequence: "The wet well overflows the bench".to_string(),
+            required_action: "Start the standby pump".to_string(),
+            reference: "station-high-level".to_string(),
+        });
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"rationalization\""), "{json}");
+        assert!(json.contains("\"required_action\""), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn journaled_float_point_is_rejected_by_load() {
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].journaled = true;
+        let json = serde_json::to_string(&model).unwrap();
+        match PlantModel::load(&json) {
+            Err(LoadError::Invalid(errors)) => assert!(
+                errors.contains(&ValidationError::JournaledFloat { point: PointId(10) }),
+                "{errors:?}"
+            ),
+            other => panic!("expected invalid model, got {other:?}"),
+        }
     }
 
     #[test]

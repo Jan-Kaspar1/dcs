@@ -4,10 +4,12 @@
 use crate::describe;
 use crate::params::{self, ParameterError, Parameters};
 use dcs_core::{
-    CommandError, ComponentDescriptor, PointId, PortRole, Sample, StateError, StateMap, Tick,
-    Value, ValueKind,
+    CommandArgument, CommandAvailability, CommandDecl, CommandError, ComponentDescriptor,
+    EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue, PointId,
+    PortRole, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
 use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
+use std::collections::BTreeMap;
 
 /// One step of a [`Sequencer`]'s table: `out` drives `value` while the
 /// step is active, and the step holds for `ticks` scans.
@@ -60,6 +62,18 @@ pub struct SequencerStep {
 /// reporting the held step, every output stamped with the worst of the
 /// two input qualities.
 ///
+/// **Declared commands and events:** the kind's native command surface —
+/// `advance` moves the active step forward `count` steps (one when the
+/// argument is absent) and `reset` restarts the table — applies at the
+/// scan boundary through `invoke_command`; `advance` is
+/// `KindDeclared`-available and refuses a completed table, the standing
+/// refusal `command_refusal` publishes on the snapshot's
+/// `command_verdicts` section. The declared
+/// `step_completed` event emits on the scan a step runs its `ticks` out
+/// and journals at the producing tick. None of the commands aliases a
+/// writable point: `reset` the command is a one-shot action where the
+/// `reset` input is a held condition.
+///
 /// Declared I/O: `run` (`In`, `Bool`), `reset` (`In`, `Bool`), `out`
 /// (`Out`, `Float`), `step` (`Out`, `Int`), `done` (`Out`, `Bool`).
 ///
@@ -87,6 +101,10 @@ pub struct Sequencer {
     elapsed: u64,
     /// Set when the final step completes; holds until `reset`.
     completed: bool,
+    /// Events emitted since the last drain — the executor empties this
+    /// after every `step`, so it is always empty between scans and
+    /// never part of the checkpointed state.
+    pending_events: Vec<EmittedEvent>,
 }
 
 impl Sequencer {
@@ -152,6 +170,7 @@ impl Sequencer {
             current: 0,
             elapsed: 0,
             completed: false,
+            pending_events: Vec::new(),
         })
     }
 
@@ -245,6 +264,19 @@ impl Component for Sequencer {
             if quality.is_good() && run.value && !self.completed {
                 self.elapsed += 1;
                 if self.elapsed >= self.steps[self.current].ticks.max(1) {
+                    // The reported step ran its declared ticks out — the
+                    // declared `step_completed` event, journaled at this
+                    // scan's tick.
+                    self.pending_events.push(EmittedEvent {
+                        event: "step_completed".to_string(),
+                        component: self.name.clone(),
+                        fields: [(
+                            "step".to_string(),
+                            EventValue::Value(Value::Int(reported as i64 + 1)),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    });
                     if self.current == self.steps.len() - 1 {
                         // Hold-at-end: the count clamps at the step's
                         // declared duration, so a captured `done` state
@@ -295,7 +327,7 @@ impl Component for Sequencer {
                 Some(describe::FINITE_F64),
             ));
         }
-        describe::component(
+        let mut descriptor = describe::component(
             &self.name,
             Self::KIND,
             &self.io_requirements(),
@@ -307,7 +339,112 @@ impl Component for Sequencer {
                 ("done", PortRole::Status),
             ],
             parameters,
-        )
+        );
+        // The declared command surface — the invoke-side actions beside
+        // the `run`/`reset` level inputs: `advance` paces the table by
+        // command, `reset` restarts it. Neither is a writable-point
+        // alias: `reset`'s input must be held, the command is a
+        // one-shot action.
+        descriptor.commands = vec![
+            CommandDecl {
+                name: "advance".to_string(),
+                request: vec![CommandArgument {
+                    name: "count".to_string(),
+                    kind: ValueKind::Int,
+                }],
+                availability: CommandAvailability::KindDeclared,
+            },
+            CommandDecl {
+                name: "reset".to_string(),
+                request: Vec::new(),
+                availability: CommandAvailability::Always,
+            },
+        ];
+        descriptor.events = vec![EventDecl {
+            name: "step_completed".to_string(),
+            payload: vec![EventField {
+                name: "step".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::Journal,
+        }];
+        descriptor
+    }
+
+    /// The standing-availability probe the executor's post-scan
+    /// verdict evaluation calls for the descriptor's `KindDeclared`
+    /// commands: `advance` reports the same standing refusal dispatch
+    /// checks — a completed table — and `reset` stands invocable. The
+    /// argument-dependent refusal (a `count` below 1) stays with
+    /// dispatch: the probe answers whether the command is invocable at
+    /// all now, not what a given request would meet.
+    fn command_refusal(&self, command: &str) -> Option<String> {
+        match command {
+            "advance" if self.completed => {
+                Some("the sequence has run to its end; reset restarts it".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// The invoke surface the descriptor declares: `advance` moves the
+    /// active step forward `count` steps — absent `count` means one —
+    /// and `reset` returns the run to the first step, the one-shot
+    /// equivalent of the held `reset` input.
+    ///
+    /// `advance` is `KindDeclared`-available: a completed table refuses
+    /// it with the declared reason, and `count` must be at least 1.
+    /// The standing half is [`command_refusal`](Self::command_refusal)'s
+    /// — dispatch consults the probe so the published verdict and the
+    /// refusal can never disagree. Landing past the last step completes
+    /// the run — the same hold-at-end state a `run`-paced table
+    /// reaches. `reset` is always available. Both mutate only the
+    /// checkpointed `step`/`elapsed`/`done` run state, so a tracking
+    /// standby inherits the effect through the ordinary checkpoint.
+    fn invoke_command(
+        &mut self,
+        command: &str,
+        arguments: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        match command {
+            "advance" => {
+                if let Some(reason) = self.command_refusal(command) {
+                    return Err(reason);
+                }
+                let count = match arguments.get("count") {
+                    None => 1,
+                    Some(Value::Int(count)) => *count,
+                    Some(_) => unreachable!("submission validates the declared argument kind"),
+                };
+                if count < 1 {
+                    return Err("count must be at least 1".to_string());
+                }
+                let remaining = self.steps.len() - self.current;
+                if count as u64 >= remaining as u64 {
+                    self.current = self.steps.len() - 1;
+                    self.elapsed = self.steps[self.current].ticks;
+                    self.completed = true;
+                } else {
+                    self.current += count as usize;
+                    self.elapsed = 0;
+                }
+                Ok(())
+            }
+            "reset" => {
+                self.current = 0;
+                self.elapsed = 0;
+                self.completed = false;
+                Ok(())
+            }
+            _ => unreachable!("submission validates the declared command name"),
+        }
+    }
+
+    /// Empties the emitted-event queue the `step_completed` emissions
+    /// land in — the executor drains it after every `step`.
+    fn drain_events(&mut self) -> Vec<EmittedEvent> {
+        std::mem::take(&mut self.pending_events)
     }
 
     /// Tunes a step's declared duration or driven value at the scan
@@ -875,6 +1012,7 @@ mod tests {
             id: ComponentId(11),
             kind: Sequencer::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block =
@@ -1115,5 +1253,206 @@ mod tests {
                 range: Some(describe::FINITE_F64),
             }
         );
+    }
+
+    /// Invokes the declared command surface — the hook
+    /// `Command::Invoke` dispatches to at the scan boundary.
+    fn invoke(
+        block: &mut Sequencer,
+        command: &str,
+        arguments: &[(&str, Value)],
+    ) -> Result<(), String> {
+        block.invoke_command(
+            command,
+            &arguments
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn declares_its_command_and_event_surface() {
+        let descriptor = component().describe();
+        assert_eq!(
+            descriptor.commands,
+            [
+                CommandDecl {
+                    name: "advance".to_string(),
+                    request: vec![CommandArgument {
+                        name: "count".to_string(),
+                        kind: ValueKind::Int,
+                    }],
+                    availability: CommandAvailability::KindDeclared,
+                },
+                CommandDecl {
+                    name: "reset".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::Always,
+                },
+            ]
+        );
+        assert_eq!(
+            descriptor.events,
+            [EventDecl {
+                name: "step_completed".to_string(),
+                payload: vec![EventField {
+                    name: "step".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::Journal,
+            }]
+        );
+    }
+
+    #[test]
+    fn advance_and_reset_invoke_through_the_declared_hook() {
+        let mut block = component();
+        let seq_io = io();
+        step(&mut block, &seq_io, true, false, 1);
+        assert_eq!(active(&seq_io), 1);
+
+        // `advance` without a count moves one step; the next scan
+        // reports it.
+        invoke(&mut block, "advance", &[]).unwrap();
+        step(&mut block, &seq_io, true, false, 2);
+        assert_eq!(active(&seq_io), 2);
+        assert_eq!(out(&seq_io), 20.0);
+
+        // A typed `count` argument paces further.
+        invoke(&mut block, "advance", &[("count", Value::Int(1))]).unwrap();
+        step(&mut block, &seq_io, true, false, 3);
+        assert_eq!(active(&seq_io), 3);
+
+        // Landing past the last step completes the run — the same
+        // hold-at-end a `run`-paced table reaches.
+        let mut at_end = component();
+        let end_io = io();
+        invoke(&mut at_end, "advance", &[("count", Value::Int(9))]).unwrap();
+        step(&mut at_end, &end_io, true, false, 1);
+        assert_eq!(active(&end_io), 3);
+        assert!(done(&end_io));
+
+        // `KindDeclared` availability: a completed table refuses
+        // `advance` with the declared reason while `reset` serves.
+        let refusal = invoke(&mut at_end, "advance", &[]).unwrap_err();
+        assert_eq!(
+            refusal,
+            "the sequence has run to its end; reset restarts it"
+        );
+        invoke(&mut at_end, "reset", &[]).unwrap();
+        step(&mut at_end, &end_io, true, false, 2);
+        assert_eq!(active(&end_io), 1);
+        assert!(!done(&end_io));
+
+        // `count` below one is the kind invariant the schema cannot
+        // express — refused, changing nothing.
+        assert_eq!(
+            invoke(&mut at_end, "advance", &[("count", Value::Int(0))]).unwrap_err(),
+            "count must be at least 1"
+        );
+    }
+
+    #[test]
+    fn the_probe_reports_the_standing_advance_refusal() {
+        // The probe is dispatch's standing predicate: `advance` answers
+        // the completed-table refusal — the same text a refused
+        // invocation settles — while `reset` stands invocable, and the
+        // `count` domain stays dispatch-only.
+        let mut block = component();
+        let seq_io = io();
+
+        // Mid-table: no standing refusal, dispatch applies.
+        assert_eq!(block.command_refusal("advance"), None);
+        invoke(&mut block, "advance", &[]).unwrap();
+
+        // Run the table out: the probe's answer is the refusal the
+        // receipted path would carry.
+        for tick in 1..=6 {
+            step(&mut block, &seq_io, true, false, tick);
+        }
+        assert!(done(&seq_io));
+        let standing = block.command_refusal("advance");
+        assert_eq!(
+            standing.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert_eq!(
+            invoke(&mut block, "advance", &[]).unwrap_err(),
+            standing.unwrap()
+        );
+
+        // `reset` is invocable throughout — probe and dispatch agree —
+        // and clears the standing refusal again.
+        assert_eq!(block.command_refusal("reset"), None);
+        invoke(&mut block, "reset", &[]).unwrap();
+        assert_eq!(block.command_refusal("advance"), None);
+    }
+
+    #[test]
+    fn step_completed_emits_on_the_completing_scan() {
+        let mut block = component();
+        let io = io();
+
+        // Step 1 banks its first scan: nothing completes, nothing
+        // drains.
+        step(&mut block, &io, true, false, 1);
+        assert!(block.drain_events().is_empty());
+
+        // Tick 2 runs step 1's declared ticks out — the event names the
+        // completed step's 1-based index.
+        step(&mut block, &io, true, false, 2);
+        let events = block.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "step_completed");
+        assert_eq!(events[0].fields["step"], EventValue::Value(Value::Int(1)));
+        // The drain emptied the queue.
+        assert!(block.drain_events().is_empty());
+
+        // A parked or held scan emits nothing.
+        step(&mut block, &io, false, false, 3);
+        assert!(block.drain_events().is_empty());
+
+        // The run walks to the end: step 2's second running scan
+        // completes it on tick 5 and step 3's single scan completes the
+        // table on tick 6 — one event each, in emission order.
+        step(&mut block, &io, true, false, 4);
+        assert!(block.drain_events().is_empty());
+        step(&mut block, &io, true, false, 5);
+        assert_eq!(
+            block.drain_events()[0].fields["step"],
+            EventValue::Value(Value::Int(2))
+        );
+        step(&mut block, &io, true, false, 6);
+        assert_eq!(
+            block.drain_events()[0].fields["step"],
+            EventValue::Value(Value::Int(3))
+        );
+        // Held at the end, no further emissions.
+        step(&mut block, &io, true, false, 7);
+        assert!(block.drain_events().is_empty());
+    }
+
+    #[test]
+    fn command_effects_ride_the_checkpoint() {
+        // `advance` mutates only the checkpointed run state: the
+        // captured `step`/`elapsed`/`done` carry the command's effect
+        // to a restored instance.
+        let mut block = component();
+        let seq_io = io();
+        step(&mut block, &seq_io, true, false, 1);
+        invoke(&mut block, "advance", &[("count", Value::Int(2))]).unwrap();
+        let state = block.capture_state();
+        assert_eq!(state.get("step"), Some(Value::Int(3)));
+        assert_eq!(state.get("elapsed"), Some(Value::Int(0)));
+        assert_eq!(state.get("done"), Some(Value::Bool(false)));
+
+        let mut restored = component();
+        restored.restore_state(&state).unwrap();
+        let restored_io = io();
+        step(&mut restored, &restored_io, true, false, 1);
+        assert_eq!(active(&restored_io), 3);
+        assert_eq!(out(&restored_io), 30.0);
     }
 }

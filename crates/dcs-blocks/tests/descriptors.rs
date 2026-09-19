@@ -6,14 +6,20 @@
 use dcs_blocks::{
     AdvanceMode, AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, AutoStart,
     BackwashCoordinator, BackwashCoordinatorConfig, BackwashSequence, BackwashSequenceConfig,
-    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FaultPolicy,
-    FilterIo, GateOperation, GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter,
-    Motor, OverrideSelect, OverrunPolicy, PermissiveInputs, Pid, PidConfig, PumpGroup,
-    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RotationPolicy, Scaling,
-    Sequencer, SequencerStep, SignalFilter, SrLatch, Timer, Totalizer, Valve,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BadTermResponse, BlowerGroup,
+    BlowerGroupConfig, BlowerIo, BlowerOutputs, BlowerRotation, BoolGate, BoolLatchingAlarm,
+    CoordinationStrategy, CoordinatorOutputs, Counter, DemandFallback, DemandFallbackConfig,
+    DemandFallbackIo, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FallbackResponse,
+    FaultPolicy, FeedforwardSum, FeedforwardSumConfig, FeedforwardSumIo, FilterIo, GateOperation,
+    GroupOutputs, GuardResponse, HeaderCoordinator, HeaderCoordinatorConfig, HeaderOutputs,
+    Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm,
+    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, OverrunPolicy,
+    PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid, PidConfig, PumpGroup,
+    PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter, RateOfRise, Rationalization,
+    RotationPolicy, Scaling, Sequencer, SequencerStep, SignalFilter, SrLatch, StagingAuthority,
+    SurgeGuard, SurgeGuardConfig, SurgeGuardIo, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
-use dcs_core::{Command, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
+use dcs_core::{Command, CommandVerdict, Direction, PointId, TelemetrySnapshot, Value, ValueKind};
 use dcs_runtime::{Component, Executor, PointMap};
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
 use std::collections::BTreeSet;
@@ -189,6 +195,11 @@ fn rig() -> Rig {
                     high: 90.0,
                     hysteresis: 5.0,
                 },
+                Rationalization {
+                    priority: 1,
+                    class: 2,
+                    response_ticks: 30,
+                },
             )
             .unwrap(),
         ),
@@ -318,6 +329,63 @@ fn rig() -> Rig {
             point(&mut specs, 251, Direction::In, ValueKind::Bool),
             point(&mut specs, 252, Direction::Out, ValueKind::Bool),
             point(&mut specs, 253, Direction::Out, ValueKind::Bool),
+            Rationalization {
+                priority: 1,
+                class: 2,
+                response_ticks: 30,
+            },
+        )),
+        // The managed siblings, fully bound — `in`/`ack` plus the
+        // `shelve`/`oos`/`suppress` inputs and the five status outputs.
+        Box::new(
+            ManagedLatchingAlarm::new(
+                "mlal",
+                ManagedAlarmIo {
+                    input: point(&mut specs, 300, Direction::In, ValueKind::Float),
+                    ack: point(&mut specs, 301, Direction::In, ValueKind::Bool),
+                    shelve: Some(point(&mut specs, 302, Direction::In, ValueKind::Bool)),
+                    oos: Some(point(&mut specs, 303, Direction::In, ValueKind::Bool)),
+                    suppress: Some(point(&mut specs, 304, Direction::In, ValueKind::Bool)),
+                    alarm: point(&mut specs, 305, Direction::Out, ValueKind::Bool),
+                    unacknowledged: point(&mut specs, 306, Direction::Out, ValueKind::Bool),
+                    shelved: point(&mut specs, 307, Direction::Out, ValueKind::Bool),
+                    suppressed: point(&mut specs, 308, Direction::Out, ValueKind::Bool),
+                    out_of_service: point(&mut specs, 309, Direction::Out, ValueKind::Bool),
+                },
+                AlarmLimits {
+                    low: 10.0,
+                    high: 90.0,
+                    hysteresis: 5.0,
+                },
+                ManagedAlarmConfig {
+                    max_shelve_ticks: 5,
+                    priority: 1,
+                    class: 2,
+                    response_ticks: 30,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(ManagedBoolLatchingAlarm::new(
+            "mbal",
+            ManagedAlarmIo {
+                input: point(&mut specs, 320, Direction::In, ValueKind::Bool),
+                ack: point(&mut specs, 321, Direction::In, ValueKind::Bool),
+                shelve: Some(point(&mut specs, 322, Direction::In, ValueKind::Bool)),
+                oos: Some(point(&mut specs, 323, Direction::In, ValueKind::Bool)),
+                suppress: Some(point(&mut specs, 324, Direction::In, ValueKind::Bool)),
+                alarm: point(&mut specs, 325, Direction::Out, ValueKind::Bool),
+                unacknowledged: point(&mut specs, 326, Direction::Out, ValueKind::Bool),
+                shelved: point(&mut specs, 327, Direction::Out, ValueKind::Bool),
+                suppressed: point(&mut specs, 328, Direction::Out, ValueKind::Bool),
+                out_of_service: point(&mut specs, 329, Direction::Out, ValueKind::Bool),
+            },
+            ManagedAlarmConfig {
+                max_shelve_ticks: 5,
+                priority: 1,
+                class: 2,
+                response_ticks: 30,
+            },
         )),
         Box::new(
             BackwashCoordinator::new(
@@ -356,28 +424,28 @@ fn rig() -> Rig {
             BackwashSequence::new(
                 "bws",
                 BackwashSequenceInputs {
-                    trig_time: point(&mut specs, 280, Direction::In, ValueKind::Bool),
-                    trig_headloss: point(&mut specs, 281, Direction::In, ValueKind::Bool),
-                    trig_turbidity: point(&mut specs, 282, Direction::In, ValueKind::Bool),
-                    trig_operator: point(&mut specs, 283, Direction::In, ValueKind::Bool),
-                    grant: point(&mut specs, 284, Direction::In, ValueKind::Bool),
-                    abort: point(&mut specs, 285, Direction::In, ValueKind::Bool),
-                    fault: point(&mut specs, 286, Direction::In, ValueKind::Bool),
-                    meas: vec![point(&mut specs, 287, Direction::In, ValueKind::Float)],
+                    trig_time: point(&mut specs, 410, Direction::In, ValueKind::Bool),
+                    trig_headloss: point(&mut specs, 411, Direction::In, ValueKind::Bool),
+                    trig_turbidity: point(&mut specs, 412, Direction::In, ValueKind::Bool),
+                    trig_operator: point(&mut specs, 413, Direction::In, ValueKind::Bool),
+                    grant: point(&mut specs, 414, Direction::In, ValueKind::Bool),
+                    abort: point(&mut specs, 415, Direction::In, ValueKind::Bool),
+                    fault: point(&mut specs, 416, Direction::In, ValueKind::Bool),
+                    meas: vec![point(&mut specs, 417, Direction::In, ValueKind::Float)],
                 },
                 BackwashSequenceOutputs {
-                    request: point(&mut specs, 290, Direction::Out, ValueKind::Bool),
-                    active: point(&mut specs, 291, Direction::Out, ValueKind::Bool),
-                    pending: point(&mut specs, 292, Direction::Out, ValueKind::Bool),
-                    done: point(&mut specs, 293, Direction::Out, ValueKind::Bool),
-                    aborted: point(&mut specs, 294, Direction::Out, ValueKind::Bool),
-                    overrun: point(&mut specs, 295, Direction::Out, ValueKind::Bool),
-                    trigger_source: point(&mut specs, 296, Direction::Out, ValueKind::Int),
-                    step: point(&mut specs, 297, Direction::Out, ValueKind::Int),
-                    out: point(&mut specs, 298, Direction::Out, ValueKind::Float),
+                    request: point(&mut specs, 420, Direction::Out, ValueKind::Bool),
+                    active: point(&mut specs, 421, Direction::Out, ValueKind::Bool),
+                    pending: point(&mut specs, 422, Direction::Out, ValueKind::Bool),
+                    done: point(&mut specs, 423, Direction::Out, ValueKind::Bool),
+                    aborted: point(&mut specs, 424, Direction::Out, ValueKind::Bool),
+                    overrun: point(&mut specs, 425, Direction::Out, ValueKind::Bool),
+                    trigger_source: point(&mut specs, 426, Direction::Out, ValueKind::Int),
+                    step: point(&mut specs, 427, Direction::Out, ValueKind::Int),
+                    out: point(&mut specs, 428, Direction::Out, ValueKind::Float),
                     phases: vec![
-                        point(&mut specs, 300, Direction::Out, ValueKind::Bool),
-                        point(&mut specs, 301, Direction::Out, ValueKind::Bool),
+                        point(&mut specs, 430, Direction::Out, ValueKind::Bool),
+                        point(&mut specs, 431, Direction::Out, ValueKind::Bool),
                     ],
                 },
                 vec![
@@ -407,12 +475,194 @@ fn rig() -> Rig {
             )
             .unwrap(),
         ),
+        Box::new(
+            HeaderCoordinator::new(
+                "hdr",
+                point(&mut specs, 280, Direction::In, ValueKind::Float),
+                vec![
+                    ZoneIo {
+                        valve_pos: point(&mut specs, 281, Direction::In, ValueKind::Float),
+                        airflow: point(&mut specs, 282, Direction::In, ValueKind::Float),
+                        pulsing: point(&mut specs, 283, Direction::In, ValueKind::Bool),
+                        pulse_grant: point(&mut specs, 284, Direction::Out, ValueKind::Bool),
+                    },
+                    ZoneIo {
+                        valve_pos: point(&mut specs, 285, Direction::In, ValueKind::Float),
+                        airflow: point(&mut specs, 286, Direction::In, ValueKind::Float),
+                        pulsing: point(&mut specs, 287, Direction::In, ValueKind::Bool),
+                        pulse_grant: point(&mut specs, 288, Direction::Out, ValueKind::Bool),
+                    },
+                ],
+                HeaderOutputs {
+                    pressure_sp: point(&mut specs, 289, Direction::Out, ValueKind::Float),
+                    blower_demand: point(&mut specs, 290, Direction::Out, ValueKind::Float),
+                    most_open: point(&mut specs, 291, Direction::Out, ValueKind::Int),
+                    at_bound: point(&mut specs, 292, Direction::Out, ValueKind::Bool),
+                    pulse_blocked: point(&mut specs, 293, Direction::Out, ValueKind::Bool),
+                },
+                HeaderCoordinatorConfig {
+                    strategy: CoordinationStrategy::ConstantPressure,
+                    pressure_hold: 10.0,
+                    pressure_min: 4.0,
+                    pressure_max: 16.0,
+                    mov_band_lo: 85.0,
+                    mov_band_hi: 95.0,
+                    adjust_ticks: 3,
+                    min_total_airflow: 1.0,
+                    max_pulsing: 1,
+                },
+            )
+            .unwrap(),
+        ),
+        // The blower group fully bound — `approve` wired since its
+        // instance runs the operator-approval authority.
+        Box::new(
+            BlowerGroup::new(
+                "bg",
+                point(&mut specs, 340, Direction::In, ValueKind::Float),
+                Some(point(&mut specs, 341, Direction::In, ValueKind::Bool)),
+                vec![
+                    BlowerIo {
+                        cmd: point(&mut specs, 342, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 343, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 344, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 345, Direction::In, ValueKind::Bool),
+                        capacity: point(&mut specs, 346, Direction::Out, ValueKind::Float),
+                        vent: point(&mut specs, 347, Direction::Out, ValueKind::Bool),
+                    },
+                    BlowerIo {
+                        cmd: point(&mut specs, 348, Direction::Out, ValueKind::Bool),
+                        run: point(&mut specs, 349, Direction::In, ValueKind::Bool),
+                        fault: point(&mut specs, 350, Direction::In, ValueKind::Bool),
+                        avail: point(&mut specs, 351, Direction::In, ValueKind::Bool),
+                        capacity: point(&mut specs, 352, Direction::Out, ValueKind::Float),
+                        vent: point(&mut specs, 353, Direction::Out, ValueKind::Bool),
+                    },
+                ],
+                vec![
+                    UnitBounds {
+                        min_flow: 20.0,
+                        max_flow: 100.0,
+                        max_current: 90.0,
+                    };
+                    2
+                ],
+                BlowerOutputs {
+                    staged: point(&mut specs, 354, Direction::Out, ValueKind::Int),
+                    none_available: point(&mut specs, 355, Direction::Out, ValueKind::Bool),
+                    all_faulted: point(&mut specs, 356, Direction::Out, ValueKind::Bool),
+                    staging_pending: point(&mut specs, 357, Direction::Out, ValueKind::Bool),
+                    transition: point(&mut specs, 358, Direction::Out, ValueKind::Bool),
+                },
+                BlowerGroupConfig {
+                    staging_authority: StagingAuthority::OperatorApproval,
+                    stage_up: 0.9,
+                    stage_down: 0.8,
+                    min_run_ticks: 0,
+                    min_start_interval_ticks: 0,
+                    vent_ticks: 2,
+                    rotation: BlowerRotation::NoRotation,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            PhaseMonitor::new(
+                "phm",
+                PhaseMonitorIo {
+                    input: point(&mut specs, 360, Direction::In, ValueKind::Float),
+                    phase: point(&mut specs, 361, Direction::In, ValueKind::Bool),
+                    capture: point(&mut specs, 362, Direction::In, ValueKind::Bool),
+                    deviation: point(&mut specs, 363, Direction::Out, ValueKind::Float),
+                    exceeded: point(&mut specs, 364, Direction::Out, ValueKind::Bool),
+                    overdue: point(&mut specs, 365, Direction::Out, ValueKind::Bool),
+                },
+                0.5,
+                5,
+                PhaseMode::Absolute,
+            )
+            .unwrap(),
+        ),
+        // The surge guard fully bound — `current` wired since its
+        // instance carries the minimum-amperage proxy.
+        Box::new(
+            SurgeGuard::new(
+                "sg",
+                SurgeGuardIo {
+                    demand: point(&mut specs, 370, Direction::In, ValueKind::Float),
+                    flow: point(&mut specs, 371, Direction::In, ValueKind::Float),
+                    pressure: point(&mut specs, 372, Direction::In, ValueKind::Float),
+                    current: Some(point(&mut specs, 373, Direction::In, ValueKind::Float)),
+                    surge_trip: point(&mut specs, 374, Direction::In, ValueKind::Bool),
+                    out: point(&mut specs, 375, Direction::Out, ValueKind::Float),
+                    guarding: point(&mut specs, 376, Direction::Out, ValueKind::Bool),
+                    tripped: point(&mut specs, 377, Direction::Out, ValueKind::Bool),
+                },
+                SurgeGuardConfig {
+                    min_flow: 50.0,
+                    max_pressure: 30.0,
+                    min_current: 40.0,
+                    on_guard: GuardResponse::Clamp,
+                    trip_value: 0.0,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            DemandFallback::new(
+                "dfb",
+                DemandFallbackIo {
+                    input: point(&mut specs, 380, Direction::In, ValueKind::Float),
+                    pv: point(&mut specs, 381, Direction::In, ValueKind::Float),
+                    out: point(&mut specs, 382, Direction::Out, ValueKind::Float),
+                    fallback_active: point(&mut specs, 383, Direction::Out, ValueKind::Bool),
+                },
+                DemandFallbackConfig {
+                    on_bad: FallbackResponse::Hold,
+                    fallback_flow: 25.0,
+                    safe_flow: 5.0,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            FeedforwardSum::new(
+                "ffs",
+                FeedforwardSumIo {
+                    ff: point(&mut specs, 390, Direction::In, ValueKind::Float),
+                    trim: point(&mut specs, 391, Direction::In, ValueKind::Float),
+                    out: point(&mut specs, 392, Direction::Out, ValueKind::Float),
+                    clamped: point(&mut specs, 393, Direction::Out, ValueKind::Bool),
+                    fallback_active: point(&mut specs, 394, Direction::Out, ValueKind::Bool),
+                },
+                FeedforwardSumConfig {
+                    trim_min: -10.0,
+                    trim_max: 10.0,
+                    min_demand: 0.0,
+                    max_demand: 100.0,
+                    on_bad_ff: BadTermResponse::Drop,
+                    on_bad_trim: BadTermResponse::Drop,
+                },
+            )
+            .unwrap(),
+        ),
+        Box::new(
+            RateOfRise::new(
+                "ror",
+                point(&mut specs, 400, Direction::In, ValueKind::Float),
+                point(&mut specs, 401, Direction::Out, ValueKind::Float),
+                point(&mut specs, 402, Direction::Out, ValueKind::Bool),
+                0.5,
+                0.0,
+            )
+            .unwrap(),
+        ),
     ];
     Rig { components, specs }
 }
 
 /// The kinds' registered kind strings in the rig's scan order.
-const EXPECTED_KINDS: [&str; 26] = [
+const EXPECTED_KINDS: [&str; 35] = [
     Motor::KIND,
     AnalogInput::<f64>::KIND,
     Pid::KIND,
@@ -437,8 +687,17 @@ const EXPECTED_KINDS: [&str; 26] = [
     SrLatch::KIND,
     EdgeTrigger::KIND,
     BoolLatchingAlarm::KIND,
+    ManagedLatchingAlarm::KIND,
+    ManagedBoolLatchingAlarm::KIND,
     BackwashCoordinator::KIND,
     BackwashSequence::KIND,
+    HeaderCoordinator::KIND,
+    BlowerGroup::KIND,
+    PhaseMonitor::KIND,
+    SurgeGuard::KIND,
+    DemandFallback::KIND,
+    FeedforwardSum::KIND,
+    RateOfRise::KIND,
 ];
 
 /// The rig wired for an executor: the simulated driver serving every
@@ -469,7 +728,7 @@ fn wired() -> (SimDriver, PointMap, Vec<Box<dyn Component>>) {
 fn snapshot() -> TelemetrySnapshot {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     executor.snapshot()
 }
 
@@ -503,9 +762,8 @@ fn snapshot_reports_every_kind_descriptor_in_scan_order() {
         .filter(|descriptor| !descriptor.parameters.is_empty())
         .map(|descriptor| descriptor.name.as_str())
         .collect();
-    // OverrideSelect, SrLatch, and BoolLatchingAlarm are the rig's
-    // parameterless kinds.
-    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 3);
+    // OverrideSelect and SrLatch are the rig's parameterless kinds.
+    assert_eq!(with_parameters.len(), EXPECTED_KINDS.len() - 2);
 }
 
 #[test]
@@ -544,8 +802,8 @@ fn reported_parameters_match_each_kinds_declared_set() {
         let reported: BTreeSet<&str> = parameters.values.keys().map(String::as_str).collect();
         assert_eq!(reported, declared, "{}", descriptor.name);
     }
-    // OverrideSelect, SrLatch, and BoolLatchingAlarm declare no
-    // parameters and report an empty set.
+    // OverrideSelect and SrLatch declare no parameters and report an
+    // empty set; BoolLatchingAlarm reports the decision-70 codes.
     let ovr = &snapshot.parameters[7];
     assert_eq!(ovr.name, "ovr");
     assert!(ovr.values.is_empty());
@@ -554,14 +812,16 @@ fn reported_parameters_match_each_kinds_declared_set() {
     assert!(srl.values.is_empty());
     let bal = &snapshot.parameters[23];
     assert_eq!(bal.name, "bal");
-    assert!(bal.values.is_empty());
+    assert_eq!(bal.values["priority"], Value::Int(1));
+    assert_eq!(bal.values["class"], Value::Int(2));
+    assert_eq!(bal.values["response_ticks"], Value::Int(30));
 }
 
 #[test]
 fn reported_values_equal_the_checkpointed_fields() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // Every reported value is what the same run's checkpoint persists
     // for the component — the standby and the faceplate read one
@@ -584,7 +844,7 @@ fn reported_values_equal_the_checkpointed_fields() {
 fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let (sim, point_map, components) = wired();
     let mut executor = Executor::new(&sim, point_map, components).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     // A receipted tune on the `pid` instance reports its new value in
     // the next snapshot under the declared name.
@@ -593,7 +853,7 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
         name: "kp".to_string(),
         value: Value::Float(3.5),
     });
-    executor.scan().unwrap();
+    executor.scan();
     let pid = &executor.snapshot().parameters[2];
     assert_eq!(pid.name, "pid");
     assert_eq!(pid.values["kp"], Value::Float(3.5));
@@ -603,9 +863,93 @@ fn a_tuned_pid_parameter_reports_and_restores_identically() {
     let checkpoint = executor.checkpoint();
     let (sim, point_map, components) = wired();
     let mut restored = Executor::restore(&sim, point_map, components, &checkpoint, None).unwrap();
-    restored.scan().unwrap();
+    restored.scan();
     assert_eq!(
         restored.snapshot().parameters,
         executor.snapshot().parameters
+    );
+}
+
+/// Reads `command`'s published verdict on `component` out of the
+/// snapshot's `command_verdicts` section — `None` when the component or
+/// command carries none.
+fn verdict<'a>(
+    snapshot: &'a TelemetrySnapshot,
+    component: &str,
+    command: &str,
+) -> Option<&'a CommandVerdict> {
+    snapshot
+        .command_verdicts
+        .iter()
+        .find(|entry| entry.name == component)
+        .and_then(|entry| entry.verdicts.iter().find(|v| v.name == command))
+}
+
+fn invoke(component: &str, command: &str, arguments: &[(&str, Value)]) -> Command {
+    Command::Invoke {
+        component: component.to_string(),
+        command: command.to_string(),
+        arguments: arguments
+            .iter()
+            .map(|(name, value)| (name.to_string(), *value))
+            .collect(),
+    }
+}
+
+#[test]
+fn a_completed_sequencer_publishes_advances_standing_refusal() {
+    // `seq` is the proving kind: `advance` is `KindDeclared`-available,
+    // `reset` `Always`. The post-scan probe publishes the verdicts on
+    // the snapshot — exactly the declared `KindDeclared` commands, so
+    // `reset` takes no verdict — and the completed table's `advance`
+    // verdict carries the same refusal the receipted path settles.
+    let (sim, point_map, components) = wired();
+    let mut executor = Executor::new(&sim, point_map, components).unwrap();
+    executor.scan();
+
+    let snapshot = executor.snapshot();
+    let seq = snapshot
+        .command_verdicts
+        .iter()
+        .find(|entry| entry.name == "seq")
+        .expect("the probe covers every registered component");
+    assert_eq!(
+        seq.verdicts,
+        [CommandVerdict {
+            name: "advance".to_string(),
+            available: true,
+            refusal: None,
+        }]
+    );
+
+    // `advance {count: 9}` lands past the table's last step: the run
+    // completes and the same scan's probe reports the standing refusal.
+    executor.submit_command(invoke("seq", "advance", &[("count", Value::Int(9))]));
+    executor.scan();
+    let snapshot = executor.snapshot();
+    assert_eq!(
+        verdict(&snapshot, "seq", "advance"),
+        Some(&CommandVerdict {
+            name: "advance".to_string(),
+            available: false,
+            refusal: Some("the sequence has run to its end; reset restarts it".to_string()),
+        })
+    );
+    // `reset` is `Always`-declared: admissible by construction, so it
+    // takes no verdict — the section covers exactly the declared
+    // `KindDeclared` commands.
+    assert_eq!(verdict(&snapshot, "seq", "reset"), None);
+
+    // `reset` re-opens `advance`: the next scan's probe reports it
+    // invocable again — the verdicts track checkpointed run state.
+    executor.submit_command(invoke("seq", "reset", &[]));
+    executor.scan();
+    assert_eq!(
+        verdict(&executor.snapshot(), "seq", "advance"),
+        Some(&CommandVerdict {
+            name: "advance".to_string(),
+            available: true,
+            refusal: None,
+        })
     );
 }

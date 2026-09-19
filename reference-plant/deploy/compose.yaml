@@ -1,0 +1,134 @@
+# The consumer-side rig definition — `deploy/manifest.json`
+# instantiated as a checked-in compose declaration, the consumer
+# counterpart of the platform repository's rig definition and its
+# `docs/packaging.md` procedure. Every manifest field lands here as
+# data: `x-dcs-release` carries `dcs_release`; the `dcs-plant` service
+# runs the released `dcs-plant-server` image serving the mounted
+# approved model and declared dynamics documents read-only
+# (deployment-supplied paths, never content over the wire); and the
+# manifest's `controllers` pair runs the released `dcs-controller`
+# image — the duty controller and the tracking standby its `standby`
+# field names — attaching to the plant's listener with their monitor
+# ports published as the manifest declares. Each controller invocation
+# carries the manifest's recorded model fingerprint in its environment
+# as `DCS_MODEL_FINGERPRINT` — the identity the standby's checkpoint
+# pulls verify on the wire.
+#
+# The manifest's per-controller `state_file`/`journal_file` fields
+# name each peer's durability paths (decisions 35 and 36): every
+# declared path lands on a writable named volume — `ctrl-a-data` /
+# `ctrl-b-data` mounted at `/var/tmp`, an existing world-writable
+# directory in the released image, so the non-root controller process
+# can create its files on the volume — and rides the invocation's
+# `--state-file`/`--journal-file` flags, so a container restart
+# resumes in place and the operator-action record outlives the
+# process. The model and dynamics mounts stay read-only: deployment
+# inputs are mounted, never written.
+#
+# `ci/check.sh`'s `deploy` stage asserts this file and the manifest
+# agree on every field — a divergence fails `rig-mismatch` — and that
+# `docker compose config` (or the stage's fallback parser) accepts it.
+# Running the rig is the documented customer action (README §6): the
+# file is a single-host orchestration declaration inside the
+# no-live-deployment bound, and the two-machine shape is the same
+# declaration spread across hosts with published addresses in place of
+# network names, as the platform's `docs/packaging.md` records.
+
+name: reference-plant
+
+x-dcs-release: v0.2.0
+
+services:
+  dcs-plant:
+    image: dcs-plant-server:v0.2.0
+    container_name: dcs-plant
+    networks:
+      - dcs-rig
+    volumes:
+      - ../model/plant.json:/model/plant.json:ro
+      - ../model/dynamics.json:/model/dynamics.json:ro
+    command:
+      - /model/plant.json
+      - --dynamics
+      - /model/dynamics.json
+      - --listen
+      - 0.0.0.0:9001
+    healthcheck:
+      # The controllers' --remote attach connects once at startup and
+      # exits if the listener is not yet bound, so the pair orders on
+      # the plant actually serving. The probe opens and closes a TCP
+      # connection; the plant's per-connection handler reads a line,
+      # sees the close, and exits.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9001"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+
+  ctrl-a:
+    image: dcs-controller:v0.2.0
+    container_name: ctrl-a
+    depends_on:
+      dcs-plant:
+        condition: service_healthy
+    networks:
+      - dcs-rig
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../model/plant.json:/model/plant.json:ro
+      - ctrl-a-data:/var/tmp
+    environment:
+      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
+    command:
+      - /model/plant.json
+      - --remote
+      - dcs-plant:9001
+      - --scan-ms
+      - "100"
+      - --listen
+      - 0.0.0.0:8080
+      - --state-file
+      - /var/tmp/state.json
+      - --journal-file
+      - /var/tmp/journal.jsonl
+
+  ctrl-b:
+    image: dcs-controller:v0.2.0
+    container_name: ctrl-b
+    depends_on:
+      dcs-plant:
+        condition: service_healthy
+      ctrl-a:
+        condition: service_started
+    networks:
+      - dcs-rig
+    ports:
+      - "8081:8081"
+    volumes:
+      - ../model/plant.json:/model/plant.json:ro
+      - ctrl-b-data:/var/tmp
+    environment:
+      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
+    command:
+      - /model/plant.json
+      - --remote
+      - dcs-plant:9001
+      - --standby
+      - ctrl-a:8080
+      - --scan-ms
+      - "100"
+      - --listen
+      - 0.0.0.0:8081
+      - --state-file
+      - /var/tmp/state.json
+      - --journal-file
+      - /var/tmp/journal.jsonl
+
+networks:
+  dcs-rig:
+    name: dcs-rig
+
+volumes:
+  ctrl-a-data:
+  ctrl-b-data:

@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "run_id": "qa-20260915-001",
+  "attempted_sha": "c2ac026d2e1f4a5b6c7d8e9f0a1b2c3d4e5f6a7b",
+  "completed_sha": "c2ac026d2e1f4a5b6c7d8e9f0a1b2c3d4e5f6a7b",
+  "image": {
+    "controller": "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+    "plant": "sha256:9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e"
+  },
+  "started_at": "2026-09-15T10:00:00+00:00",
+  "finished_at": "2026-09-15T10:12:41+00:00",
+  "outcome": "passed",
+  "attempt": 1,
+  "host": {"name": "lenovo", "os": "ubuntu"},
+  "changed_range": {
+    "first": "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "last": "c2ac026d2e1f4a5b6c7d8e9f0a1b2c3d4e5f6a7b"
+  },
+  "scenarios": [
+    {
+      "key": "controller-active",
+      "title": "Active controller owns the simulated field",
+      "expected": "ctrl-a reports role active and its monitor serves a telemetry snapshot",
+      "outcome": "passed",
+      "observations": [
+        "GET /role on ctrl-a reported role=active",
+        "GET /snapshot returned a telemetry snapshot with tick advancing"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/controller-active-role.json", "detail": "RoleReport from ctrl-a"},
+        {"kind": "endpoint", "ref": "GET /snapshot", "detail": "tick advanced from 12 to 47 across the observation window"}
+      ]
+    },
+    {
+      "key": "standby-tracking",
+      "title": "Standby converges behind the active",
+      "expected": "ctrl-b reports role standby with tracking converged",
+      "outcome": "passed",
+      "observations": [
+        "GET /role on ctrl-b reported role=standby tracking=converged"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/standby-tracking-role.json"}
+      ]
+    },
+    {
+      "key": "operator-command",
+      "title": "Writable point command applies at a scan boundary",
+      "expected": "POST /command marking pump-1 out-of-service is accepted and visible in telemetry",
+      "outcome": "passed",
+      "observations": [
+        "POST /command accepted with a command receipt",
+        "pump-1 oos point read true in the following snapshot"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/operator-command-snapshot.json"}
+      ]
+    },
+    {
+      "key": "failover",
+      "title": "Demote/promote switchover preserves the field",
+      "expected": "POST /demote on ctrl-a then POST /promote on ctrl-b leaves ctrl-b active and telemetry flowing",
+      "outcome": "passed",
+      "observations": [
+        "ctrl-a reported standby after demote",
+        "ctrl-b reported active after promote",
+        "snapshot tick continued advancing on ctrl-b"
+      ],
+      "evidence": [
+        {"kind": "file", "ref": "evidence/failover-roles.json"},
+        {"kind": "file", "ref": "evidence/failover-snapshot.json"}
+      ]
+    }
+  ],
+  "capability_limitations": [
+    {"key": "no-ethercat", "detail": "Controller has no EtherCAT driver; all field I/O exercised through the dcs-sim-net remote simulation only.", "blocking": false}
+  ],
+  "infrastructure_failures": [],
+  "timeline": [
+    {"t": "2026-09-15T10:00:00+00:00", "event": "run-start", "detail": "resolved origin/main to attempted_sha"},
+    {"t": "2026-09-15T10:01:12+00:00", "event": "images-built", "detail": "controller and plant images built from pinned source"},
+    {"t": "2026-09-15T10:02:03+00:00", "event": "rig-up", "detail": "plant plus redundant controller pair healthy"},
+    {"t": "2026-09-15T10:11:58+00:00", "event": "scenarios-complete", "detail": "4/4 scenarios passed"},
+    {"t": "2026-09-15T10:12:41+00:00", "event": "teardown", "detail": "run containers and network removed"}
+  ]
+}

@@ -14,8 +14,8 @@
 //! [`step`](ScriptedDriver::step) is called, so identical write and step
 //! sequences replay identically on every run.
 
-use crate::driver::{decode_quality, encode_quality};
 use crate::map::{ChannelId, Direction, PointBinding};
+use crate::state::{FaultParticipation, capture_points, restore_points};
 use dcs_core::{
     IoDriver, IoError, PointId, Quality, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
@@ -378,20 +378,13 @@ impl IoDriver for ScriptedDriver {
         let state = self.state.lock().unwrap();
         let mut captured = StateMap::new();
         captured.insert("tick", Value::Int(state.tick.0 as i64));
-        let mut points: Vec<(&PointId, &PointState)> = state.points.iter().collect();
-        points.sort_by_key(|(point, _)| **point);
-        for (point, point_state) in points {
-            let prefix = format!("point.{}", point.0);
-            captured.insert(format!("{prefix}.value"), point_state.sample.value);
-            captured.insert(
-                format!("{prefix}.quality"),
-                Value::Int(encode_quality(point_state.sample.quality)),
-            );
-            captured.insert(
-                format!("{prefix}.tick"),
-                Value::Int(point_state.sample.tick.0 as i64),
-            );
-        }
+        let mut points: Vec<(PointId, Sample)> = state
+            .points
+            .iter()
+            .map(|(&point, point_state)| (point, point_state.sample))
+            .collect();
+        points.sort_by_key(|(point, _)| *point);
+        capture_points(&mut captured, &points, |_| None);
         captured.insert("writes.len", Value::Int(state.writes.len() as i64));
         for (index, write) in state.writes.iter().enumerate() {
             let prefix = format!("write.{index}");
@@ -429,25 +422,16 @@ impl IoDriver for ScriptedDriver {
         }
 
         let mut known = vec!["tick".to_string(), "writes.len".to_string()];
-        let mut samples = HashMap::with_capacity(current.points.len());
-        for (&point, point_state) in &current.points {
-            let prefix = format!("point.{}", point.0);
-            let value =
-                state.require_kind(STATE_ELEMENT, &format!("{prefix}.value"), point_state.kind)?;
-            let quality_code = state.require_i64(STATE_ELEMENT, &format!("{prefix}.quality"))?;
-            let quality = decode_quality(quality_code)
-                .ok_or_else(|| invalid(format!("{prefix}.quality"), Value::Int(quality_code)))?;
-            let sample_tick = state.require_i64(STATE_ELEMENT, &format!("{prefix}.tick"))?;
-            if sample_tick < 0 {
-                return Err(invalid(format!("{prefix}.tick"), Value::Int(sample_tick)));
-            }
-            known.extend([
-                format!("{prefix}.value"),
-                format!("{prefix}.quality"),
-                format!("{prefix}.tick"),
-            ]);
-            samples.insert(point, Sample::new(value, quality, Tick(sample_tick as u64)));
-        }
+        let samples = restore_points(
+            current
+                .points
+                .iter()
+                .map(|(&point, point_state)| (point, point_state.kind)),
+            state,
+            STATE_ELEMENT,
+            FaultParticipation::Foreign,
+            &mut known,
+        )?;
 
         let mut writes = Vec::with_capacity(writes_len as usize);
         for index in 0..writes_len {
@@ -483,9 +467,9 @@ impl IoDriver for ScriptedDriver {
         state.ensure_known_fields(STATE_ELEMENT, &known_refs)?;
 
         current.tick = Tick(tick as u64);
-        for (point, sample) in samples {
+        for (point, restored) in samples {
             let point_state = current.points.get_mut(&point).unwrap();
-            point_state.sample = sample;
+            point_state.sample = restored.sample;
             // Replay position follows from the restored tick: entries at
             // or before it are already in effect.
             point_state.next = point_state
@@ -849,5 +833,22 @@ mod tests {
         ));
         // A rejected restore changed nothing.
         assert_eq!(driver.writes().len(), 1);
+    }
+
+    #[test]
+    fn restore_rejects_a_fault_field_the_driver_never_captured() {
+        // `point.{id}.fault` is SimDriver's fault participation — a
+        // ScriptedDriver declares none, so the field stays foreign even
+        // on a bound point.
+        let driver = driver();
+        let mut map = driver.capture_state().unwrap();
+        map.insert("point.10.fault", Value::Int(0));
+        assert_eq!(
+            driver.restore_state(&map).unwrap_err(),
+            StateError::UnknownField {
+                element: "scripted-driver".to_string(),
+                field: "point.10.fault".to_string(),
+            }
+        );
     }
 }

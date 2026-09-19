@@ -4,20 +4,23 @@
 //! Usage: `dcs-sim-bus-device <model-file> --device <id> [--dynamics <file>] [--listen <addr>]`
 //!
 //! The binary loads and validates the plant model, finds the declared
-//! `sim-bus` device, and serves its register bank through
-//! [`BusServer`]'s documented frame protocol — the same `parameters`
-//! the driver-side factory parses, so a rig's controller and device
-//! server read one declaration: each channel's register index and
-//! optional power-on `initial` value come from the model, and `--listen`
-//! defaults to the declared `"address"`. Register state changes only on
-//! writes, quality injection, and the explicit `step` request, so
-//! identical request sequences produce identical responses on every
-//! run.
+//! `sim-bus` or `sim-cyclic` device, and serves its register bank
+//! through [`BusServer`]'s documented frame protocol — the same
+//! `parameters` the driver-side factory parses, so a rig's controller
+//! and device server read one declaration: each channel's register
+//! index and optional power-on `initial` value come from the model, and
+//! `--listen` defaults to the declared `"address"`. A `sim-cyclic`
+//! device's declared station layout is served with the bank so a
+//! station-attributed scripted exchange withholds the device's own
+//! registers. Register state changes only on writes, quality injection,
+//! the explicit `step` request, and the `exchange` request's staged
+//! outputs, so identical request sequences produce identical responses
+//! on every run.
 //!
 //! `--dynamics` merges a device-side dynamics document: a JSON list of
 //! [`ProcessElement`] declarations (`first_order_lag`,
 //! `second_order_lag`, `integrator`, `dead_time`, `noise`, `bool_flow`,
-//! `flow_sum`, `scaled_flow`) standing in for field physics — the same
+//! `flow_sum`, `scaled_flow`, `threshold`) standing in for field physics — the same
 //! seam `dcs-plant-server --dynamics` serves, with the document's
 //! point-valued fields carrying register addresses. Each element is
 //! validated as it merges, so a rejection names the element and the
@@ -32,7 +35,8 @@
 
 use dcs_model::{DeviceId, PlantModel};
 use dcs_sim_bus::{
-    BusServer, DEVICE_KIND, DeviceParameters, ProcessElement, RegisterBank, RegisterDecl,
+    BusServer, CYCLIC_DEVICE_KIND, CyclicDeviceParameters, DEVICE_KIND, DeviceParameters,
+    ProcessElement, RegisterBank, RegisterDecl,
 };
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -44,7 +48,7 @@ use std::process::ExitCode;
 struct Options {
     /// The plant model document naming the device.
     model: PathBuf,
-    /// The `sim-bus` device to serve.
+    /// The `sim-bus` or `sim-cyclic` device to serve.
     device: u64,
     /// The optional process-element list to merge over the bank's
     /// registers.
@@ -58,16 +62,18 @@ const USAGE: &str = "\
 Usage: dcs-sim-bus-device <model-file> --device <id> [--dynamics <file>] [--listen <addr>]
 
 Loads and validates the plant model, builds the register bank the
-declared sim-bus device's parameters describe — one register per
-channel, at its declared index and optional initial value — and serves
-it on ADDR until signaled (SIGINT/SIGTERM).
+declared sim-bus or sim-cyclic device's parameters describe — one
+register per channel, at its declared index and optional initial value
+— and serves it on ADDR until signaled (SIGINT/SIGTERM). A sim-cyclic
+device's station layout is served with the bank, so a scripted
+short-station exchange withholds its declared registers.
 
-  --device ID      the sim-bus device to serve (required)
+  --device ID      the sim-bus or sim-cyclic device to serve (required)
   --dynamics FILE  merge a JSON list of process-element declarations —
                    first_order_lag, second_order_lag, integrator,
-                   dead_time, noise, bool_flow, flow_sum, scaled_flow —
-                   over the bank's registers; an element's point-valued
-                   fields carry register addresses
+                   dead_time, noise, bool_flow, flow_sum, scaled_flow,
+                   threshold — over the bank's registers; an element's
+                   point-valued fields carry register addresses
   --listen ADDR    serve the register protocol on ADDR; defaults to the
                    device's declared \"address\" parameter — a port of 0
                    binds an ephemeral port, reported on stderr
@@ -155,39 +161,51 @@ fn build(options: &Options) -> Result<(BusServer, String), String> {
         .iter()
         .find(|device| device.id == id)
         .ok_or_else(|| format!("model declares no device {}", id.0))?;
-    if device.kind != DEVICE_KIND {
-        return Err(format!(
-            "device {} has kind {:?}, which is not {DEVICE_KIND:?}",
-            id.0, device.kind
-        ));
-    }
     let channels: BTreeMap<String, dcs_core::ValueKind> = device
         .channels
         .iter()
         .map(|(name, channel)| (name.clone(), channel.value_type))
         .collect();
-    let parameters = DeviceParameters::parse(&device.parameters, &channels)
-        .map_err(|error| format!("device {} has invalid parameters: {error}", id.0))?;
-    let decls = parameters
-        .registers
-        .iter()
-        .map(|(name, declaration)| RegisterDecl {
-            register: declaration.register,
-            initial: declaration
-                .initial
-                .unwrap_or_else(|| neutral(channels[name.as_str()])),
-        });
-    let decls: Vec<RegisterDecl> = decls.collect();
+    // Both served kinds share the register bank; a cyclic device adds
+    // its station layout to the server so station-attributed short
+    // exchanges withhold the device's own declaration.
+    let (decls, address, stations) = match device.kind.as_str() {
+        DEVICE_KIND => {
+            let parameters = DeviceParameters::parse(&device.parameters, &channels)
+                .map_err(|error| format!("device {} has invalid parameters: {error}", id.0))?;
+            let decls: Vec<RegisterDecl> = parameters
+                .registers
+                .iter()
+                .map(|(name, declaration)| RegisterDecl {
+                    register: declaration.register,
+                    initial: declaration
+                        .initial
+                        .unwrap_or_else(|| neutral(channels[name.as_str()])),
+                })
+                .collect();
+            (decls, parameters.address, BTreeMap::new())
+        }
+        CYCLIC_DEVICE_KIND => {
+            let parameters = CyclicDeviceParameters::parse(&device.parameters, &channels)
+                .map_err(|error| format!("device {} has invalid parameters: {error}", id.0))?;
+            let decls = parameters.register_decls(&channels);
+            let stations = parameters.station_registers();
+            (decls, parameters.address, stations)
+        }
+        other => {
+            return Err(format!(
+                "device {} has kind {other:?}, which is neither {DEVICE_KIND:?} nor {CYCLIC_DEVICE_KIND:?}",
+                id.0
+            ));
+        }
+    };
     let bank = match &options.dynamics {
         Some(path) => RegisterBank::with_dynamics(decls, load_dynamics(path)?)
             .map_err(|error| error.to_string())?,
         None => RegisterBank::new(decls).map_err(|error| error.to_string())?,
     };
-    let listen = options
-        .listen
-        .clone()
-        .unwrap_or_else(|| parameters.address.clone());
-    let server = BusServer::bind(listen.as_str(), bank)
+    let listen = options.listen.clone().unwrap_or(address);
+    let server = BusServer::bind_stationed(listen.as_str(), bank, stations)
         .map_err(|error| format!("cannot bind {listen}: {error}"))?;
     Ok((server, listen))
 }

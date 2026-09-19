@@ -22,6 +22,37 @@ MIGRATIONS = [
       improvement TEXT NOT NULL, issue INTEGER NOT NULL,
       PRIMARY KEY(improvement, issue));
     """,
+    # 2: Lenovo QA findings lane
+    """
+    CREATE TABLE IF NOT EXISTS qa_reports(
+      run_id TEXT PRIMARY KEY, sha TEXT, status TEXT NOT NULL,
+      received REAL NOT NULL, count INTEGER NOT NULL DEFAULT 0, summary TEXT);
+    CREATE TABLE IF NOT EXISTS qa_findings(
+      key TEXT PRIMARY KEY, kind TEXT NOT NULL, module TEXT NOT NULL,
+      severity TEXT NOT NULL, confidence TEXT NOT NULL, title TEXT NOT NULL,
+      status TEXT NOT NULL, issue INTEGER, fix_sha TEXT,
+      cycles INTEGER NOT NULL DEFAULT 0, occurrences INTEGER NOT NULL DEFAULT 1,
+      first_run TEXT NOT NULL, last_run TEXT NOT NULL, sha TEXT,
+      payload TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
+    """,
+    # 3: concurrency groups are descriptive only; dispatch no longer serializes on them
+    """
+    DROP INDEX IF EXISTS live_group;
+    """,
+    # 4: unified admission control — inference leases and quota-group state
+    """
+    CREATE TABLE IF NOT EXISTS admission_leases(
+      owner TEXT PRIMARY KEY, model TEXT NOT NULL, grps TEXT NOT NULL,
+      clone TEXT, invocation TEXT, probe INTEGER NOT NULL DEFAULT 0,
+      started REAL, updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS admission_groups(
+      grp TEXT PRIMARY KEY, target INTEGER NOT NULL, mode TEXT NOT NULL DEFAULT 'normal',
+      cooldown_until REAL, cooldown_len REAL NOT NULL DEFAULT 0,
+      window_start REAL NOT NULL DEFAULT 0, loaded REAL, useful INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS admission_outcomes(
+      invocation TEXT PRIMARY KEY, owner TEXT NOT NULL, grps TEXT NOT NULL,
+      category TEXT NOT NULL, useful INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL);
+    """,
 ]
 
 
@@ -40,8 +71,6 @@ class State:
               process_start TEXT, session TEXT, started REAL, updated REAL NOT NULL,
               error TEXT, clone TEXT, prompt TEXT, log TEXT);
             CREATE UNIQUE INDEX IF NOT EXISTS live_worker ON jobs(worker)
-              WHERE status IN ('working','pr-open');
-            CREATE UNIQUE INDEX IF NOT EXISTS live_group ON jobs(concurrency_group)
               WHERE status IN ('working','pr-open');
         """)
         version = self.db.execute('PRAGMA user_version').fetchone()[0]
@@ -275,3 +304,81 @@ class State:
                 'pending_candidates': len(self.candidates('pending')),
                 'pending_assessments': len(self.pending_assessments()),
                 'rollout_failure': self.get('review:rollout_failure')}
+
+    # --- Lenovo QA findings lane -------------------------------------------
+
+    def qa_report(self, run_id):
+        row = self.db.execute('SELECT * FROM qa_reports WHERE run_id=?', (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_qa_report(self, run_id, sha, status, count=0, summary=None):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO qa_reports(run_id,sha,status,received,count,summary) '
+                            'VALUES(?,?,?,?,?,?)',
+                            (run_id, sha, status, time.time(), count, summary))
+
+    def qa_finding(self, key):
+        row = self.db.execute('SELECT * FROM qa_findings WHERE key=?', (key,)).fetchone()
+        return dict(row) if row else None
+
+    def qa_findings(self, statuses=None):
+        query, args = 'SELECT * FROM qa_findings', []
+        if statuses:
+            args = list(statuses)
+            query += ' WHERE status IN (' + ','.join('?' for _ in args) + ')'
+        return [dict(r) for r in self.db.execute(query + ' ORDER BY created', args)]
+
+    def upsert_qa_finding(self, finding, report, status):
+        """Insert a new finding or re-observe an existing one.
+
+        Re-observation refreshes the stored redacted payload and bumps the
+        occurrence counter; lifecycle columns (status, issue, fix_sha, cycles)
+        move only through set_qa_finding.
+        """
+        payload = json.dumps({**finding, '_run_id': report['run_id'],
+                              '_sha': report['sha'], '_rig': report['rig'],
+                              '_report_status': report.get('status', 'completed')})
+        now = time.time()
+        with self.db:
+            cursor = self.db.execute(
+                'UPDATE qa_findings SET kind=?,module=?,severity=?,confidence=?,title=?,'
+                'sha=?,last_run=?,payload=?,occurrences=occurrences+1,updated=? WHERE key=?',
+                (finding['kind'], finding['module'], finding['severity'],
+                 finding['confidence'], finding['title'], report['sha'],
+                 report['run_id'], payload, now, finding['key']))
+            if not cursor.rowcount:
+                self.db.execute(
+                    'INSERT INTO qa_findings(key,kind,module,severity,confidence,title,'
+                    'status,first_run,last_run,sha,payload,created,updated) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (finding['key'], finding['kind'], finding['module'],
+                     finding['severity'], finding['confidence'], finding['title'],
+                     status, report['run_id'], report['run_id'], report['sha'],
+                     payload, now, now))
+
+    def set_qa_finding(self, key, **fields):
+        allowed = {'status', 'issue', 'fix_sha', 'cycles', 'title', 'sha'}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError('Invalid finding fields')
+        fields['updated'] = time.time()
+        with self.db:
+            self.db.execute('UPDATE qa_findings SET ' + ','.join(k + '=?' for k in fields) + ' WHERE key=?',
+                            (*fields.values(), key))
+
+    def qa_count(self, statuses):
+        args = list(statuses)
+        return self.db.execute('SELECT COUNT(*) FROM qa_findings WHERE status IN ('
+                               + ','.join('?' for _ in args) + ')', args).fetchone()[0]
+
+    def pending_verifications(self):
+        """Findings whose fix merged and still owe a hardware/sim verification."""
+        return self.qa_findings(('fix-merged',))
+
+    def qa_summary(self):
+        counts = {r['status']: r['n'] for r in self.db.execute(
+            'SELECT status, COUNT(*) AS n FROM qa_findings GROUP BY status')}
+        return {'findings': counts,
+                'pending_verifications': len(self.pending_verifications()),
+                'reports': self.db.execute('SELECT COUNT(*) FROM qa_reports').fetchone()[0],
+                'published_at': self.get('qa:published_at'),
+                'publish_error': self.get('qa:publish_error')}

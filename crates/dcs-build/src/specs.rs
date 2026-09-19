@@ -20,9 +20,13 @@ use crate::spec::{
     BINARY_CODE_RANGE, CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
     POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
-use dcs_core::{Direction, PointType, ValueKind};
-use dcs_model::ComponentId;
+use dcs_core::{
+    CommandArgument, CommandAvailability, CommandDecl, Direction, EventDecl, EventField,
+    EventFieldKind, EventRetention, PointType, ValueKind,
+};
+use dcs_model::{ComponentId, Rationalization};
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
 mod sealed {
     /// Seals [`RawKind`](super::RawKind): the analog kinds' raw channel
@@ -1008,10 +1012,15 @@ impl Spec for RateLimiterSpec {
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
 /// Parameters — shared with `alarm-monitor`: `low_limit`, `high_limit`
 /// required finite `Float`s; `hysteresis` optional non-negative
-/// `Float`.
+/// `Float` — plus the decision-70 rationalization codes `priority`,
+/// `class`, `response_ticks`, required non-negative `Int`s.
+/// `rationalization` is the record's required prose half — a typed
+/// argument so a composed plant cannot omit it.
 pub struct LatchingAlarmSpec {
     /// The instance's parameter map.
     pub parameters: Parameters,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `latching-alarm` instance.
@@ -1038,11 +1047,18 @@ impl LatchingAlarmSpec {
         required("low_limit", ValueKind::Float, Some(FINITE_F64)),
         required("high_limit", ValueKind::Float, Some(FINITE_F64)),
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
     ];
 
-    /// A spec carrying `parameters` as the instance's parameter map.
-    pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+    /// A spec carrying `parameters` as the instance's parameter map and
+    /// `rationalization` as the instance's required decision-70 record.
+    pub fn new(parameters: Parameters, rationalization: Rationalization) -> Self {
+        Self {
+            parameters,
+            rationalization,
+        }
     }
 }
 
@@ -1070,6 +1086,10 @@ impl Spec for LatchingAlarmSpec {
         &self.parameters
     }
 
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
     fn instance(&self, id: ComponentId) -> Self::Instance {
         LatchingAlarmInstance {
             id,
@@ -1088,12 +1108,18 @@ impl Spec for LatchingAlarmSpec {
 ///
 /// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).
-/// The kind declares no parameters.
+/// Parameters are the decision-70 rationalization codes `priority`,
+/// `class`, `response_ticks` — required non-negative `Int`s;
+/// `rationalization` is the record's required prose half — a typed
+/// argument so a composed plant cannot omit it.
 pub struct BoolLatchingAlarmSpec {
-    /// The instance's parameter map — the kind declares no parameters,
-    /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
-    /// at `build`.
+    /// The instance's parameter map — the three required rationalization
+    /// codes; any other key is an
+    /// [`UnknownParameter`](crate::BuildError::UnknownParameter) at
+    /// `build`.
     pub parameters: Parameters,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
 }
 
 /// Typed port handles for a `bool-latching-alarm` instance.
@@ -1115,12 +1141,21 @@ impl BoolLatchingAlarmSpec {
     /// The model kind string this spec emits.
     pub const KIND: &'static str = "bool-latching-alarm";
 
-    /// The declared parameter set: the kind takes none.
-    pub const PARAMETERS: &'static [ParamDecl] = &[];
+    /// The declared parameter set — the decision-70 rationalization
+    /// codes.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
 
-    /// A spec carrying `parameters` as the instance's parameter map.
-    pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+    /// A spec carrying `parameters` as the instance's parameter map and
+    /// `rationalization` as the instance's required decision-70 record.
+    pub fn new(parameters: Parameters, rationalization: Rationalization) -> Self {
+        Self {
+            parameters,
+            rationalization,
+        }
     }
 }
 
@@ -1148,11 +1183,345 @@ impl Spec for BoolLatchingAlarmSpec {
         &self.parameters
     }
 
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
     fn instance(&self, id: ComponentId) -> Self::Instance {
         BoolLatchingAlarmInstance {
             id,
             input: Sink::port(id, "in"),
             ack: Sink::port(id, "ack"),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
+/// The managed-alarm surface decisions 71–73 record, shared by both
+/// managed latching kinds' specs: which of the optional `shelve`,
+/// `oos`, and `suppress` inputs the instance declares.
+///
+/// A `false` flag emits an instance with no port to wire — the model's
+/// "unbound" case: no shelving surface, never out of service, never
+/// suppressed. The status outputs `shelved`, `suppressed`, and
+/// `out_of_service` are always declared — the uniform Status-role
+/// vocabulary the alarm pane joins.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ManagedInputs {
+    /// Whether the instance declares the `shelve` port — the
+    /// level-observed shelving request, conventionally wired to a
+    /// writable internal `In` point.
+    pub shelve: bool,
+    /// Whether the instance declares the `oos` port — the
+    /// level-observed out-of-service command.
+    pub oos: bool,
+    /// Whether the instance declares the `suppress` port — the
+    /// designed-suppression condition.
+    pub suppress: bool,
+}
+
+/// The bound managed inputs' port declarations, in
+/// `shelve`/`oos`/`suppress` order — the position the kinds'
+/// `io_requirements` place them.
+fn managed_input_ports(inputs: ManagedInputs) -> Vec<PortDecl> {
+    let mut ports = Vec::with_capacity(3);
+    if inputs.shelve {
+        ports.push(port("shelve", Direction::In, ValueKind::Bool));
+    }
+    if inputs.oos {
+        ports.push(port("oos", Direction::In, ValueKind::Bool));
+    }
+    if inputs.suppress {
+        ports.push(port("suppress", Direction::In, ValueKind::Bool));
+    }
+    ports
+}
+
+/// The three managed status outputs' declarations — always all three.
+fn managed_output_ports() -> Vec<PortDecl> {
+    vec![
+        port("shelved", Direction::Out, ValueKind::Bool),
+        port("suppressed", Direction::Out, ValueKind::Bool),
+        port("out_of_service", Direction::Out, ValueKind::Bool),
+    ]
+}
+
+/// The managed-alarm parameter set both managed latching kinds declare:
+/// `max_shelve_ticks` — the shelving bound, `0` declaring
+/// never-shelvable — plus the decision-70 `priority`/`class`/
+/// `response_ticks` rationalization fields; all required non-negative
+/// `Int`s.
+const MANAGED_ALARM_PARAMETERS: &[ParamDecl] = &[
+    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+];
+
+/// Typed handles for the managed-alarm ports both managed latching
+/// kinds share — the `Option` members following the declared set.
+#[derive(Debug)]
+pub struct ManagedAlarmHandles {
+    /// `shelve` port (`In`, `Bool`): the level-observed shelving
+    /// request — `Some` only when the spec declared the port; wiring a
+    /// handle the emitted instance does not carry is `UnknownPort` at
+    /// `build`. Wire it to a writable internal `In` point so operator
+    /// shelve requests ride the receipted command path.
+    pub shelve: Option<Sink<bool>>,
+    /// `oos` port (`In`, `Bool`): the level-observed out-of-service
+    /// command — `Some` only when declared.
+    pub oos: Option<Sink<bool>>,
+    /// `suppress` port (`In`, `Bool`): the designed-suppression
+    /// condition — `Some` only when declared.
+    pub suppress: Option<Sink<bool>>,
+    /// `shelved` port (`Out`, `Bool`): asserts while a shelve request
+    /// stands inside the declared bound.
+    pub shelved: Source<bool>,
+    /// `suppressed` port (`Out`, `Bool`): asserts while `suppress`
+    /// reads `true`.
+    pub suppressed: Source<bool>,
+    /// `out_of_service` port (`Out`, `Bool`): asserts while `oos`
+    /// reads `true`.
+    pub out_of_service: Source<bool>,
+}
+
+impl ManagedAlarmHandles {
+    /// Builds the handles for component `id` under `inputs` — the
+    /// `Option` members `Some` only where the spec declared the port.
+    fn for_component(id: ComponentId, inputs: ManagedInputs) -> Self {
+        Self {
+            shelve: inputs.shelve.then(|| Sink::port(id, "shelve")),
+            oos: inputs.oos.then(|| Sink::port(id, "oos")),
+            suppress: inputs.suppress.then(|| Sink::port(id, "suppress")),
+            shelved: Source::port(id, "shelved"),
+            suppressed: Source::port(id, "suppressed"),
+            out_of_service: Source::port(id, "out_of_service"),
+        }
+    }
+}
+
+/// Spec for the `managed-latching-alarm` kind: `latching-alarm`'s
+/// limit checking and acknowledgment latch plus the shelving,
+/// suppression, and out-of-service lifecycle decisions 71–73 record.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`), `ack` (`In`,
+/// `Bool`), the spec-declared subset of `shelve`/`oos`/`suppress`
+/// (`In`, `Bool`), then `alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service` (all `Out`, `Bool`). Parameters — the
+/// sibling's `low_limit`, `high_limit` (required finite `Float`s) and
+/// `hysteresis` (optional non-negative `Float`), plus the shared
+/// managed set: `max_shelve_ticks`, `priority`, `class`, and
+/// `response_ticks` (required non-negative `Int`s).
+/// `rationalization` is the decision-70 record's required prose half —
+/// a typed argument so a composed plant cannot omit it.
+pub struct ManagedLatchingAlarmSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Which managed inputs the instance declares.
+    pub managed: ManagedInputs,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
+}
+
+/// Typed port handles for a `managed-latching-alarm` instance.
+pub struct ManagedLatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the monitored analog value.
+    pub input: Sink<f64>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// The managed-alarm ports — optional inputs and the uniform
+    /// status outputs.
+    pub managed: ManagedAlarmHandles,
+    /// `alarm` port (`Out`, `Bool`): the limit-violation state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// trip-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl ManagedLatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "managed-latching-alarm";
+
+    /// The declared parameter set — the sibling's limits plus the
+    /// managed configuration.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("low_limit", ValueKind::Float, Some(FINITE_F64)),
+        required("high_limit", ValueKind::Float, Some(FINITE_F64)),
+        optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `managed` selects which managed inputs the instance declares;
+    /// `rationalization` is the instance's required decision-70 record.
+    pub fn new(
+        parameters: Parameters,
+        managed: ManagedInputs,
+        rationalization: Rationalization,
+    ) -> Self {
+        Self {
+            parameters,
+            managed,
+            rationalization,
+        }
+    }
+}
+
+impl Spec for ManagedLatchingAlarmSpec {
+    type Instance = ManagedLatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("ack", Direction::In, ValueKind::Bool),
+        ];
+        ports.extend(managed_input_ports(self.managed));
+        ports.extend([
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]);
+        ports.extend(managed_output_ports());
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ManagedLatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            managed: ManagedAlarmHandles::for_component(id, self.managed),
+            alarm: Source::port(id, "alarm"),
+            unacknowledged: Source::port(id, "unacknowledged"),
+        }
+    }
+}
+
+/// Spec for the `managed-bool-latching-alarm` kind:
+/// `bool-latching-alarm`'s two-flag lifecycle for Bool-sourced
+/// conditions plus the shelving, suppression, and out-of-service
+/// lifecycle decisions 71–73 record.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
+/// `Bool`), the spec-declared subset of `shelve`/`oos`/`suppress`
+/// (`In`, `Bool`), then `alarm`, `unacknowledged`, `shelved`,
+/// `suppressed`, `out_of_service` (all `Out`, `Bool`). Parameters — the
+/// shared managed set: `max_shelve_ticks`, `priority`, `class`, and
+/// `response_ticks` (required non-negative `Int`s); the Bool analogue
+/// of the standing limit state has no limits or hysteresis.
+/// `rationalization` is the decision-70 record's required prose half —
+/// a typed argument so a composed plant cannot omit it.
+pub struct ManagedBoolLatchingAlarmSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Which managed inputs the instance declares.
+    pub managed: ManagedInputs,
+    /// The instance's decision-70 rationalization record.
+    pub rationalization: Rationalization,
+}
+
+/// Typed port handles for a `managed-bool-latching-alarm` instance.
+pub struct ManagedBoolLatchingAlarmInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Bool`): the Bool alarm condition.
+    pub input: Sink<bool>,
+    /// `ack` port (`In`, `Bool`): the operator's clearing command.
+    pub ack: Sink<bool>,
+    /// The managed-alarm ports — optional inputs and the uniform
+    /// status outputs.
+    pub managed: ManagedAlarmHandles,
+    /// `alarm` port (`Out`, `Bool`): the standing condition state.
+    pub alarm: Source<bool>,
+    /// `unacknowledged` port (`Out`, `Bool`): the
+    /// asserted-until-acknowledged latch.
+    pub unacknowledged: Source<bool>,
+}
+
+impl ManagedBoolLatchingAlarmSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "managed-bool-latching-alarm";
+
+    /// The declared parameter set — the shared managed configuration.
+    pub const PARAMETERS: &'static [ParamDecl] = MANAGED_ALARM_PARAMETERS;
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `managed` selects which managed inputs the instance declares;
+    /// `rationalization` is the instance's required decision-70 record.
+    pub fn new(
+        parameters: Parameters,
+        managed: ManagedInputs,
+        rationalization: Rationalization,
+    ) -> Self {
+        Self {
+            parameters,
+            managed,
+            rationalization,
+        }
+    }
+}
+
+impl Spec for ManagedBoolLatchingAlarmSpec {
+    type Instance = ManagedBoolLatchingAlarmInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("in", Direction::In, ValueKind::Bool),
+            port("ack", Direction::In, ValueKind::Bool),
+        ];
+        ports.extend(managed_input_ports(self.managed));
+        ports.extend([
+            port("alarm", Direction::Out, ValueKind::Bool),
+            port("unacknowledged", Direction::Out, ValueKind::Bool),
+        ]);
+        ports.extend(managed_output_ports());
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn rationalization(&self) -> Option<&Rationalization> {
+        Some(&self.rationalization)
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        ManagedBoolLatchingAlarmInstance {
+            id,
+            input: Sink::port(id, "in"),
+            ack: Sink::port(id, "ack"),
+            managed: ManagedAlarmHandles::for_component(id, self.managed),
             alarm: Source::port(id, "alarm"),
             unacknowledged: Source::port(id, "unacknowledged"),
         }
@@ -1460,12 +1829,50 @@ impl Spec for TotalizerSpec {
     }
 }
 
+/// The `sequencer` kind's declared native commands — the spec mirror of
+/// the descriptor's `commands`: `advance` paces the table by command and
+/// `reset` restarts it, neither aliased to a writable point.
+static SEQUENCER_COMMANDS: LazyLock<Vec<CommandDecl>> = LazyLock::new(|| {
+    vec![
+        CommandDecl {
+            name: "advance".to_string(),
+            request: vec![CommandArgument {
+                name: "count".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        },
+        CommandDecl {
+            name: "reset".to_string(),
+            request: Vec::new(),
+            availability: CommandAvailability::Always,
+        },
+    ]
+});
+
+/// The `sequencer` kind's declared emitted events — the spec mirror of
+/// the descriptor's `events`: `step_completed` journals the 1-based
+/// index of each step that ran its `ticks` out.
+static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
+    vec![EventDecl {
+        name: "step_completed".to_string(),
+        payload: vec![EventField {
+            name: "step".to_string(),
+            kind: EventFieldKind::Value(ValueKind::Int),
+            optional: false,
+        }],
+        retention: EventRetention::Journal,
+    }]
+});
+
 /// Spec for the `sequencer` kind: stepping through a declared ordered
 /// table of steps, each driving `out` for a configured tick count.
 ///
 /// Ports mirror the descriptor: `run` (`In`, `Bool`), `reset` (`In`,
 /// `Bool`), `out` (`Out`, `Float`), `step` (`Out`, `Int`), `done`
-/// (`Out`, `Bool`).
+/// (`Out`, `Bool`). The kind also declares the native commands
+/// `advance`/`reset` and the emitted `step_completed` event — mirrored
+/// by [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
 ///
 /// The parameter set is *not statically enumerable*: `step_count`
 /// declares the table length `N` and each step `n` in `1..=N` adds
@@ -1537,6 +1944,14 @@ impl Spec for SequencerSpec {
         // `step_count`: no static set exists, so the map goes
         // unchecked at `build` (the recorded treatment for this kind).
         None
+    }
+
+    fn declared_commands(&self) -> Option<&[CommandDecl]> {
+        Some(&SEQUENCER_COMMANDS)
+    }
+
+    fn declared_events(&self) -> Option<&[EventDecl]> {
+        Some(&SEQUENCER_EVENTS)
     }
 
     fn parameter_values(&self) -> &Parameters {
@@ -1798,6 +2213,215 @@ impl Spec for PumpGroupSpec {
     }
 }
 
+/// Spec for the `blower-group` kind: an N-blower capacity-staged group
+/// with per-unit declared bounds, start-interval protection, the
+/// vent-based join/departure choreography, and the declared rotation
+/// and staging-authority policies.
+///
+/// The port set is not static: an instance declares
+/// [`blowers`](Self::blowers) managed blowers, and
+/// [`ports`](Spec::ports) emits `demand` (`In`, `Float`), then
+/// `approve` (`In`, `Bool`) when the spec's [`approve`](Self::approve)
+/// flag wires the operator release — required when `staging_authority`
+/// is `1` — then `cmd_i` (`Out`, `Bool`), `run_i` (`In`, `Bool`),
+/// `fault_i` (`In`, `Bool`), `avail_i` (`In`, `Bool`), `capacity_i`
+/// (`Out`, `Float`), `vent_i` (`Out`, `Bool`) per blower — each
+/// connected through the instance's [`cmd`](BlowerGroupInstance::cmd),
+/// [`run`](BlowerGroupInstance::run), [`fault`](BlowerGroupInstance::fault),
+/// [`avail`](BlowerGroupInstance::avail),
+/// [`capacity`](BlowerGroupInstance::capacity), and
+/// [`vent`](BlowerGroupInstance::vent) handles — followed by `staged`
+/// (`Out`, `Int`), `none_available`/`all_faulted`/`staging_pending`/
+/// `transition` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// The parameter set is indexed by `blowers` — `unit_<i>_min_flow`/
+/// `unit_<i>_max_flow`/`unit_<i>_max_current` per unit — a different
+/// key set per instance, so `declared_parameters` is `None` and
+/// `build` leaves the map to the kind's `from_parameters`, which
+/// reports `Missing`/`Invalid` naming the offending key. The shared
+/// keys are `staging_authority` (required `Int` in `0..=2` — `0`
+/// automatic, `1` operator-approval, `2` flag-only), `stage_up`/
+/// `stage_down` (required non-negative `Float`s), `min_run_ticks`/
+/// `min_start_interval_ticks` (required non-negative `Int`s),
+/// `vent_ticks` (required positive `Int`), and `rotation` (required
+/// `Int` in `0..=2` — `0` none, `1` equalize runtime, `2` fixed
+/// order).
+pub struct BlowerGroupSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many blowers the instance manages — the `cmd_i`/`run_i`/
+    /// `fault_i`/`avail_i`/`capacity_i`/`vent_i` port families' index
+    /// bound.
+    pub blowers: usize,
+    /// Whether the instance declares the `approve` port — the
+    /// operator release the `staging_authority = 1` instance requires;
+    /// a plant running automatic or flag-only staging leaves it
+    /// unwired.
+    pub approve: bool,
+}
+
+/// Typed port handles for a `blower-group` instance.
+pub struct BlowerGroupInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `demand` port (`In`, `Float`): the aggregate capacity demand —
+    /// the header-coordinator's `blower_demand`.
+    pub demand: Sink<f64>,
+    /// `approve` port (`In`, `Bool`): the operator release — `Some`
+    /// where the spec's `approve` flag declares it.
+    pub approve: Option<Sink<bool>>,
+    /// `staged` port (`Out`, `Int`): how many blowers the group
+    /// currently commands.
+    pub staged: Source<i64>,
+    /// `none_available` port (`Out`, `Bool`): no blower is available.
+    pub none_available: Source<bool>,
+    /// `all_faulted` port (`Out`, `Bool`): every blower's `fault_i`
+    /// reads failed.
+    pub all_faulted: Source<bool>,
+    /// `staging_pending` port (`Out`, `Bool`): a stage change standing
+    /// unexecuted under a non-automatic authority.
+    pub staging_pending: Source<bool>,
+    /// `transition` port (`Out`, `Bool`): a join, departure, or
+    /// rotation handover in progress — the valve-freeze surface.
+    pub transition: Source<bool>,
+}
+
+impl BlowerGroupInstance {
+    /// Blower `index`'s run request (`cmd_1`…`cmd_N`, where `N` is the
+    /// spec's [`blowers`](BlowerGroupSpec::blowers)): an `Out`, `Bool`
+    /// port. An `index` outside `1..=N` names a port the instance does
+    /// not declare, and [`build`](crate::PlantBuilder::build) reports
+    /// the connection.
+    pub fn cmd(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("cmd_{index}"))
+    }
+
+    /// Blower `index`'s run feedback (`run_1`…`run_N`): an `In`,
+    /// `Bool` port.
+    pub fn run(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("run_{index}"))
+    }
+
+    /// Blower `index`'s proven-failure flag (`fault_1`…`fault_N`): an
+    /// `In`, `Bool` port.
+    pub fn fault(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("fault_{index}"))
+    }
+
+    /// Blower `index`'s aggregated availability (`avail_1`…`avail_N`):
+    /// an `In`, `Bool` port.
+    pub fn avail(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("avail_{index}"))
+    }
+
+    /// Blower `index`'s capacity demand (`capacity_1`…`capacity_N`):
+    /// an `Out`, `Float` port — the unit's share under the equal
+    /// split, clamped to its declared bounds.
+    pub fn capacity(&self, index: usize) -> Source<f64> {
+        Source::port(self.id, &format!("capacity_{index}"))
+    }
+
+    /// Blower `index`'s vent command (`vent_1`…`vent_N`): an `Out`,
+    /// `Bool` port — `true` holds the unit off the header.
+    pub fn vent(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("vent_{index}"))
+    }
+}
+
+impl BlowerGroupSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "blower-group";
+
+    /// A spec for an instance managing `blowers` blowers, carrying
+    /// `parameters` as its parameter map, and declaring the `approve`
+    /// port when `approve` is set.
+    pub fn new(parameters: Parameters, blowers: usize, approve: bool) -> Self {
+        Self {
+            parameters,
+            blowers,
+            approve,
+        }
+    }
+}
+
+impl Spec for BlowerGroupSpec {
+    type Instance = BlowerGroupInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![port("demand", Direction::In, ValueKind::Float)];
+        if self.approve {
+            ports.push(port("approve", Direction::In, ValueKind::Bool));
+        }
+        for index in 1..=self.blowers {
+            ports.push(port(
+                &format!("cmd_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("run_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("fault_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("avail_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("capacity_{index}"),
+                Direction::Out,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("vent_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+        }
+        ports.push(port("staged", Direction::Out, ValueKind::Int));
+        ports.push(port("none_available", Direction::Out, ValueKind::Bool));
+        ports.push(port("all_faulted", Direction::Out, ValueKind::Bool));
+        ports.push(port("staging_pending", Direction::Out, ValueKind::Bool));
+        ports.push(port("transition", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    /// The parameter set is indexed by `blowers` — not statically
+    /// enumerable, so the map goes to the kind's `from_parameters`
+    /// unchecked by `build`.
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        None
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        BlowerGroupInstance {
+            id,
+            demand: Sink::port(id, "demand"),
+            approve: self.approve.then(|| Sink::port(id, "approve")),
+            staged: Source::port(id, "staged"),
+            none_available: Source::port(id, "none_available"),
+            all_faulted: Source::port(id, "all_faulted"),
+            staging_pending: Source::port(id, "staging_pending"),
+            transition: Source::port(id, "transition"),
+        }
+    }
+}
+
 /// Spec for the `sr-latch` kind: a reset-dominant set/reset bistable.
 ///
 /// Ports mirror the descriptor: `set` (`In`, `Bool`), `reset` (`In`,
@@ -2037,12 +2661,21 @@ impl Spec for ThresholdChainSpec {
 ///
 /// Ports mirror the descriptor: `primary` (`In`, `Float`), `backup`
 /// (`In`, `Float`), `out` (`Out`, `Float`), `backup_active` (`Out`,
-/// `Bool`). The kind takes no parameters.
+/// `Bool`), and `backup_unhealthy` (`Out`, `Bool`) — the standby-health
+/// report, declared only when the spec's `backup_unhealthy` flag is
+/// set. The kind takes no parameters.
 pub struct FailoverSelectSpec {
     /// The instance's parameter map — the kind declares no parameters,
     /// so any key is an [`UnknownParameter`](crate::BuildError::UnknownParameter)
     /// at `build`.
     pub parameters: Parameters,
+    /// Whether the instance declares the optional `backup_unhealthy`
+    /// port. `true` emits an instance whose health output the model
+    /// must wire — the station alarms it so a failed standby
+    /// annunciates before it is needed; `false` emits an instance
+    /// with no `backup_unhealthy` to wire, the form documents emitted
+    /// before the port existed take.
+    pub backup_unhealthy: bool,
 }
 
 /// Typed port handles for a `failover-select` instance.
@@ -2059,6 +2692,11 @@ pub struct FailoverSelectInstance {
     /// `backup_active` port (`Out`, `Bool`): asserts while the backup
     /// is selected.
     pub backup_active: Source<bool>,
+    /// `backup_unhealthy` port (`Out`, `Bool`): asserts while the
+    /// backup's own sample is non-`Good` or non-finite — `Some` only
+    /// when the spec declared the port; wiring a handle the emitted
+    /// instance does not carry is `UnknownPort` at `build`.
+    pub backup_unhealthy: Option<Source<bool>>,
 }
 
 impl FailoverSelectSpec {
@@ -2069,8 +2707,21 @@ impl FailoverSelectSpec {
     pub const PARAMETERS: &'static [ParamDecl] = &[];
 
     /// A spec carrying `parameters` as the instance's parameter map.
+    /// The emitted instance declares no `backup_unhealthy` port — the
+    /// form documents emitted before the port existed take.
     pub fn new(parameters: Parameters) -> Self {
-        Self { parameters }
+        Self {
+            parameters,
+            backup_unhealthy: false,
+        }
+    }
+
+    /// Declares the optional `backup_unhealthy` port — the form a
+    /// station alarms so a failed standby annunciates before it is
+    /// needed.
+    pub fn with_backup_unhealthy(mut self) -> Self {
+        self.backup_unhealthy = true;
+        self
     }
 }
 
@@ -2082,12 +2733,16 @@ impl Spec for FailoverSelectSpec {
     }
 
     fn ports(&self) -> Vec<PortDecl> {
-        vec![
+        let mut ports = vec![
             port("primary", Direction::In, ValueKind::Float),
             port("backup", Direction::In, ValueKind::Float),
             port("out", Direction::Out, ValueKind::Float),
             port("backup_active", Direction::Out, ValueKind::Bool),
-        ]
+        ];
+        if self.backup_unhealthy {
+            ports.push(port("backup_unhealthy", Direction::Out, ValueKind::Bool));
+        }
+        ports
     }
 
     fn declared_parameters(&self) -> Option<&[ParamDecl]> {
@@ -2105,6 +2760,9 @@ impl Spec for FailoverSelectSpec {
             backup: Sink::port(id, "backup"),
             out: Source::port(id, "out"),
             backup_active: Source::port(id, "backup_active"),
+            backup_unhealthy: self
+                .backup_unhealthy
+                .then(|| Source::port(id, "backup_unhealthy")),
         }
     }
 }
@@ -2701,6 +3359,699 @@ impl Spec for BackwashSequenceSpec {
             trigger_source: Source::port(id, "trigger_source"),
             step: Source::port(id, "step"),
             out: Source::port(id, "out"),
+        }
+    }
+}
+
+/// Spec for the `header-coordinator` kind: the shared aeration-header
+/// coordination contract — the declared strategy, the bounded
+/// set-point, the floored aggregate demand, and the capped pulse-grant
+/// set.
+///
+/// The port set is not static: an instance declares
+/// [`zones`](Self::zones) managed zones, and [`ports`](Spec::ports)
+/// emits `pressure` (`In`, `Float`), then `valve_pos_i` (`In`,
+/// `Float`), `airflow_i` (`In`, `Float`), `pulsing_i` (`In`, `Bool`),
+/// `pulse_grant_i` (`Out`, `Bool`) per zone — each connected through
+/// the instance's [`valve_pos`](HeaderCoordinatorInstance::valve_pos),
+/// [`airflow`](HeaderCoordinatorInstance::airflow),
+/// [`pulsing`](HeaderCoordinatorInstance::pulsing), and
+/// [`pulse_grant`](HeaderCoordinatorInstance::pulse_grant) handles —
+/// followed by `pressure_sp` (`Out`, `Float`), `blower_demand` (`Out`,
+/// `Float`), `most_open` (`Out`, `Int`), `at_bound` (`Out`, `Bool`),
+/// and `pulse_blocked` (`Out`, `Bool`). Mirrors the descriptor's
+/// `io_requirements` order.
+///
+/// Parameters: `strategy` (required `Int` in `0..=2` — `0` constant
+/// header pressure, `1` most-open-valve reset, `2` direct-airflow);
+/// `pressure_hold`, `pressure_min`, `pressure_max`, `mov_band_lo`,
+/// `mov_band_hi` (required finite `Float`s — `pressure_min <=
+/// pressure_max` and `mov_band_lo <= mov_band_hi` are the
+/// constructor's checks, the spec's ranges mirror the descriptor's);
+/// `adjust_ticks` (required positive `Int`); `min_total_airflow`
+/// (required non-negative `Float`); `max_pulsing` (required
+/// non-negative `Int`). All nine are the decision's
+/// assumption-marked declared data — required, never defaulted.
+pub struct HeaderCoordinatorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// How many zones the instance coordinates — the
+    /// `valve_pos_i`/`airflow_i`/`pulsing_i`/`pulse_grant_i` port
+    /// families' index bound.
+    pub zones: usize,
+}
+
+/// Typed port handles for a `header-coordinator` instance.
+pub struct HeaderCoordinatorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `pressure` port (`In`, `Float`): the discharge-header pressure
+    /// transmitter.
+    pub pressure: Sink<f64>,
+    /// `pressure_sp` port (`Out`, `Float`): the header-pressure
+    /// set-point the blower capacity loop tracks.
+    pub pressure_sp: Source<f64>,
+    /// `blower_demand` port (`Out`, `Float`): the aggregate capacity
+    /// demand the blower group stages against.
+    pub blower_demand: Source<f64>,
+    /// `most_open` port (`Out`, `Int`): the 1-based index of the zone
+    /// whose valve is most open, `0` while none is trusted.
+    pub most_open: Source<i64>,
+    /// `at_bound` port (`Out`, `Bool`): the set-point or demand
+    /// resting at a declared bound.
+    pub at_bound: Source<bool>,
+    /// `pulse_blocked` port (`Out`, `Bool`): a pulse request standing
+    /// refused by the declared cap.
+    pub pulse_blocked: Source<bool>,
+}
+
+impl HeaderCoordinatorInstance {
+    /// Zone `index`'s valve-position feedback
+    /// (`valve_pos_1`…`valve_pos_N`, where `N` is the spec's
+    /// [`zones`](HeaderCoordinatorSpec::zones)): an `In`, `Float`
+    /// port. An `index` outside `1..=N` names a port the instance does
+    /// not declare, and [`build`](crate::PlantBuilder::build) reports
+    /// the connection.
+    pub fn valve_pos(&self, index: usize) -> Sink<f64> {
+        Sink::port(self.id, &format!("valve_pos_{index}"))
+    }
+
+    /// Zone `index`'s airflow demand (`airflow_1`…`airflow_N`): an
+    /// `In`, `Float` port — the DO/airflow loop's output the header
+    /// must deliver.
+    pub fn airflow(&self, index: usize) -> Sink<f64> {
+        Sink::port(self.id, &format!("airflow_{index}"))
+    }
+
+    /// Zone `index`'s mixing-pulse request (`pulsing_1`…`pulsing_N`):
+    /// an `In`, `Bool` port.
+    pub fn pulsing(&self, index: usize) -> Sink<bool> {
+        Sink::port(self.id, &format!("pulsing_{index}"))
+    }
+
+    /// Zone `index`'s pulse admission (`pulse_grant_1`…`pulse_grant_N`):
+    /// an `Out`, `Bool` port.
+    pub fn pulse_grant(&self, index: usize) -> Source<bool> {
+        Source::port(self.id, &format!("pulse_grant_{index}"))
+    }
+}
+
+impl HeaderCoordinatorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "header-coordinator";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("strategy", ValueKind::Int, Some(CODE_RANGE)),
+        required("pressure_hold", ValueKind::Float, Some(FINITE_F64)),
+        required("pressure_min", ValueKind::Float, Some(FINITE_F64)),
+        required("pressure_max", ValueKind::Float, Some(FINITE_F64)),
+        required("mov_band_lo", ValueKind::Float, Some(FINITE_F64)),
+        required("mov_band_hi", ValueKind::Float, Some(FINITE_F64)),
+        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("min_total_airflow", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_pulsing", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    ];
+
+    /// A spec for an instance coordinating `zones` zones and carrying
+    /// `parameters` as its parameter map.
+    pub fn new(parameters: Parameters, zones: usize) -> Self {
+        Self { parameters, zones }
+    }
+}
+
+impl Spec for HeaderCoordinatorSpec {
+    type Instance = HeaderCoordinatorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![port("pressure", Direction::In, ValueKind::Float)];
+        for index in 1..=self.zones {
+            ports.push(port(
+                &format!("valve_pos_{index}"),
+                Direction::In,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("airflow_{index}"),
+                Direction::In,
+                ValueKind::Float,
+            ));
+            ports.push(port(
+                &format!("pulsing_{index}"),
+                Direction::In,
+                ValueKind::Bool,
+            ));
+            ports.push(port(
+                &format!("pulse_grant_{index}"),
+                Direction::Out,
+                ValueKind::Bool,
+            ));
+        }
+        ports.push(port("pressure_sp", Direction::Out, ValueKind::Float));
+        ports.push(port("blower_demand", Direction::Out, ValueKind::Float));
+        ports.push(port("most_open", Direction::Out, ValueKind::Int));
+        ports.push(port("at_bound", Direction::Out, ValueKind::Bool));
+        ports.push(port("pulse_blocked", Direction::Out, ValueKind::Bool));
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        HeaderCoordinatorInstance {
+            id,
+            pressure: Sink::port(id, "pressure"),
+            pressure_sp: Source::port(id, "pressure_sp"),
+            blower_demand: Source::port(id, "blower_demand"),
+            most_open: Source::port(id, "most_open"),
+            at_bound: Source::port(id, "at_bound"),
+            pulse_blocked: Source::port(id, "pulse_blocked"),
+        }
+    }
+}
+
+/// Spec for the `phase-monitor` kind: the phase-conditioned
+/// verification checks architecture decision 61 records — ripening
+/// turbidity under a declared bound within a declared duration of the
+/// condition window, and clean-bed headloss within a declared
+/// deviation of its captured baseline.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the measured
+/// value; `phase` (`In`, `Bool`) — the condition window; `capture`
+/// (`In`, `Bool`) — while asserted inside the window the kind holds
+/// `in` as its baseline; `deviation` (`Out`, `Float`) — the reported
+/// `in − baseline`; `exceeded` (`Out`, `Bool`) — the excursion
+/// condition the alarm set consumes; `overdue` (`Out`, `Bool`) — the
+/// bound not met within `limit_ticks` of the phase opening.
+/// Parameters: `bound` (required non-negative finite `Float`),
+/// `limit_ticks` (required `Int` in `1..=i64::MAX`), and `mode`
+/// (required `Int` code `0`/`1` — absolute bound on `in` / deviation
+/// from the captured baseline).
+pub struct PhaseMonitorSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `phase-monitor` instance.
+pub struct PhaseMonitorInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the measured value the check
+    /// verifies — turbidity for ripening, headloss for CBHL.
+    pub input: Sink<f64>,
+    /// `phase` port (`In`, `Bool`): the condition window — the
+    /// post-wash or return-to-service flag decoded upstream.
+    pub phase: Sink<bool>,
+    /// `capture` port (`In`, `Bool`): while asserted inside the
+    /// window the kind tracks `in` as its baseline — the CBHL
+    /// reference-flow hold.
+    pub capture: Sink<bool>,
+    /// `deviation` port (`Out`, `Float`): the reported
+    /// `in − baseline`, `0.0` until the window's first capture.
+    pub deviation: Source<f64>,
+    /// `exceeded` port (`Out`, `Bool`): the excursion condition the
+    /// alarm set consumes.
+    pub exceeded: Source<bool>,
+    /// `overdue` port (`Out`, `Bool`): the bound not met within
+    /// `limit_ticks` of the phase opening.
+    pub overdue: Source<bool>,
+}
+
+impl PhaseMonitorSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "phase-monitor";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("bound", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("mode", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for PhaseMonitorSpec {
+    type Instance = PhaseMonitorInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("phase", Direction::In, ValueKind::Bool),
+            port("capture", Direction::In, ValueKind::Bool),
+            port("deviation", Direction::Out, ValueKind::Float),
+            port("exceeded", Direction::Out, ValueKind::Bool),
+            port("overdue", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        PhaseMonitorInstance {
+            id,
+            input: Sink::port(id, "in"),
+            phase: Sink::port(id, "phase"),
+            capture: Sink::port(id, "capture"),
+            deviation: Source::port(id, "deviation"),
+            exceeded: Source::port(id, "exceeded"),
+            overdue: Source::port(id, "overdue"),
+        }
+    }
+}
+
+/// Spec for the `surge-guard` kind: the machine-protection demand
+/// bound architecture decision 64 records — a blower's capacity
+/// demand bounded against the declared two-variable
+/// flow-versus-pressure surge region (plus the optional
+/// minimum-current proxy), clamping or tripping per `on_guard` and
+/// honoring the hardwired proven `surge_trip` unconditionally.
+///
+/// Ports mirror the descriptor: `demand` (`In`, `Float`) — the unit's
+/// capacity demand, conventionally a `blower-group`'s `capacity_i`;
+/// `flow`, `pressure` (`In`, `Float`) — the surge-region
+/// measurements; `current` (`In`, `Float`) — the optional
+/// minimum-amperage proxy, declared only when the spec's `current`
+/// flag is set; `surge_trip` (`In`, `Bool`) — the hardwired
+/// protective device's proven trip; `out` (`Out`, `Float`);
+/// `guarding` and `tripped` (`Out`, `Bool`). Parameters: `min_flow`,
+/// `max_pressure`, `min_current` (required non-negative finite
+/// `Float`s — the declared surge-region bounds), `on_guard`
+/// (required `Int` code `0`/`1` — clamp the demand at the bound /
+/// trip the machine to `trip_value`), and `trip_value` (required
+/// finite `Float` — the demand a trip emits).
+pub struct SurgeGuardSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+    /// Whether the instance declares the optional `current` port —
+    /// the minimum-amperage surge proxy. `false` emits an instance
+    /// with no `current` to wire, and the kind guards on flow and
+    /// pressure only.
+    pub current: bool,
+}
+
+/// Typed port handles for a `surge-guard` instance.
+pub struct SurgeGuardInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `demand` port (`In`, `Float`): the capacity demand the guard
+    /// bounds — conventionally wired to a `blower-group`'s
+    /// `capacity_i` source.
+    pub demand: Sink<f64>,
+    /// `flow` port (`In`, `Float`): the unit's discharge airflow —
+    /// the surge region's low-flow edge.
+    pub flow: Sink<f64>,
+    /// `pressure` port (`In`, `Float`): the discharge or header
+    /// pressure — the region's high-pressure edge.
+    pub pressure: Sink<f64>,
+    /// `current` port (`In`, `Float`): the motor current — the
+    /// minimum-amperage proxy — `Some` only when the spec declared
+    /// the port; wiring a handle the emitted instance does not carry
+    /// is `UnknownPort` at `build`.
+    pub current: Option<Sink<f64>>,
+    /// `surge_trip` port (`In`, `Bool`): the hardwired protective
+    /// device's proven-surge status.
+    pub surge_trip: Sink<bool>,
+    /// `out` port (`Out`, `Float`): the guarded demand feeding the
+    /// machine's actuation path.
+    pub out: Source<f64>,
+    /// `guarding` port (`Out`, `Bool`): asserts while a declared
+    /// bound is crossed — the operating point inside the surge
+    /// region.
+    pub guarding: Source<bool>,
+    /// `tripped` port (`Out`, `Bool`): asserts while a proven surge,
+    /// a declared trip response, or an untrusted demand drives
+    /// `trip_value`.
+    pub tripped: Source<bool>,
+}
+
+impl SurgeGuardSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "surge-guard";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("min_flow", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("max_pressure", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("min_current", ValueKind::Float, Some(NONNEGATIVE_F64)),
+        required("on_guard", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+        required("trip_value", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map;
+    /// `current` selects whether the optional minimum-amperage port
+    /// is declared.
+    pub fn new(parameters: Parameters, current: bool) -> Self {
+        Self {
+            parameters,
+            current,
+        }
+    }
+}
+
+impl Spec for SurgeGuardSpec {
+    type Instance = SurgeGuardInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        let mut ports = vec![
+            port("demand", Direction::In, ValueKind::Float),
+            port("flow", Direction::In, ValueKind::Float),
+            port("pressure", Direction::In, ValueKind::Float),
+        ];
+        if self.current {
+            ports.push(port("current", Direction::In, ValueKind::Float));
+        }
+        ports.extend([
+            port("surge_trip", Direction::In, ValueKind::Bool),
+            port("out", Direction::Out, ValueKind::Float),
+            port("guarding", Direction::Out, ValueKind::Bool),
+            port("tripped", Direction::Out, ValueKind::Bool),
+        ]);
+        ports
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        SurgeGuardInstance {
+            id,
+            demand: Sink::port(id, "demand"),
+            flow: Sink::port(id, "flow"),
+            pressure: Sink::port(id, "pressure"),
+            current: self.current.then(|| Sink::port(id, "current")),
+            surge_trip: Sink::port(id, "surge_trip"),
+            out: Source::port(id, "out"),
+            guarding: Source::port(id, "guarding"),
+            tripped: Source::port(id, "tripped"),
+        }
+    }
+}
+
+/// Spec for the `demand-fallback` kind: the declared
+/// all-measurements-bad demand response architecture decision 65
+/// records — the terminal fallback on a measurement-conditioned
+/// demand path, engaging while the selected `pv` is untrusted.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the demand
+/// passed through while `pv` reads `Good`; `pv` (`In`, `Float`) — the
+/// selected measurement whose quality drives the fallback; `out`
+/// (`Out`, `Float`); `fallback_active` (`Out`, `Bool`). Parameters:
+/// `on_bad` (required `Int` code `0`/`1`/`2` — hold the last
+/// `Good`-stamped demand / drive `fallback_flow` / drive `safe_flow`),
+/// `fallback_flow` and `safe_flow` (required finite `Float`s — the
+/// fixed demands the codes emit).
+pub struct DemandFallbackSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `demand-fallback` instance.
+pub struct DemandFallbackInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the demand passed through while the
+    /// measurement reads `Good` — conventionally a DO loop's airflow
+    /// demand.
+    pub input: Sink<f64>,
+    /// `pv` port (`In`, `Float`): the selected measurement whose
+    /// quality drives the fallback — a voter's or selector's `out`, or
+    /// the single probe.
+    pub pv: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the demand served downstream.
+    pub out: Source<f64>,
+    /// `fallback_active` port (`Out`, `Bool`): asserted for the
+    /// engagement's duration — the alarmed transition surface.
+    pub fallback_active: Source<bool>,
+}
+
+impl DemandFallbackSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "demand-fallback";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("on_bad", ValueKind::Int, Some(CODE_RANGE)),
+        required("fallback_flow", ValueKind::Float, Some(FINITE_F64)),
+        required("safe_flow", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for DemandFallbackSpec {
+    type Instance = DemandFallbackInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("pv", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("fallback_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        DemandFallbackInstance {
+            id,
+            input: Sink::port(id, "in"),
+            pv: Sink::port(id, "pv"),
+            out: Source::port(id, "out"),
+            fallback_active: Source::port(id, "fallback_active"),
+        }
+    }
+}
+
+/// Spec for the `feedforward-sum` kind: the additive trim contract
+/// architecture decision 66 records — the bounded `ff` + `trim` sum on
+/// a zone's demand path, the sibling of `flow-paced-ratio` whose
+/// `trim` scales where this kind's adds.
+///
+/// Ports mirror the descriptor: `ff` (`In`, `Float`) — the computed
+/// feed-forward demand; `trim` (`In`, `Float`) — the feedback loop's
+/// additive correction; `out` (`Out`, `Float`) — the summed, bounded
+/// demand; `clamped` and `fallback_active` (`Out`, `Bool`).
+/// Parameters: `trim_min`, `trim_max`, `min_demand`, `max_demand`
+/// (required finite `Float`s — the `min <= max` ordering of each bound
+/// pair is a cross-parameter invariant the kind's `from_parameters`
+/// checks; a spec cannot express it), `on_bad_ff` and `on_bad_trim`
+/// (required `Int` codes in `0..=1` — `0` the untrusted term drops out
+/// and the other term serves alone, `1` the term's last `Good` finite
+/// value stands in).
+pub struct FeedforwardSumSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `feedforward-sum` instance.
+pub struct FeedforwardSumInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `ff` port (`In`, `Float`): the feed-forward demand —
+    /// conventionally a `flow-paced-ratio`'s `demand` with its `trim`
+    /// unwired where the pacing law is proportional.
+    pub ff: Sink<f64>,
+    /// `trim` port (`In`, `Float`): the feedback loop's additive
+    /// correction — typically the zone DO `pid`'s `out`.
+    pub trim: Sink<f64>,
+    /// `out` port (`Out`, `Float`): the summed, bounded demand.
+    pub out: Source<f64>,
+    /// `clamped` port (`Out`, `Bool`): asserts while the trim-authority
+    /// or demand bound engages.
+    pub clamped: Source<bool>,
+    /// `fallback_active` port (`Out`, `Bool`): asserts while a declared
+    /// bad-signal response runs.
+    pub fallback_active: Source<bool>,
+}
+
+impl FeedforwardSumSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "feedforward-sum";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("trim_min", ValueKind::Float, Some(FINITE_F64)),
+        required("trim_max", ValueKind::Float, Some(FINITE_F64)),
+        required("min_demand", ValueKind::Float, Some(FINITE_F64)),
+        required("max_demand", ValueKind::Float, Some(FINITE_F64)),
+        required("on_bad_ff", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+        required("on_bad_trim", ValueKind::Int, Some(BINARY_CODE_RANGE)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for FeedforwardSumSpec {
+    type Instance = FeedforwardSumInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("ff", Direction::In, ValueKind::Float),
+            port("trim", Direction::In, ValueKind::Float),
+            port("out", Direction::Out, ValueKind::Float),
+            port("clamped", Direction::Out, ValueKind::Bool),
+            port("fallback_active", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        FeedforwardSumInstance {
+            id,
+            ff: Sink::port(id, "ff"),
+            trim: Sink::port(id, "trim"),
+            out: Source::port(id, "out"),
+            clamped: Source::port(id, "clamped"),
+            fallback_active: Source::port(id, "fallback_active"),
+        }
+    }
+}
+
+/// Spec for the `rate-of-rise` kind: the one-sided derivative
+/// annunciation the IJmuiden composition's recorded contract gap
+/// names — the composed `deviation-monitor`-versus-`signal-filter`
+/// detector flags fast excursions in either direction, so the rapidly
+/// falling level after the protective draw reads as a "rise"; this
+/// kind's flag asserts only while the input's per-scan rise meets the
+/// declared bound.
+///
+/// Ports mirror the descriptor: `in` (`In`, `Float`) — the measured
+/// value the kind differences; `rate` (`Out`, `Float`) — the per-scan
+/// first difference in the input's declared measured-units-per-tick,
+/// the evidence the trend and faceplate show beside the flag;
+/// `rising` (`Out`, `Bool`) — the standing condition a downstream
+/// `bool-latching-alarm`/`managed-bool-latching-alarm` `in` consumes.
+/// Parameters: `rate_limit` (required positive finite `Float` — the
+/// per-tick rise the flag asserts at) and `initial_rate` (required
+/// finite `Float` — the rate reported until the first `Good` sample
+/// pair completes a difference).
+pub struct RateOfRiseSpec {
+    /// The instance's parameter map.
+    pub parameters: Parameters,
+}
+
+/// Typed port handles for a `rate-of-rise` instance.
+pub struct RateOfRiseInstance {
+    /// The allocated component id.
+    pub id: ComponentId,
+    /// `in` port (`In`, `Float`): the measured value the kind
+    /// differences — conventionally the level whose rise annunciates.
+    pub input: Sink<f64>,
+    /// `rate` port (`Out`, `Float`): the per-scan first difference —
+    /// the evidence trended beside the flag.
+    pub rate: Source<f64>,
+    /// `rising` port (`Out`, `Bool`): the standing rise-exceeds-bound
+    /// condition — wire it into a `bool-latching-alarm` for the
+    /// station's alarm set.
+    pub rising: Source<bool>,
+}
+
+impl RateOfRiseSpec {
+    /// The model kind string this spec emits.
+    pub const KIND: &'static str = "rate-of-rise";
+
+    /// The declared parameter set.
+    pub const PARAMETERS: &'static [ParamDecl] = &[
+        required("rate_limit", ValueKind::Float, Some(POSITIVE_F64)),
+        required("initial_rate", ValueKind::Float, Some(FINITE_F64)),
+    ];
+
+    /// A spec carrying `parameters` as the instance's parameter map.
+    pub fn new(parameters: Parameters) -> Self {
+        Self { parameters }
+    }
+}
+
+impl Spec for RateOfRiseSpec {
+    type Instance = RateOfRiseInstance;
+
+    fn kind(&self) -> &str {
+        Self::KIND
+    }
+
+    fn ports(&self) -> Vec<PortDecl> {
+        vec![
+            port("in", Direction::In, ValueKind::Float),
+            port("rate", Direction::Out, ValueKind::Float),
+            port("rising", Direction::Out, ValueKind::Bool),
+        ]
+    }
+
+    fn declared_parameters(&self) -> Option<&[ParamDecl]> {
+        Some(Self::PARAMETERS)
+    }
+
+    fn parameter_values(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    fn instance(&self, id: ComponentId) -> Self::Instance {
+        RateOfRiseInstance {
+            id,
+            input: Sink::port(id, "in"),
+            rate: Source::port(id, "rate"),
+            rising: Source::port(id, "rising"),
         }
     }
 }

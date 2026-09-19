@@ -53,6 +53,30 @@ impl std::error::Error for BuildError {
     }
 }
 
+/// The decision-70 rejection a declared alarm kind's construction
+/// reports through
+/// [`ComponentSpec::require_rationalization`](crate::ComponentSpec::require_rationalization):
+/// the instance carries no `rationalization` block, or leaves a prose
+/// field empty — `element` names what to add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingRationalization {
+    /// The absent or empty element: `"rationalization"` for an absent
+    /// block, or the field's name — `"consequence"`, `"required_action"`,
+    /// or `"reference"`.
+    pub element: &'static str,
+}
+
+impl fmt::Display for MissingRationalization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.element {
+            "rationalization" => write!(f, "requires a \"rationalization\" record"),
+            field => write!(f, "rationalization field {field:?} is missing or empty"),
+        }
+    }
+}
+
+impl std::error::Error for MissingRationalization {}
+
 /// Why a validated [`PlantModel`](dcs_model::PlantModel) could not be
 /// assembled into the driver surface and the executor.
 #[derive(Debug, Clone, PartialEq)]

@@ -15,7 +15,14 @@
 //! switchover its next scan produces what the active would have produced.
 //! The `components`, `outputs`, and `internal` sections transfer verbatim —
 //! they are controller-side state: `outputs` carries the image's `Out`
-//! samples and `internal` the image-carried `In` samples. The `driver`
+//! samples and `internal` the image-carried `In` samples. So does the
+//! `receipts` log — the bounded tail of the run's command audit, so
+//! `GET /receipts` answers identically on a peer that adopted the
+//! checkpoint — along with the `command_admission` counters measuring
+//! that audit, so the pair's command-ingress telemetry agrees too and
+//! the adopted window's place in the submission sequence stays known:
+//! `attempts` minus the retained length is the count the source already
+//! evicted. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -23,7 +30,9 @@
 //! `driver` empty and the restore skips it.
 
 use crate::executor::WiringError;
-use dcs_core::{ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind};
+use dcs_core::{
+    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -55,6 +64,31 @@ pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 /// `outputs` and `internal` sections all still apply after the version
 /// is accepted.
 pub const SUPPORTED_FORMAT_VERSIONS: &[u32] = &[0, CHECKPOINT_FORMAT_VERSION];
+
+/// The pending-command queue's admission counters — the bounded
+/// command-ingress metrics the snapshot's `command_queue` section
+/// reports.
+///
+/// The executor counts into this set on every
+/// [`Executor::submit_command`](crate::Executor::submit_command), and the
+/// checkpoint carries it beside the `receipts` log it measures: a peer
+/// adopting the checkpoint converges to the same admission history, so
+/// the pair's command-ingress telemetry answers identically across a
+/// switchover. The snapshot section's `capacity` and `depth` are not
+/// here — the bound is construction configuration, and the depth is the
+/// adopted pending set itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandAdmissionCounts {
+    /// Commands presented for admission — every submission the
+    /// executor's command path received, whether it settled accepted,
+    /// was refused by validation, or was refused by a full queue.
+    pub attempts: u64,
+    /// Validated submissions refused because the pending queue was at
+    /// capacity — each answered with a `queue_full` rejection receipt.
+    pub full_rejections: u64,
+    /// The deepest the pending queue has run — the high-water mark.
+    pub high_water: usize,
+}
 
 /// A serializable snapshot of a run's transferable state.
 ///
@@ -121,6 +155,58 @@ pub struct Checkpoint {
     /// checkpoints written before forces existed; defaults to empty.
     #[serde(default)]
     pub forces: BTreeMap<PointId, Value>,
+    /// The command receipt log at capture: the retained tail of the
+    /// run's audit — the most recent receipts in submission order,
+    /// bounded by the capturing run's receipt-log capacity, served as
+    /// `GET /receipts`. The window's place in the submission sequence
+    /// is recoverable from the `command_admission` counters — see
+    /// [`receipt_base`](Self::receipt_base). Restoring it converges
+    /// the tracking peer's log to the active's, so the pair presents
+    /// one continuous audit trail across a switchover — evictions the
+    /// source already made showing on the peer as the same numbering
+    /// gap — except the contiguous tail of the restoring run's own
+    /// log this window's high-water never reached: those receipts are
+    /// submissions the capture predates, not entries the line dropped,
+    /// so the restore keeps them suspended rather than settling their
+    /// absence as a verdict; entries still `Accepted` at capture
+    /// re-queue on the restoring run — verbatim, past the pending
+    /// queue's admission bound: carried run state is not new admission,
+    /// so a command taken over between its submission boundary and its
+    /// applying scan is not lost, and a queue restored at or over the
+    /// bound admits nothing new until a scan drains it.
+    /// Absent from checkpoints written before the section existed;
+    /// defaults to empty.
+    #[serde(default)]
+    pub receipts: Vec<CommandReceipt>,
+    /// The pending-command queue's admission counters at capture,
+    /// converging beside the `receipts` log they measure — the pair's
+    /// `command_queue` telemetry section answers identically on either
+    /// peer. `attempts` doubles as the receipt window's high-water mark:
+    /// every submission produced exactly one receipt. Absent from
+    /// checkpoints written before the section existed; defaults to
+    /// zeroed — a legacy log is then the never-evicted prefix it always
+    /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
+    #[serde(default)]
+    pub command_admission: CommandAdmissionCounts,
+}
+
+impl Checkpoint {
+    /// The absolute submission index of `receipts[0]` — the count of
+    /// settled receipts the capturing run had already evicted at
+    /// capture.
+    ///
+    /// Derived rather than carried: `attempts` counts every lifetime
+    /// submission and each produced exactly one receipt, so
+    /// `attempts - receipts.len()` is the evicted prefix's length. A
+    /// checkpoint captured before admission counters existed reports
+    /// zeroed counters; saturating subtraction then resolves to 0 —
+    /// the base those logs genuinely had, since nothing had ever been
+    /// evicted.
+    pub fn receipt_base(&self) -> u64 {
+        self.command_admission
+            .attempts
+            .saturating_sub(self.receipts.len() as u64)
+    }
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.

@@ -1,7 +1,97 @@
 # Implementation plan: Lenovo hardware QA
 
-Status: proposed, not deployed. Prepared 2026-09-14.
+Status: simulation lane implemented and deployed. Prepared 2026-09-14;
+runner + report contract landed 2026-09-15 (see below).
 Implementation order: second, after [daily architecture review](daily-architecture-review-plan.md).
+
+## Landed 2026-09-15 (HQ-1, HQ-2 deterministic slice, HQ-5 provisioning slice)
+
+- `qa_lane/report.py`: versioned run-report contract (schema_version 1)
+  with validator and passed/failed/interrupted fixtures — run identity,
+  attempted vs completed SHA, image digests, per-scenario outcomes,
+  capability limitations, infrastructure failures, action timeline.
+- `qa_lane/state.py` + `qa_lane/runner.py`: SQLite-backed Lenovo
+  supervisor — exact-SHA queue (newest wins, intervening range
+  preserved), one active run via flock + oneshot unit, daily budget
+  (4/day) and one auto-retry per inconclusive SHA, 2 h hard timeout,
+  restart reconciliation of dead runs and labeled orphan containers.
+- `qa_lane/scenarios.py`: deterministic checks over the simulated rig —
+  active role + telemetry, standby convergence, writable-point command,
+  controller restart recovery (`--state-file`/`--journal-file` on
+  runner-owned per-controller paths, with a runner-owned container
+  stop/start action on the run timeline), demote/promote failover,
+  receipts/journal evidence — all through the documented monitor
+  endpoints.
+- `qa_lane/relay.py`: WSL-side sanitizer + publisher pushing
+  `qa/latest.json` and `qa/run-<id>.json` through the Pi report key.
+- `qa_lane/deploy/`: generic systemd unit/timer and config example.
+- Build choice: no CI image pinning exists, so images are compiled on
+  the Lenovo from the pushed `git archive` of the exact SHA inside a
+  cpuset/memory/PID-limited builder container running the checked-in
+  Dockerfile's build stage verbatim, then packaged into the same
+  bookworm-slim + uid 10001 + entrypoint runtime contract. Documented
+  as the interim path until CI-pinned images exist.
+- Report-only: no GitHub issue publication (finding ingestion is a
+  later task). Devin exploration phase gated behind the deterministic
+  scenarios per the plan's ordering.
+
+### Landed 2026-09-16 (charter-driven exploration, Task 3)
+
+- `qa_lane/explorer.py` + `qa_lane/explorer_prompt.md`: `qax-*`
+  exploration runs dispatch when no verification or assessment is due —
+  the same build/rig skeleton, then a time-bounded Devin session
+  (`swe-2-high`, dangerous permissions) on the host receives a rendered
+  charter prompt with the run id, exact revision, changed range, mode,
+  endpoints, UI URL, rig manifest, recent merges, open-backlog snapshot,
+  pending fix verifications, the exploration ledger, and the forbidden
+  actions list. The agent chooses its own charter under a novelty rule;
+  there is no scenario list.
+- Agent output contract: `results/agent-result.json` (charter, dynamic
+  scenario results with stable mechanism keys, capability limitations,
+  infrastructure failures, verification replays, coverage ledger,
+  timeline) plus `exploration-summary.md`, `evidence/`, `scripts/` —
+  validated and folded into the run report; malformed entries degrade to
+  named infrastructure failures instead of sinking the run.
+- `qa_lane/report.py` schema v3: optional top-level `mode` and
+  `exploration` channel; per-scenario explicit finding fields
+  (`module`, `mode`, `reproduction`, `severity`, `confidence`,
+  `test_requirements`, `product_cause`) so exploratory defects publish
+  real tickets instead of coordinator-default stubs. v1/v2 reports
+  remain valid input.
+- `agent_pool/findings.py`: `_scenario_finding` prefers the explicit
+  schema-v3 fields; the pending-verification queue marks cases with no
+  deterministic scenario as `replay: agent` — the exploration lane
+  re-runs those reproductions, `qav-*` skips them.
+- Run bookkeeping scopes to `qa-` prefixes so an exploration of an older
+  verdicted revision never regresses `last_attempted_sha`, triggers a
+  scenario retry, or lets a queued dedicated run be superseded.
+- Cadence: `exploration_interval_seconds` spacing plus
+  `max_explorations_per_day`, outside the assessment's daily budget;
+  budgets are config so cadence can tighten without a code change.
+- Session sandbox: host-level Devin process (not a container — it needs
+  host loopback for the rig's monitor ports and egress to the Devin
+  API), read-only worktree source, results dir under the run dir,
+  process-group kill at the time budget. An ephemeral agent container
+  remains future hardening work.
+
+### Landed 2026-09-15 (fix verification, Task 2)
+
+- `qa_lane/report.py` schema v2: optional `verifications` channel —
+  finding key, original case identity, fix SHA, tested SHA, ancestry
+  record, verdict, evidence. v1 reports remain valid input.
+- `qa_lane/verify.py` + runner/state hooks: pending verifications arrive
+  as `verifications.json` (`qa-verifications/1`) pushed by the WSL
+  relay; `qav-*` verification runs dispatch ahead of the newest-SHA
+  assessment, prove the tested revision contains the fix via
+  `git merge-base --is-ancestor` in the lane's bare mirror (`git_dir`),
+  and replay exactly the original case. A non-containing revision is a
+  `blocked` report naming the check, never a verdict.
+- `agent_pool/findings.py`: `apply_verification` requires matching
+  finding key + case identity + this report's tested revision + ancestry
+  proof + real evidence, plus the supervisor's own containment lookup;
+  failed/ambiguous merge-SHA lookups stay pending and retry next poll,
+  and transient containment failures park for retry. The pending queue
+  is emitted as `verifications.json` beside the report inbox.
 
 ## Outcome
 
@@ -91,7 +181,9 @@ where appropriate. Do not build a second general-purpose issue dispatcher.
    Start the controller in simulation when hardware execution is not yet supported.
 6. Start ephemeral Devin with the configured CLI and `swe-2-high`. The agent first
    determines what works today, then chooses an exploratory plan with observable
-   expected outcomes. It verifies pending fixes before unrelated exploration.
+   expected outcomes. It verifies pending fixes before unrelated exploration
+   (deterministic slice landed: `qav-*` verification runs replay a finding's
+   original case ahead of the newest-SHA assessment).
 7. Devin operates monitoring/commands/browser UI and approved harness actions.
    Persist evidence during the run so a timeout does not erase all diagnostics.
 8. Validate the report, reconcile findings with the backlog, stop the controller,

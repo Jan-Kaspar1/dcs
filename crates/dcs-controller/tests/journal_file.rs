@@ -9,10 +9,12 @@
 
 use dcs_core::{Command, JournalEntry, PointId, Tick, Value, ValueKind};
 use dcs_monitor::MonitorClient;
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::process::Command as Process;
+
+mod support;
+
+use support::{Spawned, kill, listening_on, spawn};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: point 10 is a model-declared writable `In`
@@ -38,15 +40,23 @@ fn scratch(test: &str) -> PathBuf {
     dir
 }
 
-/// The file's `entry` records, in file order, decoded back into the
-/// contract's `JournalEntry` — marker lines are skipped.
-fn file_entries(path: &Path) -> Vec<JournalEntry> {
+/// The file's raw records in file order, decoded as JSON —
+/// `{"run_boundary": …}` markers and `{"entry": …}` records alike.
+fn file_records(path: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .unwrap()
         .lines()
-        .filter_map(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .unwrap()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The file's `entry` records, in file order, decoded back into the
+/// contract's `JournalEntry` — marker lines are skipped.
+fn file_entries(path: &Path) -> Vec<JournalEntry> {
+    file_records(path)
+        .iter()
+        .filter_map(|record| {
+            record
                 .get("entry")
                 .map(|entry| serde_json::from_value(entry.clone()).unwrap())
         })
@@ -55,11 +65,9 @@ fn file_entries(path: &Path) -> Vec<JournalEntry> {
 
 /// The file's `run_boundary` marker records as `(run, tick)` pairs.
 fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .filter_map(|line| {
-            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+    file_records(path)
+        .iter()
+        .filter_map(|record| {
             record.get("run_boundary").map(|marker| {
                 (
                     marker["run"].as_u64().unwrap(),
@@ -70,54 +78,33 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// A spawned `--driven` controller: scans run only when `POST /scan`
-/// requests them — a restart mid-run leaves the process dead until the
-/// test spawns its replacement, exactly the restart the journal file
-/// exists for. Killed on drop so a panicking test leaves nothing behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// Spawns the controller and reads stderr until its `listening on`
 /// line — a resumed process reports the resume first.
 fn spawn_driven(args: &[String]) -> Spawned {
-    let mut child = Process::new(BINARY)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("controller exited before reporting its address");
-        }
-        if let Some(addr) = line.trim().strip_prefix("listening on ") {
-            break addr.parse().unwrap();
-        }
-    };
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
+    spawn(Path::new(BINARY), args, listening_on)
 }
+
+/// The journaled-points rig: point 10 is a writable journaled `In`
+/// point — the receipted-write shape — and point 20 a journaled
+/// internal `Out` status point a `digital-output` component mirrors
+/// from the scripted, unjournaled point 11 — the component-driven
+/// shape.
+const JOURNALED_POINTS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-assembly/fixtures/journaled_points.json"
+);
 
 /// The driven-mode arguments: `--journal-file` always, `--state-file`
 /// when `state` names a checkpoint path.
 fn driven_args(journal: &Path, state: Option<&Path>) -> Vec<String> {
+    driven_args_for(TANK_LOOP, journal, state)
+}
+
+/// As [`driven_args`] for an explicit model — the journaled rig shares
+/// the same spawning harness.
+fn driven_args_for(model: &str, journal: &Path, state: Option<&Path>) -> Vec<String> {
     let mut args = vec![
-        TANK_LOOP.to_string(),
+        model.to_string(),
         "--listen".to_string(),
         "127.0.0.1:0".to_string(),
         "--driven".to_string(),
@@ -143,11 +130,6 @@ fn setpoint_write() -> Command {
     }
 }
 
-fn kill(spawned: &mut Spawned) {
-    spawned.child.kill().unwrap();
-    spawned.child.wait().unwrap();
-}
-
 #[test]
 fn journaled_entries_land_in_the_file_and_replay_across_a_restart() {
     let dir = scratch("restart");
@@ -171,11 +153,23 @@ fn journaled_entries_land_in_the_file_and_replay_across_a_restart() {
     assert_eq!(file_boundaries(&journal), vec![(1, 0)]);
 
     // The restarted process replays the file: the same entries answer
-    // GET /journal with their seqs, the run-2 marker separates the
-    // lifetimes in the file, and new entries continue the numbering.
+    // GET /journal with their seqs behind the restart's served boundary
+    // entry — the run-2 marker's served form, attributing the lifetimes
+    // to a journal consumer — and new entries continue the numbering.
     let second = spawn_driven(&driven_args(&journal, None));
     let client = MonitorClient::new(second.addr);
-    assert_eq!(client.journal(0).unwrap(), before_restart);
+    let served = client.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: Tick::ZERO,
+            event: dcs_core::JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     client.advance(HALF / 2).unwrap();
     let after_restart = client.journal(0).unwrap();
     assert!(after_restart.len() > before_restart.len());
@@ -208,12 +202,24 @@ fn a_state_file_resumed_run_appends_in_the_restored_tick_domain() {
     kill(&mut first);
 
     // The state file resumes the run at tick HALF; the journal file
-    // keeps appending — the boundary marker records the restored tick,
+    // keeps appending — the boundary marker records the restored tick
+    // and journals once as the restart's served `run_boundary` entry —
     // and post-restart entries live in the restored tick domain with
     // continuing seqs.
     let second = spawn_driven(&driven_args(&journal, Some(&state)));
     let client = MonitorClient::new(second.addr);
-    assert_eq!(client.journal(0).unwrap(), before_restart);
+    let served = client.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: Tick(HALF),
+            event: dcs_core::JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(client.snapshot().unwrap().tick, Tick(HALF));
     client.advance(HALF).unwrap();
 
@@ -223,8 +229,11 @@ fn a_state_file_resumed_run_appends_in_the_restored_tick_domain() {
         after_restart[before_restart.len()].seq,
         before_restart.last().unwrap().seq + 1
     );
+    // The boundary itself is attributed to the tick the resumed run
+    // starts at; every later entry lives in the restored tick domain.
+    assert_eq!(after_restart[before_restart.len()].tick, Tick(HALF));
     assert!(
-        after_restart[before_restart.len()..]
+        after_restart[before_restart.len() + 1..]
             .iter()
             .all(|entry| entry.tick > Tick(HALF)),
         "{after_restart:?}"
@@ -252,8 +261,9 @@ fn a_legacy_spelling_journal_file_replays_through_the_aliases() {
     std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
 
     // Replay accepts every legacy spelling through the aliases: the
-    // entries answer GET /journal identically to their canonical form,
-    // and new entries continue the numbering behind a run-2 marker.
+    // entries answer GET /journal identically to their canonical form
+    // behind the restart's served boundary entry, and new entries
+    // continue the numbering behind a run-2 marker.
     let spawned = spawn_driven(&driven_args(&journal, None));
     let client = MonitorClient::new(spawned.addr);
     let replayed = client.journal(0).unwrap();
@@ -295,13 +305,14 @@ fn a_legacy_spelling_journal_file_replays_through_the_aliases() {
                     },
                 }
             ),
+            (4, &dcs_core::JournalEvent::RunBoundary { run: 2 }),
         ]
     );
     client.advance(1).unwrap();
     let after = client.journal(0).unwrap();
     assert!(after.len() > replayed.len(), "{after:?}");
     assert_eq!(&after[..replayed.len()], &replayed[..]);
-    assert_eq!(after[replayed.len()].seq, 4);
+    assert_eq!(after[replayed.len()].seq, 5);
     assert_eq!(file_boundaries(&journal), vec![(1, 0), (2, 0)]);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -336,6 +347,119 @@ fn a_corrupt_journal_file_fails_startup_naming_the_file_and_record() {
 }
 
 #[test]
+fn a_receipted_write_and_a_component_transition_journal_side_by_side() {
+    let dir = scratch("journaled");
+    let journal = dir.join("journal.jsonl");
+
+    // First lifetime — the first scan journals the declared points'
+    // first observed samples (`from: None` on the two journaled
+    // points). The receipted write to journaled writable point 10 then
+    // lands its `CommandSettled` and the resulting `PointChanged` at
+    // the applying scan — the action's attribution and the transition
+    // coexisting in `seq` order.
+    let mut first = spawn_driven(&driven_args_for(JOURNALED_POINTS, &journal, None));
+    let client = MonitorClient::new(first.addr);
+    client.advance(1).unwrap();
+    let receipt = client
+        .command(&Command::WriteValue {
+            point: PointId(10),
+            kind: ValueKind::Bool,
+            value: Value::Bool(true),
+        })
+        .unwrap();
+    client.advance(1).unwrap();
+
+    // Scan 3 flips scripted point 11 — unjournaled, so no value entry —
+    // and the digital-output component mirrors it onto journaled status
+    // point 20: a component-driven transition with no command and so
+    // no receipt.
+    client.advance(1).unwrap();
+
+    let before_restart = client.journal(0).unwrap();
+    let settled = before_restart
+        .iter()
+        .position(|entry| matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. }))
+        .expect("the write settled");
+    assert_eq!(
+        before_restart[settled].event,
+        dcs_core::JournalEvent::CommandSettled {
+            receipt: dcs_core::CommandReceipt {
+                command: receipt.command,
+                outcome: dcs_core::CommandOutcome::Applied { tick: Tick(2) },
+                actor: None,
+            },
+        }
+    );
+    assert_eq!(
+        before_restart[settled + 1].event,
+        dcs_core::JournalEvent::PointChanged {
+            point: PointId(10),
+            from: Some(Value::Bool(false)),
+            to: Value::Bool(true),
+        }
+    );
+    assert_eq!(before_restart[settled + 1].tick, Tick(2));
+    assert!(
+        before_restart
+            .iter()
+            .filter(|entry| {
+                matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. })
+            })
+            .count()
+            == 1,
+        "{before_restart:?}"
+    );
+    let status_transition = before_restart
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.event,
+                dcs_core::JournalEvent::PointChanged {
+                    point,
+                    to: Value::Bool(true),
+                    ..
+                } if point == PointId(20)
+            )
+        })
+        .expect("the component-driven status transition is journaled");
+    assert_eq!(status_transition.tick, Tick(3));
+    assert!(
+        before_restart.iter().all(|entry| !matches!(
+            entry.event,
+            dcs_core::JournalEvent::PointChanged { point, .. } if point == PointId(11)
+        )),
+        "{before_restart:?}"
+    );
+    kill(&mut first);
+
+    // Every served entry — receipts and `point_changed` transitions
+    // alike — landed in the file in order behind the run-1 marker, and
+    // a restarted process replays them with `seq` numbering continued
+    // behind the restart's served boundary entry.
+    assert_eq!(file_entries(&journal), before_restart);
+    let second = spawn_driven(&driven_args_for(JOURNALED_POINTS, &journal, None));
+    let client = MonitorClient::new(second.addr);
+    let served = client.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()].event,
+        dcs_core::JournalEvent::RunBoundary { run: 2 },
+        "the restart marker must be served: {served:?}"
+    );
+    client.advance(1).unwrap();
+    let after_restart = client.journal(0).unwrap();
+    assert_eq!(&after_restart[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        after_restart[before_restart.len()].seq,
+        before_restart.last().unwrap().seq + 1
+    );
+    assert_eq!(file_entries(&journal), after_restart);
+    assert_eq!(file_boundaries(&journal), vec![(1, 0), (2, 0)]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn identical_scripted_runs_produce_identical_files() {
     let scripted = |dir: &Path| {
         let journal = dir.join("journal.jsonl");
@@ -360,4 +484,122 @@ fn identical_scripted_runs_produce_identical_files() {
 
     let _ = std::fs::remove_dir_all(&first_dir);
     let _ = std::fs::remove_dir_all(&second_dir);
+}
+
+/// The scripted-rig reproduction of the restart defect: a `--state-file`
+/// resume continues the audit trail — the restored receipt log's settled
+/// commands must not re-journal, restored points re-observing unchanged
+/// must not journal phantom `from: null` transitions, and the restart
+/// boundary must be observable through `GET /journal`.
+#[test]
+fn a_state_file_restart_continues_the_record_without_re_journaling() {
+    let dir = scratch("resume-continues");
+    let journal = dir.join("journal.jsonl");
+    let state = dir.join("state.json");
+
+    // First lifetime: K receipted writes, each settled at its own scan
+    // boundary. The state file carries their receipt log and the journal
+    // file their settlements across the kill.
+    const SETTLED: usize = 3;
+    let mut first = spawn_driven(&driven_args(&journal, Some(&state)));
+    let client = MonitorClient::new(first.addr);
+    client.advance(1).unwrap();
+    for _ in 0..SETTLED {
+        client.command(&setpoint_write()).unwrap();
+        client.advance(1).unwrap();
+    }
+    let before_restart = client.journal(0).unwrap();
+    assert_eq!(
+        before_restart
+            .iter()
+            .filter(|entry| {
+                matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. })
+            })
+            .count(),
+        SETTLED,
+        "{before_restart:?}"
+    );
+    let restored_tick = client.snapshot().unwrap().tick;
+    kill(&mut first);
+
+    // The restart resumes the checkpoint and replays the journal: the
+    // replayed record answers verbatim behind the restart's boundary
+    // entry — the run-2 marker, served through GET /journal at bind
+    // before any post-restart scan.
+    let second = spawn_driven(&driven_args(&journal, Some(&state)));
+    let client = MonitorClient::new(second.addr);
+    let served = client.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: restored_tick,
+            event: dcs_core::JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
+
+    // Two post-restart scans — the reproduction's trigger. The served
+    // stream itself continues the record past its boundary entry: the
+    // run-1 entries answer verbatim before it, and nothing the resumed
+    // run already recorded re-journals after it — no standing census
+    // re-emitted as `from: null` transitions, no settled receipts
+    // repeated. A `GET /journal` consumer attributes each side of the
+    // seam to its process lifetime.
+    client.advance(2).unwrap();
+    let served = client.journal(0).unwrap();
+    let seam = served
+        .iter()
+        .position(|entry| matches!(entry.event, dcs_core::JournalEvent::RunBoundary { run: 2 }))
+        .expect("GET /journal must serve the restart's run boundary");
+    assert_eq!(&served[..seam], &before_restart[..]);
+    assert!(
+        served[seam + 1..].iter().all(|entry| !matches!(
+            entry.event,
+            dcs_core::JournalEvent::QualityChanged { from: None, .. }
+                | dcs_core::JournalEvent::PointChanged { from: None, .. }
+                | dcs_core::JournalEvent::CommandSettled { .. }
+        )),
+        "the served journal must not re-emit the standing census: {served:?}"
+    );
+
+    // The file's new run segment is the same record: its boundary
+    // marker separates the lifetimes and nothing journaled before the
+    // restart re-appends behind it.
+    let records = file_records(&journal);
+    let marker = records
+        .iter()
+        .rposition(|record| record.get("run_boundary").is_some())
+        .expect("the run-2 marker must separate the lifetimes");
+    let segment: Vec<JournalEntry> = records[marker + 1..]
+        .iter()
+        .filter_map(|record| {
+            record
+                .get("entry")
+                .map(|entry| serde_json::from_value(entry.clone()).unwrap())
+        })
+        .collect();
+    assert_eq!(
+        segment.first().map(|entry| &entry.event),
+        Some(&dcs_core::JournalEvent::RunBoundary { run: 2 }),
+        "the run's first journaled entry is its boundary: {segment:?}"
+    );
+    assert!(
+        segment
+            .iter()
+            .all(|entry| !matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. })),
+        "settled receipts must not re-journal across the restart: {segment:?}"
+    );
+    assert!(
+        segment.iter().all(|entry| !matches!(
+            entry.event,
+            dcs_core::JournalEvent::QualityChanged { from: None, .. }
+                | dcs_core::JournalEvent::PointChanged { from: None, .. }
+        )),
+        "unchanged restored points must not re-observe `from: null`: {segment:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

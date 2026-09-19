@@ -1,0 +1,64 @@
+[
+  {
+    "bool_flow": {
+      "input": 15,
+      "output": 12,
+      "on_rate": 0.0,
+      "off_rate": 0.25,
+      "initial": 0.25
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 100,
+      "output": 20,
+      "on_rate": -0.4,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "bool_flow": {
+      "input": 101,
+      "output": 21,
+      "on_rate": -0.4,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "flow_sum": {
+      "inputs": [
+        12,
+        20,
+        21
+      ],
+      "output": 13,
+      "bias": 0.0,
+      "initial": 0.25
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 10,
+      "initial": 3.5
+    }
+  },
+  {
+    "integrator": {
+      "input": 13,
+      "output": 11,
+      "initial": 3.45
+    }
+  },
+  {
+    "threshold": {
+      "input": 11,
+      "output": 15,
+      "on": 4.9,
+      "off": 4.7,
+      "initial": false
+    }
+  }
+]

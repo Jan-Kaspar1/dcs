@@ -15,6 +15,8 @@
   .bad { color: #b00; font-weight: bold; }
   .nosample { color: #888; font-style: italic; }
   #status { color: #666; }
+  #feed-state.gap, #feed-state.stale { display: inline-block; padding: 0.1rem 0.6rem;
+    border: 1px solid #36a; border-radius: 3px; color: #36a; font-weight: 600; }
   #receipt { background: #f6f6f6; padding: 0.5rem; white-space: pre-wrap; }
   #trends { display: flex; flex-wrap: wrap; gap: 1rem; }
   .trend { margin: 0; }
@@ -31,12 +33,35 @@
   #health > section { flex: 1 1 24rem; }
   .forced { background: #a60; color: #fff; font-size: 0.75rem;
           padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
-  #pair-summary.good, #io-health-summary.good, #alarm-summary.good { color: #060; }
-  #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad { color: #b00; font-weight: bold; }
+  #pair-summary.good, #io-health-summary.good, #alarm-summary.good,
+  #protection-summary.good { color: #060; }
+  #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad,
+  #protection-summary.bad { color: #b00; font-weight: bold; }
   tr.alarm td.value { font-weight: 600; }
   tr.alarm.bad td, tr.alarm.substituted td, tr.alarm.uncertain td {
     background: #f4f0fa; font-style: italic; }
+  tr.alarm .priority { display: inline-block; padding: 0 0.4rem;
+    border: 1px solid #999; border-radius: 3px; font-size: 0.8rem;
+    font-weight: 700; }
+  tr.alarm .priority.p1 { background: #b00; border-color: #b00; color: #fff; }
+  tr.alarm .priority.p2 { background: #e60; border-color: #e60; color: #fff; }
+  tr.alarm .priority.p3 { background: #fc3; border-color: #cc0; color: #420; }
+  tr.alarm .priority.other { background: #eee; color: #555; }
+  tr.alarm .rationalization-code { white-space: nowrap; font-size: 0.85rem;
+    color: #444; }
+  .rationalization { font-size: 0.82rem; color: #444; margin-top: 0.25rem; }
+  .rationalization p { margin: 0.2rem 0; }
+  .rationalization .field { font-weight: 600; color: #333; }
+  section.managed { margin: 0.8rem 0; }
+  section.managed h3 { margin: 0.3rem 0; }
+  .managed-count { font-size: 0.85rem; color: #666; margin: 0.2rem 0; }
+  #protection-pane { border: 2px solid #06c; border-radius: 4px;
+    padding: 0.4rem 1rem 0.8rem; margin: 1rem 0; background: #f4f8fc; }
+  #protection-pane .protection-note { font-size: 0.85rem; color: #345; }
+  tr.protection.bad td, tr.protection.substituted td,
+  tr.protection.uncertain td { background: #dde8f4; font-style: italic; }
   button.ack { color: #b00; font-weight: bold; }
+  button.managed { color: #a60; font-weight: bold; margin-left: 0.3rem; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -46,10 +71,10 @@
     gap: 0.6rem; margin: 0.25rem 0; }
   .faceplate .role .value { font-variant-numeric: tabular-nums; }
   .faceplate .role-process_value .value { font-size: 1.35rem; font-weight: 600; }
-  .faceplate .flag { display: inline-block; margin: 0.15rem 0.3rem 0.15rem 0;
+  .flag { display: inline-block; margin: 0.15rem 0.3rem 0.15rem 0;
     padding: 0 0.45rem; border: 1px solid #ccc; border-radius: 3px;
     background: #eee; color: #555; }
-  .faceplate .flag.on { background: #fee; border-color: #b00; color: #b00; font-weight: bold; }
+  .flag.on { background: #fee; border-color: #b00; color: #b00; font-weight: bold; }
   .faceplate table { margin-top: 0.4rem; font-size: 0.85rem; }
   .faceplate .diag { margin-top: 0.45rem; font-size: 0.8rem; color: #666; }
   .faceplate .diag .errors { color: #b00; font-weight: bold; }
@@ -64,6 +89,19 @@
   .faceplate .param-status { font-size: 0.8rem; color: #666; }
   .faceplate .param-status.warn { color: #a60; }
   .faceplate .param-status.bad { color: #b00; font-weight: bold; }
+  .faceplate details.interface { margin-top: 0.5rem; font-size: 0.85rem; }
+  .faceplate details.interface > summary { cursor: pointer; color: #555; }
+  .faceplate .res { margin: 0.4rem 0 0.4rem 0.6rem; }
+  .faceplate .res h4 { margin: 0.25rem 0; font-weight: 600; color: #445;
+    text-transform: capitalize; }
+  .faceplate .res-empty { margin: 0.15rem 0; color: #999; font-style: italic; }
+  .faceplate .command-arg { width: 5rem; }
+  .faceplate select.command-arg { width: auto; }
+  .faceplate button.invoke { margin-left: 0.3rem; }
+  .faceplate button.invoke:disabled { color: #888; }
+  .faceplate .command-status { font-size: 0.8rem; color: #666; }
+  .faceplate .command-status.warn { color: #a60; }
+  .faceplate .command-status.bad { color: #b00; font-weight: bold; }
   #overview-cards { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .pair-card { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 22rem; background: #fdfdfd; }
@@ -76,6 +114,7 @@
 <body>
 <h1>Plant monitoring</h1>
 <p id="status">connecting&hellip;</p>
+<p id="feed-state" hidden></p>
 
 <section id="overview" hidden>
 <h2>Controller pairs</h2>
@@ -107,21 +146,48 @@
 <section id="alarm-pane" hidden>
 <h2>Alarms</h2>
 <p id="alarm-summary"></p>
+<p><label>state
+  <select id="alarm-filter">
+    <option value="all">all</option>
+    <option value="active">active</option>
+    <option value="unacknowledged">unacknowledged</option>
+    <option value="shelved">shelved</option>
+    <option value="suppressed">suppressed</option>
+    <option value="out_of_service">out of service</option>
+  </select></label></p>
 <table>
   <thead>
     <tr>
       <th>Component</th><th>Status</th><th>Value</th><th>Quality</th>
-      <th>Last changed</th><th></th>
+      <th>Last changed</th><th>Priority</th><th></th>
     </tr>
   </thead>
   <tbody id="alarms"></tbody>
 </table>
+<div id="managed-lists"></div>
 <h3>Alarm journal</h3>
 <table>
   <thead>
     <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
   </thead>
   <tbody id="alarm-journal"></tbody>
+</table>
+</section>
+
+<section id="protection-pane" hidden>
+<h2>Protection layer</h2>
+<p class="protection-note">The independent protection layer's declared
+reported states — availability, demand, bypass, trip — rendered on their
+own surface: the HMI alarm path is never presented as the safeguard.</p>
+<p id="protection-summary"></p>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Value</th><th>Quality</th>
+      <th>Unit</th><th>Last changed</th>
+    </tr>
+  </thead>
+  <tbody id="protection-points"></tbody>
 </table>
 </section>
 
@@ -190,6 +256,28 @@
 // describe — degrades to a generic
 // name-plus-diagnostics-plus-wired-points view, never an error.
 //
+// The schema-driven interface surface (the block-interface decision):
+// every faceplate also carries the component's five declared resource
+// categories, fetched as GET /schema (the per-instance BlockInterface
+// registry — measurements, configuration, state, commands, events)
+// joined onto GET /resources (the same publication's live values,
+// command availability and refusal reasons, and the retained journal
+// tail attributed per component). The join is by component and
+// resource name; a peer predating the endpoints answers 404 and the
+// surface simply renders nothing — the absent-section convention.
+// Measurements and state render as labeled readouts with quality;
+// configuration rows carry the tunable entries' edit controls through
+// the same receipted set_parameter path the parameter table uses;
+// every named command — the adapted generic variants and the kind's
+// declared commands alike — is an invocable action whose declared
+// request arguments get typed controls, whose live unavailability
+// disables the control and shows the served refusal reason, and whose
+// submission flows through the receipted command path so a scan-
+// boundary refusal surfaces on the row and in the events list. Kind-
+// specific presentation is never the only usable surface: a kind with
+// no dedicated markup is fully operable through this generic rendering
+// alone.
+//
 // Operator forcing (the input-forcing decision's UI slice): the
 // snapshot's force set marks each forced point — a badge beside its
 // value in the point listing and on every faceplate element bound to
@@ -208,15 +296,52 @@
 // component, value, quality, and the tick the value last changed,
 // walked back through the point's retained history. A non-good quality
 // draws the whole row distinctly, so a degraded sensor reads as
-// uncertainty rather than a hidden alarm state. Journal entries
-// touching the alarm surface — quality transitions on status-bound
-// points, settled commands on them, the owning components' step
-// failures and tunes — list in tick order as the alarm journal. A
-// component declaring an `ack` input wired to a model-writable point
-// gets an ack affordance issuing an ordinary receipted write_value —
-// no alarm-specific protocol — and because the kind's ack is
-// level-observed the pane pulses it: once the write's apply tick has
-// scanned past, a second receipted write drops the point back to false.
+// uncertainty rather than a hidden alarm state.
+//
+// The managed-alarm decisions extend the pane: a component whose
+// shelved, suppressed, or out_of_service status port asserts — the
+// uniform vocabulary every managed kind shares — routes its rows to
+// the named managed list beneath the standing list, each list carrying
+// its count and every row still reporting the component's `alarm` and
+// `unacknowledged` truth; managed rows count toward the displayed
+// totals — suppressed or shelved alarms are never erased. Each row
+// renders the instance's declared priority — joined from the
+// snapshot's parameters section — as colour plus the textual level
+// from the declared PRIORITY_VOCABULARY presentation data, with the
+// declared `class` and `response_ticks` beside it, and the instance's
+// rationalization record — consequence, required action, reference —
+// joined from the served index's components section. The state select
+// filters rows by state — all, active, unacknowledged, and each
+// managed state — the operator navigation the pane offers. Journal
+// entries touching the alarm surface — value transitions on
+// status-bound journaled points, quality transitions, settled commands
+// on them, the owning components' step failures and tunes — list in
+// the durable journal's seq order as the alarm journal, so the
+// initiating cause of a burst stands first. A component declaring an
+// `ack` input wired to a model-writable point gets an ack affordance
+// issuing an ordinary receipted write_value — no alarm-specific
+// protocol — and because the kind's ack is level-observed the pane
+// pulses it: once the write's apply tick has scanned past, a second
+// receipted write drops the point back to false. The managed kinds'
+// `shelve` and `oos` inputs join the same way — the descriptor's
+// bound-point annotation plus the bound point's writable mark — but
+// they are held level-observed, not pulsed: the affordance writes the
+// request level and leaves it standing until the opposite command,
+// rendering shelve/unshelve and out-of-service/return-to-service by
+// the request point's live level rather than the flag, since `shelved`
+// drops at the max_shelve_ticks bound while the request still stands
+// and a re-shelve needs the request cycled through false. An unbound
+// or unwritable managed input offers nothing — the never-shelvable
+// surface — and a write attempted anyway meets the receipted path's
+// named rejection.
+//
+// The protection boundary (the independent-protection-layer decision):
+// each ?protection=<group> parameter names a model signal `group`
+// whose points are the independent protection layer's reported field
+// states — availability, demand, bypass, trip. Those points render in
+// their own section beside the alarm pane, visually distinct, so the
+// HMI alarm path is never presented as the safeguard; undeclared, the
+// section stays hidden.
 //
 // Pair view (the monitoring-under-redundancy decision): the page is
 // configured with both peers' monitor addresses — the serving origin is
@@ -225,14 +350,34 @@
 // same-origin. Under a pair, every refresh polls GET /role on each peer,
 // the data endpoints are read from the peer reporting "active" — one
 // logical controller — and the other peer contributes pair health only.
-// Commands submit only to the settled-active peer; a "not_active"
-// rejection means the command landed mid-transition, so roles are
-// re-polled and the command retried once. Beside the pair's role and
+// Two peers reporting "active" at once is the dual-active split-brain
+// that contract makes impossible: the pair summary names it as a
+// redundancy fault rather than rendering the pair healthy, the view
+// holds its current source rather than re-homing between claimants,
+// and commands find no unique target — nothing is sent while the
+// fault stands. Commands submit only to the settled-active peer; a
+// "not_active" rejection means the command landed mid-transition, so
+// roles are re-polled and the command retried once. Beside the pair's
+// role and
 // convergence reporting the I/O-health pane renders the snapshot's
 // io_health section — the executor's boundary counters and attributed
 // last fault, the driver's volunteered link diagnostics, and the pacing
 // shell's scan-overrun count — so operator-facing health reads as one
 // surface.
+//
+// Feed state (the disposable-consumer decision's page-side honesty):
+// the page is a seq-cursor consumer of the monitor's bounded served
+// streams, and it reports its own delivery state rather than letting
+// last-known values pass for current ones. A /history or /journal
+// since-poll answering past the cursor's successor — the stretch the
+// bounded store evicted before the page read it — marks the feed
+// "publication gap"; a /snapshot re-serving the same publication's
+// seq and tick — a stall — marks it "stale publication". Both render
+// on the #feed-state line beside the view, distinct from the pair
+// section's unreachable-peer fault (a peer's reachability, not the
+// feed's delivery) and from a row's non-Good quality (process data,
+// not delivery), and each clears on the next in-sequence, fresh
+// publication.
 //
 // Command audit identity (the command-path audit-identity decision):
 // ?operator=<name> configures the actor identity every command
@@ -277,9 +422,15 @@ for (const raw of urlParams.getAll("peer")) {
 // on every command submission as the attributed envelope's actor (see
 // postCommand). Declared, not authenticated; null submits unattributed.
 const operator = urlParams.get("operator");
-// Per-peer last-polled state: { report: RoleReport | null, error } —
-// error non-null is the named unreachable redundancy fault.
-const peerState = peers.map(() => ({ report: null, error: null }));
+// Per-peer last-polled state: { report: RoleReport | null, error,
+// unsyncedSince } — error non-null is the named unreachable redundancy
+// fault; unsyncedSince is the convergence-grace clock pairHealth reads
+// (epoch ms of the first still-unsynchronized report, else null).
+const peerState = peers.map(() => ({
+  report: null,
+  error: null,
+  unsyncedSince: null,
+}));
 // Index of the peer currently sourcing the logical view's data.
 let source = 0;
 
@@ -289,6 +440,14 @@ let source = 0;
 const overviewPairs = urlParams.getAll("pair")
   .map(parsePairSpec)
   .filter(pair => pair !== null);
+
+// The declared protection-layer signal groups: each ?protection=<group>
+// parameter names a model signal `group` whose points are the
+// independent protection layer's reported field states. Deployment
+// configuration like ?peer and ?operator — the layer's identity is
+// declared data, not page policy. Empty means undeclared: the
+// protection section stays hidden.
+const protectionGroups = new Set(urlParams.getAll("protection"));
 
 // Signals declare an optional display group in the model; the point
 // listing organizes itself under those groups. A point whose signal —
@@ -311,10 +470,15 @@ function groupedPoints() {
   return groups;
 }
 
-let index = { points: [] };
+let index = { points: [], components: [] };
 // point id -> PointSignal metadata, built once from the fetched index:
 // the writable flag that gates every command affordance lives here.
 const metaByPoint = new Map();
+// component diagnostic name -> its served ComponentRecord — the
+// per-instance model data the alarm pane joins: the decision-70
+// rationalization block. The index's components section is
+// serde-defaulted — an index served without it simply joins nothing.
+const componentsByName = new Map();
 // point id -> { samples: [Sample], lastSeq, lastTick } — the series a
 // trend draws. lastSeq is the since-cursor in the *current* source's
 // stream; lastTick is the merge watermark that keeps the series
@@ -326,6 +490,15 @@ const journalEntries = [];
 // re-fetch from the new source after a switch adds each transition once.
 const journalSeen = new Set();
 let journalSince = 0;
+// The feed's delivery state — see the feed-state note above. The
+// current source's last rendered publication identity
+// ({published, tick}) plus the named degradations the latest poll
+// observed: gap = {stream, from, through}, the served seq stretch a
+// since-poll stepped over; stale = the re-served publication's
+// identity when a poll found nothing new. null marks are a fresh,
+// in-sequence feed; a source switch resets the identity — each peer
+// numbers its own publications.
+const feed = { publication: null, gap: null, stale: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -339,6 +512,26 @@ const paramStatus = new Map();
 function paramKey(component, name) {
   return component + "\n" + name;
 }
+// component name -> its served BlockInterface (GET /schema): the
+// declared five-category surface the generic faceplate rendering reads.
+// Rebuilt on every poll like descriptorByName.
+const interfaceByName = new Map();
+// component name -> its served ComponentResources (GET /resources): the
+// live values, command availability/refusals, and recent events joined
+// onto the interface.
+const resourcesByName = new Map();
+// commandKey(component, command) -> { text, warn, bad }: the receipted
+// path's latest answer for a faceplate command invocation — what its
+// row's status cell shows. The map survives the per-poll re-render.
+const commandStatus = new Map();
+function commandKey(component, name) {
+  return component + "\n" + name;
+}
+// component name -> its interface <details> open state, snapshotted
+// before each faceplate re-render so a poll never collapses the section
+// the operator opened. Absent means the default: open for a generic
+// faceplate, closed beside dedicated presentation.
+const interfaceOpen = new Map();
 // ack point -> the earliest snapshot tick at which its release write may
 // go: the pulse's second half, armed by submitAck once the acknowledge
 // write is accepted — see the alarm pane's notes on the level-observed
@@ -407,6 +600,28 @@ function pointName(point) {
   return meta ? meta.name + " (point " + point + ")" : "point " + point;
 }
 
+// The wall-clock grace a peer reporting "unsynchronized" gets before
+// pairHealth names it a redundancy fault — the transient a fresh or
+// newly demoted standby legitimately occupies while its first tracking
+// pulls land at the documented pull-per-scan cadence. Past it the peer
+// cannot demonstrate convergence — a demoted peer with no checkpoint
+// source stays unsynchronized forever and can never be promoted back —
+// and the pair has no failover coverage to call healthy.
+const CONVERGENCE_GRACE_MS = 5000;
+
+// The convergence-grace clock pairHealth reads: a report of
+// "unsynchronized" starts or continues the peer's run; any converged
+// sync state — and the unreachable fault, which pairHealth already
+// names on its own — ends it. Called wherever a role poll lands.
+function noteSyncAge(state) {
+  if (state.error === null && state.report !== null &&
+      state.report.sync === "unsynchronized") {
+    state.unsyncedSince = state.unsyncedSince || Date.now();
+  } else {
+    state.unsyncedSince = null;
+  }
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -421,6 +636,7 @@ async function pollRoles() {
     } catch (error) {
       peerState[i].error = String(error);
     }
+    noteSyncAge(peerState[i]);
   }));
   selectSource();
 }
@@ -428,11 +644,14 @@ async function pollRoles() {
 // The logical view reads from the peer reporting settled "active".
 // During a switchover a "promoting" peer already owns the field and is
 // becoming active, so it sources the view until it settles; otherwise the
-// previous source stays while it remains reachable.
+// previous source stays while it remains reachable. Under the dual-active
+// fault the current source is held while it is one of the claimants —
+// pairHealth names the fault; re-homing the view between two reported
+// actives would only flap the displays without resolving which is real.
 function selectSource() {
   const reachable = i => peerState[i].error === null && peerState[i].report !== null;
-  let next = peerState.findIndex((state, i) =>
-    reachable(i) && state.report.role === "active");
+  const actives = activePeers();
+  let next = actives.includes(source) ? source : (actives.length > 0 ? actives[0] : -1);
   if (next < 0) next = peerState.findIndex((state, i) =>
     reachable(i) && state.report.role === "promoting");
   if (next < 0) {
@@ -449,14 +668,43 @@ function switchSource(next) {
   source = next;
   for (const state of trends.values()) state.lastSeq = 0;
   journalSince = 0;
+  // The new peer numbers its own publications: the feed's freshness
+  // and gap bookkeeping starts over — a mark observed against the old
+  // source's numbering says nothing about this stream.
+  feed.publication = null;
+  feed.gap = null;
+  feed.stale = null;
 }
 
-// The index of a peer reporting settled "active" — the only legitimate
-// command target — or -1 while the pair is mid-transition or its active
-// is lost.
+// The indices of the peers reporting settled "active" — the legitimate
+// command target when exactly one does.
+function activePeers() {
+  const actives = [];
+  peerState.forEach((state, i) => {
+    if (state.error === null && state.report &&
+        state.report.role === "active") actives.push(i);
+  });
+  return actives;
+}
+
+// The index of the pair's unique settled-active peer — the only
+// legitimate command target — or -1 while the pair is mid-transition,
+// its active is lost, or the dual-active fault stands: two reported
+// actives are a split-brain no command may arbitrate by picking one.
 function activePeer() {
-  return peerState.findIndex(state =>
-    state.error === null && state.report && state.report.role === "active");
+  const actives = activePeers();
+  return actives.length === 1 ? actives[0] : -1;
+}
+
+// The not-sent verdict a control surfaces when submitCommand found no
+// legitimate target: no settled-active peer mid-transition, or the
+// dual-active fault leaving no unique one.
+function noActiveVerdict() {
+  const actives = activePeers().length;
+  return actives > 1
+    ? "not sent: " + actives + " peers report role active — the " +
+      "dual-active fault leaves no unique command target"
+    : "not sent: no peer reports role active — the pair is mid-transition";
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
@@ -474,21 +722,27 @@ function describeSync(sync) {
   }
   if ("reinitialized" in sync) {
     const report = sync.reinitialized.report;
+    const reverted = (report.reverted_tuning || []).length;
     return "reinitialized under revised model at tick " + report.resumed_at +
       " (" + report.carried.length + " carried, " +
-      report.dropped.length + " dropped)";
+      report.dropped.length + " dropped" +
+      (reverted > 0 ? ", " + reverted + " reverted" : "") + ")";
   }
   return JSON.stringify(sync);
 }
 
 // The pair's redundancy health for either the pair section or an
-// overview card: the active peer's name plus the named redundancy
-// faults — an unreachable peer, a degraded or diverged standby
-// convergence, or no peer reporting active. These are pair health,
-// never plant faults.
+// overview card: the reported-active peers' names plus the named
+// redundancy faults — an unreachable peer, a degraded or diverged
+// standby convergence, a peer still reporting "unsynchronized" past
+// CONVERGENCE_GRACE_MS, no peer reporting active, or more than one
+// reporting it. Two actives is the dual-active split-brain the
+// one-logical-controller contract makes impossible — an alarmable
+// state the summary names rather than presenting the pair as healthy.
+// These are pair health, never plant faults.
 function pairHealth(pairPeers, states) {
   const faults = [];
-  let activeName = null;
+  const actives = [];
   pairPeers.forEach((peer, i) => {
     const state = states[i];
     if (state.error !== null) {
@@ -497,7 +751,13 @@ function pairHealth(pairPeers, states) {
       return;
     }
     if (state.report === null) return;
-    if (state.report.role === "active") activeName = peer.name;
+    if (state.report.role === "active") actives.push(peer.name);
+    if (state.report.sync === "unsynchronized" &&
+        state.unsyncedSince != null &&
+        Date.now() - state.unsyncedSince >= CONVERGENCE_GRACE_MS) {
+      faults.push(peer.name + " has not converged: unsynchronized " +
+        "past the convergence grace");
+    }
     if (state.report.sync && typeof state.report.sync === "object") {
       if ("degraded" in state.report.sync) {
         faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
@@ -508,13 +768,16 @@ function pairHealth(pairPeers, states) {
       }
     }
   });
-  if (activeName === null) faults.push("no peer reports role active");
-  return { activeName, faults };
+  if (actives.length === 0) faults.push("no peer reports role active");
+  if (actives.length > 1) {
+    faults.push("dual-active: " + actives.join(", ") +
+      " report role active — split-brain leaves no unique controller");
+  }
+  return { activeName: actives.length === 1 ? actives[0] : null, actives, faults };
 }
 
 // The pair's redundancy summary line, from pairHealth's verdict.
-function pairSummary() {
-  const health = pairHealth(peers, peerState);
+function pairSummary(health) {
   return health.faults.length === 0
     ? "redundant pair healthy — active on " + health.activeName
     : "redundancy fault: " + health.faults.join("; ");
@@ -542,9 +805,74 @@ function renderPair() {
       "</td></tr>";
   }).join("");
   const summary = document.getElementById("pair-summary");
-  summary.textContent = pairSummary();
-  summary.className = activePeer() >= 0 &&
-    peerState.every(state => state.error === null) ? "good" : "bad";
+  const health = pairHealth(peers, peerState);
+  summary.textContent = pairSummary(health);
+  summary.className = health.faults.length === 0 ? "good" : "bad";
+}
+
+// ---- Feed state ----
+//
+// The page-side honesty the bounded-publication decision requires of a
+// consumer: a polling reader observes coalescing or an explicit
+// sequence gap/freshness state rather than silently stale data. The
+// page reads only the served seq/freshness fields — the publication
+// section's `published` seq and the snapshot's tick, and the served
+// streams' entry seqs — so no endpoint or wire type is added.
+
+// Records the publication a landed snapshot serves — its `publication`
+// section's `published` seq beside the snapshot tick — and marks the
+// feed stale when that identity repeats: the source answered with the
+// same read model it last served, so the values about to re-render are
+// last-known rather than current. A new identity clears the mark. A
+// peer serving snapshots without the section compares on tick alone.
+function notePublication(snapshot) {
+  const health = snapshot.publication || null;
+  const current = {
+    published: health ? health.published : null,
+    tick: snapshot.tick,
+  };
+  const last = feed.publication;
+  feed.stale = last !== null &&
+    current.published === last.published && current.tick <= last.tick
+    ? current
+    : null;
+  feed.publication = current;
+}
+
+// Notes a served seq stretch the page's since-cursor stepped over:
+// `stream` answered entries numbered `through` while the cursor stood
+// before `from` — the stretch between evicted from the bounded store
+// before the page read it. Kept as the widest gap observed this poll;
+// renderFeed names it.
+function noteFeedGap(stream, from, through) {
+  if (feed.gap === null || through > feed.gap.through) {
+    feed.gap = { stream: stream, from: from, through: through };
+  }
+}
+
+// Renders the feed's named degraded states on the #feed-state line —
+// or hides it when the poll landed fresh and in sequence. The marks
+// name the page's own consumption: distinct from the pair section's
+// unreachable-peer fault and from a row's non-Good quality.
+function renderFeed() {
+  const line = document.getElementById("feed-state");
+  const notices = [];
+  if (feed.gap !== null) {
+    notices.push("publication gap: " + feed.gap.stream + " seqs " +
+      feed.gap.from + "–" + feed.gap.through +
+      " evicted before this page read them — showing the retained tail");
+  }
+  if (feed.stale !== null) {
+    notices.push("stale publication: " +
+      (feed.stale.published === null
+        ? "tick " + feed.stale.tick
+        : "seq " + feed.stale.published + " at tick " + feed.stale.tick) +
+      " re-served — values shown are last-known, not current");
+  }
+  line.hidden = notices.length === 0;
+  line.className =
+    feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
+  line.textContent = notices.join("; ");
 }
 
 // ---- Plant overview ----
@@ -567,9 +895,9 @@ function renderPair() {
 
 // Parses one ?pair= value — `[name=]host:port[,host:port],…` — into a
 // card's pair record, or null for a value naming no peers. The record
-// carries the card's whole polled state: per-peer {report, error} like
-// the pair view's peerState, the snapshot-source index, and the source
-// peer's last snapshot or its fetch error.
+// carries the card's whole polled state: per-peer {report, error,
+// unsyncedSince} like the pair view's peerState, the snapshot-source
+// index, and the source peer's last snapshot or its fetch error.
 function parsePairSpec(raw) {
   const eq = raw.indexOf("=");
   const spec = eq >= 0 ? raw.slice(eq + 1) : raw;
@@ -585,7 +913,7 @@ function parsePairSpec(raw) {
   return {
     name: name === "" ? pairPeers[0].name : name,
     peers: pairPeers,
-    state: pairPeers.map(() => ({ report: null, error: null })),
+    state: pairPeers.map(() => ({ report: null, error: null, unsyncedSince: null })),
     source: 0,
     snapshot: null,
     snapshotError: null,
@@ -593,13 +921,19 @@ function parsePairSpec(raw) {
 }
 
 // The card's snapshot source follows the pair view's selection rule:
-// the peer reporting settled active, then a promoting peer, then the
-// previous source while it stays reachable, then any reachable peer.
+// the peer reporting settled active — holding the current source while
+// it is one of several claimants under the dual-active fault — then a
+// promoting peer, then the previous source while it stays reachable,
+// then any reachable peer.
 function selectPairSource(pair) {
   const reachable = i =>
     pair.state[i].error === null && pair.state[i].report !== null;
-  let next = pair.state.findIndex((state, i) =>
-    reachable(i) && state.report.role === "active");
+  const actives = [];
+  pair.state.forEach((state, i) => {
+    if (reachable(i) && state.report.role === "active") actives.push(i);
+  });
+  let next = actives.includes(pair.source) ? pair.source
+    : (actives.length > 0 ? actives[0] : -1);
   if (next < 0) next = pair.state.findIndex((state, i) =>
     reachable(i) && state.report.role === "promoting");
   if (next < 0) {
@@ -625,6 +959,7 @@ async function pollPairCard(pair) {
     } catch (error) {
       pair.state[i].error = String(error);
     }
+    noteSyncAge(pair.state[i]);
   }));
   selectPairSource(pair);
   pair.snapshot = null;
@@ -667,10 +1002,12 @@ function pairHref(pair) {
 }
 
 // The card's I/O-health line: the pair view's io-health troubled rule
-// reduced to one line — link degradation, boundary failures, the
-// attributed last fault, scan overruns — read from the source peer's
-// snapshot. A card with no landed snapshot reports the fetch's failure,
-// or waits out its first poll, instead of inventing health.
+// reduced to one line — link degradation, boundary failures (including
+// failed cyclic exchanges), a cyclic driver's working-counter
+// mismatches and missed deadlines, the attributed last fault, scan
+// overruns — read from the source peer's snapshot. A card with no
+// landed snapshot reports the fetch's failure, or waits out its first
+// poll, instead of inventing health.
 function ioHealthLine(pair) {
   if (pair.snapshot === null) {
     return pair.snapshotError !== null
@@ -686,6 +1023,20 @@ function ioHealthLine(pair) {
   if (health.failed_reads || health.failed_writes) {
     troubles.push(health.failed_reads + " failed read(s), " +
       health.failed_writes + " failed write(s)");
+  }
+  if (health.failed_exchanges) {
+    troubles.push(health.failed_exchanges + " failed exchange(s)");
+  }
+  const exchange = health.driver && health.driver.exchange;
+  if (exchange) {
+    if (exchange.working_counter_mismatches) {
+      troubles.push(exchange.working_counter_mismatches +
+        " working-counter mismatch(es)");
+    }
+    if (exchange.missed_deadlines) {
+      troubles.push(exchange.missed_deadlines +
+        " missed exchange deadline(s)");
+    }
   }
   if (health.last_error) {
     troubles.push("last fault " + describeIoError(health.last_error.error) +
@@ -723,7 +1074,7 @@ function pairCardMarkup(pair) {
   return "<section class=\"pair-card" + (faulted ? " faulted" : "") + "\">" +
     "<h3><a href=\"" + esc(pairHref(pair)) + "\">" + esc(pair.name) + "</a></h3>" +
     "<p>active peer: <span class=\"active-peer\">" +
-      (health.activeName === null ? "none reported" : esc(health.activeName)) +
+      (health.actives.length === 0 ? "none reported" : esc(health.actives.join(", "))) +
       "</span></p>" +
     "<table><thead><tr><th>Peer</th><th>Role</th><th>Standby sync</th>" +
       "<th>Tick</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>" +
@@ -768,7 +1119,30 @@ async function refresh() {
     await pollRoles();
     renderPair();
     const base = peers[source].base;
-    const snapshot = await (await fetch(base + "/snapshot")).json();
+    // The snapshot and the decision-82 views ride the same publication:
+    // fetched together so the schema, the live resource state, and the
+    // telemetry all name one read model. A peer predating /schema or
+    // /resources answers 404 — the interface surface then renders
+    // nothing, the absent-section convention.
+    const [snapshot, schema, resources] = await Promise.all([
+      fetch(base + "/snapshot").then(r => r.json()),
+      fetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    // Freshness bookkeeping before the view re-renders: the served
+    // publication's seq/tick identity decides whether this poll found
+    // anything new, and the since-polls below note any evicted stretch
+    // they step over.
+    notePublication(snapshot);
+    feed.gap = null;
+    interfaceByName.clear();
+    for (const entry of (schema && schema.interfaces) || []) {
+      interfaceByName.set(entry.name, entry.interface);
+    }
+    resourcesByName.clear();
+    for (const entry of (resources && resources.components) || []) {
+      resourcesByName.set(entry.name, entry);
+    }
     const peerNote = peers.length > 1 ? " — active peer " + peers[source].name : "";
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
@@ -790,7 +1164,7 @@ async function refresh() {
         }
       }
     }
-    renderIoHealth(snapshot.io_health);
+    renderIoHealth(snapshot.io_health, snapshot.command_queue);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     // The snapshot's force set marks the page's forced points;
     // ForcedPoint serializes as {point, value} — the map keys the badge
@@ -820,11 +1194,14 @@ async function refresh() {
       if (input.dataset.point === focusedPoint) input.focus();
     }
     await Promise.all([refreshTrends(base), refreshJournal(base)]);
+    renderFeed();
     // The alarm pane draws last: its standing list reads this snapshot's
     // telemetry, the last-changed tick walks the history refreshTrends
     // just grew, and its journal slice reads the entries refreshJournal
-    // just merged.
+    // just merged. The protection section draws with it — the same
+    // telemetry, its own surface.
     renderAlarms(snapshot, telemetry, forced);
+    renderProtection(telemetry, forced);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
@@ -836,12 +1213,19 @@ async function refresh() {
 // the pair view's role and convergence reporting — one surface for
 // operator-facing health. The driver's volunteered diagnostics get rows
 // of their own: a dead transport names link degradation there, visibly
-// separate from the per-point quality column below. IoFault serializes
-// as {tick, point, direction, error}, an IoError as
+// separate from the per-point quality column below, and a cyclic field
+// driver's exchange counters — the once-per-scan process-image exchange
+// the cyclic contract counts — render beside it, so a failed exchange,
+// a missed deadline, or a working-counter shortfall reads as field-
+// communication health rather than hiding behind the per-point rows.
+// IoFault serializes as {tick, point, direction, error}, an IoError as
 // {"disconnected": id} | {"timeout": id} | {"unknown_point": id} |
 // {"type_mismatch": {point, expected, found}} | {"fenced": id}, a
-// LinkState as "connected" | "disconnected", and a Direction as
-// "in" | "out".
+// LinkState as "connected" | "disconnected", a Direction as
+// "in" | "out", and a driver's ExchangeDiagnostics as {attempted,
+// succeeded, working_counter_mismatches, last_exchange_tick,
+// missed_deadlines} — present only when the driver carries the cyclic
+// surface.
 function describeIoError(error) {
   const [variant, detail] = Object.entries(error)[0];
   const name = variant.replace(/_/g, " ");
@@ -856,7 +1240,7 @@ function healthRow(label, value) {
   return "<tr><th>" + esc(label) + "</th><td>" + esc(value) + "</td></tr>";
 }
 
-function renderIoHealth(health) {
+function renderIoHealth(health, commandQueue) {
   const pane = document.getElementById("io-health");
   if (!health) { pane.hidden = true; return; }
   const rows = [];
@@ -870,9 +1254,39 @@ function renderIoHealth(health) {
     if (health.driver.last_error) {
       rows.push(healthRow("last link failure", health.driver.last_error));
     }
+    // The cyclic contract's exchange counters ride driver.exchange —
+    // absent on a point-wise driver, which serializes no `exchange`
+    // field, so nothing new renders for one (the absent-field
+    // convention last_error and scan_overruns already follow).
+    const exchange = health.driver.exchange;
+    if (exchange) {
+      rows.push(healthRow("exchanges attempted/succeeded",
+        exchange.attempted + "/" + exchange.succeeded));
+      rows.push(healthRow("working-counter mismatches",
+        exchange.working_counter_mismatches));
+      rows.push(healthRow("missed exchange deadlines",
+        exchange.missed_deadlines));
+      rows.push(healthRow("last exchange tick",
+        exchange.last_exchange_tick == null
+          ? "none" : exchange.last_exchange_tick));
+      // A completed-but-short or completed-but-late exchange is field
+      // degradation the boundary counters below never counted.
+      if (exchange.working_counter_mismatches || exchange.missed_deadlines) {
+        troubled = true;
+      }
+    }
   }
   rows.push(healthRow("failed reads", health.failed_reads));
   rows.push(healthRow("failed writes", health.failed_writes));
+  // The executor's count of failed cyclic exchanges — a boundary
+  // counter like the reads and writes beside it, rendered once a cyclic
+  // surface reports or one has actually failed; a non-cyclic driver
+  // keeps the pane exactly as before.
+  if (health.failed_exchanges ||
+      (health.driver && health.driver.exchange)) {
+    rows.push(healthRow("failed exchanges", health.failed_exchanges || 0));
+    if (health.failed_exchanges) troubled = true;
+  }
   rows.push(healthRow("consecutive failures", health.consecutive_failures));
   if (health.failed_reads || health.failed_writes) troubled = true;
   if (health.last_error) {
@@ -887,6 +1301,24 @@ function renderIoHealth(health) {
   if (health.scan_overruns) {
     rows.push(healthRow("scan overruns", health.scan_overruns));
     troubled = true;
+  }
+  // The bounded command ingress's admission metrics ride the snapshot's
+  // command_queue section — absent on a peer predating it, which
+  // renders nothing new (the absent-field convention above).
+  if (commandQueue) {
+    rows.push(healthRow("command queue depth/capacity",
+      commandQueue.depth + "/" + commandQueue.capacity));
+    rows.push(healthRow("command admissions", commandQueue.attempts));
+    if (commandQueue.high_water) {
+      rows.push(healthRow("command queue high-water",
+        commandQueue.high_water));
+    }
+    // A refused command is operator-visible degradation, not a fault.
+    if (commandQueue.full_rejections) {
+      rows.push(healthRow("full-queue command rejections",
+        commandQueue.full_rejections));
+      troubled = true;
+    }
   }
   document.getElementById("io-health-rows").innerHTML = rows.join("");
   const summary = document.getElementById("io-health-summary");
@@ -1215,6 +1647,10 @@ function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
     parts.push(parameterTable(descriptor, parameters.get(descriptor.name)));
   }
   parts.push(diagnosticsMarkup(diag));
+  // The five-category resource surface renders for every component —
+  // for a kind with dedicated presentation it is the collapsed generic
+  // surface; for a generic kind it is the control surface itself.
+  parts.push(interfaceMarkup(descriptor.name, generic));
   parts.push("</section>");
   return parts.join("");
 }
@@ -1234,6 +1670,17 @@ function renderFaceplates(snapshot, telemetry, forced) {
     const key = paramKey(control.dataset.component, control.dataset.param);
     pending.set(key, control.value);
     if (control === document.activeElement) focused = key;
+  }
+  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    pending.set(key, input.value);
+    if (input === document.activeElement) focused = key;
+  }
+  // The interface disclosure's open state is the operator's: snapshot
+  // it before the rebuild so a poll never collapses an opened section.
+  for (const details of document.querySelectorAll("#faceplates details.interface")) {
+    interfaceOpen.set(details.dataset.component, details.open);
   }
   descriptorByName.clear();
   for (const descriptor of snapshot.descriptors) {
@@ -1261,6 +1708,416 @@ function renderFaceplates(snapshot, telemetry, forced) {
     if (pending.has(key)) control.value = pending.get(key);
     if (key === focused) control.focus();
   }
+  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    if (pending.has(key)) {
+      input.value = pending.get(key);
+    } else if (input.dataset.initial != null) {
+      // A command-argument input is a typed affordance the page seeds
+      // with the declared default once: an untouched control submits
+      // the default, matching a CLI that omitted the flag.
+      input.value = input.dataset.initial;
+    }
+    if (key === focused) input.focus();
+  }
+}
+
+// ---- Interface resources ----
+//
+// The decision-82 surface: every faceplate carries a disclosure
+// rendering the component's five declared resource categories from the
+// served schema — GET /schema's per-instance BlockInterface, joined by
+// resource name onto GET /resources' live ComponentResources. The
+// schema is authoritative for identities, kinds, and command request
+// schemas; the resource view supplies current values, availability,
+// refusals, and the recent journal tail. A peer predating the
+// endpoints serves no interface entries and the disclosure renders
+// nothing — the absent-section convention — so the surface is purely
+// additive beside whatever dedicated presentation the kind already
+// had. For a kind with no dedicated presentation it is the control
+// surface itself, and it opens by default; beside a dedicated
+// presentation it stays collapsed until the operator opens it.
+
+// Client-side display bound on the per-component event list; the
+// served tail is bounded already.
+const EVENT_LIMIT = 8;
+
+// One resource collection's live entries, keyed by resource name for
+// the join onto the interface's declared specs.
+function resourcesByResource(readings) {
+  return new Map((readings || []).map(reading => [reading.name, reading]));
+}
+
+// The measurements and runtime-state readouts: one labeled row per
+// declared resource carrying its direction, kind, bound point, live
+// value with unit, and quality — an unbound port or a point with no
+// sample renders "no sample" rather than failing.
+function resourceTable(category, specs, readings) {
+  const byName = resourcesByResource(readings);
+  return "<div class=\"res\" data-category=\"" + category + "\">" +
+    "<h4>" + category + "</h4>" +
+    (specs.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Name</th><th>Dir</th><th>Kind</th><th>Point</th>" +
+        "<th>Value</th><th>Quality</th>" +
+        "</tr></thead><tbody>" +
+        specs.map(spec => {
+          const sample = (byName.get(spec.name) || {}).sample;
+          const meta = spec.point == null ? null : metaByPoint.get(spec.point);
+          return "<tr><td>" + esc(spec.name) + "</td><td>" + esc(spec.direction) +
+            "</td><td>" + esc(pascal(spec.kind)) +
+            "</td><td>" + (spec.point == null ? "unwired"
+              : "point " + spec.point + (meta ? " · " + esc(meta.name) : "")) +
+            "</td><td class=\"value\">" +
+            (sample ? esc(formatValue(sample.value)) : "") +
+            (spec.unit ? " " + esc(spec.unit) : "") +
+            "</td><td class=\"" + (sample ? qualityClass(sample.quality) : "nosample") +
+            "\">" + (sample ? esc(formatQuality(sample.quality)) : "no sample") +
+            "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The configuration rows: one per declared ConfigProperty, showing the
+// current value the resource view reports. A `tunable` property gets
+// the same edit control and `set` button the parameter table renders —
+// the .param-value/.tune markup is deliberately identical so its
+// submission flows through the existing receipted set_parameter path
+// unchanged, status cell included. An `engineering_fixed` property is
+// read-only: no edit affordance, matching the descriptor rule.
+function configTable(component, properties, values) {
+  const byName = resourcesByResource(values);
+  return "<div class=\"res\" data-category=\"configuration\">" +
+    "<h4>configuration</h4>" +
+    (properties.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"params\"><thead><tr>" +
+        "<th>Name</th><th>Kind</th><th>Range</th><th>Current</th>" +
+        "<th>Set</th><th></th>" +
+        "</tr></thead><tbody>" +
+        properties.map(property => {
+          const current = byName.get(property.name);
+          const status = paramStatus.get(paramKey(component, property.name));
+          return "<tr><td>" + esc(property.name) + "</td><td>" +
+            esc(pascal(property.kind)) + "</td><td>" +
+            (property.range
+              ? esc(formatValue(property.range.min)) + " … " +
+                esc(formatValue(property.range.max))
+              : "unbounded") +
+            "</td><td class=\"param-current\">" +
+            (current && current.value != null ? esc(formatValue(current.value)) : "") +
+            "</td><td>" +
+            (property.capability === "tunable"
+              ? parameterControl(component, property) +
+                "<button type=\"button\" class=\"tune\" data-component=\"" +
+                esc(component) + "\" data-param=\"" + esc(property.name) +
+                "\">set</button>"
+              : "fixed") +
+            "</td><td class=\"param-status" +
+            (status && status.warn ? " warn" : "") +
+            (status && status.bad ? " bad" : "") + "\" data-component=\"" +
+            esc(component) + "\" data-param=\"" + esc(property.name) + "\">" +
+            (status ? esc(status.text) : "") + "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The verb a command row's button wears: the adapted generic command's
+// short name, or "invoke" for a kind-declared command — the action the
+// CommandSpec's provenance names.
+function commandVerb(spec) {
+  switch (spec.adapted) {
+    case "write_value": return "write";
+    case "force_point": return "force";
+    case "unforce_point": return "release";
+    case "set_parameter": return "set";
+    default: return "invoke";
+  }
+}
+
+// The seed a `value` argument's control starts from: the resource
+// view's current reading — the bound point's sample for a point
+// command, the current tune for set_parameter. A declared command's
+// arguments seed nothing; an omitted entry means the kind's own
+// default applies.
+function argumentInitial(spec, argument, resources) {
+  if (argument.name !== "value" || !resources) return null;
+  if (spec.adapted === "write_value" || spec.adapted === "force_point") {
+    const reading = (resources.measurements || [])
+      .concat(resources.state || [])
+      .find(reading => reading.point === spec.point);
+    return reading && reading.sample ? formatValue(reading.sample.value) : null;
+  }
+  if (spec.adapted === "set_parameter") {
+    const name = spec.name.slice("set_parameter:".length);
+    const entry = (resources.configuration || [])
+      .find(value => value.name === name);
+    return entry && entry.value != null ? formatValue(entry.value) : null;
+  }
+  return null;
+}
+
+// One declared request argument's typed control — a true/false select
+// for Bool, a text input otherwise, seeded with argumentInitial's
+// value where the resource view supplies one. The data-* attributes
+// are what the submit handler and the re-render's pending-value
+// restore read.
+function argumentControl(component, spec, argument, resources) {
+  const initial = argumentInitial(spec, argument, resources);
+  const attrs = " data-component=\"" + esc(component) +
+    "\" data-command=\"" + esc(spec.name) +
+    "\" data-arg=\"" + esc(argument.name) +
+    "\" data-kind=\"" + esc(argument.kind) + "\"" +
+    (initial != null ? " data-initial=\"" + esc(initial) + "\"" : "");
+  if (argument.kind === "bool") {
+    return "<select class=\"command-arg\"" + attrs + ">" +
+      "<option value=\"true\">true</option>" +
+      "<option value=\"false\">false</option></select>";
+  }
+  return "<input class=\"command-arg\"" + attrs + " size=\"7\"" +
+    (argument.kind === "int" ? " inputmode=\"numeric\"" : " inputmode=\"decimal\"") +
+    " placeholder=\"" + esc(argument.name) + "\">";
+}
+
+// The named-command rows: every CommandSpec is an invocable action —
+// the adapted generic variants and the kind's declared commands alike.
+// The resource view's CommandState rules the row: an unavailable
+// command's control disables and its status cell carries the served
+// refusal text, so the declared surface is never silently hidden and
+// the refusal reason is on the row before any attempt. An available
+// command submits through the receipted path — a boundary refusal the
+// served state could not pre-empt (a KindDeclared predicate, a role
+// gate) still surfaces its named reason there.
+function commandTable(component, specs, states, resources) {
+  const byName = resourcesByResource(states);
+  return "<div class=\"res\" data-category=\"commands\">" +
+    "<h4>commands</h4>" +
+    (specs.length === 0
+      ? "<p class=\"res-empty\">none declared</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Command</th><th>Availability</th><th>Arguments</th>" +
+        "<th></th><th></th>" +
+        "</tr></thead><tbody>" +
+        specs.map(spec => {
+          const state = byName.get(spec.name);
+          const available = !state || state.available;
+          const status = commandStatus.get(commandKey(component, spec.name));
+          const statusText = state && !state.available
+            ? state.refusal || "unavailable"
+            : status ? status.text : "";
+          return "<tr><td>" + esc(spec.name) + "</td><td>" +
+            (state == null ? "—"
+              : state.available ? "available" : "unavailable") +
+            "</td><td>" +
+            spec.request.map(argument =>
+              argumentControl(component, spec, argument, resources)).join(" ") +
+            "</td><td><button type=\"button\" class=\"invoke\"" +
+            " data-component=\"" + esc(component) +
+            "\" data-command=\"" + esc(spec.name) + "\"" +
+            (available ? "" : " disabled") + ">" + commandVerb(spec) +
+            "</button></td>" +
+            "<td class=\"command-status" +
+            (state && !state.available ? " warn"
+              : status && status.warn ? " warn" : "") +
+            (status && status.bad ? " bad" : "") +
+            "\" data-component=\"" + esc(component) +
+            "\" data-command=\"" + esc(spec.name) + "\">" +
+            esc(statusText) + "</td></tr>";
+        }).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The recent-events list: the component's attributed event record —
+// the retained journal tail (point transitions on its bound points,
+// its commands' settled receipts, its step failures, its
+// Journal-retained and undeclared kind emissions) beside its routed
+// History/Latest emission records — rendered through the same
+// describeEvent the journal pane uses, newest last. The store column
+// reads the entry's `retention` mark — journal | history | latest —
+// telling the durable record from the diagnostic streams; entries
+// from a pre-marker document render under the journal they are.
+function eventList(events) {
+  const recent = (events || []).slice(-EVENT_LIMIT);
+  return "<div class=\"res\" data-category=\"events\">" +
+    "<h4>events</h4>" +
+    (recent.length === 0
+      ? "<p class=\"res-empty\">no recent events</p>"
+      : "<table class=\"ports\"><thead><tr>" +
+        "<th>Seq</th><th>Tick</th><th>Store</th><th>Event</th>" +
+        "</tr></thead><tbody>" +
+        recent.map(entry =>
+          "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+          "</td><td>" + esc(entry.retention || "journal") +
+          "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>"
+        ).join("") + "</tbody></table>") +
+    "</div>";
+}
+
+// The per-component interface disclosure. `generic` — the
+// no-dedicated-presentation case — opens the section by default; an
+// operator's open/close choice survives re-renders through
+// interfaceOpen.
+function interfaceMarkup(name, generic) {
+  const iface = interfaceByName.get(name);
+  if (!iface) return "";
+  const resources = resourcesByName.get(name);
+  const open = interfaceOpen.has(name) ? interfaceOpen.get(name) : generic;
+  return "<details class=\"interface\" data-component=\"" + esc(name) + "\"" +
+    (open ? " open" : "") + ">" +
+    "<summary>interface</summary>" +
+    resourceTable("measurements", iface.measurements,
+      resources && resources.measurements) +
+    configTable(name, iface.configuration,
+      resources && resources.configuration) +
+    resourceTable("state", iface.state,
+      resources && resources.state) +
+    commandTable(name, iface.commands,
+      resources && resources.commands, resources) +
+    eventList(resources && resources.events) +
+    "</details>";
+}
+
+// Records the receipted path's latest answer for one named command and
+// paints it into every matching status cell — the same store-and-paint
+// rule the parameter status follows.
+function setCommandStatus(component, name, status) {
+  commandStatus.set(commandKey(component, name), status);
+  for (const cell of document.querySelectorAll("#faceplates .command-status")) {
+    if (cell.dataset.component === component && cell.dataset.command === name) {
+      cell.textContent = status.text;
+      cell.className = "command-status" + (status.warn ? " warn" : "") +
+        (status.bad ? " bad" : "");
+    }
+  }
+}
+
+// The interface row a settled receipt belongs to — the journal's
+// command_settled entries update the named command's status cell with
+// the authority's final word, the rule the parameter rows already
+// follow. Component-addressed commands map directly; a point command
+// finds the spec whose bound point and adapted variant match.
+function settledCommandKey(command) {
+  if ("invoke" in command) {
+    return { component: command.invoke.component, name: command.invoke.command };
+  }
+  if ("set_parameter" in command) {
+    const tuning = command.set_parameter;
+    return { component: tuning.component, name: "set_parameter:" + tuning.name };
+  }
+  const verb = "write_value" in command ? "write_value"
+    : "force_point" in command ? "force_point"
+    : "unforce_point" in command ? "unforce_point" : null;
+  if (!verb) return null;
+  const point = command[verb].point;
+  for (const [component, iface] of interfaceByName) {
+    const spec = iface.commands.find(spec =>
+      spec.adapted === verb && spec.point === point);
+    if (spec) return { component, name: spec.name };
+  }
+  return null;
+}
+
+// The wire command a CommandSpec's submission builds: the adapted
+// variants reconstruct their generic Command — the spec's identity
+// holds the addressing fields its request schema omits — and a
+// declared command goes as the Invoke variant carrying the typed
+// argument map.
+function specCommand(component, spec, args) {
+  const value = args.value;
+  switch (spec.adapted) {
+    case "write_value":
+      return { write_value: {
+        point: spec.point, kind: spec.request[0].kind, value: value } };
+    case "force_point":
+      return { force_point: {
+        point: spec.point, kind: spec.request[0].kind, value: value } };
+    case "unforce_point":
+      return { unforce_point: { point: spec.point } };
+    case "set_parameter":
+      return { set_parameter: {
+        component: component,
+        name: spec.name.slice("set_parameter:".length),
+        value: value } };
+    default:
+      return { invoke: {
+        component: component, command: spec.name, arguments: args } };
+  }
+}
+
+// Parses a typed command-argument entry into a Value of the declared
+// kind, strictly: an entry that is not such a value returns null so
+// the row can refuse it client-side rather than ship a body the
+// receipted path could only answer with a parse failure.
+function argumentValue(kind, text) {
+  if (kind === "int") {
+    return /^[-+]?\d+$/.test(text) ? { int: parseInt(text, 10) } : null;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? { float: number } : null;
+}
+
+// A named command's submission from its interface row: reads the
+// request schema's typed controls, builds the CommandSpec's wire
+// command, and submits through the same receipted, active-peer-routed
+// path every operator command takes. An adapted command's required
+// `value` entry warns client-side when empty or unparsable — the
+// parameter edit's advisory wording, here a guard — while a declared
+// command's omitted argument simply means the kind's default applies.
+// The answer lands on the row's status cell.
+async function submitInterfaceCommand(button) {
+  const component = button.dataset.component;
+  const name = button.dataset.command;
+  const iface = interfaceByName.get(component);
+  const spec = iface && iface.commands.find(candidate => candidate.name === name);
+  if (!spec) return;
+  const args = {};
+  for (const input of button.closest("tr").querySelectorAll(".command-arg")) {
+    const text = input.value.trim();
+    if (input.dataset.kind === "bool") {
+      args[input.dataset.arg] = { bool: text === "true" };
+    } else if (text !== "") {
+      const value = argumentValue(input.dataset.kind, text);
+      if (value === null) {
+        setCommandStatus(component, name,
+          { text: "not a " + input.dataset.kind + " value", warn: true, bad: false });
+        return;
+      }
+      args[input.dataset.arg] = value;
+    }
+  }
+  if (spec.adapted !== "declared" && spec.request.length > 0 && args.value == null) {
+    setCommandStatus(component, name,
+      { text: "enter a value", warn: true, bad: false });
+    return;
+  }
+  if (spec.point == null &&
+      (spec.adapted === "write_value" || spec.adapted === "force_point" ||
+       spec.adapted === "unforce_point")) {
+    setCommandStatus(component, name,
+      { text: "unbound — no point to command", warn: false, bad: true });
+    return;
+  }
+  let answer;
+  try {
+    answer = await submitCommand(specCommand(component, spec, args));
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+    setCommandStatus(component, name,
+      { text: "command failed: " + error, warn: false, bad: true });
+    return;
+  }
+  const verdict = answer && answer.outcome
+    ? describeOutcome(answer.outcome)
+    : answer === null
+      ? noActiveVerdict()
+      : String(answer);
+  setCommandStatus(component, name, {
+    text: verdict,
+    warn: false,
+    bad: !answer || !answer.outcome || "rejected" in answer.outcome,
+  });
 }
 
 // ---- Alarm pane ----
@@ -1274,6 +2131,48 @@ function renderFaceplates(snapshot, telemetry, forced) {
 // filter the merged journal into the alarm journal, and a component
 // declaring an `ack` input bound to a model-writable point gets the
 // acknowledge affordance.
+//
+// The managed-alarm decisions add three surfaces on the same join:
+//
+// - Managed-state lists (decision 71): the asserted subset of the
+//   uniform `shelved`/`suppressed`/`out_of_service` status vocabulary
+//   routes the component's rows to the named managed list — joined by
+//   port name across kinds, never per-kind code. Routing is
+//   presentation only: every row keeps reporting `alarm` and
+//   `unacknowledged` truth, and managed rows count toward the
+//   displayed totals — a suppressed or shelved alarm is never erased.
+// - Consequential coding (decisions 70, 75): each row renders the
+//   instance's declared `priority` — joined from the snapshot's
+//   parameters section — as colour plus the textual level the declared
+//   PRIORITY_VOCABULARY names, with `class` and `response_ticks` beside
+//   it, and exposes the instance's served rationalization record.
+// - First-out ordering (decision 75): the alarm journal lists in the
+//   durable journal's seq order — point_changed transitions and
+//   settled receipts alike — so a burst's initiating cause stands
+//   first.
+
+// Decision 71's uniform managed-state vocabulary: the status Out ports
+// every managed alarm kind declares, with the name each asserts under
+// in the pane. Joined by port name across kinds — a kind's managed
+// surface is exactly the bound subset.
+const MANAGED_STATES = ["shelved", "suppressed", "out_of_service"];
+const MANAGED_LABELS = {
+  shelved: "shelved",
+  suppressed: "suppressed",
+  out_of_service: "out of service",
+};
+
+// The site's priority presentation — the site vocabulary being the
+// recorded open customer assumption — carried as declared presentation
+// data, not compiled policy: each entry maps a declared `priority` Int
+// code to the level's text and colour class. Editing the table is a
+// data change; a code no entry declares renders as the bare code under
+// the neutral class.
+const PRIORITY_VOCABULARY = [
+  { code: 1, label: "P1", cls: "p1" },
+  { code: 2, label: "P2", cls: "p2" },
+  { code: 3, label: "P3", cls: "p3" },
+];
 
 // One snapshot's alarm surface: the status-role Out ports the standing
 // list draws from, plus the sets the journal filter tests against —
@@ -1344,13 +2243,161 @@ function ackAffordance(descriptor) {
     "\">ack</button>";
 }
 
-// Whether a journal entry belongs to the alarm surface: a quality
-// transition on a status-bound point — the trust change that makes a
-// standing value read as uncertain — a settled command targeting one
-// (the ack write included), or a tune or step failure of a component
-// declaring status ports. The merged list is already in tick order.
+// The managed-state request inputs a managed kind may declare —
+// `shelve` and `oos`, Bool, In — with each direction's label: the
+// raise command while the request reads false, the release while it
+// stands. Joined by port name across kinds like the status vocabulary
+// — a kind's managed command surface is exactly the bound,
+// model-writable subset.
+const MANAGED_ACTIONS = [
+  { port: "shelve", raise: "shelve", release: "unshelve" },
+  { port: "oos", raise: "out of service", release: "return to service" },
+];
+
+// The managed-state affordances, offered only where the component
+// declares the request input wired to a point the model marked
+// writable — the same metadata gate `ack` passes. Unlike the ack pulse
+// the managed inputs are held level-observed: the button writes the
+// request's level and leaves it standing until the opposite command,
+// so the label tracks the request point's live level rather than the
+// flag — `shelved` drops at the max_shelve_ticks bound while the
+// request still stands, and a re-shelve needs the request cycled
+// through false. An unbound or unwritable input offers nothing — the
+// never-shelvable surface — and a write attempted anyway meets the
+// receipted path's named rejection.
+function managedAffordance(descriptor, telemetry) {
+  const parts = [];
+  for (const action of MANAGED_ACTIONS) {
+    const port = descriptor.ports.find(p =>
+      p.name === action.port && p.direction === "in" && p.kind === "bool");
+    if (!port || port.point == null) continue;
+    const meta = metaByPoint.get(port.point);
+    if (!meta || !meta.writable) continue;
+    const held = isAsserted(portSample(port, telemetry));
+    const label = held ? action.release : action.raise;
+    parts.push("<button type=\"button\" class=\"managed\" data-point=\"" +
+      port.point + "\" data-level=\"" + !held + "\" title=\"" +
+      esc(label + " " + descriptor.label) + "\">" + esc(label) + "</button>");
+  }
+  return parts.join("");
+}
+
+// The live sample of the component's status Out port named `name`, or
+// null when the kind declares none — the uniform-vocabulary join the
+// managed flags and the two-flag truth share.
+function flagSample(descriptor, telemetry, name) {
+  const port = descriptor.ports.find(p =>
+    p.name === name && p.role === "status" && p.direction === "out");
+  return port ? portSample(port, telemetry) : null;
+}
+
+// The states the component reports this snapshot — what a row routes
+// by and the state filter matches on: each asserted managed flag, plus
+// "active" while the `alarm` port stands and "unacknowledged" while
+// the latch stands.
+function alarmRowStates(descriptor, telemetry) {
+  const states = new Set();
+  for (const name of MANAGED_STATES) {
+    if (isAsserted(flagSample(descriptor, telemetry, name))) {
+      states.add(name);
+    }
+  }
+  if (isAsserted(flagSample(descriptor, telemetry, "alarm"))) {
+    states.add("active");
+  }
+  if (isAsserted(flagSample(descriptor, telemetry, "unacknowledged"))) {
+    states.add("unacknowledged");
+  }
+  return states;
+}
+
+// The two-flag truth every row still reports: the component's live
+// `alarm` and `unacknowledged` flags drawn on or off, so a routed row
+// keeps reporting process truth and its latch — a managed state
+// reroutes the presentation, never the record. A kind declaring
+// neither port draws no flags.
+function truthFlags(descriptor, telemetry) {
+  return ["alarm", "unacknowledged"].map(name => {
+    const port = descriptor.ports.find(p =>
+      p.name === name && p.role === "status" && p.direction === "out");
+    if (!port) return "";
+    return " <span class=\"flag" +
+      (isAsserted(portSample(port, telemetry)) ? " on" : "") + "\">" +
+      esc(name) + "</span>";
+  }).join("");
+}
+
+// The instance's declared `priority`, joined from the snapshot's
+// parameters section by component name — the same join the parameter
+// tables use — and mapped through the declared PRIORITY_VOCABULARY to
+// its redundant indication: the colour class plus the textual level.
+// `class` and `response_ticks` render beside as declared data. An
+// absent section, undeclared parameters, or a code the vocabulary does
+// not name renders plainly — never an error.
+function priorityMarkup(name, parameters) {
+  const values = parameters.get(name);
+  if (!values) return "";
+  const parts = [];
+  const priority = values["priority"];
+  if (priority && "int" in priority) {
+    const entry = PRIORITY_VOCABULARY.find(e => e.code === priority.int);
+    parts.push("<span class=\"priority " + (entry ? entry.cls : "other") +
+      "\">" + esc(entry ? entry.label : "P" + priority.int) + "</span>");
+  }
+  for (const key of ["class", "response_ticks"]) {
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      parts.push(" <span class=\"rationalization-code\">" +
+        esc(key.replace(/_/g, " ")) + " " +
+        esc(formatValue(values[key])) + "</span>");
+    }
+  }
+  return parts.join("");
+}
+
+// The instance's decision-70 record — the consequence of inaction, the
+// required action, and the display/procedure reference — joined from
+// the served index's components section by diagnostic name. An index
+// served without the section, or an instance declaring no block,
+// renders nothing.
+function rationalizationMarkup(name) {
+  const record = componentsByName.get(name);
+  const block = record && record.rationalization;
+  if (!block) return "";
+  return "<details class=\"rationalization\"><summary>rationalization</summary>" +
+    "<p><span class=\"field\">consequence</span> " +
+      esc(block.consequence) + "</p>" +
+    "<p><span class=\"field\">required action</span> " +
+      esc(block.required_action) + "</p>" +
+    "<p><span class=\"field\">reference</span> " +
+      esc(block.reference) + "</p></details>";
+}
+
+// One named managed list's section: the decision-71 state name, its
+// count — managed rows still count even while their annunciation is
+// withheld — and the routed rows in the standing list's own columns.
+function managedListMarkup(state, rows) {
+  return "<section class=\"managed\" id=\"managed-" + state + "\">" +
+    "<h3>" + esc(MANAGED_LABELS[state]) + "</h3>" +
+    "<p class=\"managed-count\">" + rows.length + " " +
+      esc(MANAGED_LABELS[state]) + "</p>" +
+    "<table><thead><tr>" + ALARM_HEADINGS + "</tr></thead><tbody>" +
+    rows.join("") + "</tbody></table></section>";
+}
+const ALARM_HEADINGS =
+  "<th>Component</th><th>Status</th><th>Value</th><th>Quality</th>" +
+  "<th>Last changed</th><th>Priority</th><th></th>";
+
+// Whether a journal entry belongs to the alarm surface: a value
+// transition on a status-bound journaled point — the alarm
+// lifecycle's durable record — a quality transition on one (the trust
+// change that makes a standing value read as uncertain), a settled
+// command targeting one (the ack write included), or a tune or step
+// failure of a component declaring status ports.
 function alarmJournalEntry(entry, join) {
   const event = entry.event;
+  if ("point_changed" in event) {
+    return join.related.has(event.point_changed.point);
+  }
   if ("quality_changed" in event) {
     return join.related.has(event.quality_changed.point);
   }
@@ -1358,8 +2405,10 @@ function alarmJournalEntry(entry, join) {
     const command = event.command_settled.receipt.command;
     const point = commandPoint(command);
     if (point !== null) return join.related.has(point);
-    return "set_parameter" in command &&
-      join.components.has(command.set_parameter.component);
+    return ("set_parameter" in command &&
+      join.components.has(command.set_parameter.component)) ||
+      ("invoke" in command &&
+        join.components.has(command.invoke.component));
   }
   if ("step_failed" in event) {
     return join.components.has(event.step_failed.component);
@@ -1376,9 +2425,46 @@ function commandPoint(command) {
   return null;
 }
 
+// One asserted status port's row: the markup every list renders, plus
+// the states the row routes and filters by — the component's asserted
+// managed flags, "active" while `alarm` stands, "unacknowledged" while
+// the latch stands. `managed` is the subset of states in the uniform
+// vocabulary, in MANAGED_STATES order. `actions` is the component's
+// affordance cell — the ack plus managed-state commands — rendered on
+// its first row only.
+function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actions) {
+  const states = alarmRowStates(descriptor, telemetry);
+  const cls = qualityClass(sample.quality);
+  const meta = portMeta(port);
+  // The row carries the quality class: a Bad or Uncertain value draws
+  // degraded — italic, tinted — instead of as a clean assertion, so a
+  // bad sensor reads as uncertainty rather than a hidden alarm state.
+  return {
+    states,
+    managed: MANAGED_STATES.filter(state => states.has(state)),
+    degraded: !isGood(sample.quality),
+    html: "<tr class=\"alarm " + cls + "\">" +
+      "<td>" + esc(descriptor.label) +
+        rationalizationMarkup(descriptor.name) + "</td>" +
+      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
+        truthFlags(descriptor, telemetry) + "</td>" +
+      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
+        forcedBadge(port.point, forced) + "</td>" +
+      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
+      "</td>" +
+      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
+      "<td>" + priorityMarkup(descriptor.name, parameters) + "</td>" +
+      "<td>" + actions + "</td></tr>",
+  };
+}
+
 // Renders the pane from the polled snapshot plus the history and
 // journal the refresh already fetched. The section shows while any
 // descriptor declares a status-role port; a plant with none hides it.
+// Rows whose component reports a managed flag route to that state's
+// named list — the standing list keeps the unmanaged rows — and the
+// state select filters every list at once: filtering selects which
+// rows render, never which exist.
 function renderAlarms(snapshot, telemetry, forced) {
   const pane = document.getElementById("alarm-pane");
   const join = alarmJoin(snapshot);
@@ -1387,46 +2473,106 @@ function renderAlarms(snapshot, telemetry, forced) {
     return;
   }
   pane.hidden = false;
+  const parameters = new Map(
+    (snapshot.parameters || []).map(p => [p.name, p.values]));
+  const filter = document.getElementById("alarm-filter").value;
+  // One affordance cell per component per render: a latching kind's
+  // `alarm` and `unacknowledged` can stand together, and both clear
+  // through the same `ack` input — and every managed list the states
+  // route the component's rows to shares the one affordance set, the
+  // ack plus the managed-state commands, built once.
+  const offered = new Set();
   const rows = [];
   let degraded = 0;
-  // One ack affordance per component per render: a latching kind's
-  // `alarm` and `unacknowledged` can stand together, and both clear
-  // through the same `ack` input.
-  const acked = new Set();
   for (const { descriptor, port } of join.standing) {
-    const sample = port.point == null
-      ? null : (telemetry.get(port.point) || {}).sample || null;
+    const sample = port.point == null ? null : portSample(port, telemetry);
     if (!isAsserted(sample)) continue;
-    const cls = qualityClass(sample.quality);
-    if (!isGood(sample.quality)) degraded++;
-    const meta = portMeta(port);
-    const ack = acked.has(descriptor.name) ? "" : ackAffordance(descriptor);
-    if (ack !== "") acked.add(descriptor.name);
-    // The row carries the quality class: a Bad or Uncertain value draws
-    // degraded — italic, tinted — instead of as a clean assertion, so a
-    // bad sensor reads as uncertainty rather than a hidden alarm state.
-    rows.push("<tr class=\"alarm " + cls + "\">" +
-      "<td>" + esc(descriptor.label) + "</td>" +
-      "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") + "</td>" +
-      "<td class=\"value " + cls + "\">" + esc(formatValue(sample.value)) +
-        forcedBadge(port.point, forced) + "</td>" +
-      "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
-      "</td>" +
-      "<td>" + lastChangedTick(port.point, sample) + "</td>" +
-      "<td>" + ack + "</td></tr>");
+    const actions = offered.has(descriptor.name)
+      ? ""
+      : ackAffordance(descriptor) + managedAffordance(descriptor, telemetry);
+    if (actions !== "") offered.add(descriptor.name);
+    const row = alarmRow(descriptor, port, sample, telemetry, forced,
+      parameters, actions);
+    if (row.degraded) degraded++;
+    rows.push(row);
   }
-  document.getElementById("alarms").innerHTML = rows.join("");
+  const visible = filter === "all"
+    ? rows : rows.filter(row => row.states.has(filter));
+  document.getElementById("alarms").innerHTML = visible
+    .filter(row => row.managed.length === 0)
+    .map(row => row.html).join("");
+  const lists = [];
+  const counts = [];
+  for (const state of MANAGED_STATES) {
+    const listed = visible.filter(row => row.states.has(state));
+    counts.push(listed.length);
+    if (listed.length > 0) {
+      lists.push(managedListMarkup(state, listed.map(row => row.html)));
+    }
+  }
+  document.getElementById("managed-lists").innerHTML = lists.join("");
   const summary = document.getElementById("alarm-summary");
+  const managed = MANAGED_STATES
+    .map((state, i) => counts[i] + " " + MANAGED_LABELS[state])
+    .filter((_, i) => counts[i] > 0);
   summary.textContent = rows.length === 0
     ? "no standing alarms"
     : rows.length + " standing" +
-      (degraded > 0 ? " — " + degraded + " degraded" : "");
+      (managed.length > 0 ? " — " + managed.join(" · ") : "") +
+      (degraded > 0 ? " — " + degraded + " degraded" : "") +
+      (filter !== "all"
+        ? " — showing " + (MANAGED_LABELS[filter] || filter) : "");
   summary.className = rows.length === 0 ? "good" : "bad";
+  // The alarm journal lists in the durable journal's transition order —
+  // seq order — so a burst's initiating cause stands first: equal-tick
+  // point_changed transitions and the settled receipt that caused them
+  // keep the order the recorder appended them.
   document.getElementById("alarm-journal").innerHTML = journalEntries
     .filter(entry => alarmJournalEntry(entry, join))
+    .sort((a, b) => a.seq - b.seq)
     .map(entry => "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
       "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>")
     .join("");
+}
+
+// The independent protection layer's declared points — every index
+// point whose signal `group` a ?protection= parameter names — on their
+// own section, visually distinct from the alarm pane: the HMI alarm
+// path is never presented as the safeguard. Undeclared (no
+// ?protection), the section stays hidden; a named group matching no
+// points renders the empty count rather than failing.
+function renderProtection(telemetry, forced) {
+  const pane = document.getElementById("protection-pane");
+  if (protectionGroups.size === 0) {
+    pane.hidden = true;
+    return;
+  }
+  pane.hidden = false;
+  const rows = [];
+  let degraded = 0;
+  for (const meta of index.points) {
+    if (!protectionGroups.has(meta.group || "")) continue;
+    const sample = (telemetry.get(meta.point) || {}).sample;
+    const cls = sample ? qualityClass(sample.quality) : "nosample";
+    if (sample && !isGood(sample.quality)) degraded++;
+    rows.push("<tr class=\"protection " + cls + "\">" +
+      "<td>" + meta.point + "</td><td>" + esc(meta.name) + "</td>" +
+      "<td class=\"value " + cls + "\">" +
+        (sample ? esc(formatValue(sample.value)) : "") +
+        forcedBadge(meta.point, forced) + "</td>" +
+      "<td class=\"" + cls + "\">" +
+        (sample ? esc(formatQuality(sample.quality)) : "no sample") + "</td>" +
+      "<td>" + esc(meta.unit || "") + "</td>" +
+      "<td>" + (sample ? lastChangedTick(meta.point, sample) : "") +
+      "</td></tr>");
+  }
+  document.getElementById("protection-points").innerHTML = rows.join("");
+  const summary = document.getElementById("protection-summary");
+  summary.textContent = rows.length === 0
+    ? "no declared protection-layer points"
+    : rows.length + " declared protection point(s)" +
+      (degraded > 0 ? " — " + degraded + " degraded" : "");
+  summary.className = degraded > 0 ? "bad" : "good";
 }
 
 // The acknowledge submission: an ordinary receipted write_value of true
@@ -1448,6 +2594,30 @@ async function submitAck(button) {
         ackReleases.set(point, answer.outcome.applied.tick);
       }
     }
+  } catch (error) {
+    document.getElementById("receipt").textContent = "command failed: " + error;
+  }
+  refresh();
+}
+
+// A managed-state submission: an ordinary receipted write_value of the
+// affordance's target level on the bound request point. Unlike the ack
+// pulse the managed inputs are held level-observed — no release write
+// follows: a shelve request stands until the unshelve, max_shelve_ticks
+// bounding the flag rather than the request; an oos request stands
+// until the return, there being no automatic return. The named
+// rejection of a refused write lands in the receipt pane and the
+// journal like every other command's.
+async function submitManaged(button) {
+  const point = Number(button.dataset.point);
+  const meta = metaByPoint.get(point);
+  if (!meta || !meta.writable) return;
+  try {
+    await submitCommand({ write_value: {
+      point: point,
+      kind: meta.value_type,
+      value: { bool: button.dataset.level === "true" },
+    } });
   } catch (error) {
     document.getElementById("receipt").textContent = "command failed: " + error;
   }
@@ -1481,6 +2651,13 @@ async function refreshTrends(base) {
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    // A since-read answering past the cursor's successor is the served
+    // form of the named publication gap: the stretch between evicted
+    // from the bounded ring while the page wasn't polling.
+    const first = history.samples.find(entry => entry.seq > state.lastSeq);
+    if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {
+      noteFeedGap("history", state.lastSeq + 1, first.seq - 1);
+    }
     for (const entry of history.samples) {
       if (entry.seq <= state.lastSeq) continue;
       state.lastSeq = entry.seq;
@@ -1550,6 +2727,11 @@ function drawTrend(meta) {
 // the same run's events, and each journals its own role changes.
 async function refreshJournal(base) {
   const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
+  // The journal stream's served form of the same gap.
+  if (journalSince > 0 && entries.length > 0 &&
+      entries[0].seq > journalSince + 1) {
+    noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);
+  }
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
     const key = entry.tick + " " + JSON.stringify(entry.event);
@@ -1569,6 +2751,19 @@ async function refreshJournal(base) {
           bad: "rejected" in settled.receipt.outcome,
         });
       }
+      // The same settled receipt is the authority's final word on an
+      // interface command's invocation: the applied tick or the named
+      // rejection surfaces on its row as well.
+      if (settled) {
+        const key = settledCommandKey(settled.receipt.command);
+        if (key) {
+          setCommandStatus(key.component, key.name, {
+            text: describeOutcome(settled.receipt.outcome),
+            warn: false,
+            bad: "rejected" in settled.receipt.outcome,
+          });
+        }
+      }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
@@ -1582,11 +2777,41 @@ async function refreshJournal(base) {
     esc(describeEvent(entry.event)) + "</td></tr>").join("");
 }
 
-// Journal events serialize as {"quality_changed": ...} |
-// {"command_settled": ...} | {"step_failed": ...} |
+// One emitted-event payload field: an EventValue serializes as
+// {"value": <Value>} | {"quality": <Quality>} | {"receipt":
+// <CommandReceipt>} | {"text": <string>}.
+function describeEventField(field) {
+  if ("value" in field) return formatValue(field.value);
+  if ("quality" in field) return formatQuality(field.quality);
+  if ("receipt" in field) {
+    return describeCommand(field.receipt.command) + " — " +
+      describeOutcome(field.receipt.outcome);
+  }
+  if ("text" in field) return field.text;
+  return JSON.stringify(field);
+}
+
+// Journal events serialize as {"point_changed": ...} |
+// {"quality_changed": ...} | {"command_settled": ...} |
+// {"step_failed": ...} | {"event_emitted": {event: {event, component,
+// fields}}} — the kind-declared event's durable record — |
 // {"role_changed": {from, to}} |
-// {"divergence_detected": {mismatches}} | {"reinitialized": {report}}.
+// {"divergence_detected": {mismatches}} |
+// {"divergence_resolved": {compared}} — the compared points a clean
+// resync stood on; a diverged verdict clears only on that fully-read
+// same-tick evidence, so an empty list marks an entry an older build
+// journaled — |
+// {"reinitialized": {report}} |
+// {"source_restarted": {was_aligned, resumed_at}} — the tracked
+// stream's generation boundary — | {"run_boundary": {run}} — a new
+// process lifetime's marker on a restarted journal file.
 function describeEvent(event) {
+  if ("point_changed" in event) {
+    const change = event.point_changed;
+    return pointName(change.point) + " value " +
+      (change.from ? formatValue(change.from) : "no prior sample") +
+      " → " + formatValue(change.to);
+  }
   if ("quality_changed" in event) {
     const change = event.quality_changed;
     return pointName(change.point) + " quality " +
@@ -1616,8 +2841,34 @@ function describeEvent(event) {
         pointName(m.point) + " (staged " + formatValue(m.staged) +
         ", field " + formatValue(m.field) + ")").join(", ");
   }
+  if ("divergence_resolved" in event) {
+    const compared = event.divergence_resolved.compared;
+    if (compared.length === 0) {
+      // Reachable only in a journal an older build wrote: a clear now
+      // always stands on the fully-read same-tick comparison below.
+      return "standby divergence cleared — no same-tick field " +
+        "comparison stands behind the clear";
+    }
+    return "standby divergence resolved: staged outputs match the " +
+      "field at " + compared.map(m =>
+        pointName(m.point) + " (staged " + formatValue(m.staged) +
+        ", field " + formatValue(m.field) + ")").join(", ");
+  }
+  if ("source_restarted" in event) {
+    const restart = event.source_restarted;
+    return "tracking source restarted: resumed at tick " +
+      restart.resumed_at +
+      (restart.was_aligned === null || restart.was_aligned === undefined
+        ? ""
+        : " (was aligned to " + restart.was_aligned + ")");
+  }
+  if ("run_boundary" in event) {
+    return "run " + event.run_boundary.run + " began — a new process " +
+      "lifetime; later entries carry its own tick domain";
+  }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;
+    const reverted = report.reverted_tuning || [];
     return "standby reinitialized under revised model at tick " +
       report.resumed_at + ": carried " +
       report.carried.map(c => pointName(c.point)).join(", ") +
@@ -1627,14 +2878,28 @@ function describeEvent(event) {
             : d.output_point ? pointName(d.output_point.point)
             : d.component ? "component " + d.component.name
             : "driver state").join(", ")
+        : "") +
+      (reverted.length > 0
+        ? "; reverted tuning " + reverted.map(r =>
+            r.component + "." + r.parameter + " " +
+            formatValue(r.checkpointed) + " → " +
+            formatValue(r.declared)).join(", ")
         : "");
+  }
+  if ("event_emitted" in event) {
+    const emitted = event.event_emitted.event;
+    const fields = Object.keys(emitted.fields || {}).sort().map(name =>
+      name + "=" + describeEventField(emitted.fields[name])).join(", ");
+    return emitted.component + " emitted " + emitted.event +
+      (fields === "" ? "" : " (" + fields + ")");
   }
   return JSON.stringify(event);
 }
 
 // A command serializes as {"write_value": {point, kind, value}} |
 // {"force_point": {point, kind, value}} | {"unforce_point": {point}} |
-// {"set_parameter": {component, name, value}}.
+// {"set_parameter": {component, name, value}} |
+// {"invoke": {component, command, arguments}}.
 function describeCommand(command) {
   if ("write_value" in command) {
     const write = command.write_value;
@@ -1651,6 +2916,13 @@ function describeCommand(command) {
     const tuning = command.set_parameter;
     return "tune " + tuning.component + "." + tuning.name + " := " +
       formatValue(tuning.value);
+  }
+  if ("invoke" in command) {
+    const call = command.invoke;
+    const args = Object.keys(call.arguments || {}).sort().map(name =>
+      name + "=" + formatValue(call.arguments[name])).join(", ");
+    return "invoke " + call.component + "." + call.command +
+      "(" + args + ")";
   }
   return JSON.stringify(command);
 }
@@ -1672,10 +2944,13 @@ function describeOutcome(outcome) {
 // {"not_writable": {point}} |
 // {"type_mismatch": {point, expected, found}} |
 // {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
-// the parameter-command reasons
+// {"queue_full": {point, capacity}} — the bounded ingress's admission
+// refusal — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
-// each carrying the offending component.
+// each carrying the offending component — | the invoke surface's
+// {"unknown_command"|"argument_type_mismatch"|"command_refused":
+// {component, command, ...}}.
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
@@ -1697,6 +2972,10 @@ function describeReason(reason) {
   if ("not_active" in reason) {
     return "refused: peer reports role " + reason.not_active.role +
       "; commands apply only on the active peer";
+  }
+  if ("queue_full" in reason) {
+    return "command queue full (" + reason.queue_full.capacity +
+      " pending) — resubmit once a scan drains it";
   }
   if ("unknown_component" in reason) {
     return "unknown component " + reason.unknown_component.component;
@@ -1725,6 +3004,21 @@ function describeReason(reason) {
     const rejection = reason.invalid_parameter;
     return rejection.component + " rejected parameter " + rejection.parameter +
       ": " + rejection.detail;
+  }
+  if ("unknown_command" in reason) {
+    const rejection = reason.unknown_command;
+    return rejection.component + " declares no command " + rejection.command;
+  }
+  if ("argument_type_mismatch" in reason) {
+    const rejection = reason.argument_type_mismatch;
+    return "command " + rejection.component + "." + rejection.command +
+      " argument " + rejection.argument + " expects " +
+      pascal(rejection.expected) + ", found " + pascal(rejection.found);
+  }
+  if ("command_refused" in reason) {
+    const rejection = reason.command_refused;
+    return rejection.component + " refused command " + rejection.command +
+      ": " + rejection.reason;
   }
   return JSON.stringify(reason);
 }
@@ -1777,8 +3071,7 @@ async function submitCommand(command) {
     target = activePeer();
   }
   if (target < 0) {
-    receipt.textContent =
-      "not sent: no peer reports role active — the pair is mid-transition";
+    receipt.textContent = noActiveVerdict();
     return null;
   }
   let answer = await postCommand(peers[target].base, command);
@@ -1828,7 +3121,7 @@ async function submitParameter(button) {
   const verdict = answer && answer.outcome
     ? describeOutcome(answer.outcome)
     : answer === null
-      ? "not sent: no peer reports role active"
+      ? noActiveVerdict()
       : String(answer);
   setParamStatus(component, name, {
     text: (parsed.warnings.length > 0
@@ -1898,6 +3191,12 @@ async function init() {
   }
   index = await (await fetch("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
+  // The index's components section — serde-defaulted, so an index
+  // served without it joins nothing — carries the per-instance records
+  // the alarm pane's rationalization disclosure reads by name.
+  for (const record of index.components || []) {
+    componentsByName.set(record.name, record);
+  }
   const select = document.getElementById("command-point");
   // The command form offers only the model-declared writable points —
   // the index carries each io_point's `writable` mark, and writes to
@@ -1925,6 +3224,12 @@ async function init() {
     const tune = event.target.closest("button.tune");
     if (tune) {
       await submitParameter(tune);
+      refresh();
+      return;
+    }
+    const invoke = event.target.closest("button.invoke");
+    if (invoke) {
+      await submitInterfaceCommand(invoke);
       refresh();
       return;
     }
@@ -1961,12 +3266,19 @@ async function init() {
     }
     refresh();
   });
-  // The alarm pane's ack affordance takes the same delegated shape —
-  // the rows re-render on every poll.
+  // The alarm pane's affordances take the same delegated shape — the
+  // rows re-render on every poll — and the state select re-filters the
+  // lists on the next refresh, triggered immediately here.
   document.getElementById("alarm-pane").addEventListener("click", async event => {
     const ack = event.target.closest("button.ack");
-    if (ack) await submitAck(ack);
+    if (ack) {
+      await submitAck(ack);
+      return;
+    }
+    const managed = event.target.closest("button.managed");
+    if (managed) await submitManaged(managed);
   });
+  document.getElementById("alarm-filter").addEventListener("change", refresh);
   // The point listing's force and release affordances take the same
   // delegated shape — the rows re-render on every poll.
   const points = document.getElementById("points");
@@ -1986,6 +3298,12 @@ async function init() {
     if (input) {
       const button = input.parentElement.querySelector("button.write");
       if (button) button.click();
+      return;
+    }
+    const arg = event.target.closest(".command-arg");
+    if (arg) {
+      const invoke = arg.closest("tr").querySelector("button.invoke");
+      if (invoke) invoke.click();
       return;
     }
     const control = event.target.closest(".param-value");

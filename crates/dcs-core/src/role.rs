@@ -116,7 +116,10 @@ pub enum StandbySync {
     /// apply — and has consumed the active's checkpoint under the
     /// documented model-boundary carryover rule: operator-writable
     /// internal points matched by declared identity carried their last
-    /// values, component state reinitialized, and every element without
+    /// values, component state reinitialized — the report's
+    /// `reverted_tuning` itemizing the declared parameters whose
+    /// checkpointed values the crossing reverted to the revision's
+    /// declared defaults — and every element without
     /// a continuation is named in `report`. A promotable state: the run
     /// is defined, and the documented switchover order — demote the old
     /// peer, then promote — moves the field writer to the revised model
@@ -196,6 +199,12 @@ pub enum SwitchError {
         /// What the field-side claim reported.
         detail: String,
     },
+    /// Demotion was requested on a field-owning instance that has no
+    /// checkpoint source to track once demoted — no configured peer and
+    /// no standby that announced itself through its pulls. Accepting it
+    /// would strand the peer permanently `unsynchronized` and
+    /// unpromotable, so the request is refused up front.
+    NoTrackingSource,
 }
 
 impl fmt::Display for SwitchError {
@@ -216,6 +225,10 @@ impl fmt::Display for SwitchError {
             Self::FieldClaimFailed { detail } => {
                 write!(f, "field write-ownership claim failed: {detail}")
             }
+            Self::NoTrackingSource => f.write_str(
+                "no checkpoint source is configured or announced; demotion would \
+                     leave the peer permanently unsynchronized",
+            ),
         }
     }
 }
@@ -282,6 +295,7 @@ mod tests {
                         carried_forces: vec![],
                         dropped: vec![],
                         reinitialized: vec![],
+                        reverted_tuning: vec![],
                         initialized: vec![],
                     }),
                 }),
@@ -331,6 +345,7 @@ mod tests {
             SwitchError::FieldClaimFailed {
                 detail: "plant server unreachable".to_string(),
             },
+            SwitchError::NoTrackingSource,
         ] {
             let json = serde_json::to_string(&error).unwrap();
             assert_eq!(serde_json::from_str::<SwitchError>(&json).unwrap(), error);
@@ -339,6 +354,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&SwitchError::AlreadyActive).unwrap(),
             "\"already_active\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SwitchError::NoTrackingSource).unwrap(),
+            "\"no_tracking_source\""
         );
         assert!(
             serde_json::to_string(&SwitchError::NotConverged {

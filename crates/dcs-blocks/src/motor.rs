@@ -394,6 +394,7 @@ mod tests {
             id: ComponentId(10),
             kind: Motor::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut motor =

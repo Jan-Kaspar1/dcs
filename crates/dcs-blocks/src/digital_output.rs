@@ -193,6 +193,7 @@ mod tests {
             id: ComponentId(3),
             kind: DigitalOutput::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block =

@@ -1,0 +1,579 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "level": { "direction": "in", "value_type": "float" },
+        "fault": { "direction": "in", "value_type": "bool" },
+        "power": { "direction": "in", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "level" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "fault" }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 17,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 18,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 19,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 25,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "power" }
+    },
+    {
+      "id": 26,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 27,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 28,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 30,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 31,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 32,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 33,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 34,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 40,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 42,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 43,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 44,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "wet-well-level",
+      "source": 10,
+      "description": "Level the managed high/low alarm checks"
+    },
+    {
+      "id": 101,
+      "name": "level-alarm-ack",
+      "source": 11,
+      "description": "Operator acknowledgment for the level alarm, held internally until a command writes it"
+    },
+    {
+      "id": 102,
+      "name": "level-alarm-shelve",
+      "source": 12,
+      "description": "Operator shelve request for the level alarm — writable so requests ride the receipted path"
+    },
+    {
+      "id": 103,
+      "name": "level-alarm-oos",
+      "source": 13,
+      "description": "Operator out-of-service command for the level alarm — manual in both directions"
+    },
+    {
+      "id": 104,
+      "name": "level-alarm-suppress",
+      "source": 14,
+      "description": "Designed-suppression condition for the level alarm — wired, so it is a declared input not a mode"
+    },
+    {
+      "id": 105,
+      "name": "pump-fault",
+      "source": 15,
+      "description": "Pump fault flag the managed Bool alarm latches"
+    },
+    {
+      "id": 106,
+      "name": "fault-alarm-ack",
+      "source": 16,
+      "description": "Operator acknowledgment for the fault alarm"
+    },
+    {
+      "id": 107,
+      "name": "fault-alarm-shelve",
+      "source": 17,
+      "description": "Operator shelve request for the fault alarm"
+    },
+    {
+      "id": 108,
+      "name": "fault-alarm-oos",
+      "source": 18,
+      "description": "Operator out-of-service command for the fault alarm"
+    },
+    {
+      "id": 109,
+      "name": "fault-alarm-suppress",
+      "source": 19,
+      "description": "Designed-suppression condition for the fault alarm"
+    },
+    {
+      "id": 110,
+      "name": "level-alarm",
+      "source": 20,
+      "description": "Standing limit state of the managed level alarm"
+    },
+    {
+      "id": 111,
+      "name": "level-alarm-unacknowledged",
+      "source": 21,
+      "description": "Latched from a fresh level trip until the operator acknowledges"
+    },
+    {
+      "id": 112,
+      "name": "level-alarm-shelved",
+      "source": 22,
+      "description": "Asserts while a shelve request stands inside the declared bound"
+    },
+    {
+      "id": 113,
+      "name": "level-alarm-suppressed",
+      "source": 23,
+      "description": "Asserts while the level alarm's suppress condition holds"
+    },
+    {
+      "id": 114,
+      "name": "level-alarm-out-of-service",
+      "source": 24,
+      "description": "Asserts while the level alarm is out of service"
+    },
+    {
+      "id": 115,
+      "name": "station-power-fail",
+      "source": 25,
+      "description": "Station power failure — the never-shelvable managed alarm's condition"
+    },
+    {
+      "id": 116,
+      "name": "power-alarm-ack",
+      "source": 26,
+      "description": "Operator acknowledgment for the power alarm"
+    },
+    {
+      "id": 117,
+      "name": "power-alarm-shelve",
+      "source": 27,
+      "description": "Shelve request the never-shelvable power alarm binds but never accepts — not writable, so requests reject NotWritable at submission"
+    },
+    {
+      "id": 118,
+      "name": "power-alarm-oos",
+      "source": 28,
+      "description": "Operator out-of-service command for the power alarm"
+    },
+    {
+      "id": 119,
+      "name": "fault-alarm",
+      "source": 30,
+      "description": "Standing condition state of the managed fault alarm"
+    },
+    {
+      "id": 120,
+      "name": "fault-alarm-unacknowledged",
+      "source": 31,
+      "description": "Latched from a fresh fault assertion until the operator acknowledges"
+    },
+    {
+      "id": 121,
+      "name": "fault-alarm-shelved",
+      "source": 32,
+      "description": "Asserts while a shelve request stands inside the declared bound"
+    },
+    {
+      "id": 122,
+      "name": "fault-alarm-suppressed",
+      "source": 33,
+      "description": "Asserts while the fault alarm's suppress condition holds"
+    },
+    {
+      "id": 123,
+      "name": "fault-alarm-out-of-service",
+      "source": 34,
+      "description": "Asserts while the fault alarm is out of service"
+    },
+    {
+      "id": 124,
+      "name": "power-alarm",
+      "source": 40,
+      "description": "Standing condition state of the never-shelvable power alarm"
+    },
+    {
+      "id": 125,
+      "name": "power-alarm-unacknowledged",
+      "source": 41,
+      "description": "Latched from a fresh power-fail assertion until the operator acknowledges"
+    },
+    {
+      "id": 126,
+      "name": "power-alarm-shelved",
+      "source": 42,
+      "description": "Never asserts — the declared bound is zero and the bound point is not writable"
+    },
+    {
+      "id": 127,
+      "name": "power-alarm-suppressed",
+      "source": 43,
+      "description": "Never asserts — the instance declares no suppress surface"
+    },
+    {
+      "id": 128,
+      "name": "power-alarm-out-of-service",
+      "source": 44,
+      "description": "Asserts while the power alarm is out of service"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "managed-latching-alarm",
+      "parameters": {
+        "low_limit": { "float": 10.0 },
+        "high_limit": { "float": 90.0 },
+        "hysteresis": { "float": 5.0 },
+        "max_shelve_ticks": { "int": 3 },
+        "priority": { "int": 1 },
+        "class": { "int": 2 },
+        "response_ticks": { "int": 30 }
+      },
+      "rationalization": {
+        "consequence": "The wet well leaves its limits unnoticed",
+        "required_action": "Acknowledge and respond to the level excursion",
+        "reference": "level-alarm"
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "shelve": { "direction": "in", "value_type": "bool" },
+        "oos": { "direction": "in", "value_type": "bool" },
+        "suppress": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" },
+        "shelved": { "direction": "out", "value_type": "bool" },
+        "suppressed": { "direction": "out", "value_type": "bool" },
+        "out_of_service": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "max_shelve_ticks": { "int": 3 },
+        "priority": { "int": 2 },
+        "class": { "int": 1 },
+        "response_ticks": { "int": 20 }
+      },
+      "rationalization": {
+        "consequence": "The pump fault stands unnoticed",
+        "required_action": "Acknowledge and clear the pump fault",
+        "reference": "fault-alarm"
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "bool" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "shelve": { "direction": "in", "value_type": "bool" },
+        "oos": { "direction": "in", "value_type": "bool" },
+        "suppress": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" },
+        "shelved": { "direction": "out", "value_type": "bool" },
+        "suppressed": { "direction": "out", "value_type": "bool" },
+        "out_of_service": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "managed-bool-latching-alarm",
+      "parameters": {
+        "max_shelve_ticks": { "int": 0 },
+        "priority": { "int": 1 },
+        "class": { "int": 1 },
+        "response_ticks": { "int": 10 }
+      },
+      "rationalization": {
+        "consequence": "Station power is lost while the plant must run",
+        "required_action": "Switch to backup power and investigate the supply",
+        "reference": "power-alarm"
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "bool" },
+        "ack": { "direction": "in", "value_type": "bool" },
+        "shelve": { "direction": "in", "value_type": "bool" },
+        "oos": { "direction": "in", "value_type": "bool" },
+        "alarm": { "direction": "out", "value_type": "bool" },
+        "unacknowledged": { "direction": "out", "value_type": "bool" },
+        "shelved": { "direction": "out", "value_type": "bool" },
+        "suppressed": { "direction": "out", "value_type": "bool" },
+        "out_of_service": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "ack" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "shelve" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 1, "name": "oos" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 1, "name": "suppress" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "alarm" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "unacknowledged" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "shelved" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "suppressed" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out_of_service" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 2, "name": "ack" } }
+    },
+    {
+      "from": { "point": 17 },
+      "to": { "port": { "component": 2, "name": "shelve" } }
+    },
+    {
+      "from": { "point": 18 },
+      "to": { "port": { "component": 2, "name": "oos" } }
+    },
+    {
+      "from": { "point": 19 },
+      "to": { "port": { "component": 2, "name": "suppress" } }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "alarm" } },
+      "to": { "point": 30 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "unacknowledged" } },
+      "to": { "point": 31 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "shelved" } },
+      "to": { "point": 32 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "suppressed" } },
+      "to": { "point": 33 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "out_of_service" } },
+      "to": { "point": 34 }
+    },
+    {
+      "from": { "point": 25 },
+      "to": { "port": { "component": 3, "name": "in" } }
+    },
+    {
+      "from": { "point": 26 },
+      "to": { "port": { "component": 3, "name": "ack" } }
+    },
+    {
+      "from": { "point": 27 },
+      "to": { "port": { "component": 3, "name": "shelve" } }
+    },
+    {
+      "from": { "point": 28 },
+      "to": { "port": { "component": 3, "name": "oos" } }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "alarm" } },
+      "to": { "point": 40 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "unacknowledged" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "shelved" } },
+      "to": { "point": 42 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "suppressed" } },
+      "to": { "point": 43 }
+    },
+    {
+      "from": { "port": { "component": 3, "name": "out_of_service" } },
+      "to": { "point": 44 }
+    }
+  ]
+}

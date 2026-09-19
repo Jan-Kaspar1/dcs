@@ -470,6 +470,7 @@ mod tests {
             id: ComponentId(9),
             kind: Timer::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = Timer::from_parameters("tmr", IN, OUT, &instance.parameters).unwrap();

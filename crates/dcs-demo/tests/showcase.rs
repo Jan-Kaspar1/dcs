@@ -95,6 +95,75 @@ fn fixture_loads_validates_and_covers_the_component_library() {
 }
 
 #[test]
+fn journaled_marks_the_durable_record_points() {
+    // Decision 74's sweep on the hand-authored fixture: the alarm
+    // lifecycle outputs, the mode and managed-state points decision
+    // 75 names, the batch record, and the protection-relevant status
+    // points carry `journaled`; receipts-only writables, delivered
+    // copies, pulses, and every float stay off the durable record.
+    let model = PlantModel::load(SHOWCASE_DOCUMENT).unwrap();
+    let journaled = |point: PointId| {
+        model
+            .io_points
+            .iter()
+            .find(|io| io.id == point)
+            .unwrap_or_else(|| panic!("{point:?} is not in the fixture"))
+            .journaled
+    };
+    for point in [
+        points::PUMP_RUN,
+        points::HIGH_SWITCH,
+        points::VALVE_MANUAL_SELECT,
+        points::BATCH_RUN,
+        points::BATCH_MODE,
+        points::INTERLOCK_TRIPPED,
+        points::LEVEL_ALARM,
+        points::PUMP_FAULT,
+        points::VALVE_DISCREPANCY,
+        points::TRIP_COUNT,
+        points::TRIPS_DONE,
+        points::VOTER_DISCREPANCY,
+        points::LATCH_ALARM,
+        points::LATCH_UNACKNOWLEDGED,
+        points::BATCH_STEP,
+        points::BATCH_DONE,
+        points::STATION_MANUAL,
+    ] {
+        assert!(journaled(point), "{point:?} must carry `journaled`");
+    }
+    for point in [
+        points::LEVEL_SETPOINT,
+        points::PUMP_START,
+        points::VALVE_MANUAL,
+        points::TRIP_COUNT_RESET,
+        points::BATCH_RESET,
+        points::ALARM_ACK,
+        points::TOTAL_RESET,
+        points::PUMP_COMMAND,
+        points::HORN,
+        points::BEACON,
+        points::PUMP_RUNNING,
+        points::RUN_FOR_MOTOR,
+        points::RUN_FOR_PERMISSIVE,
+        points::TRIP_PULSE,
+        points::HORN_COMMAND,
+        points::BEACON_COMMAND,
+        points::BATCH_PROGRAM,
+        points::PROGRAM_FOR_SELECT,
+    ] {
+        assert!(!journaled(point), "{point:?} must stay off the record");
+    }
+    for point in &model.io_points {
+        if point.journaled {
+            assert!(
+                matches!(point.value_type, ValueKind::Bool | ValueKind::Int),
+                "a journaled float slipped in: {point:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_dynamics_document_loads_with_the_second_order_tank() {
     // The same document `dcs-plant-server --dynamics` merges: a JSON
     // list of process-element declarations. The tank is a

@@ -24,14 +24,29 @@
 //! - the freshness-budget rule: a non-null `stale_after_ticks` may mark a
 //!   field `In` point only — it requires `direction: "in"` and a non-null
 //!   `channel`;
+//! - the journaled-flag rule: `journaled: true` may mark a `bool`/`int`
+//!   point only — the durable journal records discrete state transitions,
+//!   so a `float` point's per-scan stream is rejected from it;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
-//!   additionally requires the `registers` map, and `sim-scripted`
-//!   requires the `script` map — the parts of each kind's contract JSON
+//!   additionally requires the `registers` map, `sim-cyclic` requires the
+//!   `exchange_miss_threshold` and the `stations` map of per-channel
+//!   register declarations, `sim-scripted` requires
+//!   the `script` map, and `ethercat` requires the `hardware` marker plus
+//!   the `bus`, `identity`, `mapping`, `exchange_miss_threshold`, and
+//!   `startup` parameter shapes — the parts of each kind's contract JSON
 //!   Schema can write down. Other kinds' parameters stay unconstrained
 //!   objects: the `sim*` prefix family is open-ended, so the schema does
 //!   not pin its parameter rule (the standard `sim` factory rejecting all
-//!   parameters is an assembly-side contract, not a document shape).
+//!   parameters is an assembly-side contract, not a document shape);
+//! - the alarm rationalization obligation (decision 70): the known alarm
+//!   kind strings — `latching-alarm`, `bool-latching-alarm`, and the
+//!   managed siblings — require a `rationalization` block whose
+//!   `consequence`/`required_action`/`reference` prose fields are
+//!   non-empty and the non-negative `Int` parameters `priority`, `class`,
+//!   and `response_ticks`. The conditional documents the obligation for
+//!   non-Rust tooling; the operative rejection still lands at alarm-kind
+//!   construction, which is also where the component id is known.
 //!
 //! Rules the schema language cannot express — they stay with
 //! [`PlantModel::validate`](crate::PlantModel::validate) and the
@@ -49,7 +64,11 @@
 //!   resolves, a `registers` map covering exactly the declared channels
 //!   with no shared register, a `script` keyed to bound `in` channels with
 //!   per-entry values matching the channel kind and strictly increasing
-//!   ticks;
+//!   ticks, an `ethercat` `mapping` placing every declared channel in the
+//!   image matching its direction at non-overlapping offsets shaped for
+//!   its value kind, and `safe_outputs` covering exactly the `out`
+//!   channels — those depend on the channel table the document declares
+//!   elsewhere;
 //! - the lexical integer/float distinction — JSON Schema compares numbers
 //!   mathematically, so `1.0` passes an integer field the serde loader
 //!   rejects;
@@ -103,7 +122,30 @@ const SCHEMA_SOURCE: &str = r##"{
     "direction": { "enum": ["in", "out"] },
     "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },
+    "u32-int": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "register-index": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "image-offset": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["byte", "bit"],
+          "properties": {
+            "byte": { "$ref": "#/$defs/u32-int" },
+            "bit": { "type": "integer", "minimum": 0, "maximum": 7 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["byte", "bits"],
+          "properties": {
+            "byte": { "$ref": "#/$defs/u32-int" },
+            "bits": { "enum": [8, 16, 32, 64] }
+          }
+        }
+      ]
+    },
     "bool-value": {
       "type": "object",
       "additionalProperties": false,
@@ -115,6 +157,22 @@ const SCHEMA_SOURCE: &str = r##"{
       "additionalProperties": false,
       "required": ["int"],
       "properties": { "int": { "type": "integer" } }
+    },
+    "nonneg-int-value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["int"],
+      "properties": { "int": { "$ref": "#/$defs/nonneg-int" } }
+    },
+    "rationalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consequence", "required_action", "reference"],
+      "properties": {
+        "consequence": { "type": "string", "minLength": 1 },
+        "required_action": { "type": "string", "minLength": 1 },
+        "reference": { "type": "string", "minLength": 1 }
+      }
     },
     "float-value": {
       "type": "object",
@@ -183,6 +241,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
         },
+        "hardware": { "type": "boolean" },
         "parameters": { "type": "object" }
       },
       "allOf": [
@@ -246,6 +305,52 @@ const SCHEMA_SOURCE: &str = r##"{
         {
           "if": {
             "required": ["kind"],
+            "properties": { "kind": { "const": "sim-cyclic" } }
+          },
+          "then": {
+            "required": ["parameters"],
+            "properties": {
+              "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["address", "exchange_miss_threshold", "stations"],
+                "properties": {
+                  "address": { "type": "string" },
+                  "timeout_ms": { "$ref": "#/$defs/nonneg-int" },
+                  "exchange_miss_threshold": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "stations": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "anyOf": [
+                          { "$ref": "#/$defs/register-index" },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["register"],
+                            "properties": {
+                              "register": { "$ref": "#/$defs/register-index" },
+                              "initial": { "$ref": "#/$defs/value" }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
             "properties": { "kind": { "const": "sim-scripted" } }
           },
           "then": {
@@ -261,6 +366,76 @@ const SCHEMA_SOURCE: &str = r##"{
                     "additionalProperties": {
                       "type": "array",
                       "items": { "$ref": "#/$defs/script-entry" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "ethercat" } }
+          },
+          "then": {
+            "required": ["hardware", "parameters"],
+            "properties": {
+              "hardware": { "const": true },
+              "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "bus",
+                  "identity",
+                  "mapping",
+                  "exchange_miss_threshold",
+                  "startup"
+                ],
+                "properties": {
+                  "bus": { "type": "string", "minLength": 1 },
+                  "identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["vendor", "product", "revision"],
+                    "properties": {
+                      "vendor": { "$ref": "#/$defs/u32-int" },
+                      "product": { "$ref": "#/$defs/u32-int" },
+                      "revision": { "$ref": "#/$defs/u32-int" }
+                    }
+                  },
+                  "mapping": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "inputs": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        }
+                      },
+                      "outputs": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        }
+                      }
+                    }
+                  },
+                  "exchange_miss_threshold": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "safe_outputs": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/value" }
+                  },
+                  "startup": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["on_mismatch"],
+                    "properties": {
+                      "on_mismatch": { "const": "fail" }
                     }
                   }
                 }
@@ -317,7 +492,8 @@ const SCHEMA_SOURCE: &str = r##"{
         "writable": { "type": "boolean" },
         "stale_after_ticks": {
           "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
-        }
+        },
+        "journaled": { "type": "boolean" }
       },
       "allOf": [
         {
@@ -364,6 +540,15 @@ const SCHEMA_SOURCE: &str = r##"{
               "direction": { "const": "in" },
               "channel": { "not": { "type": "null" } }
             }
+          }
+        },
+        {
+          "if": {
+            "required": ["journaled"],
+            "properties": { "journaled": { "const": true } }
+          },
+          "then": {
+            "properties": { "value_type": { "enum": ["bool", "int"] } }
           }
         },
         {
@@ -428,11 +613,45 @@ const SCHEMA_SOURCE: &str = r##"{
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/value" }
         },
+        "rationalization": {
+          "anyOf": [{ "$ref": "#/$defs/rationalization" }, { "type": "null" }]
+        },
         "ports": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "latching-alarm",
+                  "bool-latching-alarm",
+                  "managed-latching-alarm",
+                  "managed-bool-latching-alarm"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": ["rationalization"],
+            "properties": {
+              "rationalization": { "$ref": "#/$defs/rationalization" },
+              "parameters": {
+                "required": ["priority", "class", "response_ticks"],
+                "properties": {
+                  "priority": { "$ref": "#/$defs/nonneg-int-value" },
+                  "class": { "$ref": "#/$defs/nonneg-int-value" },
+                  "response_ticks": { "$ref": "#/$defs/nonneg-int-value" }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "connection": {
       "type": "object",

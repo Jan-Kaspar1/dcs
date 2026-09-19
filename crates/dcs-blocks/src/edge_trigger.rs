@@ -454,6 +454,7 @@ mod tests {
             id: ComponentId(32),
             kind: EdgeTrigger::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut block = EdgeTrigger::from_parameters("etr", IN, OUT, &instance.parameters).unwrap();

@@ -1,6 +1,6 @@
 # Local agent pool operations
 
-Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation explicitly selects `swe-2-high` with `--permission-mode dangerous`, authorized by the user on 2026-09-14. This gives local Devin full tool access as the WSL user; clones provide work separation, not a security sandbox. Model fallback is rejected.
+Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation runs with full tool access — `devin -p --permission-mode dangerous` for `swe-2-*` models, `opencode run --auto` for `opencode/*` models — authorized by the user on 2026-09-14 and extended to OpenCode free models on 2026-09-17. This gives agents full tool access as the WSL user; clones provide work separation, not a security sandbox. The `models` config list is validated against a verified free-model allow-list; paid fallback is rejected. Worker clones rotate through `models` by slot so parallel jobs spread across separate model quotas; the planner and review lane use the first configured model. OpenCode invocations are not resumable through the Devin session id, so retries carry repair context in the prompt instead.
 
 ## Installation and startup
 
@@ -40,11 +40,26 @@ dcs-agents retry 123
 
 `pause` prevents new dispatch and merging while active processes may finish and publish their results. `resume` reopens dispatch unless an integrity failure remains. `stop` terminates managed processes through the service and preserves their checkouts. `retry` applies only to a blocked issue after the pool is resumed; inspect its error and workspace first. A retry is not evidence that the underlying blocker has been fixed.
 
-The personal `/home/kaspar/workspace/dcs` checkout is separate from managed clones under `/home/kaspar/workspace/dcs-agent-pool`. Worker clones are allocated as needed. Successful automated merge-and-issue-closure reconciliations raise capacity from five to ten after five merges, and to twenty after fifteen. One planner may run alongside workers. Dependencies and occupied concurrency groups can leave slots idle.
+The personal `/home/kaspar/workspace/dcs` checkout is separate from managed clones under `/home/kaspar/workspace/dcs-agent-pool`. Worker clones are allocated as needed. Successful automated merge-and-issue-closure reconciliations raise capacity from five to ten after five merges, and to twenty after fifteen. One planner may run alongside workers. Only dependencies and worker-slot capacity can leave slots idle; concurrency groups are descriptive metadata and no longer serialize dispatch, so same-area tickets run in parallel and overlapping edits are resolved through serialized merges and conflict repairs.
 
 The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/` files, and cited notes under `docs/research/` before proposing work. Product issue scopes begin with stable requirement IDs. When customer-specific semantics or measurable acceptance criteria lack evidence, the planner creates a `docs/research` issue first. The assigned worker then runs as the research role: it updates a cited research note and requirement status, and implementation waits for a later planning pass. This separates evidence gathering from the planner's backlog and dependency decisions without requiring a permanently running research session.
 
+The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
+
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
+
+## Admission control
+
+Every managed invocation — worker, retry, repair, planner, and reviewer — must reserve a durable inference lease in SQLite before it spawns. Inference capacity is accounted separately from workspace: a PR awaiting CI keeps its clone reservation in `jobs` while releasing its inference lease. `model_caps` still orders worker preference in dispatch, but the lease is the authoritative check on every launch path, including preserved-clone retries.
+
+Models are grouped into quota groups — sets of models sharing one provider budget. Without an explicit `scheduler` config section, one group is derived per unique entry in `models`, seeded from `model_caps` (uncapped models start at four slots). Provider feedback is scoped to the affected group:
+
+- A rate-limit or provider-outage receipt cools down only that group (bounded exponential cooldown, honoring a `Retry-After` hint); other groups keep dispatching, and retries migrate to any group with capacity instead of dying again on the throttled model. Recovery reopens with a single probe session, never a retry wave.
+- Authentication and credit failures block the group until `dcs-agents admission reset <group>` after the credential problem is resolved; sleeping cannot fix them, so they are never auto-retried.
+- A quota-killed job is requeued automatically once per failed invocation, bounded by `scheduler.max_quota_requeues` (default 4). Ordinary task failures stay blocked for operator `retry`.
+- Group targets adapt: halved on a congestion event (floor 1), and raised by one only after a `quiet_seconds` window that contained both refused demand and a verified useful completion, up to `ceiling`. A new congestion event restarts the window.
+
+`dcs-agents admission` prints group targets, modes, active leases, and deduplicated outcome counts; `dcs-agents admission reset <group>` clears a blocked or cooling group. An optional `scheduler` section in `config.json` defines named groups (`models`, `initial`, `ceiling`, `external_slots` for consumers outside the pool) plus `quiet_seconds`, `cooldown_seconds`, and `max_cooldown_seconds`. Global `pause` remains the manual and integrity control and still gates all admission.
 
 ## Architecture review lane
 
@@ -67,6 +82,20 @@ Controls: `dcs-agents review` prints lane status (stage, running run, latest res
 Reviewer guidance is pinned in `agent_pool/resources/architecture/` (project policy, prompt template, MIT-licensed vendored references with a hash manifest). Preflight verifies every resource hash of the *installed* release before launch and stages a copy beside the report; the reviewed checkout's copies are never used, so a main commit cannot change live reviewer behavior without a pinned upgrade. A mismatch fails the run explicitly. Regenerate `MANIFEST.json` after changing any resource: `python3 -c "from agent_pool.review import write_manifest; write_manifest('agent_pool/resources/architecture', '<upstream revision>')"` — a test fails when the manifest is stale.
 
 Rollout: install the pinned upgrade, keep `enabled` at `false` to stage, then set `enabled`/`mode` per the table. `mode: report` with `auto_promote` exercises the staged path — one validated report promotes to `pilot` (planner ingestion for at most one active improvement), and a confirmed post-merge assessment of that pilot improvement promotes to `full` — without a manual report-inspection gate. A rejected assessment rolls back to `report`.
+
+## QA findings lane
+
+The supervisor ingests Lenovo QA run reports from `<state_root>/qa/reports/` and is the sole GitHub publisher for QA findings: reproduced defects become managed issues (severity maps to P1-P3, never P0; the affected module is the concurrency group), missing capabilities become planner candidates, and rig/build/credential/agent failures stay operational records. Merged fixes chain finding -> issue -> fix SHA -> verification; a failed fix yields a linked follow-up issue bounded by `max_fix_cycles`, never a bare reopen. See `docs/qa-findings-ingestion.md` for the report contract, lifecycle, and seeded-defect demo.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `qa.enabled` | `false` | Ingest QA reports each cycle. |
+| `qa.mode` | `record` | `record` validates/records only; `route` publishes issues, candidates, and follow-ups. |
+| `qa.dashboard` | `false` | Publish `qa/findings.json` to the Pi dashboard (content-hashed, tolerant of outages). Keep off until the Pi view exists. |
+| `qa.report_dir` | `<state_root>/qa/reports` | Report inbox; processed and rejected files move beside it. |
+| `qa.max_open` / `qa.max_issues_per_report` / `qa.max_fix_cycles` | `20` / `5` / `2` | Open-finding bound, per-pass issue cap, and fix-attempt bound. |
+
+`dcs-agents status` reports `qa` lane counts, pending verifications, and the last publication error. The lane is fail-safe: a malformed report is quarantined to `qa/rejected/` and never wedges the dispatch loop.
 
 ## Recovery and upgrades
 

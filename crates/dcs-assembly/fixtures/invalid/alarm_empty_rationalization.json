@@ -1,0 +1,308 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unack": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "run"
+      }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 13,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "out"
+      }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "alarm"
+      }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 1,
+        "name": "unack"
+      }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "motor-run-feedback",
+      "source": 10,
+      "description": "Run feedback the motor verifies its command against"
+    },
+    {
+      "id": 101,
+      "name": "motor-command",
+      "source": 11,
+      "description": "Operator start/stop request, held internally until a command writes it"
+    },
+    {
+      "id": 102,
+      "name": "alarm-ack",
+      "source": 12,
+      "description": "Operator acknowledgment, held internally until a command writes it"
+    },
+    {
+      "id": 103,
+      "name": "motor-fault",
+      "source": 13,
+      "description": "Fail-to-start/fail-to-stop flag the alarm latches, carried internally to its input"
+    },
+    {
+      "id": 104,
+      "name": "motor-starter",
+      "source": 20,
+      "description": "Starter command echoed to the field"
+    },
+    {
+      "id": 105,
+      "name": "fault-alarm",
+      "source": 21,
+      "description": "Standing alarm state following the motor fault flag"
+    },
+    {
+      "id": 106,
+      "name": "fault-unacknowledged",
+      "source": 22,
+      "description": "Latched from the fault's fresh assertion until the operator acknowledges"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "priority": {
+          "int": 1
+        },
+        "class": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The motor fault stands unnoticed",
+        "required_action": "   ",
+        "reference": "fault-alarm"
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 11
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 20
+      }
+    },
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 13
+      }
+    },
+    {
+      "from": {
+        "point": 14
+      },
+      "to": {
+        "point": 13
+      }
+    },
+    {
+      "from": {
+        "point": 14
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 21
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 22
+      }
+    }
+  ]
+}

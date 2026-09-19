@@ -1,0 +1,5681 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "discharge-rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "flow": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "flow-src": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "injection-rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "net-draw": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p201-draw": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p201-rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p202-draw": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "p202-rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "tank-level": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "tank-refill": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-di",
+      "channels": {
+        "bund-flood": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "external-inhibit": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "flow-proven": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p201-fault": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p201-local": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p201-run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p201-stroke": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p202-fault": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p202-local": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p202-run": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "p202-stroke": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "sim-do",
+      "channels": {
+        "p201-cmd": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "p202-cmd": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "sim-ao",
+      "channels": {
+        "p201-speed": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "p202-speed": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "flow"
+      }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "flow-src"
+      }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "tank-level"
+      }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "discharge-rate"
+      }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "net-draw"
+      }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "tank-refill"
+      }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "injection-rate"
+      }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "flow-proven"
+      },
+      "journaled": true
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "bund-flood"
+      },
+      "journaled": true
+    },
+    {
+      "id": 22,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "external-inhibit"
+      },
+      "journaled": true
+    },
+    {
+      "id": 200,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 201,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 202,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 203,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 204,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 205,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 206,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 208,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 209,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 210,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 211,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 212,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 213,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 214,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 215,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 216,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 217,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 218,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 219,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 220,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 221,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 222,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 223,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 224,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 225,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 226,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 227,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 228,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 229,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 230,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 231,
+      "direction": "in",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 232,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 233,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 234,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 235,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 236,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 237,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 238,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 240,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 2.0
+      },
+      "writable": true
+    },
+    {
+      "id": 241,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 242,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      },
+      "writable": true
+    },
+    {
+      "id": 243,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 244,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 245,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 246,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 247,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 1000,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1001,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1002,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1010,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1011,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1012,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1020,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1021,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1022,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1030,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1031,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1032,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1040,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1041,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1042,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1050,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 1051,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 1052,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p201-draw"
+      }
+    },
+    {
+      "id": 34,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p201-rate"
+      }
+    },
+    {
+      "id": 40,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p201-run"
+      },
+      "journaled": true
+    },
+    {
+      "id": 50,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p201-local"
+      },
+      "journaled": true
+    },
+    {
+      "id": 60,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p201-fault"
+      },
+      "journaled": true
+    },
+    {
+      "id": 70,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p201-stroke"
+      }
+    },
+    {
+      "id": 100,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 3,
+        "name": "p201-cmd"
+      }
+    },
+    {
+      "id": 110,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 4,
+        "name": "p201-speed"
+      }
+    },
+    {
+      "id": 300,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 301,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 302,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 303,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 304,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 305,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 306,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 307,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 308,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 309,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 310,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      },
+      "journaled": true
+    },
+    {
+      "id": 311,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 312,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 313,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 314,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 315,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 316,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 317,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 318,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 319,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 320,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 321,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 322,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 323,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 324,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 325,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 326,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 31,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p202-draw"
+      }
+    },
+    {
+      "id": 35,
+      "direction": "in",
+      "value_type": "float",
+      "channel": {
+        "device": 1,
+        "name": "p202-rate"
+      }
+    },
+    {
+      "id": 41,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p202-run"
+      },
+      "journaled": true
+    },
+    {
+      "id": 51,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p202-local"
+      },
+      "journaled": true
+    },
+    {
+      "id": 61,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p202-fault"
+      },
+      "journaled": true
+    },
+    {
+      "id": 71,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": {
+        "device": 2,
+        "name": "p202-stroke"
+      }
+    },
+    {
+      "id": 101,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": {
+        "device": 3,
+        "name": "p202-cmd"
+      }
+    },
+    {
+      "id": 111,
+      "direction": "out",
+      "value_type": "float",
+      "channel": {
+        "device": 4,
+        "name": "p202-speed"
+      }
+    },
+    {
+      "id": 332,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 333,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 334,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 335,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 336,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 337,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 338,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 339,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 340,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
+      "id": 341,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 342,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      },
+      "journaled": true
+    },
+    {
+      "id": 343,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 344,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 345,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 346,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 347,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 348,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 349,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 350,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 351,
+      "direction": "out",
+      "value_type": "int",
+      "initial": {
+        "int": 0
+      }
+    },
+    {
+      "id": 352,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      }
+    },
+    {
+      "id": 353,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 354,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 355,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 356,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true
+    },
+    {
+      "id": 357,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    },
+    {
+      "id": 358,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "journaled": true
+    }
+  ],
+  "signals": [
+    {
+      "id": 10010,
+      "name": "flow",
+      "source": 10,
+      "unit": "m3/h",
+      "description": "Measured process flow — the pacing signal",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10011,
+      "name": "flow-src",
+      "source": 11,
+      "unit": "m3/h",
+      "description": "Process flow source — the dynamics document's forcing input",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10012,
+      "name": "tank-level",
+      "source": 12,
+      "unit": "L",
+      "description": "Chemical tank level",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10013,
+      "name": "discharge-rate",
+      "source": 13,
+      "unit": "g/h",
+      "description": "Measured chemical discharge rate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10014,
+      "name": "net-draw",
+      "source": 14,
+      "unit": "L/scan",
+      "description": "Net tank drawdown rate — draws plus refill",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10015,
+      "name": "tank-refill",
+      "source": 15,
+      "unit": "L/scan",
+      "description": "Tank refill inflow — the delivery line",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10016,
+      "name": "injection-rate",
+      "source": 16,
+      "unit": "g/h",
+      "description": "Injected chemical rate at the injection point — upstream of the transport delay to the discharge measurement",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10020,
+      "name": "flow-proven",
+      "source": 20,
+      "unit": "",
+      "description": "Flow-proven contact — the process running and flow confirmed",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10021,
+      "name": "bund-flood",
+      "source": 21,
+      "unit": "",
+      "description": "Bund flood contact",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10022,
+      "name": "external-inhibit",
+      "source": 22,
+      "unit": "",
+      "description": "External (wet-weather) inhibit contact",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10200,
+      "name": "ratio-demand",
+      "source": 200,
+      "unit": "g/h",
+      "description": "Paced demand before the permissive gate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10201,
+      "name": "ratio-demand-in",
+      "source": 201,
+      "unit": "g/h",
+      "description": "Paced demand delivered to the interlock",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10202,
+      "name": "clamped",
+      "source": 202,
+      "unit": "",
+      "description": "Demand saturating at a declared dose or rate bound",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10203,
+      "name": "fallback-active",
+      "source": 203,
+      "unit": "",
+      "description": "Declared bad-flow fallback engaged",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10204,
+      "name": "fallback-active-in",
+      "source": 204,
+      "unit": "",
+      "description": "Bad-flow fallback delivered to its alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10205,
+      "name": "flow-not-proven",
+      "source": 205,
+      "unit": "",
+      "description": "Flow not proven — the inverted flow-proven contact",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10206,
+      "name": "flow-not-proven-in",
+      "source": 206,
+      "unit": "",
+      "description": "Flow-not-proven delivered to the interlock",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10208,
+      "name": "tank-empty-trip-in",
+      "source": 208,
+      "unit": "",
+      "description": "Tank-empty condition delivered to the interlock",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10209,
+      "name": "tank-empty-inv-in",
+      "source": 209,
+      "unit": "",
+      "description": "Tank-empty condition delivered to the healthy-side inversion",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10210,
+      "name": "tank-ok",
+      "source": 210,
+      "unit": "",
+      "description": "Tank above the empty inhibit",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10211,
+      "name": "tank-ok-in",
+      "source": 211,
+      "unit": "",
+      "description": "Tank-healthy delivered to the permissive gate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10212,
+      "name": "bund-ok",
+      "source": 212,
+      "unit": "",
+      "description": "Bund clear",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10213,
+      "name": "bund-ok-in",
+      "source": 213,
+      "unit": "",
+      "description": "Bund-clear delivered to the permissive gate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10214,
+      "name": "external-ok",
+      "source": 214,
+      "unit": "",
+      "description": "No external inhibit",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10215,
+      "name": "external-ok-in",
+      "source": 215,
+      "unit": "",
+      "description": "No-external-inhibit delivered to the permissive gate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10216,
+      "name": "none-available",
+      "source": 216,
+      "unit": "",
+      "description": "No dosing pump reports itself available",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10217,
+      "name": "none-available-in",
+      "source": 217,
+      "unit": "",
+      "description": "No-pump-available delivered to its consumers",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10218,
+      "name": "pump-avail",
+      "source": 218,
+      "unit": "",
+      "description": "At least one dosing pump available",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10219,
+      "name": "pump-avail-in",
+      "source": 219,
+      "unit": "",
+      "description": "Pump-available delivered to the permissive gate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10220,
+      "name": "dosing-permitted",
+      "source": 220,
+      "unit": "",
+      "description": "Dosing permitted — the aggregated permissive chain",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10221,
+      "name": "permitted-in",
+      "source": 221,
+      "unit": "",
+      "description": "Dosing-permitted delivered to the interlock",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10222,
+      "name": "gated-demand",
+      "source": 222,
+      "unit": "g/h",
+      "description": "Permissive-gated demand",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10223,
+      "name": "gated-demand-in",
+      "source": 223,
+      "unit": "g/h",
+      "description": "Permissive-gated demand delivered to the manual station",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10224,
+      "name": "interlock-tripped",
+      "source": 224,
+      "unit": "",
+      "description": "Demand interlock tripped",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10225,
+      "name": "demand",
+      "source": 225,
+      "unit": "g/h",
+      "description": "Commanded chemical rate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10226,
+      "name": "demand-chain-in",
+      "source": 226,
+      "unit": "g/h",
+      "description": "Commanded rate delivered to stage selection",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10227,
+      "name": "demand-total-in",
+      "source": 227,
+      "unit": "g/h",
+      "description": "Commanded rate delivered to totalization",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10228,
+      "name": "demand-devmon-in",
+      "source": 228,
+      "unit": "g/h",
+      "description": "Commanded rate delivered to dose confirmation",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10229,
+      "name": "manual-active",
+      "source": 229,
+      "unit": "",
+      "description": "Manual mode active",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10230,
+      "name": "stage-demand",
+      "source": 230,
+      "unit": "pumps",
+      "description": "Stage-count demand the threshold chain computes",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10231,
+      "name": "stage-demand-in",
+      "source": 231,
+      "unit": "pumps",
+      "description": "Stage-count demand delivered to the pump group",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10232,
+      "name": "duty",
+      "source": 232,
+      "unit": "pumps",
+      "description": "1-based index of the pump holding duty; 0 while none does",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10233,
+      "name": "staged",
+      "source": 233,
+      "unit": "pumps",
+      "description": "How many pumps the group currently commands",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10234,
+      "name": "all-faulted",
+      "source": 234,
+      "unit": "",
+      "description": "Every dosing pump's fault flag reads failed",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10235,
+      "name": "duty-call",
+      "source": 235,
+      "unit": "",
+      "description": "The chain's call for the duty pump",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10236,
+      "name": "lag-call",
+      "source": 236,
+      "unit": "",
+      "description": "The chain's call for the lag pump",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10237,
+      "name": "below-cutoff",
+      "source": 237,
+      "unit": "",
+      "description": "Demand at or below the chain cut-off",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10238,
+      "name": "high-level",
+      "source": 238,
+      "unit": "",
+      "description": "Demand at or above the high setpoint",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10240,
+      "name": "dose",
+      "source": 240,
+      "unit": "mg/L",
+      "description": "Operator dose setpoint per flow unit",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10241,
+      "name": "man-mode",
+      "source": 241,
+      "unit": "",
+      "description": "Manual takeover — false auto, true manual",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10242,
+      "name": "man-rate",
+      "source": 242,
+      "unit": "g/h",
+      "description": "Operator's manual chemical rate",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10243,
+      "name": "totalizer-reset",
+      "source": 243,
+      "unit": "",
+      "description": "Commanded-total reset request",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10244,
+      "name": "dose-total",
+      "source": 244,
+      "unit": "g",
+      "description": "Commanded chemical total",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10245,
+      "name": "deviation",
+      "source": 245,
+      "unit": "",
+      "description": "Commanded-versus-measured relative deviation",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10246,
+      "name": "deviating",
+      "source": 246,
+      "unit": "",
+      "description": "Dose not confirmed — the deviation window tripped",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10247,
+      "name": "deviating-in",
+      "source": 247,
+      "unit": "",
+      "description": "Dose-not-confirmed delivered to its alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11000,
+      "name": "tank-low-ack",
+      "source": 1000,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11001,
+      "name": "tank-low-alarm",
+      "source": 1001,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11002,
+      "name": "tank-low-unacknowledged",
+      "source": 1002,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11010,
+      "name": "tank-empty-ack",
+      "source": 1010,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11011,
+      "name": "tank-empty-alarm",
+      "source": 1011,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11012,
+      "name": "tank-empty-unacknowledged",
+      "source": 1012,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11020,
+      "name": "pacing-lost-ack",
+      "source": 1020,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11021,
+      "name": "pacing-lost-alarm",
+      "source": 1021,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11022,
+      "name": "pacing-lost-unacknowledged",
+      "source": 1022,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11030,
+      "name": "bund-flood-ack",
+      "source": 1030,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11031,
+      "name": "bund-flood-alarm",
+      "source": 1031,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11032,
+      "name": "bund-flood-unacknowledged",
+      "source": 1032,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11040,
+      "name": "external-inhibit-ack",
+      "source": 1040,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11041,
+      "name": "external-inhibit-alarm",
+      "source": 1041,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11042,
+      "name": "external-inhibit-unacknowledged",
+      "source": 1042,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11050,
+      "name": "dose-not-confirmed-ack",
+      "source": 1050,
+      "unit": "",
+      "description": "Operator acknowledgment for the alarm",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11051,
+      "name": "dose-not-confirmed-alarm",
+      "source": 1051,
+      "unit": "",
+      "description": "Standing alarm state",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 11052,
+      "name": "dose-not-confirmed-unacknowledged",
+      "source": 1052,
+      "unit": "",
+      "description": "Latched until the operator acknowledges",
+      "group": "dosing-skid"
+    },
+    {
+      "id": 10030,
+      "name": "p201-draw",
+      "source": 30,
+      "unit": "L/scan",
+      "description": "Chemical draw the bool_flow element drives",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10034,
+      "name": "p201-rate",
+      "source": 34,
+      "unit": "g/h",
+      "description": "Metered discharge the scaled_flow element drives",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10040,
+      "name": "p201-run",
+      "source": 40,
+      "unit": "",
+      "description": "Run feedback contact",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10050,
+      "name": "p201-local",
+      "source": 50,
+      "unit": "",
+      "description": "Local-selected — the pump on its own controls",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10060,
+      "name": "p201-fault",
+      "source": 60,
+      "unit": "",
+      "description": "Pump fault / no-discharge contact",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10070,
+      "name": "p201-stroke",
+      "source": 70,
+      "unit": "",
+      "description": "Stroke pulse the counter accumulates",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10100,
+      "name": "p201-cmd",
+      "source": 100,
+      "unit": "",
+      "description": "Field run command",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10110,
+      "name": "p201-speed",
+      "source": 110,
+      "unit": "%",
+      "description": "Analog speed demand",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10300,
+      "name": "p201-oos",
+      "source": 300,
+      "unit": "",
+      "description": "Out of service — inhibits automatic operation",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10301,
+      "name": "p201-stroke-reset",
+      "source": 301,
+      "unit": "",
+      "description": "Stroke-counter reset request",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10302,
+      "name": "p201-group-cmd",
+      "source": 302,
+      "unit": "",
+      "description": "The pump group's automatic run request",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10303,
+      "name": "p201-group-cmd-in",
+      "source": 303,
+      "unit": "",
+      "description": "Group request delivered to the motor",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10304,
+      "name": "p201-local-ok",
+      "source": 304,
+      "unit": "",
+      "description": "Remote-selected — the inverted local indication",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10305,
+      "name": "p201-local-ok-in",
+      "source": 305,
+      "unit": "",
+      "description": "Remote-selected delivered to availability",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10306,
+      "name": "p201-oos-ok",
+      "source": 306,
+      "unit": "",
+      "description": "In service — the inverted out-of-service point",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10307,
+      "name": "p201-oos-ok-in",
+      "source": 307,
+      "unit": "",
+      "description": "In-service delivered to availability",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10308,
+      "name": "p201-pfault-ok",
+      "source": 308,
+      "unit": "",
+      "description": "Pump fault contact healthy — the inverted contact",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10309,
+      "name": "p201-pfault-ok-in",
+      "source": 309,
+      "unit": "",
+      "description": "Pump-healthy delivered to availability",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10310,
+      "name": "p201-avail",
+      "source": 310,
+      "unit": "",
+      "description": "Aggregated availability for the pump group",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10311,
+      "name": "p201-avail-in",
+      "source": 311,
+      "unit": "",
+      "description": "Availability delivered to the pump group",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10312,
+      "name": "p201-motor-fault",
+      "source": 312,
+      "unit": "",
+      "description": "The motor's proven command/feedback fault",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10313,
+      "name": "p201-motor-fault-group-in",
+      "source": 313,
+      "unit": "",
+      "description": "Motor fault delivered to the pump group",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10314,
+      "name": "p201-motor-fault-alarm-in",
+      "source": 314,
+      "unit": "",
+      "description": "Motor fault delivered to the alarm",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10315,
+      "name": "p201-demand-in",
+      "source": 315,
+      "unit": "g/h",
+      "description": "Commanded rate delivered to the speed gate",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10316,
+      "name": "p201-speed-eng",
+      "source": 316,
+      "unit": "g/h",
+      "description": "Run-gated speed demand",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10317,
+      "name": "p201-speed-eng-in",
+      "source": 317,
+      "unit": "g/h",
+      "description": "Speed demand delivered to the analog output",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10318,
+      "name": "p201-speed-gated",
+      "source": 318,
+      "unit": "",
+      "description": "Speed demand gated while the pump is not proven running",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10319,
+      "name": "p201-strokes",
+      "source": 319,
+      "unit": "strokes",
+      "description": "Accumulated stroke count",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10320,
+      "name": "p201-strokes-done",
+      "source": 320,
+      "unit": "",
+      "description": "Stroke preset reached",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10321,
+      "name": "p201-fault-ack",
+      "source": 321,
+      "unit": "",
+      "description": "Operator acknowledgment for the motor-fault alarm",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10322,
+      "name": "p201-fault-alarm",
+      "source": 322,
+      "unit": "",
+      "description": "Standing motor-fault alarm",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10323,
+      "name": "p201-fault-unack",
+      "source": 323,
+      "unit": "",
+      "description": "Motor fault latched until acknowledged",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10324,
+      "name": "p201-pfault-ack",
+      "source": 324,
+      "unit": "",
+      "description": "Operator acknowledgment for the pump-fault alarm",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10325,
+      "name": "p201-pfault-alarm",
+      "source": 325,
+      "unit": "",
+      "description": "Standing pump fault / no-discharge alarm",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10326,
+      "name": "p201-pfault-unack",
+      "source": 326,
+      "unit": "",
+      "description": "Pump fault latched until acknowledged",
+      "group": "pump-p201"
+    },
+    {
+      "id": 10031,
+      "name": "p202-draw",
+      "source": 31,
+      "unit": "L/scan",
+      "description": "Chemical draw the bool_flow element drives",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10035,
+      "name": "p202-rate",
+      "source": 35,
+      "unit": "g/h",
+      "description": "Metered discharge the scaled_flow element drives",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10041,
+      "name": "p202-run",
+      "source": 41,
+      "unit": "",
+      "description": "Run feedback contact",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10051,
+      "name": "p202-local",
+      "source": 51,
+      "unit": "",
+      "description": "Local-selected — the pump on its own controls",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10061,
+      "name": "p202-fault",
+      "source": 61,
+      "unit": "",
+      "description": "Pump fault / no-discharge contact",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10071,
+      "name": "p202-stroke",
+      "source": 71,
+      "unit": "",
+      "description": "Stroke pulse the counter accumulates",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10101,
+      "name": "p202-cmd",
+      "source": 101,
+      "unit": "",
+      "description": "Field run command",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10111,
+      "name": "p202-speed",
+      "source": 111,
+      "unit": "%",
+      "description": "Analog speed demand",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10332,
+      "name": "p202-oos",
+      "source": 332,
+      "unit": "",
+      "description": "Out of service — inhibits automatic operation",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10333,
+      "name": "p202-stroke-reset",
+      "source": 333,
+      "unit": "",
+      "description": "Stroke-counter reset request",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10334,
+      "name": "p202-group-cmd",
+      "source": 334,
+      "unit": "",
+      "description": "The pump group's automatic run request",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10335,
+      "name": "p202-group-cmd-in",
+      "source": 335,
+      "unit": "",
+      "description": "Group request delivered to the motor",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10336,
+      "name": "p202-local-ok",
+      "source": 336,
+      "unit": "",
+      "description": "Remote-selected — the inverted local indication",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10337,
+      "name": "p202-local-ok-in",
+      "source": 337,
+      "unit": "",
+      "description": "Remote-selected delivered to availability",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10338,
+      "name": "p202-oos-ok",
+      "source": 338,
+      "unit": "",
+      "description": "In service — the inverted out-of-service point",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10339,
+      "name": "p202-oos-ok-in",
+      "source": 339,
+      "unit": "",
+      "description": "In-service delivered to availability",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10340,
+      "name": "p202-pfault-ok",
+      "source": 340,
+      "unit": "",
+      "description": "Pump fault contact healthy — the inverted contact",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10341,
+      "name": "p202-pfault-ok-in",
+      "source": 341,
+      "unit": "",
+      "description": "Pump-healthy delivered to availability",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10342,
+      "name": "p202-avail",
+      "source": 342,
+      "unit": "",
+      "description": "Aggregated availability for the pump group",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10343,
+      "name": "p202-avail-in",
+      "source": 343,
+      "unit": "",
+      "description": "Availability delivered to the pump group",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10344,
+      "name": "p202-motor-fault",
+      "source": 344,
+      "unit": "",
+      "description": "The motor's proven command/feedback fault",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10345,
+      "name": "p202-motor-fault-group-in",
+      "source": 345,
+      "unit": "",
+      "description": "Motor fault delivered to the pump group",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10346,
+      "name": "p202-motor-fault-alarm-in",
+      "source": 346,
+      "unit": "",
+      "description": "Motor fault delivered to the alarm",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10347,
+      "name": "p202-demand-in",
+      "source": 347,
+      "unit": "g/h",
+      "description": "Commanded rate delivered to the speed gate",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10348,
+      "name": "p202-speed-eng",
+      "source": 348,
+      "unit": "g/h",
+      "description": "Run-gated speed demand",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10349,
+      "name": "p202-speed-eng-in",
+      "source": 349,
+      "unit": "g/h",
+      "description": "Speed demand delivered to the analog output",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10350,
+      "name": "p202-speed-gated",
+      "source": 350,
+      "unit": "",
+      "description": "Speed demand gated while the pump is not proven running",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10351,
+      "name": "p202-strokes",
+      "source": 351,
+      "unit": "strokes",
+      "description": "Accumulated stroke count",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10352,
+      "name": "p202-strokes-done",
+      "source": 352,
+      "unit": "",
+      "description": "Stroke preset reached",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10353,
+      "name": "p202-fault-ack",
+      "source": 353,
+      "unit": "",
+      "description": "Operator acknowledgment for the motor-fault alarm",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10354,
+      "name": "p202-fault-alarm",
+      "source": 354,
+      "unit": "",
+      "description": "Standing motor-fault alarm",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10355,
+      "name": "p202-fault-unack",
+      "source": 355,
+      "unit": "",
+      "description": "Motor fault latched until acknowledged",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10356,
+      "name": "p202-pfault-ack",
+      "source": 356,
+      "unit": "",
+      "description": "Operator acknowledgment for the pump-fault alarm",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10357,
+      "name": "p202-pfault-alarm",
+      "source": 357,
+      "unit": "",
+      "description": "Standing pump fault / no-discharge alarm",
+      "group": "pump-p202"
+    },
+    {
+      "id": 10358,
+      "name": "p202-pfault-unack",
+      "source": 358,
+      "unit": "",
+      "description": "Pump fault latched until acknowledged",
+      "group": "pump-p202"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "flow-paced-ratio",
+      "parameters": {
+        "fallback_rate": {
+          "float": 40.0
+        },
+        "max_dose": {
+          "float": 4.0
+        },
+        "max_rate": {
+          "float": 100.0
+        },
+        "min_dose": {
+          "float": 0.5
+        },
+        "min_rate": {
+          "float": 10.0
+        },
+        "on_bad_flow": {
+          "int": 2
+        },
+        "on_bad_trim": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "clamped": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "dose": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "fallback_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "flow": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_4": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_5": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_4": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_5": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "kind": "manual-station",
+      "parameters": {
+        "transfer_delta": {
+          "float": 25.0
+        }
+      },
+      "ports": {
+        "control": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "manual": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "manual_active": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "mode": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "kind": "threshold-chain",
+      "parameters": {
+        "cutoff": {
+          "float": -1.0
+        },
+        "high": {
+          "float": 2000000000.0
+        },
+        "lag_start": {
+          "float": 1000000000.0
+        },
+        "on_bad_demand": {
+          "int": 0
+        },
+        "start": {
+          "float": 1.0
+        },
+        "stop": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "below_cutoff": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "duty_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "high_level": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "lag_call": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "level": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "kind": "pump-group",
+      "parameters": {
+        "min_off_ticks": {
+          "int": 1
+        },
+        "restage_delay_ticks": {
+          "int": 0
+        },
+        "rotation": {
+          "int": 0
+        },
+        "start_delay_ticks": {
+          "int": 1
+        }
+      },
+      "ports": {
+        "all_faulted": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "avail_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "avail_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "cmd_1": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "cmd_2": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "demand": {
+          "direction": "in",
+          "value_type": "int"
+        },
+        "duty": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "fault_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "none_available": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "run_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "staged": {
+          "direction": "out",
+          "value_type": "int"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "kind": "totalizer",
+      "parameters": {},
+      "ports": {
+        "rate": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "reset": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "total": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "kind": "deviation-monitor",
+      "parameters": {
+        "deviation_limit": {
+          "float": 0.2
+        },
+        "window_ticks": {
+          "int": 6
+        }
+      },
+      "ports": {
+        "deviating": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "deviation": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "expected": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "measured": {
+          "direction": "in",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "kind": "latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "high_limit": {
+          "float": 1000000000.0
+        },
+        "hysteresis": {
+          "float": 10.0
+        },
+        "low_limit": {
+          "float": 150.0
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The chemical tank runs low and dosing capacity narrows",
+        "required_action": "Arrange a chemical refill before the tank empties",
+        "reference": "tank-low-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "kind": "latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "high_limit": {
+          "float": 1000000000.0
+        },
+        "hysteresis": {
+          "float": 10.0
+        },
+        "low_limit": {
+          "float": 60.0
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The chemical tank is empty and dosing stops",
+        "required_action": "Refill the tank and confirm the permissive clears",
+        "reference": "tank-empty-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "Dosing runs un-paced against the fallback demand",
+        "required_action": "Check the process flowmeter and the pacing source",
+        "reference": "pacing-lost-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 1
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "A chemical spill floods the bund unannounced",
+        "required_action": "Inspect the skid and clear the bund",
+        "reference": "bund-flood-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "An external inhibit holds dosing off unnoticed",
+        "required_action": "Trace the external inhibit contact",
+        "reference": "external-inhibit-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 1
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 30
+        }
+      },
+      "rationalization": {
+        "consequence": "The delivered dose deviates from the demand unnoticed",
+        "required_action": "Check the pump delivery and the dose calculation",
+        "reference": "dose-deviation-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "int": 2
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "kind": "analog-output",
+      "parameters": {
+        "eng_max": {
+          "float": 100.0
+        },
+        "eng_min": {
+          "float": 0.0
+        },
+        "raw_max": {
+          "float": 100.0
+        },
+        "raw_min": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "eng": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "raw": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "kind": "counter",
+      "parameters": {
+        "preset": {
+          "int": 1000000
+        }
+      },
+      "ports": {
+        "count": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "done": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "reset": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot dose while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p201-fault-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump runs without proven discharge",
+        "required_action": "Check the pump's discharge path and fault contact",
+        "reference": "p201-pfault-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "kind": "motor",
+      "parameters": {
+        "fault_ticks": {
+          "int": 2
+        }
+      },
+      "ports": {
+        "cmd": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "fault": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "run": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "kind": "analog-output",
+      "parameters": {
+        "eng_max": {
+          "float": 100.0
+        },
+        "eng_min": {
+          "float": 0.0
+        },
+        "raw_max": {
+          "float": 100.0
+        },
+        "raw_min": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "eng": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "raw": {
+          "direction": "out",
+          "value_type": "float"
+        }
+      }
+    },
+    {
+      "id": 37,
+      "kind": "counter",
+      "parameters": {
+        "preset": {
+          "int": 1000000
+        }
+      },
+      "ports": {
+        "count": {
+          "direction": "out",
+          "value_type": "int"
+        },
+        "done": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "reset": {
+          "direction": "in",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump cannot dose while its fault stands",
+        "required_action": "Clear the motor fault and reset the pump",
+        "reference": "p202-fault-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "kind": "bool-latching-alarm",
+      "parameters": {
+        "class": {
+          "int": 2
+        },
+        "priority": {
+          "int": 2
+        },
+        "response_ticks": {
+          "int": 60
+        }
+      },
+      "rationalization": {
+        "consequence": "The pump runs without proven discharge",
+        "required_action": "Check the pump's discharge path and fault contact",
+        "reference": "p202-pfault-alarm"
+      },
+      "ports": {
+        "ack": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "alarm": {
+          "direction": "out",
+          "value_type": "bool"
+        },
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "unacknowledged": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "point": 10
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "flow"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 240
+      },
+      "to": {
+        "port": {
+          "component": 1,
+          "name": "dose"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "demand"
+        }
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "point": 200
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "clamped"
+        }
+      },
+      "to": {
+        "point": 202
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 1,
+          "name": "fallback_active"
+        }
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 204
+      },
+      "to": {
+        "point": 203
+      }
+    },
+    {
+      "from": {
+        "point": 20
+      },
+      "to": {
+        "port": {
+          "component": 2,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 2,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 205
+      }
+    },
+    {
+      "from": {
+        "point": 206
+      },
+      "to": {
+        "point": 205
+      }
+    },
+    {
+      "from": {
+        "point": 209
+      },
+      "to": {
+        "port": {
+          "component": 3,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 3,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 210
+      }
+    },
+    {
+      "from": {
+        "point": 211
+      },
+      "to": {
+        "point": 210
+      }
+    },
+    {
+      "from": {
+        "point": 21
+      },
+      "to": {
+        "port": {
+          "component": 4,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 4,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 212
+      }
+    },
+    {
+      "from": {
+        "point": 213
+      },
+      "to": {
+        "point": 212
+      }
+    },
+    {
+      "from": {
+        "point": 22
+      },
+      "to": {
+        "port": {
+          "component": 5,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 5,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 214
+      }
+    },
+    {
+      "from": {
+        "point": 215
+      },
+      "to": {
+        "point": 214
+      }
+    },
+    {
+      "from": {
+        "point": 217
+      },
+      "to": {
+        "port": {
+          "component": 6,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 6,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 218
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "point": 218
+      }
+    },
+    {
+      "from": {
+        "point": 20
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 211
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 213
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 215
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in_4"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 219
+      },
+      "to": {
+        "port": {
+          "component": 7,
+          "name": "in_5"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 7,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 220
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "point": 220
+      }
+    },
+    {
+      "from": {
+        "point": 201
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 221
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 206
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "trip_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 208
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "trip_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 21
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "trip_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 22
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "trip_4"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 217
+      },
+      "to": {
+        "port": {
+          "component": 8,
+          "name": "trip_5"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 222
+      }
+    },
+    {
+      "from": {
+        "point": 223
+      },
+      "to": {
+        "point": 222
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 8,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "point": 224
+      }
+    },
+    {
+      "from": {
+        "point": 223
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "control"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 242
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "manual"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 241
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "mode"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 9,
+          "name": "manual_active"
+        }
+      },
+      "to": {
+        "point": 229
+      }
+    },
+    {
+      "from": {
+        "point": 226
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "point": 227
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "point": 228
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "point": 226
+      },
+      "to": {
+        "port": {
+          "component": 10,
+          "name": "level"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "demand"
+        }
+      },
+      "to": {
+        "point": 230
+      }
+    },
+    {
+      "from": {
+        "point": 231
+      },
+      "to": {
+        "point": 230
+      }
+    },
+    {
+      "from": {
+        "point": 231
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "demand"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "duty_call"
+        }
+      },
+      "to": {
+        "point": 235
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "lag_call"
+        }
+      },
+      "to": {
+        "point": 236
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "below_cutoff"
+        }
+      },
+      "to": {
+        "point": 237
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 10,
+          "name": "high_level"
+        }
+      },
+      "to": {
+        "point": 238
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "duty"
+        }
+      },
+      "to": {
+        "point": 232
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "staged"
+        }
+      },
+      "to": {
+        "point": 233
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "none_available"
+        }
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "point": 217
+      },
+      "to": {
+        "point": 216
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "all_faulted"
+        }
+      },
+      "to": {
+        "point": 234
+      }
+    },
+    {
+      "from": {
+        "point": 227
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "rate"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 243
+      },
+      "to": {
+        "port": {
+          "component": 12,
+          "name": "reset"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 12,
+          "name": "total"
+        }
+      },
+      "to": {
+        "point": 244
+      }
+    },
+    {
+      "from": {
+        "point": 228
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "expected"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 13
+      },
+      "to": {
+        "port": {
+          "component": 13,
+          "name": "measured"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "deviation"
+        }
+      },
+      "to": {
+        "point": 245
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 13,
+          "name": "deviating"
+        }
+      },
+      "to": {
+        "point": 246
+      }
+    },
+    {
+      "from": {
+        "point": 247
+      },
+      "to": {
+        "point": 246
+      }
+    },
+    {
+      "from": {
+        "point": 1000
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1001
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 14,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1002
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "port": {
+          "component": 14,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1010
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 15,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1011
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 15,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1012
+      }
+    },
+    {
+      "from": {
+        "point": 12
+      },
+      "to": {
+        "port": {
+          "component": 15,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 208
+      },
+      "to": {
+        "point": 1011
+      }
+    },
+    {
+      "from": {
+        "point": 209
+      },
+      "to": {
+        "point": 1011
+      }
+    },
+    {
+      "from": {
+        "point": 1020
+      },
+      "to": {
+        "port": {
+          "component": 16,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 16,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1021
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 16,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1022
+      }
+    },
+    {
+      "from": {
+        "point": 204
+      },
+      "to": {
+        "port": {
+          "component": 16,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1030
+      },
+      "to": {
+        "port": {
+          "component": 17,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 17,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1031
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 17,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1032
+      }
+    },
+    {
+      "from": {
+        "point": 21
+      },
+      "to": {
+        "port": {
+          "component": 17,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1040
+      },
+      "to": {
+        "port": {
+          "component": 18,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 18,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1041
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 18,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1042
+      }
+    },
+    {
+      "from": {
+        "point": 22
+      },
+      "to": {
+        "port": {
+          "component": 18,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1050
+      },
+      "to": {
+        "port": {
+          "component": 19,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 19,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 1051
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 19,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 1052
+      }
+    },
+    {
+      "from": {
+        "point": 247
+      },
+      "to": {
+        "port": {
+          "component": 19,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "point": 100
+      }
+    },
+    {
+      "from": {
+        "point": 50
+      },
+      "to": {
+        "port": {
+          "component": 20,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 20,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 304
+      }
+    },
+    {
+      "from": {
+        "point": 305
+      },
+      "to": {
+        "point": 304
+      }
+    },
+    {
+      "from": {
+        "point": 300
+      },
+      "to": {
+        "port": {
+          "component": 21,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 21,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 306
+      }
+    },
+    {
+      "from": {
+        "point": 307
+      },
+      "to": {
+        "point": 306
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 22,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 22,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 308
+      }
+    },
+    {
+      "from": {
+        "point": 309
+      },
+      "to": {
+        "point": 308
+      }
+    },
+    {
+      "from": {
+        "point": 305
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 307
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 309
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "in_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 310
+      }
+    },
+    {
+      "from": {
+        "point": 311
+      },
+      "to": {
+        "point": 310
+      }
+    },
+    {
+      "from": {
+        "point": 311
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "avail_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "cmd_1"
+        }
+      },
+      "to": {
+        "point": 302
+      }
+    },
+    {
+      "from": {
+        "point": 303
+      },
+      "to": {
+        "point": 302
+      }
+    },
+    {
+      "from": {
+        "point": 303
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 100
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "run_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 313
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 313
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "fault_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 314
+      },
+      "to": {
+        "point": 312
+      }
+    },
+    {
+      "from": {
+        "point": 314
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 315
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "point": 315
+      },
+      "to": {
+        "port": {
+          "component": 25,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 40
+      },
+      "to": {
+        "port": {
+          "component": 25,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 25,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 316
+      }
+    },
+    {
+      "from": {
+        "point": 317
+      },
+      "to": {
+        "point": 316
+      }
+    },
+    {
+      "from": {
+        "point": 317
+      },
+      "to": {
+        "port": {
+          "component": 26,
+          "name": "eng"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 25,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "point": 318
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 26,
+          "name": "raw"
+        }
+      },
+      "to": {
+        "point": 110
+      }
+    },
+    {
+      "from": {
+        "point": 70
+      },
+      "to": {
+        "port": {
+          "component": 27,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 301
+      },
+      "to": {
+        "port": {
+          "component": 27,
+          "name": "reset"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 27,
+          "name": "count"
+        }
+      },
+      "to": {
+        "point": 319
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 27,
+          "name": "done"
+        }
+      },
+      "to": {
+        "point": 320
+      }
+    },
+    {
+      "from": {
+        "point": 321
+      },
+      "to": {
+        "port": {
+          "component": 28,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 28,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 322
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 28,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 323
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 29,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 324
+      },
+      "to": {
+        "port": {
+          "component": 29,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 29,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 325
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 29,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 326
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "point": 101
+      }
+    },
+    {
+      "from": {
+        "point": 51
+      },
+      "to": {
+        "port": {
+          "component": 30,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 30,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 336
+      }
+    },
+    {
+      "from": {
+        "point": 337
+      },
+      "to": {
+        "point": 336
+      }
+    },
+    {
+      "from": {
+        "point": 332
+      },
+      "to": {
+        "port": {
+          "component": 31,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 31,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 338
+      }
+    },
+    {
+      "from": {
+        "point": 339
+      },
+      "to": {
+        "point": 338
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 32,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 32,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 340
+      }
+    },
+    {
+      "from": {
+        "point": 341
+      },
+      "to": {
+        "point": 340
+      }
+    },
+    {
+      "from": {
+        "point": 337
+      },
+      "to": {
+        "port": {
+          "component": 33,
+          "name": "in_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 339
+      },
+      "to": {
+        "port": {
+          "component": 33,
+          "name": "in_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 341
+      },
+      "to": {
+        "port": {
+          "component": 33,
+          "name": "in_3"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 33,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 342
+      }
+    },
+    {
+      "from": {
+        "point": 343
+      },
+      "to": {
+        "point": 342
+      }
+    },
+    {
+      "from": {
+        "point": 343
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "avail_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 11,
+          "name": "cmd_2"
+        }
+      },
+      "to": {
+        "point": 334
+      }
+    },
+    {
+      "from": {
+        "point": 335
+      },
+      "to": {
+        "point": 334
+      }
+    },
+    {
+      "from": {
+        "point": 335
+      },
+      "to": {
+        "port": {
+          "component": 34,
+          "name": "cmd"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 34,
+          "name": "run"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 34,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 101
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "run_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 34,
+          "name": "fault"
+        }
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 345
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 345
+      },
+      "to": {
+        "port": {
+          "component": 11,
+          "name": "fault_2"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 346
+      },
+      "to": {
+        "point": 344
+      }
+    },
+    {
+      "from": {
+        "point": 346
+      },
+      "to": {
+        "port": {
+          "component": 38,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 347
+      },
+      "to": {
+        "point": 225
+      }
+    },
+    {
+      "from": {
+        "point": 347
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 41
+      },
+      "to": {
+        "port": {
+          "component": 35,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 348
+      }
+    },
+    {
+      "from": {
+        "point": 349
+      },
+      "to": {
+        "point": 348
+      }
+    },
+    {
+      "from": {
+        "point": 349
+      },
+      "to": {
+        "port": {
+          "component": 36,
+          "name": "eng"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 35,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "point": 350
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 36,
+          "name": "raw"
+        }
+      },
+      "to": {
+        "point": 111
+      }
+    },
+    {
+      "from": {
+        "point": 71
+      },
+      "to": {
+        "port": {
+          "component": 37,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 333
+      },
+      "to": {
+        "port": {
+          "component": 37,
+          "name": "reset"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 37,
+          "name": "count"
+        }
+      },
+      "to": {
+        "point": 351
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 37,
+          "name": "done"
+        }
+      },
+      "to": {
+        "point": 352
+      }
+    },
+    {
+      "from": {
+        "point": 353
+      },
+      "to": {
+        "port": {
+          "component": 38,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 354
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 38,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 355
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 39,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 356
+      },
+      "to": {
+        "port": {
+          "component": 39,
+          "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 39,
+          "name": "alarm"
+        }
+      },
+      "to": {
+        "point": 357
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 39,
+          "name": "unacknowledged"
+        }
+      },
+      "to": {
+        "point": 358
+      }
+    }
+  ]
+}

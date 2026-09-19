@@ -15,8 +15,12 @@
 //! `sim*` prefix (local simulated devices), [`SIM_TCP_KIND`]
 //! (`sim-tcp`, the remote simulated plant of `dcs-sim-net`),
 //! [`SIM_BUS_KIND`] (`sim-bus`, the register-mapped simulated fieldbus
-//! device of `dcs-sim-bus`), and [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
-//! the tick-indexed playback driver of `dcs-sim`). New device
+//! device of `dcs-sim-bus`), [`SIM_CYCLIC_KIND`] (`sim-cyclic`, the
+//! same device server behind the cyclic process-image contract),
+//! [`SIM_SCRIPTED_KIND`] (`sim-scripted`,
+//! the tick-indexed playback driver of `dcs-sim`), and
+//! [`ETHERCAT_KIND`] (`ethercat`, the hardware-bound field-bus contract
+//! of `dcs-ethercat`). New device
 //! integrations register their own kind against the same [`DeviceSpec`]
 //! contract — registering a device integration is what "adding a new
 //! device" means.
@@ -24,15 +28,19 @@
 use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason, Sample,
-    StateError, StateMap, Tick, Value, ValueKind,
+    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
+    Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
 };
+use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
 use dcs_sim::{
     ChannelId, ChannelMap, Loopback, PointBinding, ScriptEntry, ScriptError, ScriptedDriver,
     SimDriver,
 };
-use dcs_sim_bus::{BusDriver, DeviceParameters, PointRegister};
+use dcs_sim_bus::{
+    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters,
+    PointRegister,
+};
 use dcs_sim_net::RemoteDriver;
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -111,6 +119,79 @@ pub const SIM_SCRIPTED_KIND: &str = "sim-scripted";
 /// two ends cannot diverge.
 pub const SIM_BUS_KIND: &str = dcs_sim_bus::DEVICE_KIND;
 
+/// The cyclic-exchange simulated fieldbus kind: a
+/// [`BusServer`](dcs_sim_bus::BusServer) register image reached over
+/// TCP through [`CyclicBusDriver`], which implements the
+/// [`CyclicIoDriver`] contract — `read`/`write` operate on the held
+/// input and staged output images and never touch the wire, while one
+/// exchange per scan publishes the staged outputs and latches the
+/// answered register census.
+///
+/// The kind is registered exactly — it outranks the `sim` prefix,
+/// which would otherwise read it as a local simulated device. Its
+/// device `parameters` carry the addressing, the miss threshold, and
+/// the station layout the factory validates at assembly:
+///
+/// - `"address"` (required string): the device server's `host:port`;
+/// - `"timeout_ms"` (optional non-negative number): the per-request
+///   timeout in milliseconds, defaulting to
+///   [`CyclicBusDriver::DEFAULT_TIMEOUT`];
+/// - `"exchange_miss_threshold"` (required positive integer): the
+///   consecutive missed exchanges before the driver's reads escalate
+///   to `IoError::Disconnected`;
+/// - `"stations"` (required object): station name → channel name →
+///   register declaration — the `"registers"` entry grammar
+///   [`SIM_BUS_KIND`] uses — partitioning every declared channel into
+///   the stations a short exchange's working counter attributes.
+///
+/// Any other parameter is rejected. The factory connects eagerly and
+/// its connect-time census probes that the server holds every declared
+/// register with the declared kind — an unreachable endpoint or a
+/// mismatched register map is an assembly failure. The full contract
+/// is [`CyclicDeviceParameters`]'s; the `dcs-sim-bus-device` binary
+/// parses the same declaration — registers *and* station layout — when
+/// it serves the device, so a scripted `short-station` outcome
+/// withholds exactly the registers the driver attributes.
+pub const SIM_CYCLIC_KIND: &str = dcs_sim_bus::CYCLIC_DEVICE_KIND;
+
+/// The EtherCAT device kind: a hardware-bound cyclic field-bus device —
+/// an EtherCAT coupler or remote-I/O station — declared through
+/// `Device.hardware` and the kind's `parameters`.
+///
+/// The kind is *hardware-bound*: the device must carry `"hardware":
+/// true`, and the factory rejects the declaration without it — the
+/// marker is the model's evidence that no simulated backend may serve
+/// the device. Its `parameters` declare the field-bus contract the
+/// master validates at startup (the full grammar is
+/// `dcs-ethercat`'s [`params`](dcs_ethercat) contract):
+///
+/// - `"bus"` (required string): the *logical* bus name — deployment
+///   configuration binds it to a host interface outside the model
+///   (decision 47); the document never names an interface;
+/// - `"identity"` (required object): the expected station identity —
+///   `{"vendor": <u32>, "product": <u32>, "revision": <u32>}`;
+/// - `"mapping"` (required object): `{"inputs": {...}, "outputs":
+///   {...}}` placing every declared channel in the image matching its
+///   direction — `{"byte", "bit"}` for a `bool` channel, a byte-aligned
+///   `{"byte", "bits"}` field for `int`/`float` — with no overlapping
+///   bit ranges;
+/// - `"exchange_miss_threshold"` (required integer ≥ 1): the cyclic
+///   contract's `Disconnected` escalation threshold (decision 78);
+/// - `"safe_outputs"` (object, required when the device declares `out`
+///   channels): each `out` channel's declared safe state staged into
+///   the output image before the first exchange;
+/// - `"startup"` (required object): `{"on_mismatch": "fail"}` — the only
+///   admitted policy: a station identity or layout mismatch is a hard
+///   startup failure.
+///
+/// A malformed declaration is [`DeviceError::Parameters`], surfacing as
+/// [`AssemblyError::InvalidDeviceParameters`]. Until the EtherCAT
+/// master integration lands (the Lenovo HQ-4 lane), a well-formed
+/// declaration still fails assembly — [`DeviceError::Backend`] — since
+/// no bus can be initialized: a hardware-bound kind is never silently
+/// substituted by simulation.
+pub const ETHERCAT_KIND: &str = dcs_ethercat::DEVICE_KIND;
+
 /// One `io_point` bound to a channel on the device under construction.
 #[derive(Debug, Clone)]
 pub struct DevicePoint {
@@ -135,6 +216,12 @@ pub struct DeviceSpec<'m> {
     /// The kind string the model declares — under a prefix registration,
     /// the device's actual kind, not the prefix it matched.
     pub kind: &'m str,
+    /// The model's `hardware` marker: `true` declares the device
+    /// hardware-bound. The factory owns the marker's meaning for its
+    /// kind — a hardware-bound kind requires it, a simulated kind
+    /// rejects it, so the flag stays honest evidence rather than a hint
+    /// a backend can ignore.
+    pub hardware: bool,
     /// The device's kind-specific parameters, as declared in the model.
     pub parameters: &'m BTreeMap<String, serde_json::Value>,
     /// The channels the model declares on the device.
@@ -232,6 +319,14 @@ pub type StepHook = Arc<dyn Fn(f64) -> Result<Tick, StepError> + Send + Sync>;
 /// the claim.
 pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 
+/// Forgets the backend's recorded field write-ownership — the
+/// per-backend half of [`FanoutDriver::release_field_claims`], run when
+/// this peer demotes: an attachment that gave the field up must not
+/// re-assert a stale claim when a re-attach finds the field's
+/// arbitration reset. `None` on kinds whose claim bookkeeping needs no
+/// forgetting — e.g. `sim-bus`, where a claim dies with its connection.
+pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -246,6 +341,10 @@ pub struct DeviceBackend {
     /// arbitrate a single writer, which keeps automatic failover off
     /// for models built on it.
     pub claim: Option<ClaimHook>,
+    /// Forgets the backend's recorded write-ownership claim — the
+    /// demotion counterpart of `claim`; `None` when the backend records
+    /// no claim state a released owner could wrongly re-assert.
+    pub release: Option<ReleaseHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -303,13 +402,19 @@ impl DriverRegistry {
     /// The built-in registry: the `sim*` prefix served by local
     /// simulated devices, [`SIM_TCP_KIND`] (`sim-tcp`) served by the
     /// remote simulated driver, [`SIM_BUS_KIND`] (`sim-bus`) served by
-    /// the register-mapped fieldbus driver, and [`SIM_SCRIPTED_KIND`]
-    /// (`sim-scripted`) served by the scripted playback driver.
+    /// the register-mapped fieldbus driver, [`SIM_CYCLIC_KIND`]
+    /// (`sim-cyclic`) served by the cyclic register-image driver,
+    /// [`SIM_SCRIPTED_KIND`]
+    /// (`sim-scripted`) served by the scripted playback driver, and
+    /// [`ETHERCAT_KIND`] (`ethercat`) served by the hardware-bound
+    /// field-bus contract.
     pub fn standard() -> Self {
         Self::new()
             .with(SIM_TCP_KIND, sim_tcp_device)
             .with(SIM_BUS_KIND, sim_bus_device)
+            .with(SIM_CYCLIC_KIND, sim_cyclic_device)
             .with(SIM_SCRIPTED_KIND, scripted_device)
+            .with(ETHERCAT_KIND, ethercat_device)
             .with_prefix(crate::SIM_DEVICE_PREFIX, sim_device)
     }
 
@@ -358,6 +463,18 @@ impl DriverRegistry {
         self
     }
 
+    /// Binds [`ETHERCAT_KIND`] to this deployment's EtherCAT buses —
+    /// replaces the validating stub [`standard`](Self::standard)
+    /// installs. `buses` carries the deployment's logical-bus →
+    /// host-interface bindings (the model names the bus, the deployment
+    /// names the NIC); a deployment without EtherCAT hardware keeps the
+    /// stub and its honest startup failure.
+    pub fn with_ethercat_buses(mut self, buses: &EthercatBuses) -> Self {
+        let buses = buses.clone();
+        self.register(ETHERCAT_KIND, move |spec| ethercat_backend(spec, &buses));
+        self
+    }
+
     /// The factory serving `kind`: the exact registration, else the
     /// first matching prefix in registration order.
     fn factory(&self, kind: &str) -> Option<&Factory> {
@@ -370,11 +487,26 @@ impl DriverRegistry {
     }
 }
 
+/// The simulated kinds reject the `hardware` marker: it declares a
+/// hardware-bound kind a simulated factory cannot serve, so a model
+/// carrying it on a `sim*` device is an assembly error, keeping the
+/// marker honest in both directions.
+fn require_simulated(spec: &DeviceSpec<'_>) -> Result<(), DeviceError> {
+    if spec.hardware {
+        return Err(DeviceError::parameters(format!(
+            "the {:?} kind is simulated; \"hardware\": true declares a hardware-bound device",
+            spec.kind
+        )));
+    }
+    Ok(())
+}
+
 /// The local simulated device factory: every bound `io_point` becomes a
 /// [`PointBinding`] in a [`ChannelMap`] fragment carrying the device's
 /// id. The kind takes no parameters — a `sim*` device declaring any is
 /// [`DeviceError::Parameters`].
 pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     if let Some(unknown) = spec.parameters.keys().next() {
         return Err(DeviceError::parameters(format!(
             "the {:?} kind takes no parameters, found {unknown:?}",
@@ -400,6 +532,7 @@ pub(crate) fn sim_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceEr
 /// connects to the plant server, and probes that it serves every
 /// declared point with the declared value kind.
 fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     for name in spec.parameters.keys() {
         if name != "address" && name != "timeout_ms" {
             return Err(DeviceError::parameters(format!(
@@ -471,6 +604,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
     let claiming = Arc::clone(&remote);
+    let releasing = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -482,15 +616,23 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             })
         })),
         // The plant server's single-writer claim — the fencing a
-        // promoted peer takes out on the old field owner.
+        // promoted peer takes out on the old field owner. A grant
+        // flagged `Shared` still holds: one owner's several sim-tcp
+        // devices on one plant claim the same token by design, so the
+        // flag is the claimer's to heed, not the hook's to refuse.
         claim: Some(Arc::new(move |owner| {
             claiming
                 .claim_writer(owner)
+                .map(|_| ())
                 .map_err(|error| StepError::Backend {
                     backend: format!("device {device}"),
                     detail: error.to_string(),
                 })
         })),
+        // The claim's demotion counterpart: the attachment forgets its
+        // recorded owner so a re-attach after a plant restart does not
+        // re-assert a claim this peer gave up.
+        release: Some(Arc::new(move || releasing.release_claim())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -501,6 +643,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
 /// and probes that it serves every mapped register with the declared
 /// value kind.
 fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     let channels: BTreeMap<String, ValueKind> = spec
         .channels
         .iter()
@@ -580,7 +723,197 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
+        // The device claim dies with its connection, so a re-attach
+        // never re-asserts it — there is nothing to forget.
+        release: None,
         inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+/// The [`SIM_CYCLIC_KIND`] factory: validates the addressing, miss
+/// threshold, and station layout against the declared channels, then
+/// connects to the device server — whose connect-time census already
+/// probes that every declared register exists with the declared kind —
+/// and returns the backend carrying the cyclic surface.
+///
+/// The backend is `field_facing` like `sim-bus`'s — the shared register
+/// image is the field every redundant peer attaches to — with the same
+/// step hook (the bank's logical tick still advances only on the
+/// explicit `step` request; the exchange moves values, not time) and
+/// the same writer claim, which a promoted peer takes out on the old
+/// field owner: a fenced attachment's staged outputs never publish,
+/// while its census-only exchanges — the tracking standby's — still
+/// latch fresh inputs.
+fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
+    let channels: BTreeMap<String, ValueKind> = spec
+        .channels
+        .iter()
+        .map(|(name, channel)| (name.clone(), channel.value_type))
+        .collect();
+    let parameters = CyclicDeviceParameters::parse(spec.parameters, &channels)
+        .map_err(DeviceError::parameters)?;
+    let address = parameters.address.as_str();
+    let addresses: Vec<_> = address
+        .to_socket_addrs()
+        .map_err(|error| {
+            DeviceError::parameters(format!("parameter \"address\": {address:?} does not resolve to a host:port address ({error})"))
+        })?
+        .collect();
+    if addresses.is_empty() {
+        return Err(DeviceError::parameters(format!(
+            "parameter \"address\": {address:?} resolved to no address"
+        )));
+    }
+    // Point → image slots: the parsed station layout places every
+    // declared channel, so each bound point resolves to its register.
+    let points: Vec<CyclicPoint> = spec
+        .points
+        .iter()
+        .map(|point| {
+            let (_, declaration) = parameters
+                .channel_register(point.channel.as_str())
+                .expect("the parsed station layout places every declared channel");
+            CyclicPoint {
+                point: point.point,
+                register: declaration.register,
+                direction: point.direction,
+                kind: point.kind,
+            }
+        })
+        .collect();
+    let bus = CyclicBusDriver::connect_with_timeout(
+        addresses.as_slice(),
+        parameters.timeout,
+        &points,
+        &parameters.station_registers(),
+        parameters.exchange_miss_threshold,
+    )
+    .map_err(|error| {
+        DeviceError::backend(format!(
+            "cannot connect to device server at {address:?}: {error}"
+        ))
+    })?;
+    let bus = Arc::new(bus);
+    let stepping = Arc::clone(&bus);
+    let claiming = Arc::clone(&bus);
+    let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
+    let device = spec.id.0;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: bus,
+        step: Some(Arc::new(move |dt| {
+            stepping.step(dt).map_err(|error| StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            })
+        })),
+        // The device server's single-writer claim — the fencing a
+        // promoted peer takes out on the old field owner.
+        claim: Some(Arc::new(move |owner| {
+            claiming
+                .claim_writer(owner)
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
+        // As `sim-bus`: the claim is bound to the connection, so a
+        // re-attach carries no stale claim to forget.
+        release: None,
+        inspect: Some(inspect),
+        field_facing: true,
+    }))
+}
+
+/// The [`ETHERCAT_KIND`] factory: validates the field-bus declaration —
+/// the `hardware` marker plus the `dcs-ethercat` parameter grammar —
+/// then fails the build because this image carries no EtherCAT master.
+///
+/// Both halves are deliberate: a model declaring a hardware kind must
+/// fail startup when the hardware cannot initialize (no silent
+/// simulation fallback), and a declaration's shape must be a named
+/// parameter error before that backend check is even reached — exactly
+/// what the master integration's own startup sequence will enforce
+/// against the answering station's identity and layout.
+fn ethercat_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    Err(DeviceError::backend(format!(
+        "logical bus {:?} cannot initialize: no EtherCAT master is available in this build — \
+         a hardware-bound kind is never silently substituted by simulation",
+        declaration.bus
+    )))
+}
+
+/// The [`ETHERCAT_KIND`] validation both factories share: the
+/// `hardware` marker plus the `dcs-ethercat` parameter grammar against
+/// the device's declared channels — a declaration's shape is a named
+/// parameter error before any backend check is reached.
+fn ethercat_declaration(
+    spec: &DeviceSpec<'_>,
+) -> Result<dcs_ethercat::DeviceParameters, DeviceError> {
+    if !spec.hardware {
+        return Err(DeviceError::parameters(format!(
+            "the {ETHERCAT_KIND:?} kind is hardware-bound; the device must declare \
+             \"hardware\": true — a simulated backend may not serve it"
+        )));
+    }
+    let channels: BTreeMap<String, ChannelDecl> = spec
+        .channels
+        .iter()
+        .map(|(name, channel)| {
+            (
+                name.clone(),
+                ChannelDecl {
+                    direction: channel.direction,
+                    kind: channel.value_type,
+                },
+            )
+        })
+        .collect();
+    dcs_ethercat::DeviceParameters::parse(spec.parameters, &channels)
+        .map_err(DeviceError::parameters)
+}
+
+/// The deployment-bound [`ETHERCAT_KIND`] factory
+/// [`with_ethercat_buses`](DriverRegistry::with_ethercat_buses)
+/// installs: the same declaration checks as the stub, then the device
+/// attaches to its logical bus over the deployment's bindings — one
+/// shared master per bus, identity and process-image layout verified
+/// against discovery, safe outputs staged, OP entry, all before the
+/// device serves a scan.
+///
+/// The backend observes the field: `field_facing` so promotion fencing
+/// counts it, `step: None` because the field advances itself, and
+/// `claim: None` because no single-writer arbitration exists — which
+/// keeps automatic failover honestly off for the hardware model.
+fn ethercat_backend(
+    spec: &DeviceSpec<'_>,
+    buses: &EthercatBuses,
+) -> Result<DeviceDriver, DeviceError> {
+    let declaration = ethercat_declaration(spec)?;
+    let points: Vec<BusPoint> = spec
+        .points
+        .iter()
+        .map(|point| BusPoint {
+            point: point.point,
+            channel: point.channel.clone(),
+            direction: point.direction,
+            kind: point.kind,
+        })
+        .collect();
+    let device = buses
+        .attach(spec.id, &declaration, &points)
+        .map_err(|error| match error {
+            AttachError::Parameters(detail) => DeviceError::parameters(detail),
+            AttachError::Backend(detail) => DeviceError::backend(detail),
+        })?;
+    Ok(DeviceDriver::Backend(DeviceBackend {
+        io: device.clone(),
+        step: None,
+        claim: None,
+        release: None,
+        inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
 }
@@ -685,6 +1018,7 @@ fn scripted_entry(
 /// scripted driver itself, so [`FanoutDriver::inspect`] reaches its
 /// recorded-write log.
 fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
+    require_simulated(spec)?;
     for name in spec.parameters.keys() {
         if name != "script" {
             return Err(DeviceError::parameters(format!(
@@ -770,6 +1104,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
         // Not field-facing — there is no shared field to claim.
         claim: None,
+        release: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -785,6 +1120,9 @@ struct Backend {
     /// [`DeviceBackend::claim`] carried into the built driver — the
     /// field-ownership claim a promotion takes out.
     claim: Option<ClaimHook>,
+    /// [`DeviceBackend::release`] carried into the built driver — the
+    /// claim-forgetting hook a demotion runs.
+    release: Option<ReleaseHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -852,6 +1190,7 @@ impl DriverPlan {
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
                 claim: None,
+                release: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -867,6 +1206,7 @@ impl DriverPlan {
                 io: planned.backend.io,
                 step: planned.backend.step,
                 claim: planned.backend.claim,
+                release: planned.backend.release,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -928,6 +1268,7 @@ pub fn resolve_drivers(
         let spec = DeviceSpec {
             id: device.id,
             kind: &device.kind,
+            hardware: device.hardware,
             parameters: &device.parameters,
             channels: &device.channels,
             points: points_by_device.remove(&device.id).unwrap_or_default(),
@@ -1111,6 +1452,23 @@ impl FanoutDriver {
         Ok(())
     }
 
+    /// Forgets every field-facing backend's recorded write-ownership
+    /// claim — the demotion counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer): a peer that gave
+    /// the field up does not re-assert a stale claim when a re-attach
+    /// finds the field's arbitration reset, so the restarted field's
+    /// claim stays free for the peer that legitimately owns it.
+    /// Backends without a release hook record nothing to forget.
+    pub fn release_field_claims(&self) {
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(release) = &backend.release
+            {
+                release();
+            }
+        }
+    }
+
     /// The field-facing devices whose backends cannot arbitrate a single
     /// writer — the ids a promotion cannot take a claim out on. The
     /// failover decision makes automatic promotion honest only when this
@@ -1224,9 +1582,15 @@ impl IoDriver for FanoutDriver {
     /// diagnose — otherwise `disconnected` when any reporting backend's
     /// link is down, with each backend's last protocol failure named by
     /// the device it serves.
+    ///
+    /// Each reporting backend's cyclic exchange section merges into the
+    /// aggregate's own: counters sum over the buses and
+    /// `last_exchange_tick` takes the earliest reported — the freshest
+    /// exchange every bus has completed is the aggregate's honest bound.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         let mut link = LinkState::Connected;
         let mut errors = Vec::new();
+        let mut exchange: Option<ExchangeDiagnostics> = None;
         let mut reported = false;
         for backend in &self.backends {
             let Some(diagnostics) = backend.io.diagnostics() else {
@@ -1242,10 +1606,204 @@ impl IoDriver for FanoutDriver {
                     .map_or_else(|| "local sim".to_string(), |id| format!("device {}", id.0));
                 errors.push(format!("{name}: {error}"));
             }
+            if let Some(section) = diagnostics.exchange {
+                let merged = exchange.get_or_insert_with(ExchangeDiagnostics::default);
+                merged.attempted += section.attempted;
+                merged.succeeded += section.succeeded;
+                merged.working_counter_mismatches += section.working_counter_mismatches;
+                merged.missed_deadlines += section.missed_deadlines;
+                merged.last_exchange_tick =
+                    match (merged.last_exchange_tick, section.last_exchange_tick) {
+                        (Some(held), Some(fresh)) => Some(held.min(fresh)),
+                        (held, fresh) => held.or(fresh),
+                    };
+            }
         }
         reported.then_some(DriverDiagnostics {
             link,
             last_error: (!errors.is_empty()).then(|| errors.join("; ")),
+            exchange,
         })
+    }
+
+    /// The fan-out answers `Some` — reporting
+    /// [`CyclicIoDriver`](dcs_core::CyclicIoDriver) through itself — when
+    /// any backend implements the cyclic contract; its
+    /// [`exchange`](CyclicIoDriver::exchange) then turns each cyclic
+    /// backend's image in backend order.
+    fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+        self.backends
+            .iter()
+            .any(|backend| backend.io.cyclic().is_some())
+            .then_some(self)
+    }
+}
+
+/// The fan-out's cyclic surface: each backend owns its process image, so
+/// the aggregate `exchange` calls every cyclic backend's exchange in
+/// turn — one call publishing and latching each bus's image. The first
+/// failing backend ends the call with its error, matching the fan-out's
+/// per-point dispatch semantics: an aggregate is only as strong as its
+/// parts, and a bus the call never reached simply holds its image for
+/// the next scan's exchange.
+impl CyclicIoDriver for FanoutDriver {
+    fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        for backend in &self.backends {
+            if let Some(cyclic) = backend.io.cyclic() {
+                cyclic.exchange(tick)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// A minimal per-point backend with no cyclic surface — the shape
+    /// every shipped kind has.
+    struct PointDriver;
+
+    impl IoDriver for PointDriver {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            Err(IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::UnknownPoint(point))
+        }
+    }
+
+    /// A cyclic backend stub: `exchange` is the only transport call,
+    /// counted and ticked; while `fail` stands every exchange misses.
+    struct CyclicBackend {
+        attempted: AtomicU64,
+        succeeded: AtomicU64,
+        last_tick: Mutex<Option<Tick>>,
+        fail: AtomicBool,
+    }
+
+    impl CyclicBackend {
+        fn new() -> Self {
+            Self {
+                attempted: AtomicU64::new(0),
+                succeeded: AtomicU64::new(0),
+                last_tick: Mutex::new(None),
+                fail: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl IoDriver for CyclicBackend {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            Err(IoError::Disconnected(point))
+        }
+
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::Disconnected(point))
+        }
+
+        fn diagnostics(&self) -> Option<DriverDiagnostics> {
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: Some(ExchangeDiagnostics {
+                    attempted: self.attempted.load(Ordering::Relaxed),
+                    succeeded: self.succeeded.load(Ordering::Relaxed),
+                    working_counter_mismatches: 0,
+                    last_exchange_tick: *self.last_tick.lock().unwrap(),
+                    missed_deadlines: 0,
+                }),
+            })
+        }
+
+        fn cyclic(&self) -> Option<&(dyn CyclicIoDriver + Sync)> {
+            Some(self)
+        }
+    }
+
+    impl CyclicIoDriver for CyclicBackend {
+        fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+            self.attempted.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(IoError::Disconnected(PointId(0)));
+            }
+            self.succeeded.fetch_add(1, Ordering::Relaxed);
+            *self.last_tick.lock().unwrap() = Some(tick);
+            Ok(())
+        }
+    }
+
+    fn backend(device: u64, io: Arc<dyn IoDriver + Send + Sync>) -> Backend {
+        Backend {
+            device: Some(DeviceId(device)),
+            io,
+            step: None,
+            claim: None,
+            release: None,
+            inspect: None,
+            field_facing: false,
+        }
+    }
+
+    #[test]
+    fn fanout_aggregates_the_cyclic_surface_over_its_backends() {
+        // An all-point-wise fan-out is not cyclic — the executor never
+        // calls `exchange` on it.
+        let plain = FanoutDriver {
+            backends: vec![backend(1, Arc::new(PointDriver))],
+            points: HashMap::new(),
+            routes: Vec::new(),
+            sim: None,
+        };
+        assert!(plain.cyclic().is_none());
+
+        // A fan-out with cyclic backends answers `Some`, and one
+        // `exchange` turns each cyclic backend's image in order —
+        // the point-wise backend has no exchange to run.
+        let bus_a = Arc::new(CyclicBackend::new());
+        let bus_b = Arc::new(CyclicBackend::new());
+        let fanout = FanoutDriver {
+            backends: vec![
+                backend(1, bus_a.clone()),
+                backend(2, Arc::new(PointDriver)),
+                backend(3, bus_b.clone()),
+            ],
+            points: HashMap::new(),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+        cyclic.exchange(Tick(7)).unwrap();
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+
+        // A failing backend's error propagates and ends the call —
+        // bus_b, later in order, never saw this exchange.
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(8)),
+            Err(IoError::Disconnected(PointId(0)))
+        );
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 2);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+
+        // The aggregate diagnostics merge each reporting backend's
+        // exchange section: counters sum, the freshest exchange every
+        // bus completed bounds `last_exchange_tick`.
+        let diagnostics = fanout.diagnostics().unwrap();
+        assert_eq!(
+            diagnostics.exchange,
+            Some(ExchangeDiagnostics {
+                attempted: 3,
+                succeeded: 2,
+                working_counter_mismatches: 0,
+                last_exchange_tick: Some(Tick(7)),
+                missed_deadlines: 0,
+            })
+        );
     }
 }

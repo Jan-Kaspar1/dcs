@@ -55,7 +55,19 @@
 //!    boundary — and picks the applied value up in its next pull.
 //! 4. **Regulation at the moved setpoint.** The rest of the moved phase
 //!    in triple agreement, re-settling at 40%.
-//! 5. **Injected fault.** `dcs-plant-ctl fault 30 bad:communication_fault`
+//! 5. **The batch program's declared surface.** `B-101` — the model's
+//!    `sequencer` — is the checked-in composition's kind carrying the
+//!    declared contract: the served `/schema` lists its `advance` and
+//!    `reset` commands and its `step_completed` event under the
+//!    `Declared` provenance beside the adapted entries. The operator
+//!    starts the table through the writable `run` point — the declared
+//!    commands do not alias the held inputs, so no bespoke point is
+//!    added — the first step's `step_completed` emission journals at
+//!    the producing tick on every controller and in both peers' durable
+//!    journal files, the `advance`/`reset` invocations settle through
+//!    the receipted command path, and the alarm report computes over
+//!    the emitted-event record.
+//! 6. **Injected fault.** `dcs-plant-ctl fault 30 bad:communication_fault`
 //!    on both plants: the conditioned run status goes `Bad`, the
 //!    interlock trips on the bad permissive and drives the valve to its
 //!    safe value, and the level drains past the low alarm — horn
@@ -69,17 +81,17 @@
 //!    itself. A quality fault degrades the signal without breaking the
 //!    exchange — and produces the same `Bad(CommunicationFault)` the
 //!    executor marks a failed read with.)
-//! 6. **Promotion mid-fault.** `POST /demote` on the active, then
+//! 7. **Promotion mid-fault.** `POST /demote` on the active, then
 //!    `POST /promote` on the converged standby: the field writer moves
 //!    at the scan boundary, `GET /role` reports the transition states on
 //!    both peers, the pair view follows the promoting peer, and the
 //!    promoted peer's outputs keep matching the uninterrupted reference
 //!    — bumpless continuation through the faulted run, the demoted peer
 //!    still agreeing scan for scan behind its closed gate.
-//! 7. **Recovery.** The tooling clears the fault; the interlock
+//! 8. **Recovery.** The tooling clears the fault; the interlock
 //!    auto-resets, the level recovers to the moved setpoint, and the
 //!    alarm and motor fault clear.
-//! 8. **Post-switch command.** The trip-counter reset lands on the new
+//! 9. **Post-switch command.** The trip-counter reset lands on the new
 //!    active through the pair view — assert, then release to rearm —
 //!    clearing the latched count.
 //!
@@ -88,24 +100,26 @@
 //! acceptance criteria require.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, JournalEntry, JournalEvent, PointId, Quality,
-    QualityReason, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick,
-    Value, ValueKind,
+    AdaptedCommand, AdaptedEvent, Command, CommandAvailability, CommandError, CommandOutcome,
+    EmittedEvent, EventEmission, EventRetention, EventValue, JournalEntry, JournalEvent, PointId,
+    Quality, QualityReason, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use dcs_demo::showcase::{
-    self, FAULT_SCANS, INITIAL_SETPOINT, MOVED_SCANS, MOVED_SETPOINT, RECOVERY_SCANS, SETTLE_SCANS,
-    points,
+    self, BATCH_STEP1_TICKS, FAULT_SCANS, INITIAL_SETPOINT, MOVED_SCANS, MOVED_SETPOINT,
+    RECOVERY_SCANS, SETTLE_SCANS, points,
 };
-use dcs_monitor::{MonitorClient, PairClient, PeerStatus};
+use dcs_monitor::{MonitorClient, PairClient, PeerStatus, read_journal_file};
 use dcs_sim_net::RemoteDriver;
-use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::path::Path;
+use std::process::Command as Process;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, controller_model, spawn_controller, spawn_plant, workspace_binary};
+
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -129,96 +143,13 @@ const DT: &str = "0.1";
 /// Ticks the promoted pair runs still-faulted after the switchover,
 /// proving continuation against the reference.
 const POST_SWITCH_SCANS: u64 = 30;
-
-/// A `dcs-*` binary sibling of the controller binary under test in the
-/// workspace target dir; workspace builds produce them.
-fn workspace_binary(name: &str) -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the showcase plant — model plus
-/// dynamics document — on an ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &workspace_binary("dcs-plant-server"),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
+/// The batch program's instance name — the showcase's `sequencer`
+/// component, addressed as `"<kind>:<id>"` by the served schema, the
+/// `invoke` command, and the emitted event.
+const BATCH_COMPONENT: &str = "sequencer:20";
+/// Scans the run lingers after the batch commands settle — the tracking
+/// peer re-converging on the invocations' checkpoints.
+const BATCH_CLOSE_SCANS: u64 = 3;
 
 /// One `dcs-plant-ctl` invocation against `plant` — the plant tooling
 /// the scenario perturbs the world through. Returns the server's
@@ -248,35 +179,6 @@ fn plant_ctl_done(plant: SocketAddr, args: &[&str]) {
     );
 }
 
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared showcase model with every declared channel merged onto one
-/// `sim-tcp` device carrying the plant's address — the remote-sim path
-/// through the assembly driver registry. One remote backend steps the
-/// plant once per scan, keeping the dynamics document's dt pacing.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    let mut channels = serde_json::Map::new();
-    for device in document["devices"].as_array().unwrap() {
-        for (channel, declaration) in device["channels"].as_object().unwrap() {
-            channels.insert(channel.clone(), declaration.clone());
-        }
-    }
-    document["devices"] = serde_json::json!([{
-        "id": 1,
-        "kind": "sim-tcp",
-        "parameters": { "address": plant.to_string() },
-        "channels": channels,
-    }]);
-    for point in document["io_points"].as_array_mut().unwrap() {
-        if let Some(channel) = point.get_mut("channel") {
-            channel["device"] = serde_json::json!(1);
-        }
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
-
 /// The sample `snapshot`'s image reports for `point`.
 fn image_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
     showcase::sample(snapshot, point).expect("the showcase maps every named point")
@@ -301,6 +203,35 @@ fn int_point(snapshot: &TelemetrySnapshot, point: PointId) -> i64 {
         panic!("point {} is an Int point", point.0)
     };
     value
+}
+
+/// A `Command::Invoke` against the batch program — the declared-command
+/// submission the bounded, receipted command path carries.
+fn invoke(command: &str, arguments: &[(&str, Value)]) -> Command {
+    Command::Invoke {
+        component: BATCH_COMPONENT.to_string(),
+        command: command.to_string(),
+        arguments: BTreeMap::from_iter(
+            arguments
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value)),
+        ),
+    }
+}
+
+/// The `step_completed` event the batch program's first step emits on
+/// its completing scan — the kind-declared emission the journal and the
+/// served recent-events view carry.
+fn step_completed() -> JournalEvent {
+    JournalEvent::EventEmitted {
+        event: EmittedEvent {
+            event: "step_completed".to_string(),
+            component: BATCH_COMPONENT.to_string(),
+            fields: [("step".to_string(), EventValue::Value(Value::Int(1)))]
+                .into_iter()
+                .collect(),
+        },
+    }
 }
 
 /// No component stepped in error anywhere in the snapshot.
@@ -445,7 +376,8 @@ struct Outcome {
     /// The pair plant's observed field state after each owner tick.
     field: Vec<FieldRow>,
     /// Stage snapshots served through the pair view, in stage order:
-    /// settled, moved, faulted, post-switch, recovered, reset.
+    /// settled, moved, batch-closed, faulted, post-switch, recovered,
+    /// reset.
     stages: Vec<TelemetrySnapshot>,
     /// The first field owner's journal, captured after the fault phase.
     owner_journal: Vec<JournalEntry>,
@@ -461,10 +393,24 @@ fn run_full_stack(tag: &str) -> Outcome {
 
     // Two shared plants: the pair's and the reference run's — identical
     // model and dynamics, identical request sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
+    let reference_model = controller_model(
+        &dir,
+        "reference.json",
+        MODEL_SOURCE,
+        reference_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
 
     // The plant tooling lists the served field surface — the eleven
     // channel-bound points of the extended showcase model: the three
@@ -488,13 +434,41 @@ fn run_full_stack(tag: &str) -> Outcome {
 
     // The pair: the active first — the standby's --standby names its
     // monitoring address — then the standby, then the reference run on
-    // its own plant.
-    let active_process = spawn_controller(&pair_model, &[]);
+    // its own plant. Each controller appends its monitor's journal to a
+    // durable file — the batch stage asserts the emitted-event record
+    // lands there.
+    let active_journal = dir.join("active.journal.jsonl");
+    let standby_journal = dir.join("standby.journal.jsonl");
+    let reference_journal = dir.join("reference.journal.jsonl");
+    for path in [&active_journal, &standby_journal, &reference_journal] {
+        let _ = std::fs::remove_file(path);
+    }
+    let active_process = spawn_controller(
+        &pair_model,
+        &[
+            "--journal-file".to_string(),
+            active_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
     let standby_process = spawn_controller(
         &pair_model,
-        &["--standby".to_string(), active_process.addr.to_string()],
+        &[
+            "--standby".to_string(),
+            active_process.addr.to_string(),
+            "--journal-file".to_string(),
+            standby_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
     );
-    let reference_process = spawn_controller(&reference_model, &[]);
+    let reference_process = spawn_controller(
+        &reference_model,
+        &[
+            "--journal-file".to_string(),
+            reference_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
     let reference = MonitorClient::new(reference_process.addr);
@@ -674,6 +648,271 @@ fn run_full_stack(tag: &str) -> Outcome {
         "the applied setpoint command is journaled"
     );
 
+    // --- Stage: the batch program's declared command and event surface ---
+    // `B-101` — the model's `sequencer` — is the checked-in
+    // composition's kind carrying the declared contract: the served
+    // block-interface schema lists its `advance` and `reset` commands
+    // and its `step_completed` event under the declared provenance
+    // beside the adapted entries — no bespoke writable point stands in
+    // for either.
+    let schema = active.schema().unwrap();
+    let batch = &schema
+        .interfaces
+        .iter()
+        .find(|entry| entry.name == BATCH_COMPONENT)
+        .expect("the served schema covers the batch program")
+        .interface;
+    for (command, availability) in [
+        ("advance", CommandAvailability::KindDeclared),
+        ("reset", CommandAvailability::Always),
+    ] {
+        let spec = batch
+            .commands
+            .iter()
+            .find(|spec| spec.name == command)
+            .unwrap_or_else(|| panic!("the schema declares {command}"));
+        assert_eq!(spec.adapted, AdaptedCommand::Declared, "{command}");
+        assert_eq!(spec.availability, availability, "{command}");
+    }
+    let declared = batch
+        .events
+        .iter()
+        .find(|spec| spec.name == "step_completed")
+        .expect("the schema declares step_completed");
+    assert_eq!(declared.adapted, AdaptedEvent::Declared);
+    assert_eq!(declared.emission, EventEmission::KindEmitted);
+    assert_eq!(declared.retention, EventRetention::Journal);
+
+    // The operator starts the table: `run` is the held level input the
+    // model wires to the declared `batch-run` writable point — the
+    // declared commands do not alias it, so the start stays the
+    // ordinary receipted write. The batch program's output is not
+    // selected — `batch-mode` stays low — so the table's walk leaves
+    // the regulating loop untouched.
+    let batch_run = |running: bool| Command::WriteValue {
+        point: points::BATCH_RUN,
+        kind: ValueKind::Bool,
+        value: Value::Bool(running),
+    };
+    let run_tick = Tick(moved.tick.0 + 1);
+    assert_eq!(
+        pair.command(&batch_run(true)).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: run_tick
+        },
+        "the pair view routed the run request to the settled active"
+    );
+    assert_eq!(
+        reference.command(&batch_run(true)).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: run_tick
+        }
+    );
+    // The apply tick: the owner and the reference scan; the tracking
+    // peer sits it out — a queued command is not checkpoint-carried —
+    // and picks the held `run` up in its next pull.
+    let image = active.advance(1).unwrap();
+    let alone = reference.advance(1).unwrap();
+    assert_eq!(image, alone);
+    assert_eq!(image.tick, run_tick);
+    trace.push(observe(&field, run_tick));
+
+    // The table's first step runs its declared ticks out: the
+    // completing scan emits `step_completed` — the kind-emitted event —
+    // and every controller's journal records it at the producing tick:
+    // the field owner's, the tracking peer's (its own scan emits it
+    // from the checkpointed state), and the reference's.
+    let event_tick = Tick(run_tick.0 + BATCH_STEP1_TICKS - 1);
+    let stepped = phase(
+        &standby,
+        &active,
+        &reference,
+        &field,
+        &mut trace,
+        BATCH_STEP1_TICKS - 1,
+    );
+    assert_eq!(stepped.tick, event_tick);
+    // The completing scan still reports the completed step — the table
+    // shows step 2 from the next scan on.
+    assert_eq!(int_point(&stepped, points::BATCH_STEP), 1);
+    for (peer, journal) in [
+        ("the field owner", active.journal(0).unwrap()),
+        ("the tracking peer", standby.journal(0).unwrap()),
+        ("the reference", reference.journal(0).unwrap()),
+    ] {
+        let emitted: Vec<&JournalEntry> = journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::EventEmitted { .. }))
+            .collect();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "{peer} journaled the batch program's one emission"
+        );
+        assert_eq!(emitted[0].tick, event_tick, "{peer}");
+        assert_eq!(emitted[0].event, step_completed(), "{peer}");
+    }
+    // The served recent-events view attributes the emission to the
+    // instance, and both declared commands report submittable.
+    let resources = active.resources().unwrap();
+    let batch_resources = resources
+        .components
+        .iter()
+        .find(|component| component.name == BATCH_COMPONENT)
+        .expect("the resource view covers the batch program");
+    assert!(
+        batch_resources
+            .events
+            .iter()
+            .any(|entry| entry.tick == event_tick && entry.event == step_completed()),
+        "the served events tail carries the emission at the producing tick"
+    );
+    for command in ["advance", "reset"] {
+        let state = batch_resources
+            .commands
+            .iter()
+            .find(|state| state.name == command)
+            .unwrap_or_else(|| panic!("the resource view serves {command}"));
+        assert!(state.available, "{command} is submittable: {state:?}");
+    }
+
+    // Dropping `run` parks the table mid-step — the held input's
+    // release, again the ordinary writable-point write.
+    let hold_tick = Tick(event_tick.0 + 1);
+    assert_eq!(
+        pair.command(&batch_run(false)).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: hold_tick
+        }
+    );
+    assert_eq!(
+        reference.command(&batch_run(false)).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: hold_tick
+        }
+    );
+    let image = active.advance(1).unwrap();
+    let alone = reference.advance(1).unwrap();
+    assert_eq!(image, alone);
+    assert_eq!(image.tick, hold_tick);
+    trace.push(observe(&field, hold_tick));
+
+    // The declared `advance` invocation — typed `count` argument and
+    // all — applies at the next boundary: the parked table steps to 4.
+    let advance = invoke("advance", &[("count", Value::Int(2))]);
+    let advance_tick = Tick(hold_tick.0 + 1);
+    assert_eq!(
+        pair.command(&advance).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: advance_tick
+        }
+    );
+    assert_eq!(
+        reference.command(&advance).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: advance_tick
+        }
+    );
+    let image = active.advance(1).unwrap();
+    let alone = reference.advance(1).unwrap();
+    assert_eq!(image, alone);
+    assert_eq!(image.tick, advance_tick);
+    assert_eq!(
+        int_point(&image, points::BATCH_STEP),
+        4,
+        "the invoked advance moved the parked table"
+    );
+    trace.push(observe(&field, advance_tick));
+
+    // `reset` — `Always`-available — returns the table to its first
+    // step: the one-shot action the held `reset` input is not.
+    let restart = invoke("reset", &[]);
+    let restart_tick = Tick(advance_tick.0 + 1);
+    assert_eq!(
+        pair.command(&restart).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: restart_tick
+        }
+    );
+    assert_eq!(
+        reference.command(&restart).unwrap().outcome,
+        CommandOutcome::Accepted {
+            apply_tick: restart_tick
+        }
+    );
+    let image = active.advance(1).unwrap();
+    let alone = reference.advance(1).unwrap();
+    assert_eq!(image, alone);
+    assert_eq!(image.tick, restart_tick);
+    assert_eq!(int_point(&image, points::BATCH_STEP), 1);
+    trace.push(observe(&field, restart_tick));
+
+    // Both invocations settled applied at their apply ticks — the
+    // journaled receipts the durable record carries.
+    for (command, tick) in [(&advance, advance_tick), (&restart, restart_tick)] {
+        assert!(
+            active.journal(0).unwrap().iter().any(|entry| matches!(
+                &entry.event,
+                JournalEvent::CommandSettled { receipt }
+                    if receipt.command == *command
+                        && receipt.outcome == CommandOutcome::Applied { tick }
+            )),
+            "the applied {command:?} receipt is journaled at {tick:?}"
+        );
+    }
+
+    // The tracking peer scans the stage out behind its gate — every
+    // controller agrees again — and the durable journal files the
+    // pair's monitors appended hold the same emitted-event record.
+    let closed = phase(
+        &standby,
+        &active,
+        &reference,
+        &field,
+        &mut trace,
+        BATCH_CLOSE_SCANS,
+    );
+    let view = pair.snapshot().unwrap();
+    assert_eq!(view, closed);
+    assert_clean(&view);
+    stages.push(view);
+    for path in [&active_journal, &standby_journal] {
+        let data = read_journal_file(path).unwrap();
+        assert!(
+            data.entries
+                .iter()
+                .any(|entry| entry.tick == event_tick && entry.event == step_completed()),
+            "the durable journal {} carries the emission",
+            path.display()
+        );
+    }
+
+    // The alarm report computes over the emitted-event journal — the
+    // served form and the durable file alike — without failure.
+    for args in [
+        vec![active_process.addr.to_string()],
+        vec![
+            active_process.addr.to_string(),
+            "--journal-file".to_string(),
+            active_journal.to_str().unwrap().to_string(),
+        ],
+    ] {
+        let output = Process::new(workspace_binary("dcs-alarm-report"))
+            .args(&args)
+            .output()
+            .expect("cannot spawn dcs-alarm-report");
+        assert!(
+            output.status.success(),
+            "dcs-alarm-report {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            report["source"]["journal_entries"].as_u64().unwrap() > 0,
+            "the report computed over the emitted-event journal: {report}"
+        );
+    }
+
     // --- Stage: the injected fault, through the plant tooling ---
     plant_ctl_done(pair_plant.addr, &["fault", "30", "bad:communication_fault"]);
     plant_ctl_done(
@@ -757,8 +996,8 @@ fn run_full_stack(tag: &str) -> Outcome {
         POST_SWITCH_SCANS,
     );
     // Roles settled on the first post-switch scan: the promoted peer
-    // reports active, the demoted peer standby — unsynchronized, its
-    // track ended with its field ownership.
+    // reports active, the demoted peer standby — and already tracking
+    // its successor again through the announced follow-peer source.
     assert_eq!(
         standby.role().unwrap(),
         RoleReport {
@@ -769,7 +1008,10 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby);
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {report:?}"
+    );
     let reports = poll(&mut pair);
     assert_eq!(reports[0].role, Role::Standby);
     assert_eq!(reports[1].role, Role::Active);

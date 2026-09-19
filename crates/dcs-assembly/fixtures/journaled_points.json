@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim",
+      "channels": {
+        "ack": { "direction": "in", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "permissive": [
+            { "tick": 0, "value": false },
+            { "tick": 2, "value": true }
+          ]
+        }
+      },
+      "channels": {
+        "permissive": { "direction": "in", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "ack" },
+      "writable": true,
+      "journaled": true
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 2, "name": "permissive" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "journaled": true
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "alarm-ack",
+      "source": 10,
+      "description": "Operator acknowledgement input, journaled"
+    },
+    {
+      "id": 101,
+      "name": "permissive-raw",
+      "source": 11,
+      "description": "Scripted permissive input — the unjournaled control"
+    },
+    {
+      "id": 102,
+      "name": "permissive",
+      "source": 20,
+      "description": "Component-driven permissive status, journaled"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "digital-output",
+      "parameters": {},
+      "ports": {
+        "in": { "direction": "in", "value_type": "bool" },
+        "out": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "out" } },
+      "to": { "point": 20 }
+    }
+  ]
+}

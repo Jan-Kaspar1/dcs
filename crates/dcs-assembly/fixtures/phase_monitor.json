@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "ripening_in": [
+            { "tick": 0, "value": 2.0 },
+            { "tick": 8, "value": 0.3 },
+            { "tick": 11, "value": 0.7 },
+            { "tick": 24, "value": 0.4 },
+            { "tick": 27, "value": 2.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 30, "value": 0.4 }
+          ],
+          "ripening_phase": [
+            { "tick": 0, "value": false },
+            { "tick": 5, "value": true },
+            { "tick": 14, "value": false },
+            { "tick": 17, "value": true },
+            { "tick": 26, "value": true, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 28, "value": true },
+            { "tick": 32, "value": false }
+          ],
+          "cbhl_in": [
+            { "tick": 0, "value": 1.0 },
+            { "tick": 10, "value": 1.5 },
+            { "tick": 13, "value": 1.125 },
+            { "tick": 20, "value": 2.0 },
+            { "tick": 24, "value": 2.5 },
+            { "tick": 28, "value": 2.125 },
+            { "tick": 31, "value": 2.125, "quality": "uncertain", "reason": "stale" },
+            { "tick": 33, "value": 2.125 }
+          ],
+          "cbhl_phase": [
+            { "tick": 0, "value": false },
+            { "tick": 5, "value": true },
+            { "tick": 16, "value": false },
+            { "tick": 20, "value": true },
+            { "tick": 34, "value": false },
+            { "tick": 40, "value": true },
+            { "tick": 48, "value": false }
+          ],
+          "cbhl_capture": [
+            { "tick": 0, "value": false },
+            { "tick": 5, "value": true },
+            { "tick": 8, "value": false },
+            { "tick": 21, "value": true },
+            { "tick": 23, "value": false }
+          ]
+        }
+      },
+      "channels": {
+        "ripening_in": { "direction": "in", "value_type": "float" },
+        "ripening_phase": { "direction": "in", "value_type": "bool" },
+        "ripening_capture": { "direction": "in", "value_type": "bool" },
+        "cbhl_in": { "direction": "in", "value_type": "float" },
+        "cbhl_phase": { "direction": "in", "value_type": "bool" },
+        "cbhl_capture": { "direction": "in", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "ripening_in" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "ripening_phase" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "ripening_capture" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "cbhl_in" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "cbhl_phase" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "cbhl_capture" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 24,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 25,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "ripening-turbidity",
+      "source": 10,
+      "unit": "NTU",
+      "description": "Filter-effluent turbidity through return to service — the ripening check's measured value"
+    },
+    {
+      "id": 101,
+      "name": "post-wash-window",
+      "source": 11,
+      "description": "The post-wash condition window — ripening verification runs while it stands"
+    },
+    {
+      "id": 102,
+      "name": "cbhl-headloss",
+      "source": 13,
+      "unit": "m",
+      "description": "Clean-bed headloss at the reference flow — the CBHL check's measured value"
+    },
+    {
+      "id": 103,
+      "name": "reference-flow-window",
+      "source": 14,
+      "description": "The reference-flow condition window — CBHL verification runs while it stands"
+    },
+    {
+      "id": 104,
+      "name": "baseline-capture",
+      "source": 15,
+      "description": "The reference-flow capture request — asserted while the held headloss baseline tracks"
+    },
+    {
+      "id": 105,
+      "name": "ripening-deviation",
+      "source": 20,
+      "unit": "NTU",
+      "description": "Reported in − baseline — zero for the absolute-bound ripening check"
+    },
+    {
+      "id": 106,
+      "name": "ripening-bound-exceeded",
+      "source": 21,
+      "description": "Turbidity above the declared bound while the post-wash window stands"
+    },
+    {
+      "id": 107,
+      "name": "ripening-overdue",
+      "source": 22,
+      "description": "Turbidity not under the declared bound within the declared duration of return to service"
+    },
+    {
+      "id": 108,
+      "name": "cbhl-deviation",
+      "source": 23,
+      "unit": "m",
+      "description": "Headloss deviation from the captured reference-flow baseline"
+    },
+    {
+      "id": 109,
+      "name": "cbhl-deviation-exceeded",
+      "source": 24,
+      "description": "Headloss deviation past the declared bound — the alarm set's excursion condition"
+    },
+    {
+      "id": 110,
+      "name": "cbhl-verification-overdue",
+      "source": 25,
+      "description": "No baseline verified within the declared duration of the reference-flow window"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "phase-monitor",
+      "parameters": {
+        "bound": { "float": 0.5 },
+        "limit_ticks": { "int": 5 },
+        "mode": { "int": 0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "phase": { "direction": "in", "value_type": "bool" },
+        "capture": { "direction": "in", "value_type": "bool" },
+        "deviation": { "direction": "out", "value_type": "float" },
+        "exceeded": { "direction": "out", "value_type": "bool" },
+        "overdue": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "phase-monitor",
+      "parameters": {
+        "bound": { "float": 0.25 },
+        "limit_ticks": { "int": 5 },
+        "mode": { "int": 1 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "phase": { "direction": "in", "value_type": "bool" },
+        "capture": { "direction": "in", "value_type": "bool" },
+        "deviation": { "direction": "out", "value_type": "float" },
+        "exceeded": { "direction": "out", "value_type": "bool" },
+        "overdue": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 1, "name": "phase" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 1, "name": "capture" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 2, "name": "phase" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 2, "name": "capture" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "deviation" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "exceeded" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "overdue" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "deviation" } },
+      "to": { "point": 23 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "exceeded" } },
+      "to": { "point": 24 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "overdue" } },
+      "to": { "point": 25 }
+    }
+  ]
+}

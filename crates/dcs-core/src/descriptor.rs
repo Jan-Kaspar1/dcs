@@ -5,13 +5,15 @@
 //! its kind and display label, its declared I/O as named
 //! [`PortDescriptor`]s carrying direction and value kind plus an
 //! optional [`PortRole`] hint, and its tunable [`ParameterDescriptor`]s
-//! — enough for a monitoring UI to render a faceplate without per-kind
-//! engineering. The runtime's component contract derives a correct
+//! — plus the kind's declared native [`CommandDecl`]s and emitted
+//! [`EventDecl`]s — enough for a monitoring UI to render a faceplate
+//! without per-kind engineering. The runtime's component contract derives a correct
 //! default from the component's name and declared I/O; component kinds
 //! override it to report their model kind, role hints, and parameter
 //! metadata. Like the rest of `dcs-core` the types are
 //! serde-serializable, so a UI needs only the shared contracts.
 
+use crate::interface::{CommandArgument, CommandAvailability, EventField, EventRetention};
 use crate::io::Direction;
 use crate::signal::{PointId, Value, ValueKind};
 use serde::{Deserialize, Serialize};
@@ -119,6 +121,54 @@ pub struct ParameterDescriptor {
     pub range: Option<ParameterRange>,
 }
 
+/// A kind-declared named command: one entry of
+/// [`ComponentDescriptor::commands`].
+///
+/// The declaration half of a
+/// [`Declared`](crate::AdaptedCommand::Declared)-provenance
+/// [`CommandSpec`](crate::CommandSpec): `name` is the command's stable
+/// identity within the interface — what an
+/// [`Invoke`](crate::Command::Invoke) submission's `command` field
+/// carries — `request` is the typed argument schema the submission's
+/// argument map is checked against, and `availability` is the
+/// submission condition, [`KindDeclared`](CommandAvailability::KindDeclared)
+/// where the kind's own availability predicate decides and reports the
+/// refusal reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandDecl {
+    /// The command's stable identity within the interface — unique
+    /// across the derived interface's `commands` collection.
+    pub name: String,
+    /// The typed request schema — the arguments an `invoke` submission
+    /// carries.
+    pub request: Vec<CommandArgument>,
+    /// The submission condition — a submission outside it is refused
+    /// with the named reason.
+    pub availability: CommandAvailability,
+}
+
+/// A kind-declared emitted event: one entry of
+/// [`ComponentDescriptor::events`].
+///
+/// The declaration half of a
+/// [`Declared`](crate::AdaptedEvent::Declared)-provenance
+/// [`EventSpec`](crate::EventSpec): `name` is the stable event-kind
+/// identity an [`EmittedEvent`](crate::EmittedEvent) reports,
+/// `payload` the emitted record's typed field schema, and `retention`
+/// how emitted events are retained. Emission is always
+/// [`KindEmitted`](crate::EventEmission::KindEmitted) — the component
+/// itself emits the event during a scan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventDecl {
+    /// The event's stable identity within the interface — unique
+    /// across the derived interface's `events` collection.
+    pub name: String,
+    /// The typed payload schema.
+    pub payload: Vec<EventField>,
+    /// How an emitted event is retained.
+    pub retention: EventRetention,
+}
+
 /// A component's self-description for the monitoring UI.
 ///
 /// The descriptor is static metadata — the component's identity and
@@ -139,6 +189,29 @@ pub struct ComponentDescriptor {
     pub ports: Vec<PortDescriptor>,
     /// The component's tunable parameters.
     pub parameters: Vec<ParameterDescriptor>,
+    /// The kind's declared native commands — the behavior vocabulary an
+    /// [`Invoke`](crate::Command::Invoke) submission addresses.
+    /// Surfaced in the derived [`BlockInterface`](crate::BlockInterface)
+    /// `commands` collection with
+    /// [`Declared`](crate::AdaptedCommand::Declared) provenance beside
+    /// the adapted generic entries; names are unique across the
+    /// collection.
+    ///
+    /// Serde-optional like [`PortDescriptor::point`]: descriptors
+    /// predating the field deserialize empty, and a kind declaring no
+    /// commands serializes without the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandDecl>,
+    /// The kind's declared emitted events — the stable event-kind
+    /// identities and payload schemas an emitted event carries.
+    /// Surfaced in the derived [`BlockInterface`](crate::BlockInterface)
+    /// `events` collection with
+    /// [`Declared`](crate::AdaptedEvent::Declared) provenance beside
+    /// the adapted journaled transitions.
+    ///
+    /// Serde-optional like `commands`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventDecl>,
 }
 
 #[cfg(test)]
@@ -211,6 +284,8 @@ mod tests {
                     range: None,
                 },
             ],
+            commands: Vec::new(),
+            events: Vec::new(),
         };
         let json = serde_json::to_string(&descriptor).unwrap();
         assert_eq!(
@@ -227,12 +302,67 @@ mod tests {
             label: "bare".to_string(),
             ports: Vec::new(),
             parameters: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
         };
         let json = serde_json::to_string(&descriptor).unwrap();
         assert_eq!(
             serde_json::from_str::<ComponentDescriptor>(&json).unwrap(),
             descriptor
         );
+    }
+
+    #[test]
+    fn declared_commands_and_events_serde_roundtrip() {
+        let descriptor = ComponentDescriptor {
+            name: "vlv:1".to_string(),
+            kind: "valve".to_string(),
+            label: "vlv:1".to_string(),
+            ports: Vec::new(),
+            parameters: Vec::new(),
+            commands: vec![CommandDecl {
+                name: "stroke_test".to_string(),
+                request: vec![CommandArgument {
+                    name: "ticks".to_string(),
+                    kind: ValueKind::Int,
+                }],
+                availability: CommandAvailability::KindDeclared,
+            }],
+            events: vec![EventDecl {
+                name: "stroke_complete".to_string(),
+                payload: vec![EventField {
+                    name: "ticks".to_string(),
+                    kind: crate::EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::Journal,
+            }],
+        };
+        let json = serde_json::to_string(&descriptor).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ComponentDescriptor>(&json).unwrap(),
+            descriptor
+        );
+        // The declared vocabulary serializes snake_case like the rest
+        // of the contract.
+        assert!(json.contains("\"kind_declared\""), "{json}");
+        assert!(json.contains("\"journal\""), "{json}");
+    }
+
+    #[test]
+    fn declared_vocabulary_is_serde_optional() {
+        // Descriptors predating the `commands`/`events` fields
+        // deserialize with empty declarations, and a kind declaring
+        // none serializes without the keys.
+        let descriptor: ComponentDescriptor = serde_json::from_str(
+            r#"{"name":"bare","kind":"custom","label":"bare","ports":[],"parameters":[]}"#,
+        )
+        .unwrap();
+        assert!(descriptor.commands.is_empty());
+        assert!(descriptor.events.is_empty());
+        let json = serde_json::to_string(&descriptor).unwrap();
+        assert!(!json.contains("commands"), "{json}");
+        assert!(!json.contains("events"), "{json}");
     }
 
     #[test]

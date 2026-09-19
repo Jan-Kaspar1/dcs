@@ -27,6 +27,12 @@ Where each contract lives in code:
 Every field name, kind string, parameter key, and element tag named below
 is the exact identifier those sources read or write.
 
+The checked-in fixtures this reference points at are platform
+conformance artifacts — test evidence owned by this repository, not
+customer-project examples. A customer plant owns its own composition as
+an external consumer of a pinned release; that boundary is the consumer
+release contract in `docs/release-contract.md` (decisions 79–81).
+
 ## Shared vocabulary
 
 - **Ids** are unsigned 64-bit integers serialized as bare JSON numbers.
@@ -52,9 +58,10 @@ is the exact identifier those sources read or write.
   section.)
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
-  and an unset field serializes back without the key. `parameters` on a
-  device, `channel`/`initial`/`writable` on an io_point, and
-  `unit`/`description`/`group` on a signal all follow this convention.
+  and an unset field serializes back without the key. `hardware` and
+  `parameters` on a device, `channel`/`initial`/`writable`/`journaled` on
+  an io_point, and `unit`/`description`/`group` on a signal all follow
+  this convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
   canonical model document — what `PlantModel::fingerprint` hashes —
@@ -113,6 +120,7 @@ assembly.
 | `id` | `DeviceId` (u64) | Required; unique within `devices` — `ValidationError::DuplicateId { collection: "device" }`. |
 | `kind` | string | Required; opaque to the model. Resolved by `dcs_assembly::DriverRegistry` at assembly — exact registration first, then prefix in registration order; an unregistered kind is `AssemblyError::UnknownDeviceKind`. The built-in kinds are in the next section. |
 | `channels` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. A channel is a physical endpoint an io_point binds to. A channel no io_point binds is lint `unbound_channel`, not an error. |
+| `hardware` | bool | Optional; unset means `false`. `true` marks the device *hardware-bound*: its kind requires physical field hardware, and no simulated backend may serve it. The kind's factory enforces the marker both ways at assembly — a hardware-bound kind rejects a device omitting it (`InvalidDeviceParameters`), and a simulated kind rejects a device carrying it — so a model declaring a hardware kind fails startup if the hardware cannot initialize rather than silently falling back to simulation. |
 | `parameters` | object: name → arbitrary JSON | Optional. Kind-specific addressing and configuration, opaque to the model — the registered device-kind factory owns all validation at assembly (`AssemblyError::InvalidDeviceParameters`). Unlike component parameters these are general JSON values, so a kind can carry strings and structured addressing data. |
 
 Example:
@@ -142,6 +150,7 @@ carried by the controller's scan image — decision 14).
 | `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
 | `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
+| `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
 
 ### Internal points
 
@@ -186,6 +195,13 @@ points are the ordinary mechanism and are not flagged. Writability joins
 the point metadata the monitoring surface serves, so the page offers
 command affordances only where commands can succeed.
 
+In the served block interface (decision 82) the mark surfaces as command
+availability: every bound `In` port's adapted `write_value:<port>`,
+`force_point:<port>`, and `unforce_point:<port>` command entries carry
+`bound_point_writable` availability, which `GET /resources` reads live —
+`available` while the point is marked, or the named `not_writable`/
+`unknown_point` refusal a submission would meet.
+
 ### `stale_after_ticks` and input freshness
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
@@ -217,6 +233,52 @@ protocol changes. A driver whose samples carry no usable freshness
 signal — one that stamps every read with the current tick, or a fixed
 tick — simply makes the declaration inert or always-stale; declare the
 field only where the source distinguishes fresh samples from held ones.
+
+### `journaled` and the durable transition record
+
+`journaled` marks the io_points whose observed *value* transitions join
+the durable transition journal — the low-volume, file-backed record of
+settled command receipts and quality transitions (decisions 36 and 74).
+Every point's samples already land in the bounded per-point history
+ring; that ring is volatile telemetry, and bounded eviction drops old
+samples. The journal is the audit-grade record: marking a point
+`journaled` makes each of its value changes durable as a
+`point_changed` journal event carrying `point`, `from`, and `to` —
+`from` reading `null` on the point's first observed sample, the
+`quality_changed` convention — attributed to the producing scan's tick
+and ordered after that scan's quality transitions in ascending point
+order.
+
+The declaration is deliberately opt-in and bounded:
+
+- either direction may be journaled — the alarm-lifecycle status points
+  the decision names (`alarm`, `unacknowledged`, `shelved`,
+  `suppressed`, `out_of_service`) are component `out` status points, and
+  mode or protection-layer states ride the same mechanism;
+- `float` points cannot be journaled (`JournaledFloat`): a per-scan
+  measurement stream would churn the durable record, and a float
+  transition belongs in the history ring, not the journal;
+- an undeclared point's value changes produce no journal entries — the
+  journal stays the low-volume record decision 36 describes, instead of
+  duplicating every point's history stream.
+
+A receipted write to a journaled writable point produces *both* its
+attributed `command_settled` entry and the resulting `point_changed`
+entry, in `seq` order — the action's attribution and the transition it
+caused are each auditable. A component-driven transition on a journaled
+status point lands with no receipt, and the durable journal file
+replays `point_changed` entries like every other event, continuing
+`seq` numbering across a restart.
+
+The same journal carries the kind-declared emitted events the
+block-interface contract adds (decisions 82, 84): a component kind's
+descriptor may declare `EventDecl`s, and a `Journal`-retained emission
+lands as an `event_emitted` entry at the producing scan's tick —
+`event` naming the declaration, `component` the instance, `fields` the
+typed payload — beside the adapted `point_changed`/`quality_changed`/
+`command_settled`/`step_failed` records. In the served interface the
+`journaled` mark surfaces as the `when_journaled` emission rule on each
+`Bool`/`Int` port's adapted `point_changed:<port>` event entry.
 
 ## `signals`
 
@@ -252,12 +314,37 @@ order.
 | `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
 | `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
+|| `rationalization` | object: `consequence`/`required_action`/`reference` strings | Optional; absent serializes to nothing. The decision-70 prose half of an alarm instance's rationalization record — the consequence of inaction, the required operator action, and the display/procedure reference. The model stores it uninterpreted; the alarm kinds' construction requires it (see below). |
 
 The model does not validate `parameters` contents or that a `kind`
 exists: kind resolution and parameter checking are assembly's, because
 the registry is a deployment choice. `docs/integration-guide.md` covers
 declaring a kind's parameters; per-kind contracts live beside each
 `dcs-blocks` kind's `KIND`/`from_parameters`/`describe`.
+
+A kind's *native* commands and emitted events are likewise kind-level
+contract, not document data: the descriptor's `commands`/`events`
+declare `CommandDecl`s (a stable name, a typed `CommandArgument`
+request schema, an `always` or `kind_declared` availability rule) and
+`EventDecl`s (a stable event-kind name, a typed payload schema, a
+retention class), so the document carries no command or event keys —
+the instance's whole engineering surface is its declared `kind`,
+`ports`, and `parameters`. Operator submissions arrive at runtime as
+`Command::Invoke` on the receipted path, validated against the
+declaration and dispatched to the component's `invoke_command` at the
+scan boundary; emissions drain after each `step` and journal per their
+declared retention (see `journaled` above). `GET /schema` serves each
+instance's derived `BlockInterface` — ports as measurements/state,
+parameters as configuration, the adapted generic and declared native
+commands, and the adapted and declared events — and `GET /resources`
+its live values, command availability, and attributed events. The
+served availability is live per rule: a `kind_declared` command joins
+the snapshot `command_verdicts` section's published standing verdict —
+`available` while the kind's probe permits invocation, `false` carrying
+the kind's named refusal reason where it refuses — while
+`bound_point_writable` answers live from the point's mark and `always`
+is unconditionally invocable. The verdict is advisory: submissions
+settle through the receipted path either way.
 
 Some kinds are variable-arity: the declared `ports` set fixes the
 instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;
@@ -281,8 +368,13 @@ parameter) and `on_bad_demand` (`Int`, `0`–`2`): the stage count the
 chain emits while `level` is non-`Good`, the decision's declared
 answer to a failed measurement. `failover-select` is parameterless:
 `primary` and `backup` (`in`, `Float`), `out` (`out`, `Float`)
-carrying the selected sample with its quality, and `backup_active`
-(`out`, `Bool`) asserted while the backup serves. The switch rule is
+carrying the selected sample with its quality, `backup_active`
+(`out`, `Bool`) asserted while the backup serves, and the optional
+`backup_unhealthy` (`out`, `Bool`) — declared only where the model
+wires it — asserted while the backup's own sample is non-`Good` or
+non-finite, independent of which source is serving, so a failed
+standby annunciates before the primary's loss would select it
+(issue #502). The switch rule is
 quality-driven — `out` carries `primary` while it reads `Good` with a
 finite value, else `backup` verbatim, quality included — and the
 return rule is immediate: a primary reading `Good` again re-selects
@@ -292,7 +384,8 @@ point pair — an internal link carries quality, a field loopback does
 not — and `threshold-chain.demand` onto `pump-group.demand` likewise.
 `backup_active` takes the same route into a `bool-latching-alarm`'s
 `in` — the alarmed backup-mode engagement decision 43 maps — with a
-model-writable `ack` point releasing the latch.
+model-writable `ack` point releasing the latch; `backup_unhealthy`
+takes the same route where bound, alarmed as the standby's loss.
 `crates/dcs-assembly/fixtures/station_level.json` is the recorded
 composition, manual-takeover gates included; per-port semantics live
 beside `ThresholdChain::KIND` and `FailoverSelect::KIND`.
@@ -301,7 +394,7 @@ The Bool-input latching sibling architecture decision 43 records adds
 one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
-standing-limit parameter, so `parameters` stays empty — and
+standing-limit parameter — and
 `unacknowledged` latches the input's false-to-true edge, clearing while
 the model-wired writable `ack` point reads `true` under the same
 level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
@@ -310,6 +403,68 @@ latch). Both outputs carry the worst of the two inputs' qualities.
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
 `BoolLatchingAlarm::KIND`.
+
+The alarm rationalization record architecture decision 70 records
+makes the model the master alarm database. An alarm's identity is the
+component instance plus the `Signal` on its standing `alarm` point —
+no separate alarm tag — and its rationalization data lands in two
+halves. The numeric half is three declared parameters every alarm
+kind carries — `latching-alarm`, `bool-latching-alarm`, and the
+managed siblings below: `priority`, `class`, and `response_ticks`,
+all required non-negative `Int`s served live through the snapshot's
+parameter section, tunable through `SetParameter`, and checkpointed
+like any declared parameter. The site vocabulary the codes name —
+priority levels, class rules — is an open customer assumption the
+model carries as data, not meaning. The prose half is the optional
+`rationalization` block on `ComponentInstance`: `consequence` (of
+inaction), `required_action`, and `reference` (the display/procedure
+the operator consults) — stored uninterpreted and absent serializing
+to nothing, so documents predating it load unchanged. Enforcement
+lands where kind and instance meet — construction of a declared
+alarm kind rejects an instance missing any of the three parameters
+or carrying no complete non-empty prose record, the failure naming
+the element through `AssemblyError::Component` and surfacing through
+`dcs-controller --check`. The emitted JSON Schema pins the same
+kind-conditional obligation where expressible.
+
+The managed alarm lifecycle architecture decisions 71–73 record adds
+two fixed-arity kinds, one managed sibling per latching kind.
+`managed-latching-alarm` keeps `latching-alarm`'s
+`in`/`ack`/`alarm`/`unacknowledged` vocabulary and its
+`low_limit`/`high_limit`/`hysteresis` parameters exactly;
+`managed-bool-latching-alarm` keeps `bool-latching-alarm`'s — `in` a
+`Bool`, `alarm` following the input directly. Each adds the uniform
+managed-state outputs `shelved`, `suppressed`, and `out_of_service`
+(`out`, `Bool`, `Status` role), three optional `in`/`Bool` inputs the
+instance declares only where the model wires one, and the `Int`
+`max_shelve_ticks` bound; both carry the decision-70
+`priority`/`class`/`response_ticks` parameters like every alarm kind.
+`shelve` and `oos` bind writable internal `In` points so operator
+commands ride the receipted `WriteValue` path: a `true` level requests
+the state, `false` returns it manually — out-of-service has no
+automatic return. Shelving asserts `shelved` while the request stands
+inside the bound, counts the request's asserting scan as the first,
+and drops at `max_shelve_ticks` even while the request still stands —
+a re-shelve requires the request to cycle through `false`. A zero
+`max_shelve_ticks` declares never-shelvable; an unbound or unwritable
+`shelve` point rejects stronger still, `NotWritable` at submission.
+`suppress` binds declared wiring — designed or state-based — asserting
+`suppressed` while it withholds `unacknowledged`'s latch; release
+evaluates fresh, so a condition that outlasted its suppression arrives
+as a new transition. While any managed flag stands, `alarm` keeps
+reporting process truth and `unacknowledged` its latch — the flag
+reroutes presentation, never erases the record: shelving an active
+alarm leaves both flags standing, an ack mid-shelve clears the latch
+normally, a trip mid-OOS evaluates and latches, and an unbound
+managed input reports its flag standing-clear. The shelve-expiry
+countdown, the out-of-service state, and the suppression state all
+ride `capture_state`, so a tracking standby promoted mid-shelve
+continues the remaining bound identically.
+`crates/dcs-assembly/fixtures/managed_alarms.json` is the recorded
+composition — three instances covering the full surface, a
+bound-but-unwritable `shelve`, and an unbound `suppress`; per-port
+semantics live beside `ManagedLatchingAlarm::KIND` and
+`ManagedBoolLatchingAlarm::KIND`.
 
 The chemical-dosing demand contract architecture decision 50 records
 adds one variable-signature kind. `flow-paced-ratio` reads `flow`
@@ -463,6 +618,325 @@ recorded composition — a four-step timed/measured/first-of table
 under each fault policy beside a `pending`-latched two-step table;
 per-port semantics live beside `BackwashSequence::KIND`.
 
+The post-wash verification checks architecture decision 61 records
+add one fixed-arity kind. `phase-monitor` reads `in` (`in`, `Float`)
+— the measured value — `phase` (`in`, `Bool`) — the condition
+window, wired from decoded phase flags or the return-to-service
+state — and `capture` (`in`, `Bool`) — while asserted inside the
+window the kind tracks `in` as its baseline — and drives `deviation`
+(`out`, `Float`), the reported `in − baseline`; `exceeded` (`out`,
+`Bool`), the excursion condition the alarm set consumes; and
+`overdue` (`out`, `Bool`), the bound-not-met verdict. The
+`parameters` are `bound` (non-negative finite `Float`), `limit_ticks`
+(`Int`, `1`–`i64::MAX`, the scans of the open window within which the
+bound must first be met), and `mode` (`Int` code — `0` absolute
+bound on `in`, `1` magnitude bound on the deviation); all three are
+`SetParameter`-tunable. The window opens on the scan `phase` reads
+`true` and closes on the scan it reads `false`, and each window
+carries its own verdict state — scans stood, the latched `met`, the
+baseline — reset as it opens. Under `mode` `0`, `exceeded` stands
+while `in` reads above `bound` and the first scan within bound
+latches `met`; under `mode` `1`, `deviation` reports `in − baseline`
+(`0.0` until the window's first capture), `exceeded` bounds the
+deviation magnitude, and only a captured deviation can be met — a
+window whose `capture` never runs meets nothing. `overdue` asserts on
+the first window scan past `limit_ticks` without `met`, and clears
+when the bound is met late or the window closes. Outside the window
+the monitor is quiescent — `deviation` `0.0`, both flags clear,
+nothing accrues, a `capture` read `true` acting on nothing — and the
+held baseline drops when the window closes, so a fresh window never
+verifies on a stale reference. A scan where any input is not `Good`,
+or `in` is not finite, is a held scan: the window neither opens nor
+closes, the count stands, nothing captures, and the outputs keep
+their standing values stamped with the merged worst-of input
+qualities — plus `Bad(DeviceFault)` for a non-finite reading the
+point did not report. The baseline, the deadline count, and the
+standing verdicts are run state under decision 20's checkpoint rule,
+so a checkpointed standby continues a mid-window verification
+identically.
+`crates/dcs-assembly/fixtures/phase_monitor.json` is the recorded
+composition — a mode-0 ripening instance beside a mode-1 CBHL
+instance over scripted turbidity, headloss, phase, and capture
+channels; per-port semantics live beside `PhaseMonitor::KIND`.
+
+The aeration-header coordination contract architecture decision 62
+records adds one variable-arity kind. `header-coordinator` owns the
+bank-level coordination the independent per-zone DO→valve loops
+cannot express — the shared discharge header lets the loops hunt
+each other through the common pressure, so a bank coordinator holds
+the coordination strategy and the plant-wide pulse cap. Per zone `i`
+declared under the indexed-family convention — the zone count is the
+highest bound index and every index below it must bind all four
+members: `valve_pos_i` (`in`, `Float`) the zone valve's position
+feedback, `airflow_i` (`in`, `Float`) the zone's airflow demand,
+`pulsing_i` (`in`, `Bool`) the zone's mixing-pulse request, and
+`pulse_grant_i` (`out`, `Bool`) the coordinator's pulse admission.
+The bank level reads `pressure` (`in`, `Float`) — the header
+transmitter — and drives `pressure_sp` (`out`, `Float`) the emitted
+set-point, `blower_demand` (`out`, `Float`) the aggregate capacity
+demand, `most_open` (`out`, `Int`) the 1-based index of the zone
+whose `valve_pos_i` reads highest — `0` while no zone's position is
+trusted, a tie resolving to the lowest index — `at_bound` (`out`,
+`Bool`) asserted while the emitted set-point rests at a declared
+pressure bound or the demand rests at the airflow floor, and
+`pulse_blocked` (`out`, `Bool`) asserted while a pulse request
+stands refused by the cap. The `parameters` are the `Int` code
+`strategy` (`0` constant header pressure — `pressure_sp` holds the
+declared `pressure_hold`; `1` most-open-valve pressure reset —
+`pressure_sp` walks once every `adjust_ticks` scans, by the
+most-open valve's distance outside the `mov_band_lo`–`mov_band_hi`
+band, until the valve settles inside it; `2` direct-airflow control
+— `blower_demand` carries the summed zone demands and `pressure_sp`
+emits the clamped hold as an inert reference), the finite `Float`s
+`pressure_hold` (the held set-point and the walk's initial value),
+`pressure_min`/`pressure_max` (the emitted set-point's clamp) and
+`mov_band_lo`/`mov_band_hi` (each pair ordered), `adjust_ticks`
+(`Int` ≥ 1, the minimum interval between set-point moves),
+`min_total_airflow` (finite `Float` ≥ 0, the header-level mixing
+floor), and `max_pulsing` (`Int` ≥ 0, the simultaneous pulse-grant
+cap); all nine are `SetParameter`-tunable, a retune breaking a bound
+pair refused naming the parameter. The non-`Good` rules are the
+decision's: a `Good` finite `valve_pos_i` alone may claim the
+most-open identity; a non-`Good` or non-finite `airflow_i` holds the
+zone's last trusted demand — a zone never trusted contributes
+nothing — and `blower_demand` floors at `min_total_airflow`; a
+non-`Good` `pulsing_i` reads as not requesting, releasing any held
+grant; and a reset-strategy interval landing on a non-`Good` or
+non-finite `pressure`, or an empty most-open selection, skips that
+move rather than catching up — the held set-point does not step on
+an untrusted read. Pulse grants hold while their request stands and
+waiting requests admit in ascending zone order as capacity frees.
+The emitted set-point, the aggregate demand, the most-open identity,
+the adjustment timer, the held per-zone demands, and the grant set
+are per-scan run state under decision 20: `capture_state` carries
+them so a checkpointed standby resumes the walk without stepping the
+header pressure.
+`crates/dcs-assembly/fixtures/header_coordinator.json` is the
+recorded composition — one bank per declared strategy over one
+scripted input set; per-port semantics live beside
+`HeaderCoordinator::KIND`.
+
+The blower-staging contract architecture decision 63 records adds one
+variable-arity kind. `blower-group` stages `N` blowers against a
+continuous `demand` (`in`, `Float` — the `header-coordinator`'s
+`blower_demand`), each unit `i` declared under the indexed-family
+convention with six members: `cmd_i` (`out`, `Bool`) the group's run
+request, `run_i`/`fault_i`/`avail_i` (`in`, `Bool`) the pump-group
+equipment family, `capacity_i` (`out`, `Float`) the unit's share of
+the demand under the equal split clamped to its declared bounds, and
+`vent_i` (`out`, `Bool`) the unloading-vent command — `true` holds the
+unit off the header. The bank level reports `staged` (`out`, `Int`)
+the commanded count, `none_available`/`all_faulted` (`out`, `Bool`)
+the station conditions, `staging_pending` (`out`, `Bool`) a stage
+change standing under a non-automatic authority, and `transition`
+(`out`, `Bool`) a join, departure, or rotation handover in progress —
+the freeze surface the most-open-valve wiring consumes. The
+`parameters` are `staging_authority` (`Int`, `0` automatic, `1`
+operator-approval — a pending change holds on `staging_pending` until
+a `Good` `true` on the bound `approve` point grants it, one assertion
+granting one change; the authority requires the bound port — `2`
+flag-only, recommendations only), `stage_up`/`stage_down` (finite
+`Float`s ≥ 0 — fractions of the committed capacity: `demand` over
+`stage_up × committed` stages up, under `stage_down × (committed −
+the departing unit's ceiling)` stages down), `min_run_ticks` and
+`min_start_interval_ticks` (`Int`s ≥ 0 — the time a joined unit must
+serve before it may depart and a stopped unit must sit out before
+restart), per-unit `unit_<i>_min_flow`/`unit_<i>_max_flow`/
+`unit_<i>_max_current` (finite `Float`s ≥ 0, ordered `min_flow ≤
+max_flow` and `min_flow ≤ max_current`, the effective ceiling the
+tighter of the two maxima), `vent_ticks` (`Int` ≥ 1, the prove window
+both choreography legs get), and `rotation` (`Int`, `0` none — lowest
+index in, most recently joined out — `1` equalize runtime — least-run
+standby swaps in for the most-run joined once the spread reaches
+`max(1, min_run_ticks)`, the join running first and `transition`
+asserted across the handover — `2` fixed order — lowest index in,
+highest joined index out). The join choreography is the decision's
+offline start: `vent_i` opens with `cmd_i`, `run_i` must prove within
+`vent_ticks`, then the vent closes; departure runs it in reverse —
+`cmd_i` drops behind the open vent, `run_i` proves the stop within
+`vent_ticks`, then the vent closes, an unproven stop resolving the
+unit offline anyway with its still-running feedback still
+accumulating run-hours. A joined unit faulting or losing availability
+departs the same scan and its demand hands to the next eligible
+standby. The non-`Good` rules are the decision's: `avail_i` non-`Good`
+reads unavailable, `fault_i` non-`Good` reads failed, `run_i`
+non-`Good` proves neither running nor stopped and accumulates no
+run-hours, a non-`Good` or non-finite `demand` holds the last `Good`
+value, and a non-`Good` `approve` grants nothing; every output
+carries `Good`. Where the model binds `approve` (`in`, `Bool`) —
+conventionally a writable internal `in` point, so grants ride the
+journaled receipted command path — the operator-approval authority
+consumes it; an instance not exposing it declares no `approve` port.
+The staging position, phase timers, run-hours, start/stop references,
+join order, rotation pair, held demand, and consumed approval are
+per-scan run state under decision 20: `capture_state` carries them so
+a checkpointed standby resumes a mid-join run identically.
+`crates/dcs-assembly/fixtures/blower_group.json` is the recorded
+composition — five groups covering every `staging_authority` and
+`rotation` code over one scripted device; per-port semantics live
+beside `BlowerGroup::KIND`.
+
+The machine-protection demand bound architecture decision 64 records
+adds one fixed-arity kind. `surge-guard` sits on each blower's demand
+path between the `blower-group`'s `capacity_i` and the machine
+actuation demand, bounding `demand` (`in`, `Float`) against the
+declared two-variable surge region: `flow` (`in`, `Float`) — the
+unit's discharge airflow — below `min_flow`, `pressure` (`in`,
+`Float`) — the discharge or header pressure — above `max_pressure`,
+or a bound `current` (`in`, `Float`) — the optional minimum-amperage
+proxy — below `min_current` sit inside the region, the comparisons
+strict so a reading resting on its bound stays clear. `surge_trip`
+(`in`, `Bool`) is the hardwired protective device's proven-surge
+status — the kind honors it, never re-implements the device. It
+drives `out` (`out`, `Float`) — the guarded demand — `guarding`
+(`out`, `Bool`) — asserted while any declared bound is crossed — and
+`tripped` (`out`, `Bool`) — asserted while a proven surge, a declared
+trip response, or an untrusted demand drives `trip_value`. The
+`parameters` are `min_flow`, `max_pressure`, and `min_current`
+(non-negative finite `Float`s — the declared surge-region bounds),
+`on_guard` (`Int` code — `0` clamps `out` at each crossed bound,
+`min_flow` and `min_current` flooring the demand and `max_pressure`
+capping it; `1` trips `out` to `trip_value`), and `trip_value`
+(finite `Float` — the demand a trip emits, the unload/vent direction
+the machine's shutdown requires); all five are
+`SetParameter`-tunable. Inside the region the demand passes
+unmodified; a proven `surge_trip` drives `trip_value` whatever the
+demand or the region; neither report latches — the kind auto-clears
+with the inputs, and a plant needing a held lockout wires an
+`sr-latch` downstream per the decision. An instance not exposing the
+amperage proxy declares no `current` port — bound through
+`ComponentSpec::get` — and `min_current` guards nothing on it. The
+non-`Good` rules are the fail-safe set: an untrusted `flow` reads
+below `min_flow`, an untrusted `pressure` above `max_pressure`, an
+untrusted bound `current` below `min_current`, a non-`Good`
+`surge_trip` reads as proven, and an untrusted or non-finite `demand`
+can neither pass nor be bounded, so `out` drives `trip_value` and
+`tripped` asserts. `out` carries the merged worst of every bound
+input's quality plus `Bad(DeviceFault)` for a non-finite reading the
+point did not report; `guarding` and `tripped` always carry `Good`.
+The tuned parameters are the only run state under decision 20 —
+every output is a pure function of the current inputs — so a
+checkpointed standby resumes identically.
+`crates/dcs-assembly/fixtures/surge_guard.json` is the recorded
+composition — a clamp instance with `current` bound beside a trip
+instance without it over one scripted input set; per-port semantics
+live beside `SurgeGuard::KIND`.
+
+The declared DO-loss fallback architecture decision 65 records adds
+one fixed-arity kind. `demand-fallback` sits on a zone's DO→airflow
+demand path — downstream of the `failover-select`/`median-voter`
+measurement layer — and carries the terminal response that layer
+cannot express once no DO source remains good. It reads `in` (`in`,
+`Float`) — the loop's airflow demand — and `pv` (`in`, `Float`) — the
+selected DO measurement whose quality drives the fallback — and
+drives `out` (`out`, `Float`) — the demand served downstream — and
+`fallback_active` (`out`, `Bool`) — asserted for the engagement's
+duration, the alarmed transition surface the alarm set consumes. The
+`parameters` are `on_bad` (`Int` code — `0` holds the last demand the
+kind stamped `Good`, zero before the first; `1` drives `fallback_flow`,
+a fixed airflow; `2` drives `safe_flow`, the declared safe airflow —
+e.g. the permit-protecting rate for the low-DO direction) and
+`fallback_flow`/`safe_flow` (finite `Float`s — the fixed demands the
+codes emit, declared engineering data emitted verbatim rather than
+clamped); all three are `SetParameter`-tunable where the plant
+declares the code operator-selectable. While `pv` reads `Good` with a
+finite value the demand passes unmodified; a non-`Good` or non-finite
+`pv` — a reading that cannot be controlled on — engages the declared
+response the same scan; recovery resumes pass-through the first scan
+`pv` reads `Good` again, neither state latching. The held demand is
+the last `Good` finite `in` stamped during pass-through — frozen for
+the engagement's duration, so a still-`Good` `in` moving while the
+fallback stands does not follow it; `in` itself never gates the
+response, an untrusted demand under a `Good` `pv` passing verbatim.
+`out` carries the merged worst of the `in` and `pv` qualities plus
+`Bad(DeviceFault)` for a non-finite reading the point did not report,
+so a held or fallback demand stays marked untrusted;
+`fallback_active` always carries `Good`. The held demand and the
+tuned parameters are run state under decision 20: `capture_state`
+carries them so a checkpointed standby resumes an engaged fallback
+identically.
+`crates/dcs-assembly/fixtures/demand_fallback.json` is the recorded
+composition — one instance per `on_bad` code over one scripted input
+set; per-port semantics live beside `DemandFallback::KIND`.
+
+The feed-forward demand injection architecture decision 66 records
+adds one fixed-arity kind — the additive sibling of the landed
+`flow-paced-ratio`, whose `trim` scales multiplicatively where this
+kind's adds. `feedforward-sum` sits on a zone's aeration demand path
+where a load feed-forward or an ammonia-based supervisory trim *adds
+to* the airflow demand rather than scaling it. It reads `ff` (`in`,
+`Float`) — the computed feed-forward demand, conventionally a
+`flow-paced-ratio` with `trim` unwired where the pacing law is
+proportional — and `trim` (`in`, `Float`) — the feedback loop's
+additive correction, typically the zone DO `pid`'s `out` — and drives
+`out` (`out`, `Float`), the summed demand bounded to `[min_demand,
+max_demand]`, `clamped` (`out`, `Bool`), and `fallback_active`
+(`out`, `Bool`) — the decision-50 status vocabulary. The `parameters`
+are `trim_min`/`trim_max` (finite `Float`s, `trim_min` ≤ `trim_max` —
+the feedback portion's declared authority: it trims, never owns, the
+demand), `min_demand`/`max_demand` (finite `Float`s, `min_demand` ≤
+`max_demand` — the emitted-demand bounds), and the `Int` codes
+`on_bad_ff`/`on_bad_trim` (`0` the untrusted term drops out and the
+other term serves alone; `1` the term's last `Good` finite value
+stands in, zero before the first); all six are
+`SetParameter`-tunable. Each scan serves `clamp(ff + clamp(trim,
+trim_min, trim_max), min_demand, max_demand)` — the trim bounded
+before the sum — with `clamped` asserting while either bound engages;
+a term resting exactly on its bound is not a clamp. A non-`Good` or
+non-finite input takes its declared response the same scan — each
+term independently, so both bad compose their responses — with
+`fallback_active` asserted for the engagement's duration and no
+latch: the first `Good` finite scan serves and banks again. The
+served terms still pass through the same bounds, so `clamped` reports
+honestly while a response runs. `out` carries the merged worst of the
+`ff` and `trim` qualities plus `Bad(DeviceFault)` for a non-finite
+reading the point did not report; `clamped` and `fallback_active`
+always carry `Good`. The held last-`Good` terms and the tuned
+parameters are run state under decision 20: `capture_state` carries
+them so a checkpointed standby resumes an engaged response
+identically.
+`crates/dcs-assembly/fixtures/feedforward_sum.json` is the recorded
+composition — drop/drop, hold/hold, and mixed response pairings over
+one scripted `ff`/`trim` set; per-port semantics live beside
+`FeedforwardSum::KIND`.
+
+The one-sided derivative annunciation the decision-75 seam map's
+recorded gap names adds one fixed-arity kind. `rate-of-rise` reads
+`in` (`in`, `Float`) — the measured value — and drives `rate` (`out`,
+`Float`), the per-scan first difference in the input's declared
+measured-units-per-tick (components own no wall clock — a scan is the
+unit), and `rising` (`out`, `Bool`), the standing condition a
+downstream `bool-latching-alarm`/`managed-bool-latching-alarm` `in`
+consumes. The `parameters` are `rate_limit` (strictly positive finite
+`Float`, the per-tick rise the flag asserts at) and `initial_rate`
+(finite `Float`, the rate reported until the first `Good` sample pair
+completes a difference — a plant choosing the alarm-until-proven
+posture declares an initial at or above the bound); both are
+`SetParameter`-tunable. Each scan where `in` reads `Good` and finite
+banks the sample and, once a pair stands, reports `in − previous` —
+signed, so a rising input asserts at the bound while a falling
+excursion, however fast, stays silent: the one-sided verdict the
+IJmuiden composition's `deviation-monitor`-versus-`signal-filter`
+detector cannot express. A difference overflowing `f64` saturates at
+`±f64::MAX`. A scan whose `in` is not `Good`, or not finite, freezes
+— the previous sample holds, `rate` and `rising` hold their standing
+values stamped with the input's quality plus `Bad(DeviceFault)` for a
+non-finite reading the point did not report — and the recovery scan
+differences against the last banked sample, the whole excursion
+across the gap reporting as one per-tick rate. Neither output
+latches: `rising` releases the first evaluated scan below the bound,
+the alarm kind the flag feeds owning the held annunciation. The
+kind is deliberately one-sided — whether a declared `direction`
+parameter or a falling sibling covers the other side is the
+parameterization record's open item. The banked previous sample, the
+standing rate and flag, and the tuned parameters are run state under
+decision 20: `capture_state` carries them so a checkpointed standby
+differences the next sample identically, no spurious edge.
+`crates/dcs-assembly/fixtures/rate_of_rise.json` is the recorded
+composition — a silent-initial instance beside a declared-initial
+instance asserting until its first `Good` pair, over one scripted
+level; per-port semantics live beside `RateOfRise::KIND`.
+
 ## `connections`
 
 A list of wires between endpoints. Each connection is
@@ -512,14 +986,15 @@ internal-point wiring.
 `Device.kind` resolves through the deployment's `DriverRegistry`;
 `DriverRegistry::standard()` (`crates/dcs-assembly/src/drivers.rs`)
 installs the built-in set: exact registrations for `sim-tcp`, `sim-bus`,
-and `sim-scripted`, plus the `sim` prefix serving every other `sim*`
-name (`sim` itself and role-flavored kinds like `sim-8ai`, `sim-4ao`,
-`sim-ai`, `sim-ao` — the convention `dcs-demo` established). Exact
-registrations always win over the prefix, which is how the three exact
-kinds route to their own backends.
+`sim-cyclic`, `sim-scripted`, and `ethercat`, plus the `sim` prefix
+serving every other
+`sim*` name (`sim` itself and role-flavored kinds like `sim-8ai`,
+`sim-4ao`, `sim-ai`, `sim-ao` — the convention `dcs-demo` established).
+Exact registrations always win over the prefix, which is how the other
+exact kinds route to their own backends.
 
-Every factory receives the device's declared `channels`, its
-`parameters`, and the `io_point`s bound to those channels as
+Every factory receives the device's declared `channels`, its `hardware`
+marker, its `parameters`, and the `io_point`s bound to those channels as
 `DevicePoint`s — already guaranteed by validation to agree on direction
 and value kind — and must serve exactly those points. A rejected
 parameter is `AssemblyError::InvalidDeviceParameters` naming the device
@@ -617,13 +1092,124 @@ registers, so a rig's two ends cannot diverge. Parameters:
 Any other parameter key is rejected. The factory connects eagerly and
 probes each mapped register — an unreachable endpoint, a register the
 server does not hold, or a kind disagreement is `DeviceBackend` at
-assembly. The backend is field-facing but declares no write-ownership
-claim: `FanoutDriver::unfenced_field_devices` names `sim-bus` devices,
-and `dcs-controller --auto-promote` refuses a model built on one —
-manual promotion only (decision 28).
+assembly. The backend is field-facing and installs the device server's
+single-writer claim: the fencing a promoted redundant peer takes out on
+the old field owner (decision 28).
 
 `crates/dcs-assembly/fixtures/mixed_bus.json` shows a `sim-bus` device
 beside a local `sim` one.
+
+### `sim-cyclic` — cyclic register-image simulated fieldbus
+
+A `dcs_sim_bus::CyclicBusDriver` reaching the same
+`dcs-sim-bus-device` server, but under the cyclic process-image
+contract (decision 78): `read` and `write` never touch the wire — they
+serve and stage the driver's two process images — and the executor's
+scan boundary calls `exchange` once per scan, one `Exchange` request
+publishing the staged output registers and latching the answered
+register census atomically. A command-staged write therefore publishes
+in the applying scan's exchange, a component's scan-*t* write in scan
+*t* + 1's — the contract's documented one-scan actuation delay — and
+the driver reports the `ExchangeDiagnostics` section on the snapshot's
+I/O-health surface. Parameters:
+
+- `"address"` — required string: the device server's `host:port`, and
+  the server binary's default `--listen`;
+- `"timeout_ms"` — optional non-negative integral number of
+  milliseconds, defaulting to `CyclicBusDriver::DEFAULT_TIMEOUT`
+  (5 s);
+- `"exchange_miss_threshold"` — required positive integer: consecutive
+  uncompleted exchanges that escalate every point's read to
+  `Disconnected`;
+- `"stations"` — required non-empty object mapping station name →
+  object mapping channel name → the `sim-bus` register declaration
+  form (a bare index or `{"register": <u16>, "initial": <tagged
+  Value>}`). The stations partition the declared channel set exactly —
+  each channel in exactly one station, no station empty, no two
+  channels sharing a register — and the station→register layout is
+  what a station-attributed short exchange withholds and what
+  `dcs-sim-bus-device --device` serves through
+  `BusServer::bind_stationed`.
+
+Any other parameter key is rejected. The factory connects eagerly; the
+connect-time census probes that the server holds every declared
+register with the declared kind — an unreachable endpoint, a missing
+register, or a kind disagreement is `DeviceBackend` at assembly.
+
+The failure semantics are the contract's: a missed exchange retains
+both images and counts once at the boundary; reads keep serving the
+held image — aging under each point's `stale_after_ticks` budget —
+until the miss count reaches `exchange_miss_threshold`, then escalate;
+a short exchange counts `working_counter_mismatches` and degrades the
+stations its withheld registers partition into — or the whole device
+when no station layout names them; a `late` answer counts
+`missed_deadlines`. The backend is field-facing and installs the same
+single-writer claim `sim-bus` does — with one asymmetry the contract
+needs: an exchange carrying staged outputs from a non-holder is
+fenced, while a census-only exchange — a tracking standby's, whose
+closed write gate drops its writes before they stage — stays open and
+keeps latching fresh inputs.
+
+`crates/dcs-assembly/fixtures/cyclic_bus.json` shows a `sim-cyclic`
+device beside a local `sim` one; `dcs-sim-bus-ctl script-exchange`
+scripts the outcomes a rig's next exchanges present.
+
+### `ethercat` — hardware-bound cyclic field-bus
+
+An EtherCAT coupler or remote-I/O station — the first *hardware-bound*
+kind. The device declares `"hardware": true`, and the kind's factory
+requires the marker: a model omitting it is `InvalidDeviceParameters`,
+and a `sim*` device carrying the marker is rejected for the symmetric
+reason. The parameter grammar lives in `crates/dcs-ethercat/src/
+params.rs` (`DeviceParameters::parse`); parameters:
+
+- `"bus"` — required non-empty string: the *logical* bus name. The
+  model names the bus; **deployment configuration binds the name to a
+  host interface outside the document** (decision 47) — no parameter
+  names a host interface, so a plant model stays identical wherever the
+  controller runs. `crates/dcs-assembly/tests/ethercat.rs` pins that
+  the declared vocabulary admits no interface field;
+- `"identity"` — required object `{"vendor": <u32>, "product": <u32>,
+  "revision": <u32>}`: the expected station identity the master checks
+  the answering station against before outputs are enabled;
+- `"mapping"` — required object `{"inputs": {...}, "outputs": {...}}`:
+  the channel → process-data-offset layout. Each direction's image
+  places every declared channel of that direction — `{"byte": <u32>,
+  "bit": <0–7>}` for a `bool` channel, or a byte-aligned `{"byte":
+  <u32>, "bits": <width>}` field for an `int` channel (8, 16, 32, or 64
+  bits) or a `float` channel (32 or 64 bits). No two channels' bit
+  ranges may overlap inside an image;
+- `"exchange_miss_threshold"` — required integer ≥ 1: consecutive
+  failed cyclic exchanges before the device's reads escalate to
+  `IoError::Disconnected` under the decision-78 cyclic contract;
+- `"safe_outputs"` — object channel → tagged `Value`, required when the
+  device declares `out` channels: every `out` channel's declared safe
+  state, matching the channel's `value_type`, staged into the output
+  image before the first exchange;
+- `"startup"` — required object `{"on_mismatch": "fail"}`: the only
+  policy the contract admits. A station identity or layout mismatch is
+  a **hard startup failure** — a hardware-bound kind is never silently
+  substituted by simulation and never runs degraded against a station
+  that does not match the declaration.
+
+Any other parameter key is rejected. A malformed declaration —
+missing `bus`, a mistyped identity, colliding offsets, a channel placed
+in the wrong image or left unmapped, a bad threshold, a non-`fail`
+startup policy, a missing or kind-mismatched safe state — is
+`InvalidDeviceParameters` before any scan. Until the EtherCAT master
+integration lands (Lenovo QA lane HQ-4), a *well-formed* declaration
+still fails assembly as `DeviceBackend`: no bus can initialize, and the
+kind fails startup rather than substituting a simulated backend. The
+emitted JSON Schema carries the kind-conditional shape for the keys it
+can express; the channel-table-dependent rules stay with the factory.
+
+`dcs-build` composes the same declaration through
+`dcs_build::ethercat` — `EthercatSpec` carries the bus, identity, and
+miss threshold, and `ethercat_input`/`ethercat_output` declare each
+channel with its `ImageOffset` (and, for outputs, its safe state), so a
+mistyped offset is a compile-time-adjacent panic rather than an
+assembly error. `crates/dcs-assembly/fixtures/ethercat.json` is the
+reference document the builder's test emits byte-for-byte.
 
 ## The dynamics document
 
@@ -650,6 +1236,7 @@ object whose single key is the snake_case element name:
 | `bool_flow` | `input`, `output`, `on_rate`, `off_rate`, `initial` | `y = on_rate` while the gate reads `true`, `off_rate` while it reads `false` — a bool-gated flow source answering an actuator's run command. `input` is the one non-float element end: a `bool` point. Rates are signed flows — a negative `on_rate` is a pump's draw — and `dt` does not scale them; a downstream `integrator` owns the time base. |
 | `flow_sum` | `inputs`, `output`, `bias`, `initial` | `y = bias + Σ inputs` over a declared list of `float` points — how an inflow and per-pump draws combine into one net rate. `bias` is a constant term (a declared inflow needs no point of its own) and may be omitted, deserializing as zero; an empty `inputs` declares exactly a constant. `dt` does not scale the sum. |
 | `scaled_flow` | `input`, `output`, `gain`, `initial` | `y = gain · u`, re-evaluated each step — a `float` demand scaled into the signed rate a downstream `flow_sum` or `integrator` consumes: a metering pump's measured discharge at its analog speed demand, a chemical tank's drawdown under a negative `gain`. `dt` does not scale the output. |
+| `threshold` | `input`, `output`, `on`, `off`, `initial` | The `float`→`bool` element — `bool_flow`'s mirror: a `float` `input` driving a `bool` contact `output` that asserts and releases on the declared `on`/`off` bounds. `on > off` is a high trip — assert at `u ≥ on`, release strictly below `off`; `on < off` is a low trip — assert at `u ≤ on`, release strictly above `off`; between the bounds the contact holds, so the band is the hysteresis that keeps a noisy input from chattering the output. `initial` is a `bool` covering reads before the first `Good` step, and `dt` scales nothing — the contact is a pure function of the standing input at each tick boundary. A level, pressure, or temperature crossing can thus drive protective behavior — the contact gating a `bool_flow` emergency draw — with no scheduled script. |
 
 Common rules, enforced by `ChannelMap::validate` as each element merges
 (`dcs-plant-server` reports a failure naming the element's index and the
@@ -661,16 +1248,19 @@ point it drives):
   unreachable for elements (`ConfigError::UnknownPoint`);
 - element ends must be `float` points (`ElementPointKind`) — except a
   `bool_flow`'s gate `input`, which must be a `bool` point
-  (`ElementGateKind`);
+  (`ElementGateKind`), and a `threshold`'s contact `output`, which must
+  be a `bool` point (`ElementContactKind`);
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
   `off_rate`, `gain`, and `bias` finite (`InvalidRate`, `InvalidGain`,
   `NonFiniteBias` — rates and gains are signed, so a negative draw is
-  legal), and `initial` finite (`NonFiniteInitial`);
+  legal), `on` and `off` finite and distinct (`InvalidBound`,
+  `NonPositiveBand` — equal bounds declare no hysteresis band), and
+  `initial` finite (`NonFiniteInitial`);
 - a non-`Good` input freezes the element's state and propagates its
   quality to the output sample — a `flow_sum` propagating the worst of
-  its inputs' qualities;
+  its inputs' qualities, a `threshold` holding its standing contact;
 - no point may be driven by more than one loopback or element
   (`ConflictingDriver`);
 - elements step in declaration order, after loopback routing, so an
@@ -703,7 +1293,10 @@ the dosing loop `scaled_flow` exists for — the metering pump's analog
 speed demand scaled into the measured discharge rate and, with a
 negative gain, the chemical tank's drawdown, integrated into the tank
 level — merging onto `crates/dcs-plant/fixtures/dosing_skid.json`'s
-points.
+points. `crates/dcs-sim/fixtures/protection_dynamics.json` is the
+protection loop `threshold` exists for — the level crossing asserting
+the `sis-active` contact that gates a `bool_flow` emergency draw —
+merging onto `crates/dcs-plant/fixtures/protection.json`'s points.
 
 ## Which layer checks what
 

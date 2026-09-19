@@ -25,7 +25,14 @@
 //! redundancy contract: which instance of a controller pair owns field
 //! writes, the transition states between, and the named switchover
 //! refusals — so a monitoring UI treats the pair as one logical
-//! controller.
+//! controller. The interface contract (`BlockInterface`) is the
+//! schema-driven surface: one versioned declaration per component
+//! `kind`, derived from its descriptor, covering measurements,
+//! configuration, runtime state, commands, and events. The served-view
+//! contract (`SchemaView`, `ResourceView`) is the live half a monitor
+//! derives from its published read model: each instance's interface
+//! plus its measurement/state samples, configuration values, command
+//! availability, and recently emitted events.
 
 #![warn(missing_docs)]
 
@@ -34,31 +41,46 @@ mod command;
 mod descriptor;
 mod fingerprint;
 mod history;
+mod interface;
+mod interface_schema;
 mod io;
 mod journal;
+mod resources;
 mod role;
 mod signal;
 mod state;
 mod telemetry;
 
-pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement};
+pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement, RevertedParameter};
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
-    ComponentDescriptor, ParameterDescriptor, ParameterRange, PortDescriptor, PortRole,
+    CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,
+    PortDescriptor, PortRole,
 };
 pub use fingerprint::ModelFingerprint;
 pub use history::{HistorySample, PointHistory};
-pub use io::{
-    Direction, DriverDiagnostics, Input, IoDriver, IoError, LinkState, Output, PointType,
-    TypedSample,
+pub use interface::{
+    AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
+    CommandSpec, ConfigCapability, ConfigProperty, EventEmission, EventField, EventFieldKind,
+    EventRetention, EventSpec, INTERFACE_VERSION, Measurement, StatePersistence, StateProperty,
+    block_interfaces,
 };
-pub use journal::{JournalEntry, JournalEvent};
+pub use io::{
+    CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
+    LinkState, Output, PointType, TypedSample,
+};
+pub use journal::{EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent};
+pub use resources::{
+    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceEvent,
+    ResourceSample, ResourceView, SchemaView,
+};
 pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
 pub use state::{StateError, StateMap};
 pub use telemetry::{
-    ComponentDiagnostics, ComponentParameters, ForcedPoint, IoFault, IoHealth, PointTelemetry,
+    CommandQueueDiagnostics, CommandVerdict, ComponentCommands, ComponentDiagnostics,
+    ComponentParameters, ForcedPoint, IoFault, IoHealth, PointTelemetry, PublicationHealth,
     TelemetrySnapshot,
 };

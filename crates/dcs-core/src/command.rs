@@ -26,13 +26,15 @@
 //! reason — unknown point, not model-declared writable, type mismatch, or
 //! driver rejection for point commands; unknown component, unknown or
 //! unsupported parameter, type mismatch, or out-of-range for parameter
-//! commands — and carrying the offending point or component.
+//! commands; a full pending-command queue refusing admission for either —
+//! and carrying the offending point or component.
 
 use crate::descriptor::ParameterRange;
 use crate::io::IoError;
 use crate::role::Role;
 use crate::signal::{PointId, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// An operator command directed at the running controller.
@@ -109,13 +111,45 @@ pub enum Command {
     /// `Out` point refuses at submission with the named reason — and the
     /// release lands at the same scan boundary every command uses: the
     /// applying scan's input phase already reads the driver again for a
-    /// field point, or resumes the held-value rule for an internal one.
+    /// field point, or resumes the held-value rule for an internal one —
+    /// its held sample, the force's last stamp, re-stamped
+    /// [`Quality::Good`](crate::Quality::Good) rather than left claiming
+    /// substituted data.
     /// Releasing a point that is not forced applies as a no-op — the
     /// release is idempotent so an operator never needs the current force
     /// set to issue one.
     UnforcePoint {
         /// The logical point to release.
         point: PointId,
+    },
+    /// Invokes the kind-declared named command `command` on `component`
+    /// with the typed `arguments` the command's declared
+    /// [`CommandSpec::request`](crate::CommandSpec) schema checks.
+    ///
+    /// `component` is the name the component's descriptor and
+    /// diagnostics report; `command` is the declared
+    /// [`CommandSpec`](crate::CommandSpec)'s `name`; `arguments` is
+    /// keyed by the declared [`CommandArgument`](crate::CommandArgument)
+    /// names — each supplied value's variant must equal the argument's
+    /// declared [`ValueKind`], strict and never coercing like the rest
+    /// of the command surface. The named refusals are
+    /// [`UnknownComponent`](CommandError::UnknownComponent),
+    /// [`UnknownCommand`](CommandError::UnknownCommand),
+    /// [`ArgumentTypeMismatch`](CommandError::ArgumentTypeMismatch), and
+    /// [`CommandRefused`](CommandError::CommandRefused).
+    ///
+    /// The invoke surface is additive to — never an alias of — the
+    /// writable-point commands: declared `writable` `In` points stay
+    /// authoritative for [`WriteValue`](Self::WriteValue) and the force
+    /// pair.
+    Invoke {
+        /// The addressed component instance's name.
+        component: String,
+        /// The declared command's identity — the `CommandSpec.name`.
+        command: String,
+        /// The invocation's typed arguments, keyed by declared argument
+        /// name.
+        arguments: BTreeMap<String, Value>,
     },
 }
 
@@ -126,16 +160,28 @@ impl Command {
             Command::WriteValue { point, .. }
             | Command::ForcePoint { point, .. }
             | Command::UnforcePoint { point } => Some(*point),
-            Command::SetParameter { .. } => None,
+            Command::SetParameter { .. } | Command::Invoke { .. } => None,
+        }
+    }
+
+    /// The component the command acts on, when it is a component
+    /// command.
+    pub fn component(&self) -> Option<&str> {
+        match self {
+            Command::SetParameter { component, .. } | Command::Invoke { component, .. } => {
+                Some(component)
+            }
+            _ => None,
         }
     }
 }
 
 /// Why a [`Command`] was rejected. Point-command variants carry the
 /// offending [`PointId`]; parameter-command variants carry the offending
-/// component name; [`CommandError::NotActive`] carries the command's
-/// target point when it has one. [`CommandError::point`] and
-/// [`CommandError::component`] retrieve each uniformly.
+/// component name; [`CommandError::NotActive`] and
+/// [`CommandError::QueueFull`] carry the command's target point when it
+/// has one. [`CommandError::point`] and [`CommandError::component`]
+/// retrieve each uniformly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandError {
@@ -223,6 +269,48 @@ pub enum CommandError {
         /// Why the component refused the value.
         detail: String,
     },
+    /// The component's kind declares no named command of this identity —
+    /// the [`Invoke`](crate::Command::Invoke) surface's
+    /// [`UnknownParameter`](Self::UnknownParameter) analogue: the
+    /// descriptor's `commands` declare the invoke vocabulary, so a
+    /// submission naming an undeclared command is refused at
+    /// submission.
+    UnknownCommand {
+        /// The offending component name.
+        component: String,
+        /// The rejected command identity.
+        command: String,
+    },
+    /// An [`Invoke`](crate::Command::Invoke) argument's kind differs
+    /// from the kind the declared command's
+    /// [`request`](crate::CommandSpec) schema declares — strict, never
+    /// coercing, like every command-path kind check.
+    ArgumentTypeMismatch {
+        /// The offending component name.
+        component: String,
+        /// The invoked command's identity.
+        command: String,
+        /// The offending argument's declared name.
+        argument: String,
+        /// The kind the argument's declaration requires.
+        expected: ValueKind,
+        /// The kind the supplied value carried.
+        found: ValueKind,
+    },
+    /// The component refused the invocation: the declared command
+    /// exists and its argument schema validated, but the kind's
+    /// availability predicate or the invocation itself reported the
+    /// declared refusal `reason` — the outcome
+    /// [`KindDeclared`](crate::CommandAvailability::KindDeclared)
+    /// availability reports.
+    CommandRefused {
+        /// The offending component name.
+        component: String,
+        /// The invoked command's identity.
+        command: String,
+        /// The kind's declared refusal reason.
+        reason: String,
+    },
     /// The instance refused the command because of its reported role:
     /// per the monitoring-under-redundancy decision only the peer
     /// reporting [`Role::Active`] accepts commands — a standby or a
@@ -235,6 +323,32 @@ pub enum CommandError {
         /// The role the instance reported.
         role: Role,
     },
+    /// The pending-command queue was already at its declared capacity
+    /// when the command was submitted — the admission refusal of the
+    /// bounded command-ingress decision. The command had passed
+    /// submission validation, but nothing was queued; it may be
+    /// resubmitted once a scan boundary drains pending entries below the
+    /// bound. `point` is the command's target, not a point at fault; a
+    /// command targeting a component rather than a point carries `None`.
+    QueueFull {
+        /// The point the command targeted, when it targeted a point.
+        point: Option<PointId>,
+        /// The pending-command queue's declared capacity.
+        capacity: usize,
+    },
+    /// The run the command applied onto was superseded out of the field:
+    /// the shared field's single-writer claim already belonged to another
+    /// attachment when the superseded peer's scan boundary settled the
+    /// command, so the change reached an image the field never saw and
+    /// the demotion reconciles the settlement rather than reporting an
+    /// `applied` the surviving owner does not carry. `point` is the
+    /// command's target, not a point at fault; a command targeting a
+    /// component rather than a point carries `None`. Resubmit to the peer
+    /// now owning the field.
+    Superseded {
+        /// The point the command targeted, when it targeted a point.
+        point: Option<PointId>,
+    },
 }
 
 impl CommandError {
@@ -246,13 +360,15 @@ impl CommandError {
             | CommandError::NotWritable { point }
             | CommandError::TypeMismatch { point, .. }
             | CommandError::DriverRejected { point, .. } => Some(*point),
-            CommandError::NotActive { point, .. } => *point,
+            CommandError::NotActive { point, .. }
+            | CommandError::QueueFull { point, .. }
+            | CommandError::Superseded { point } => *point,
             _ => None,
         }
     }
 
     /// The component the rejection is attributed to, when the rejection
-    /// is for a parameter command.
+    /// is for a component-addressed command.
     pub fn component(&self) -> Option<&str> {
         match self {
             CommandError::UnknownComponent { component }
@@ -260,7 +376,10 @@ impl CommandError {
             | CommandError::UnsupportedParameter { component, .. }
             | CommandError::ParameterTypeMismatch { component, .. }
             | CommandError::OutOfRange { component, .. }
-            | CommandError::InvalidParameter { component, .. } => Some(component),
+            | CommandError::InvalidParameter { component, .. }
+            | CommandError::UnknownCommand { component, .. }
+            | CommandError::ArgumentTypeMismatch { component, .. }
+            | CommandError::CommandRefused { component, .. } => Some(component),
             _ => None,
         }
     }
@@ -329,6 +448,27 @@ impl fmt::Display for CommandError {
                 f,
                 "component {component:?} rejected parameter {parameter:?}: {detail}"
             ),
+            CommandError::UnknownCommand { component, command } => {
+                write!(f, "component {component:?} declares no command {command:?}")
+            }
+            CommandError::ArgumentTypeMismatch {
+                component,
+                command,
+                argument,
+                expected,
+                found,
+            } => write!(
+                f,
+                "command {component:?}.{command:?} argument {argument:?} expects {expected:?}, found {found:?}"
+            ),
+            CommandError::CommandRefused {
+                component,
+                command,
+                reason,
+            } => write!(
+                f,
+                "component {component:?} refused command {command:?}: {reason}"
+            ),
             CommandError::NotActive { point, role } => match point {
                 Some(point) => write!(
                     f,
@@ -339,6 +479,32 @@ impl fmt::Display for CommandError {
                     f,
                     "command refused: instance reports role {role}; \
                      commands apply only on the active peer"
+                ),
+            },
+            CommandError::QueueFull { point, capacity } => match point {
+                Some(point) => write!(
+                    f,
+                    "command on I/O point {point:?} refused: the pending-command queue is full \
+                     (capacity {capacity}); resubmit once a scan drains it"
+                ),
+                None => write!(
+                    f,
+                    "command refused: the pending-command queue is full \
+                     (capacity {capacity}); resubmit once a scan drains it"
+                ),
+            },
+            CommandError::Superseded { point } => match point {
+                Some(point) => write!(
+                    f,
+                    "command on I/O point {point:?} superseded: the peer lost the field's \
+                     single-writer claim before the command took effect; resubmit to the \
+                     peer now owning the field"
+                ),
+                None => write!(
+                    f,
+                    "command superseded: the peer lost the field's single-writer claim \
+                     before the command took effect; resubmit to the peer now owning \
+                     the field"
                 ),
             },
         }
@@ -440,12 +606,28 @@ mod tests {
         }
     }
 
+    fn invoke() -> Command {
+        Command::Invoke {
+            component: "vlv:1".to_string(),
+            command: "stroke_test".to_string(),
+            arguments: [("ticks".to_string(), Value::Int(30))]
+                .into_iter()
+                .collect(),
+        }
+    }
+
     #[test]
     fn command_serde_roundtrip() {
         for command in [
             write_value(),
             set_parameter(),
             force_point(),
+            invoke(),
+            Command::Invoke {
+                component: "vlv:1".to_string(),
+                command: "home".to_string(),
+                arguments: BTreeMap::new(),
+            },
             Command::UnforcePoint { point: PointId(7) },
             Command::WriteValue {
                 point: PointId(1),
@@ -486,6 +668,125 @@ mod tests {
         );
         let json = serde_json::to_string(&Command::UnforcePoint { point: PointId(7) }).unwrap();
         assert_eq!(json, r#"{"unforce_point":{"point":7}}"#);
+    }
+
+    #[test]
+    fn invoke_uses_the_documented_wire_shape() {
+        // The invoke variant addresses the component instance by name,
+        // the declared command by identity, and carries the typed
+        // name→`Value` argument map the `CommandSpec.request` schema
+        // checks — snake_case like every variant. The `BTreeMap` keeps
+        // the argument order deterministic on the wire.
+        let json = serde_json::to_string(&invoke()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"invoke":{"component":"vlv:1","command":"stroke_test","arguments":{"ticks":{"int":30}}}}"#
+        );
+        let json = serde_json::to_string(&Command::Invoke {
+            component: "vlv:1".to_string(),
+            command: "home".to_string(),
+            arguments: BTreeMap::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"invoke":{"component":"vlv:1","command":"home","arguments":{}}}"#
+        );
+    }
+
+    #[test]
+    fn named_refusals_use_the_documented_wire_shapes() {
+        for (error, expected) in [
+            (
+                CommandError::UnknownCommand {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                },
+                r#"{"unknown_command":{"component":"vlv:1","command":"stroke_test"}}"#,
+            ),
+            (
+                CommandError::ArgumentTypeMismatch {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    argument: "ticks".to_string(),
+                    expected: ValueKind::Int,
+                    found: ValueKind::Float,
+                },
+                r#"{"argument_type_mismatch":{"component":"vlv:1","command":"stroke_test","argument":"ticks","expected":"int","found":"float"}}"#,
+            ),
+            (
+                CommandError::CommandRefused {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    reason: "drive not in service".to_string(),
+                },
+                r#"{"command_refused":{"component":"vlv:1","command":"stroke_test","reason":"drive not in service"}}"#,
+            ),
+        ] {
+            let json = serde_json::to_string(&error).unwrap();
+            assert_eq!(json, expected);
+            assert_eq!(serde_json::from_str::<CommandError>(&json).unwrap(), error);
+        }
+    }
+
+    #[test]
+    fn payloads_predating_the_new_variants_deserialize() {
+        // Command and receipt documents recorded before the invoke
+        // surface and its refusals existed carry none of the new
+        // variants; they deserialize unchanged.
+        assert_eq!(
+            serde_json::from_str::<Command>(
+                r#"{"write_value":{"point":7,"kind":"float","value":{"float":42.0}}}"#
+            )
+            .unwrap(),
+            Command::WriteValue {
+                point: PointId(7),
+                kind: ValueKind::Float,
+                value: Value::Float(42.0),
+            }
+        );
+        let receipt: CommandReceipt = serde_json::from_str(
+            r#"{"command":{"set_parameter":{"component":"level-pid","name":"kp","value":{"float":3.5}}},"outcome":{"rejected":{"reason":{"not_active":{"point":null,"role":"standby"}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(receipt.command, set_parameter());
+    }
+
+    #[test]
+    fn invoke_names_its_component() {
+        // The invoke variant is component-addressed: `point` is `None`
+        // and `component` names the instance, like `SetParameter`.
+        let command = invoke();
+        assert_eq!(command.point(), None);
+        assert_eq!(command.component(), Some("vlv:1"));
+        assert_eq!(set_parameter().component(), Some("level-pid"));
+        assert_eq!(write_value().component(), None);
+    }
+
+    #[test]
+    fn named_refusals_carry_the_addressed_component() {
+        for error in [
+            CommandError::UnknownCommand {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+            },
+            CommandError::ArgumentTypeMismatch {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+                argument: "ticks".to_string(),
+                expected: ValueKind::Int,
+                found: ValueKind::Bool,
+            },
+            CommandError::CommandRefused {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+                reason: "drive not in service".to_string(),
+            },
+        ] {
+            assert_eq!(error.component(), Some("vlv:1"));
+            assert_eq!(error.point(), None);
+            assert!(!error.to_string().is_empty());
+        }
     }
 
     #[test]
@@ -568,6 +869,26 @@ mod tests {
                     detail: "output limits require out_min < out_max".to_string(),
                 },
             },
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: Some(PointId(7)),
+                    capacity: 64,
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::QueueFull {
+                    point: None,
+                    capacity: 64,
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded {
+                    point: Some(PointId(7)),
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None },
+            },
         ] {
             let receipt = CommandReceipt {
                 command: set_parameter(),
@@ -625,6 +946,10 @@ mod tests {
             CommandError::DriverRejected {
                 point,
                 error: IoError::Disconnected(point),
+            },
+            CommandError::QueueFull {
+                point: Some(point),
+                capacity: 4,
             },
         ] {
             assert_eq!(error.point(), Some(point));

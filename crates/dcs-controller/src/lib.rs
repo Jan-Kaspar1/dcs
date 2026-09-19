@@ -14,12 +14,15 @@ use dcs_assembly::{
 };
 use dcs_blocks::{
     AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BackwashSequence,
-    BackwashSequenceInputs, BackwashSequenceOutputs, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger,
-    FailoverSelect, FilterIo, FlowPacedRatio, GroupOutputs, Interlock, LatchingAlarm,
-    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, Pid, PumpGroup, PumpIo,
-    RateLimiter, RatioOutputs, Sequencer, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, Valve,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BlowerGroup, BlowerIo, BlowerOutputs,
+    BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DemandFallback, DemandFallbackIo,
+    DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FeedforwardSum,
+    FeedforwardSumIo, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
+    Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMonitor,
+    PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RateOfRise, RatioOutputs, Sequencer,
+    SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer,
+    Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -119,6 +122,9 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(LatchingAlarm::KIND, |spec| {
+            // Decision 70: the alarm's rationalization record is required
+            // at construction — assembly is where kind and instance meet.
+            spec.require_rationalization()?;
             boxed(LatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
@@ -129,12 +135,55 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(BoolLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
             boxed(BoolLatchingAlarm::from_parameters(
                 spec.name.as_str(),
                 spec.require("in")?,
                 spec.require("ack")?,
                 spec.require("alarm")?,
                 spec.require("unacknowledged")?,
+                spec.parameters,
+            ))
+        })
+        .with(ManagedLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
+            // `shelve`, `oos`, and `suppress` are the optional managed
+            // inputs — bound only where the model wires them
+            // (`ComponentSpec::get`); an unbound port declares no
+            // requirement and exposes no managed surface.
+            boxed(ManagedLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                ManagedAlarmIo {
+                    input: spec.require("in")?,
+                    ack: spec.require("ack")?,
+                    shelve: spec.get("shelve"),
+                    oos: spec.get("oos"),
+                    suppress: spec.get("suppress"),
+                    alarm: spec.require("alarm")?,
+                    unacknowledged: spec.require("unacknowledged")?,
+                    shelved: spec.require("shelved")?,
+                    suppressed: spec.require("suppressed")?,
+                    out_of_service: spec.require("out_of_service")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(ManagedBoolLatchingAlarm::KIND, |spec| {
+            spec.require_rationalization()?;
+            boxed(ManagedBoolLatchingAlarm::from_parameters(
+                spec.name.as_str(),
+                ManagedAlarmIo {
+                    input: spec.require("in")?,
+                    ack: spec.require("ack")?,
+                    shelve: spec.get("shelve"),
+                    oos: spec.get("oos"),
+                    suppress: spec.get("suppress"),
+                    alarm: spec.require("alarm")?,
+                    unacknowledged: spec.require("unacknowledged")?,
+                    shelved: spec.require("shelved")?,
+                    suppressed: spec.require("suppressed")?,
+                    out_of_service: spec.require("out_of_service")?,
+                },
                 spec.parameters,
             ))
         })
@@ -297,6 +346,42 @@ pub fn registry() -> ComponentRegistry {
                 spec.parameters,
             ))
         })
+        .with(BlowerGroup::KIND, |spec| {
+            // The blowers are declared `cmd_1` … `cmd_N`, `run_1` …
+            // `run_N`, `fault_1` … `fault_N`, `avail_1` … `avail_N`,
+            // `capacity_1` … `capacity_N`, `vent_1` … `vent_N`
+            // following the pump-group convention; the shared
+            // multi-family accessor counts and requires them.
+            // `approve` is the optional operator release — bound only
+            // where the model wires it; `staging_authority = 1`
+            // without it fails construction naming the parameter.
+            let blowers = spec
+                .indexed_families(["cmd_", "run_", "fault_", "avail_", "capacity_", "vent_"])?
+                .into_iter()
+                .map(|[cmd, run, fault, avail, capacity, vent]| BlowerIo {
+                    cmd,
+                    run,
+                    fault,
+                    avail,
+                    capacity,
+                    vent,
+                })
+                .collect();
+            boxed(BlowerGroup::from_parameters(
+                spec.name.as_str(),
+                spec.require("demand")?,
+                spec.get("approve"),
+                blowers,
+                BlowerOutputs {
+                    staged: spec.require("staged")?,
+                    none_available: spec.require("none_available")?,
+                    all_faulted: spec.require("all_faulted")?,
+                    staging_pending: spec.require("staging_pending")?,
+                    transition: spec.require("transition")?,
+                },
+                spec.parameters,
+            ))
+        })
         .with(SrLatch::KIND, |spec| {
             boxed(SrLatch::from_parameters(
                 spec.name.as_str(),
@@ -329,12 +414,17 @@ pub fn registry() -> ComponentRegistry {
             ))
         })
         .with(FailoverSelect::KIND, |spec| {
+            // `backup_unhealthy` is the optional standby-health output —
+            // bound only where the model wires it (`ComponentSpec::get`);
+            // an unwired instance selects identically and simply does not
+            // expose the indication.
             boxed(FailoverSelect::from_parameters(
                 spec.name.as_str(),
                 spec.require("primary")?,
                 spec.require("backup")?,
                 spec.require("out")?,
                 spec.require("backup_active")?,
+                spec.get("backup_unhealthy"),
                 spec.parameters,
             ))
         })
@@ -368,30 +458,22 @@ pub fn registry() -> ComponentRegistry {
         .with(BackwashCoordinator::KIND, |spec| {
             // The filters are declared `request_1` … `request_N`,
             // `grant_1` … `grant_N`, `position_1` … `position_N`
-            // following the interlock's `trip_N` convention. The
-            // filter count is the highest bound index across the
-            // three families, and every index below it must bind all
-            // three — a partial family or a gap fails `UnboundPort`
-            // naming the missing member. `reorder` is the optional
-            // operator instruction — bound only where the model wires
-            // it (`ComponentSpec::get`); an unwired instance exposes
-            // no reorder surface.
-            let mut indices = std::collections::BTreeSet::new();
-            for prefix in ["request_", "grant_", "position_"] {
-                indices.extend(spec.ports.keys().filter_map(|name| {
-                    name.strip_prefix(prefix)
-                        .and_then(|suffix| suffix.parse::<usize>().ok())
-                }));
-            }
-            let count = indices.iter().next_back().copied().unwrap_or(0);
-            let mut filters = Vec::with_capacity(count);
-            for index in 1..=count {
-                filters.push(FilterIo {
-                    request: spec.require(&format!("request_{index}"))?,
-                    grant: spec.require(&format!("grant_{index}"))?,
-                    position: spec.require(&format!("position_{index}"))?,
-                });
-            }
+            // following the interlock's `trip_N` convention; the
+            // shared multi-family accessor counts and requires them —
+            // a partial family or a gap fails `UnboundPort` naming the
+            // missing member. `reorder` is the optional operator
+            // instruction — bound only where the model wires it
+            // (`ComponentSpec::get`); an unwired instance exposes no
+            // reorder surface.
+            let filters = spec
+                .indexed_families(["request_", "grant_", "position_"])?
+                .into_iter()
+                .map(|[request, grant, position]| FilterIo {
+                    request,
+                    grant,
+                    position,
+                })
+                .collect();
             boxed(BackwashCoordinator::from_parameters(
                 spec.name.as_str(),
                 PermissiveInputs {
@@ -451,6 +533,101 @@ pub fn registry() -> ComponentRegistry {
                     out: spec.require("out")?,
                     phases,
                 },
+                spec.parameters,
+            ))
+        })
+        .with(HeaderCoordinator::KIND, |spec| {
+            // The zones are declared `valve_pos_1` … `valve_pos_N`,
+            // `airflow_1` … `airflow_N`, `pulsing_1` … `pulsing_N`,
+            // `pulse_grant_1` … `pulse_grant_N` following the
+            // interlock's `trip_N` convention; the shared multi-family
+            // accessor counts and requires them — a partial family or
+            // a gap fails `UnboundPort` naming the missing member.
+            let zones = spec
+                .indexed_families(["valve_pos_", "airflow_", "pulsing_", "pulse_grant_"])?
+                .into_iter()
+                .map(|[valve_pos, airflow, pulsing, pulse_grant]| ZoneIo {
+                    valve_pos,
+                    airflow,
+                    pulsing,
+                    pulse_grant,
+                })
+                .collect();
+            boxed(HeaderCoordinator::from_parameters(
+                spec.name.as_str(),
+                spec.require("pressure")?,
+                zones,
+                HeaderOutputs {
+                    pressure_sp: spec.require("pressure_sp")?,
+                    blower_demand: spec.require("blower_demand")?,
+                    most_open: spec.require("most_open")?,
+                    at_bound: spec.require("at_bound")?,
+                    pulse_blocked: spec.require("pulse_blocked")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(PhaseMonitor::KIND, |spec| {
+            boxed(PhaseMonitor::from_parameters(
+                spec.name.as_str(),
+                PhaseMonitorIo {
+                    input: spec.require("in")?,
+                    phase: spec.require("phase")?,
+                    capture: spec.require("capture")?,
+                    deviation: spec.require("deviation")?,
+                    exceeded: spec.require("exceeded")?,
+                    overdue: spec.require("overdue")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(SurgeGuard::KIND, |spec| {
+            boxed(SurgeGuard::from_parameters(
+                spec.name.as_str(),
+                SurgeGuardIo {
+                    demand: spec.require("demand")?,
+                    flow: spec.require("flow")?,
+                    pressure: spec.require("pressure")?,
+                    current: spec.get("current"),
+                    surge_trip: spec.require("surge_trip")?,
+                    out: spec.require("out")?,
+                    guarding: spec.require("guarding")?,
+                    tripped: spec.require("tripped")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(DemandFallback::KIND, |spec| {
+            boxed(DemandFallback::from_parameters(
+                spec.name.as_str(),
+                DemandFallbackIo {
+                    input: spec.require("in")?,
+                    pv: spec.require("pv")?,
+                    out: spec.require("out")?,
+                    fallback_active: spec.require("fallback_active")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(FeedforwardSum::KIND, |spec| {
+            boxed(FeedforwardSum::from_parameters(
+                spec.name.as_str(),
+                FeedforwardSumIo {
+                    ff: spec.require("ff")?,
+                    trim: spec.require("trim")?,
+                    out: spec.require("out")?,
+                    clamped: spec.require("clamped")?,
+                    fallback_active: spec.require("fallback_active")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(RateOfRise::KIND, |spec| {
+            boxed(RateOfRise::from_parameters(
+                spec.name.as_str(),
+                spec.require("in")?,
+                spec.require("rate")?,
+                spec.require("rising")?,
                 spec.parameters,
             ))
         })

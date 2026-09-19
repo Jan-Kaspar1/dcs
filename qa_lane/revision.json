@@ -1,0 +1,14 @@
+{
+    "description": "QA lane rolling model revision: one added writable internal bool point plus its monitoring signal — an additive change that shifts the model fingerprint without touching field wiring, so the --revised peer's carryover report names exactly this point under `initialized`. The added point id sits below the fixture's maximum declared id so assembly's synthesized-link allocation base does not shift and no unrelated element is renamed across the boundary.",
+    "add_io_points": [
+        {"id": 900, "direction": "in", "value_type": "bool",
+         "writable": true, "journaled": true,
+         "initial": {"bool": false}}
+    ],
+    "add_signals": [
+        {"id": 10900, "name": "qa-revision-marker", "source": 900,
+         "unit": "",
+         "description": "QA lane revision marker — added by the checked-in rolling-revision recipe",
+         "group": "qa"}
+    ]
+}

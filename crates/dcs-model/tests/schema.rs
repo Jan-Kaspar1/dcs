@@ -19,6 +19,7 @@
 //!   (the recorded split, see `src/schema.rs` and `docs/architecture.md`).
 
 use dcs_model::PlantModel;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,7 +61,28 @@ fn invalid_expectations() -> std::collections::BTreeMap<&'static str, (bool, boo
         // dcs-assembly's invalid corpus fails at assembly, not at `load`.
         // The schema still rejects the two whose known device-kind
         // parameter shape is broken: a `sim-tcp` without `address` and a
-        // `sim-bus` register index past u16.
+        // `sim-bus` register index past u16. The decision-70 alarm
+        // fixtures fail construction — the missing record and the missing
+        // parameters are also schema-visible through the kind-conditional
+        // `then`; a whitespace-only prose field is not, so it keeps its
+        // (accepted, accepted) verdicts for the construction seam to
+        // reject.
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_empty_rationalization.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_priority.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_rationalization.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/alarm_missing_response_ticks.json",
+            (false, true),
+        ),
         (
             "crates/dcs-assembly/fixtures/invalid/bad_device_parameters.json",
             (false, true),
@@ -78,11 +100,58 @@ fn invalid_expectations() -> std::collections::BTreeMap<&'static str, (bool, boo
             (false, true),
         ),
         (
+            "crates/dcs-assembly/fixtures/invalid/bad_sim_cyclic_parameters.json",
+            (false, true),
+        ),
+        (
             "crates/dcs-assembly/fixtures/invalid/direction_mismatch.json",
             (true, true),
         ),
         (
             "crates/dcs-assembly/fixtures/invalid/duplicate_channel.json",
+            (true, true),
+        ),
+        // The `ethercat` corpus: the kind-conditional `then` rejects the
+        // shape violations it can see — a missing `hardware` marker, a
+        // missing `bus`, a mistyped identity field, a non-`fail` startup
+        // policy — while the channel-table-dependent rules (offset
+        // collisions, wrong-image placement, unmapped channels,
+        // safe-output coverage) and the marker-on-sim honesty check stay
+        // schema-accepted for the factory to reject at assembly.
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_bad_identity.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_bad_startup.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_bus.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_hardware.json",
+            (false, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_missing_safe_output.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_offset_collision.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_unmapped_channel.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/ethercat_wrong_image.json",
+            (true, true),
+        ),
+        (
+            "crates/dcs-assembly/fixtures/invalid/hardware_marked_sim.json",
             (true, true),
         ),
         (
@@ -164,6 +233,58 @@ fn schema_output_is_deterministic_across_runs() {
     );
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn recorded_release_schema_matches_the_emitted_output() {
+    // Each release record (docs/release-contract.md's release
+    // procedure) carries `dcs-model schema`'s output at its recorded
+    // commit; a checked-in file must stay byte-identical to what the
+    // subcommand emits now or the published schema silently diverges
+    // from the code before the tag is cut. Regenerate a record file
+    // with `dcs-model schema > docs/releases/<tag>/plant-model.schema.json`
+    // whenever the emitted schema legitimately changes — and update
+    // the record's published sha256 with it while the tag is pending.
+    //
+    // `Some(digest)` asserts the file's sha256 equals the digest its
+    // record publishes, keeping the checked-in artifact and the record
+    // from drifting apart. `v0.1.0` carries `None`: its recorded
+    // sha256 pins the tagged emission, which the tracked file has
+    // legitimately moved past since the cut.
+    let output = run_schema_subcommand();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (path, recorded_sha256) in [
+        ("docs/releases/v0.1.0/plant-model.schema.json", None),
+        (
+            "docs/releases/v0.2.0/plant-model.schema.json",
+            Some("68f77f99081a8e7bdc5e63b180c643b0b2e33b9459a8275ccd0da84362f26fe4"),
+        ),
+    ] {
+        let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
+            panic!("the release record's schema file {path} must exist: {error}")
+        });
+        assert_eq!(
+            recorded, output.stdout,
+            "{path} drifted from `dcs-model schema`'s emitted output — \
+             regenerate the record file"
+        );
+        if let Some(expected) = recorded_sha256 {
+            assert_eq!(
+                sha256_hex(&recorded),
+                expected,
+                "{path}'s sha256 drifted from the digest its record publishes — \
+                 regenerate the record file and update record.md"
+            );
+        }
+    }
+}
+
 #[test]
 fn schema_rejects_documents_with_structural_violations() {
     let schema = PlantModel::json_schema();
@@ -221,6 +342,12 @@ fn schema_rejects_documents_with_structural_violations() {
             {"id": 1, "direction": "in", "value_type": "float",
              "initial": {"float": 0.0}, "stale_after_ticks": 2}
         ], "signals": [], "components": [], "connections": []}),
+        // The journaled flag on a float point — the durable journal is
+        // the discrete-transition record, not a per-scan stream.
+        serde_json::json!({"version": 1, "devices": [], "io_points": [
+            {"id": 1, "direction": "in", "value_type": "float",
+             "initial": {"float": 0.0}, "journaled": true}
+        ], "signals": [], "components": [], "connections": []}),
         // A negative freshness budget.
         serde_json::json!({"version": 1, "devices": [
             {"id": 1, "kind": "sim", "channels":
@@ -236,6 +363,172 @@ fn schema_rejects_documents_with_structural_violations() {
             "case {index} unexpectedly valid: {document}"
         );
     }
+}
+
+#[test]
+fn schema_pins_the_alarm_rationalization_obligation() {
+    // Decision 70's kind-conditional rule: the known alarm kinds must
+    // carry the `rationalization` block and the `priority`/`class`/
+    // `response_ticks` parameters; other kinds may omit the block.
+    let schema = PlantModel::json_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let model = |component: serde_json::Value| {
+        serde_json::json!({
+            "version": 1, "devices": [], "io_points": [], "signals": [],
+            "components": [component], "connections": []
+        })
+    };
+    let alarm_parameters = serde_json::json!({
+        "priority": {"int": 1},
+        "class": {"int": 2},
+        "response_ticks": {"int": 30}
+    });
+    let record = serde_json::json!({
+        "consequence": "The wet well overflows",
+        "required_action": "Start the standby pump",
+        "reference": "station-high-level"
+    });
+
+    // A fully rationalized alarm validates, and a non-alarm kind may
+    // omit the block entirely.
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "latching-alarm", "parameters": alarm_parameters,
+        "rationalization": record, "ports": {}
+    }))));
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "motor", "parameters": {}, "ports": {}
+    }))));
+
+    for kind in [
+        "latching-alarm",
+        "bool-latching-alarm",
+        "managed-latching-alarm",
+        "managed-bool-latching-alarm",
+    ] {
+        // The record is obligatory...
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": alarm_parameters, "ports": {}
+            }))),
+            "{kind}: missing rationalization unexpectedly valid"
+        );
+        // ... as is the parameter basis.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": {
+                    "priority": {"int": 1}, "response_ticks": {"int": 30}
+                },
+                "rationalization": record, "ports": {}
+            }))),
+            "{kind}: missing `class` unexpectedly valid"
+        );
+        // A negative code fails the non-negative bound.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind,
+                "parameters": {
+                    "priority": {"int": -1}, "class": {"int": 2},
+                    "response_ticks": {"int": 30}
+                },
+                "rationalization": record, "ports": {}
+            }))),
+            "{kind}: negative priority unexpectedly valid"
+        );
+        // An empty prose field fails the record's own rule.
+        assert!(
+            !validator.is_valid(&model(serde_json::json!({
+                "id": 1, "kind": kind, "parameters": alarm_parameters,
+                "rationalization": {
+                    "consequence": "", "required_action": "Respond",
+                    "reference": "ref"
+                },
+                "ports": {}
+            }))),
+            "{kind}: empty consequence unexpectedly valid"
+        );
+    }
+}
+
+#[test]
+fn schema_pins_the_ethercat_declaration() {
+    // The `ethercat` kind-conditional: a hardware-bound device declares
+    // `hardware: true` plus the `bus`/`identity`/`mapping`/
+    // `exchange_miss_threshold`/`startup` parameter shapes. The schema
+    // pins the shapes; the channel-table-dependent halves stay with the
+    // factory.
+    let schema = PlantModel::json_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let model = |device: serde_json::Value| {
+        serde_json::json!({
+            "version": 1, "devices": [device], "io_points": [], "signals": [],
+            "components": [], "connections": []
+        })
+    };
+    let declaration = serde_json::json!({
+        "bus": "ecat0",
+        "identity": {"vendor": 21, "product": 750354, "revision": 1},
+        "mapping": {
+            "inputs": {"di0": {"byte": 0, "bit": 0}},
+            "outputs": {"do0": {"byte": 0, "bit": 0}}
+        },
+        "exchange_miss_threshold": 3,
+        "safe_outputs": {"do0": {"bool": false}},
+        "startup": {"on_mismatch": "fail"}
+    });
+    let channels = serde_json::json!({
+        "di0": {"direction": "in", "value_type": "bool"},
+        "do0": {"direction": "out", "value_type": "bool"}
+    });
+
+    // A well-formed declaration validates…
+    assert!(validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "hardware": true, "parameters": declaration
+    }))));
+
+    // …the hardware marker is required…
+    assert!(!validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "parameters": declaration
+    }))));
+    assert!(!validator.is_valid(&model(serde_json::json!({
+        "id": 1, "kind": "ethercat", "channels": channels,
+        "hardware": false, "parameters": declaration
+    }))));
+
+    let mutated = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+        let mut parameters = declaration.as_object().unwrap().clone();
+        edit(&mut parameters);
+        model(serde_json::json!({
+            "id": 1, "kind": "ethercat", "channels": channels,
+            "hardware": true, "parameters": parameters
+        }))
+    };
+
+    // …a missing bus…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p.remove("bus");
+    })));
+    // …a mistyped identity field…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["identity"]["vendor"] = serde_json::json!("wago");
+    })));
+    // …a zero miss threshold…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["exchange_miss_threshold"] = serde_json::json!(0);
+    })));
+    // …a startup policy other than fail…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["startup"]["on_mismatch"] = serde_json::json!("simulate");
+    })));
+    // …a host interface — there is no such parameter; an unknown key…
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p.insert("interface".to_string(), serde_json::json!("eth0"));
+    })));
+    // …and a bit index past a byte.
+    assert!(!validator.is_valid(&mutated(&|p| {
+        p["mapping"]["inputs"]["di0"] = serde_json::json!({"byte": 0, "bit": 8});
+    })));
 }
 
 #[test]

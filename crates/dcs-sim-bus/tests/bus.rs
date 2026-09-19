@@ -174,7 +174,7 @@ fn scripted_run(driver: &(dyn IoDriver + Sync), mut step: impl FnMut()) -> Vec<S
         driver
             .write(PointId(1), Value::Float(scan as f64 * 0.25))
             .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         step();
         trace.push(executor.sample(PointId(1)).unwrap());
         trace.push(executor.sample(PointId(2)).unwrap());
@@ -360,6 +360,7 @@ fn a_live_link_reports_connected_health_with_no_last_error() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
 
@@ -379,6 +380,7 @@ fn a_live_link_reports_connected_health_with_no_last_error() {
             Some(DriverDiagnostics {
                 link: LinkState::Connected,
                 last_error: None,
+                exchange: None,
             })
         );
     });
@@ -418,6 +420,7 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
             Some(DriverDiagnostics {
                 link: LinkState::Disconnected,
                 last_error: Some("no live connection to the device server".to_string()),
+                exchange: None,
             })
         );
     });
@@ -444,6 +447,7 @@ fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
         Some(DriverDiagnostics {
             link: LinkState::Disconnected,
             last_error: Some("device server did not answer in time".to_string()),
+            exchange: None,
         })
     );
     drop(listener);
@@ -1179,7 +1183,8 @@ fn the_device_binary_reports_named_startup_failures() {
 /// A model declaring one `sim-bus` device carrying the station-loop
 /// register map the shared dynamics document drives: level register 10,
 /// inflow 11, pump draws 12 and 13, net flow 14, run commands 20 and
-/// 21.
+/// 21 — plus the Bool `sis-active` contact register 30 the protection
+/// document's `threshold` drives.
 const STATION_MODEL: &str = r#"{
   "version": 1,
   "devices": [
@@ -1195,7 +1200,8 @@ const STATION_MODEL: &str = r#"{
           "pump-b-flow": 13,
           "net-flow": 14,
           "pump-a-run": 20,
-          "pump-b-run": 21
+          "pump-b-run": 21,
+          "sis-active": 30
         }
       },
       "channels": {
@@ -1205,7 +1211,8 @@ const STATION_MODEL: &str = r#"{
         "pump-b-flow": { "direction": "in", "value_type": "float" },
         "net-flow": { "direction": "in", "value_type": "float" },
         "pump-a-run": { "direction": "out", "value_type": "bool" },
-        "pump-b-run": { "direction": "out", "value_type": "bool" }
+        "pump-b-run": { "direction": "out", "value_type": "bool" },
+        "sis-active": { "direction": "in", "value_type": "bool" }
       }
     }
   ],
@@ -1312,6 +1319,187 @@ fn the_device_binary_serves_a_scaled_flow_document_over_registers() {
     bus.step(0.5).unwrap();
     assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(-25.0));
     assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(37.5));
+}
+
+/// The protection-loop document — the same file
+/// `dcs-plant-server --dynamics` merges: a `threshold` on level
+/// register 10 driving the `sis-active` Bool register 30, gating the
+/// `bool_flow` emergency draw on 12.
+const PROTECTION_DYNAMICS: &str = include_str!("../../dcs-sim/fixtures/protection_dynamics.json");
+
+#[test]
+fn the_device_binary_serves_a_threshold_protection_document_over_registers() {
+    // The Float-to-Bool element merges through the register seam: the
+    // level crossing asserts the contact register, which gates the
+    // emergency draw — no scheduled script involved.
+    let model = model_file(STATION_MODEL);
+    let dynamics = scratch_file("dynamics", PROTECTION_DYNAMICS);
+    let (_child, addr) = spawn_device(&model, 3, Some(&dynamics));
+
+    // Point 1 reads the level register, point 2 the contact, point 3
+    // the draw.
+    let bus = BusDriver::connect(
+        addr,
+        &[
+            PointRegister {
+                point: PointId(1),
+                register: 10,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(2),
+                register: 30,
+                kind: ValueKind::Bool,
+            },
+            PointRegister {
+                point: PointId(3),
+                register: 12,
+                kind: ValueKind::Float,
+            },
+        ],
+    )
+    .unwrap();
+    let driver: &dyn IoDriver = &bus;
+    let contact = |driver: &dyn IoDriver| driver.read(PointId(2)).unwrap().value;
+
+    // The integrator seeds the level at 6.0, the contact released.
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(6.0));
+    assert_eq!(contact(driver), Value::Bool(false));
+
+    // The level climbing past `on` — 6 + 4·1 = 10 — asserts the
+    // contact at the tick boundary reading the crossing; the gated
+    // draw engages on that same step and pulls the level back.
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(false));
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(true));
+    assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(-20.0));
+    assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(-6.0));
+
+    // Back below `off`, the contact releases cleanly.
+    bus.step(1.0).unwrap();
+    assert_eq!(contact(driver), Value::Bool(false));
+    assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(0.0));
+}
+
+/// The checked-in dosing-skid dynamics document — the same file
+/// `dcs-plant-server --dynamics` merges, bound to register addresses:
+/// the summed metered rates feed `injection-rate` (16) and a
+/// `dead_time` carries the transport delay to the downstream
+/// `discharge-rate` measurement (13).
+const DOSING_DYNAMICS: &str = include_str!("../../dcs-demo/fixtures/dosing_skid_dynamics.json");
+
+/// A model declaring one `sim-bus` device carrying every register the
+/// checked-in dosing document's elements touch: flow 10/11, tank
+/// level 12, discharge 13, net draw 14, refill 15, injection 16, the
+/// per-pump draws 30/31 and metered rates 34/35, the Bool run
+/// commands 100/101, and the speed demands 110/111.
+const DOSING_MODEL: &str = r#"{
+  "version": 1,
+  "devices": [
+    {
+      "id": 4,
+      "kind": "sim-bus",
+      "parameters": {
+        "address": "127.0.0.1:0",
+        "registers": {
+          "flow": 10, "flow-source": 11, "tank-level": 12,
+          "discharge-rate": 13, "net-draw": 14, "tank-refill": 15,
+          "injection-rate": 16,
+          "p1-draw": 30, "p2-draw": 31, "p1-rate": 34, "p2-rate": 35,
+          "p1-run": 100, "p2-run": 101,
+          "p1-speed": 110, "p2-speed": 111
+        }
+      },
+      "channels": {
+        "flow": { "direction": "in", "value_type": "float" },
+        "flow-source": { "direction": "in", "value_type": "float" },
+        "tank-level": { "direction": "in", "value_type": "float" },
+        "discharge-rate": { "direction": "in", "value_type": "float" },
+        "net-draw": { "direction": "in", "value_type": "float" },
+        "tank-refill": { "direction": "in", "value_type": "float" },
+        "injection-rate": { "direction": "in", "value_type": "float" },
+        "p1-draw": { "direction": "in", "value_type": "float" },
+        "p2-draw": { "direction": "in", "value_type": "float" },
+        "p1-rate": { "direction": "in", "value_type": "float" },
+        "p2-rate": { "direction": "in", "value_type": "float" },
+        "p1-run": { "direction": "out", "value_type": "bool" },
+        "p2-run": { "direction": "out", "value_type": "bool" },
+        "p1-speed": { "direction": "out", "value_type": "float" },
+        "p2-speed": { "direction": "out", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [],
+  "signals": [],
+  "components": [],
+  "connections": []
+}"#;
+
+#[test]
+fn the_device_binary_serves_the_dosing_transport_delay_over_registers() {
+    // The checked-in document merges through the register seam exactly
+    // as it does through `dcs-plant-server --dynamics`: the dead-time
+    // element's delayed response is identical either way.
+    let model = model_file(DOSING_MODEL);
+    let dynamics = scratch_file("dosing-dynamics", DOSING_DYNAMICS);
+    let (_child, addr) = spawn_device(&model, 4, Some(&dynamics));
+
+    // Point 1 writes pump A's speed demand register, point 2 reads the
+    // injected rate at the injection point, point 3 reads the
+    // downstream discharge measurement.
+    let bus = BusDriver::connect(
+        addr,
+        &[
+            PointRegister {
+                point: PointId(1),
+                register: 110,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(2),
+                register: 16,
+                kind: ValueKind::Float,
+            },
+            PointRegister {
+                point: PointId(3),
+                register: 13,
+                kind: ValueKind::Float,
+            },
+        ],
+    )
+    .unwrap();
+    let driver: &dyn IoDriver = &bus;
+
+    driver.write(PointId(1), Value::Float(50.0)).unwrap();
+    // Each explicit step advances the merged elements: the injected
+    // rate turns with the first step while the delayed measurement
+    // still reads the seeded line, and the pending sample lands at
+    // the declared delay — the same response the plant-server merge
+    // produces.
+    let mut injection = Vec::new();
+    let mut discharge = Vec::new();
+    for _ in 0..5 {
+        bus.step(1.0).unwrap();
+        injection.push(driver.read(PointId(2)).unwrap().value);
+        discharge.push(driver.read(PointId(3)).unwrap().value);
+    }
+    assert_eq!(
+        injection,
+        vec![Value::Float(50.0); 5],
+        "the injected rate must turn with the speed demand: {injection:?}"
+    );
+    assert_eq!(
+        discharge,
+        vec![
+            Value::Float(0.0),
+            Value::Float(0.0),
+            Value::Float(0.0),
+            Value::Float(50.0),
+            Value::Float(50.0),
+        ],
+        "the transport delay must hold the measurement `delay` steps: {discharge:?}"
+    );
 }
 
 #[test]

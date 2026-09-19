@@ -63,22 +63,15 @@ where
 /// mirroring the controller registry's indexed-port discovery.
 fn registry() -> ComponentRegistry {
     ComponentRegistry::new().with(BackwashCoordinator::KIND, |spec| {
-        let mut indices = std::collections::BTreeSet::new();
-        for prefix in ["request_", "grant_", "position_"] {
-            indices.extend(spec.ports.keys().filter_map(|name| {
-                name.strip_prefix(prefix)
-                    .and_then(|suffix| suffix.parse::<usize>().ok())
-            }));
-        }
-        let count = indices.iter().next_back().copied().unwrap_or(0);
-        let mut filters = Vec::with_capacity(count);
-        for index in 1..=count {
-            filters.push(FilterIo {
-                request: spec.require(&format!("request_{index}"))?,
-                grant: spec.require(&format!("grant_{index}"))?,
-                position: spec.require(&format!("position_{index}"))?,
-            });
-        }
+        let filters = spec
+            .indexed_families(["request_", "grant_", "position_"])?
+            .into_iter()
+            .map(|[request, grant, position]| FilterIo {
+                request,
+                grant,
+                position,
+            })
+            .collect();
         boxed(BackwashCoordinator::from_parameters(
             spec.name.as_str(),
             PermissiveInputs {
@@ -131,7 +124,7 @@ fn boolean(driver: &FanoutDriver, point: PointId) -> bool {
 /// last `step` made current: the tick-0 values are already in effect at
 /// scan 1.
 fn scan(executor: &mut Executor, driver: &FanoutDriver) {
-    executor.scan().unwrap();
+    executor.scan();
     driver.step(0.1).unwrap();
 }
 

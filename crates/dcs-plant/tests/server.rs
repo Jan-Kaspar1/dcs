@@ -36,6 +36,11 @@ const DOSING_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-sim/fixtures/dosing_skid_dynamics.json"
 );
+const PROTECTION_MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/protection.json");
+const PROTECTION_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../dcs-sim/fixtures/protection_dynamics.json"
+);
 const UNBOUND_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_point.json"
@@ -132,6 +137,9 @@ fn two_attached_drivers_observe_the_same_stepped_state() {
     let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
     let active = RemoteDriver::connect(plant.addr).unwrap();
     let standby = RemoteDriver::connect(plant.addr).unwrap();
+    // The driving attachment owns the field's write claim — the
+    // fail-closed field refuses a claim-less mutation.
+    active.claim_writer(1).unwrap();
 
     // The lag seeds its output — the raw tank level — at its declared
     // initial value, before any step.
@@ -156,6 +164,7 @@ fn two_attached_drivers_observe_the_same_stepped_state() {
 fn a_declared_lag_advances_only_on_explicit_step_requests() {
     let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
 
     // Reads and writes alone never advance the plant: the tick and the
     // lag's output hold until a step request arrives.
@@ -189,6 +198,7 @@ fn a_declared_second_order_lag_loads_and_overshoots_its_step_input() {
         "127.0.0.1:0",
     ]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
 
     // The element seeds its output — the raw tank level — at its
     // declared initial value.
@@ -235,6 +245,7 @@ fn a_declared_noise_element_loads_and_deviates_within_amplitude() {
     // restarted server must reproduce bit-for-bit.
     let script = |addr: SocketAddr| -> Vec<(f64, f64)> {
         let driver = RemoteDriver::connect(addr).unwrap();
+        driver.claim_writer(1).unwrap();
         // The element seeds its output at its declared initial before
         // any step.
         assert_eq!(driver.read(PointId(11)).unwrap().value, Value::Float(4.0));
@@ -294,6 +305,7 @@ fn a_pump_command_drains_the_well_only_while_it_stands() {
         "127.0.0.1:0",
     ]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let level = |driver: &RemoteDriver| {
         let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
             panic!("the level point is Float")
@@ -335,6 +347,7 @@ fn a_pump_command_drains_the_well_only_while_it_stands() {
 /// then 20, then 0 — the trace identical runs must reproduce.
 fn dosing_script(addr: SocketAddr) -> Vec<Sample> {
     let driver = RemoteDriver::connect(addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let mut trace = Vec::new();
     for demand in [50.0, 20.0, 0.0] {
         driver.write(PointId(20), Value::Float(demand)).unwrap();
@@ -363,6 +376,7 @@ fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
     ];
     let mut plant = spawn(&args);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let read = |point: u64| {
         let Value::Float(value) = driver.read(PointId(point)).unwrap().value else {
             panic!("the skid's points are Float")
@@ -407,6 +421,96 @@ fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
     let second_run = dosing_script(second.addr);
     assert!(stop(&mut second).success());
     assert_eq!(first_run, second_run);
+}
+
+/// One scripted pass over the protection loop: the level and the
+/// `sis-active` contact each step — the trace identical runs must
+/// reproduce.
+fn protection_script(addr: SocketAddr) -> Vec<(Sample, Sample)> {
+    let driver = RemoteDriver::connect(addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    (0..6)
+        .map(|_| {
+            driver.step(1.0).unwrap();
+            (
+                driver.read(PointId(10)).unwrap(),
+                driver.read(PointId(30)).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_level_crossing_drives_the_protection_contact_through_the_merge() {
+    // The threshold element the vocabulary was missing: a Float input
+    // driving a Bool contact with a declared hysteresis band, merged
+    // through `--dynamics` and gating a `bool_flow` emergency draw —
+    // a plant-side protection pattern expressed entirely in a
+    // dynamics document, no scheduled script asserting the contact.
+    let args = [
+        PROTECTION_MODEL,
+        "--dynamics",
+        PROTECTION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ];
+    let mut plant = spawn(&args);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    let level = || {
+        let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
+            panic!("the level point is Float")
+        };
+        level
+    };
+    let contact = || driver.read(PointId(30)).unwrap().value;
+
+    // The integrator seeds the well at its declared initial level and
+    // the threshold seeds the contact at its declared initial Bool.
+    assert_eq!(level(), 6.0);
+    assert_eq!(contact(), Value::Bool(false));
+
+    // The declared inflow — net +4 per unit — climbs the well to 10,
+    // past the `on` bound of 8: the next step's threshold read
+    // asserts the contact and engages the draw.
+    driver.step(1.0).unwrap();
+    assert_eq!(level(), 10.0);
+    assert_eq!(contact(), Value::Bool(false));
+    driver.step(1.0).unwrap();
+    assert_eq!(contact(), Value::Bool(true));
+    assert_eq!(driver.read(PointId(12)).unwrap().value, Value::Float(-20.0));
+    assert_eq!(level(), -6.0);
+
+    // Back below `off`, the contact releases and the draw stops at
+    // the next boundary — the loop oscillates on the element's own
+    // bounds with no script tick asserting anything.
+    driver.step(1.0).unwrap();
+    assert_eq!(contact(), Value::Bool(false));
+    assert_eq!(driver.read(PointId(12)).unwrap().value, Value::Float(0.0));
+    assert_eq!(level(), -2.0);
+
+    assert!(stop(&mut plant).success());
+
+    // Identical scripted step sequences produce identical point
+    // traces across a restart of the merged plant.
+    let mut first = spawn(&args);
+    let first_run = protection_script(first.addr);
+    assert!(stop(&mut first).success());
+    let mut second = spawn(&args);
+    let second_run = protection_script(second.addr);
+    assert!(stop(&mut second).success());
+    assert_eq!(first_run, second_run);
+    // The trace actually asserted and released the contact.
+    assert!(
+        first_run
+            .iter()
+            .any(|(_, contact)| contact.value == Value::Bool(true))
+    );
+    assert!(
+        first_run
+            .iter()
+            .any(|(_, contact)| contact.value == Value::Bool(false))
+    );
 }
 
 #[test]
@@ -502,6 +606,7 @@ fn identical_request_sequences_produce_identical_responses_across_restarts() {
     // the responses a restart must reproduce bit-for-bit.
     let script = |addr: SocketAddr| -> Vec<serde_json::Value> {
         let driver = RemoteDriver::connect(addr).unwrap();
+        driver.claim_writer(1).unwrap();
         let mut responses = Vec::new();
         responses.push(serde_json::to_value(driver.read(PointId(10)).unwrap()).unwrap());
         driver.write(PointId(20), Value::Float(12.0)).unwrap();

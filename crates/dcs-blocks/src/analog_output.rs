@@ -477,6 +477,7 @@ mod tests {
             id: ComponentId(5),
             kind: AnalogOutput::<f64>::KIND.to_string(),
             parameters,
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let mut ao =

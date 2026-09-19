@@ -26,14 +26,26 @@
 //! qualities). Element state lives in the bank for the bank's
 //! lifetime: like the `dcs-sim-net` plant, the field is shared state
 //! served by the device process — not checkpointed controller state.
+//!
+//! ## Declared field wiring
+//!
+//! [`with_wires`](RegisterBank::with_wires) declares terminal wiring
+//! the bank plays: each `(driven, observing)` pair carries every write
+//! landing on `driven` — a point-wise write or an exchange-published
+//! output — onto `observing` in the same request, so an exchange
+//! publishing a looped-back output answers the wired input's
+//! transition in that exchange's own census. This is the register-bank
+//! analogue of a rig's physical DO→DI wiring: the wire is field state
+//! the device serves, not a controller-side route pacing the model's
+//! `step` a scan later.
 
 use crate::protocol::{BusError, RegisterInfo};
 use dcs_core::{IoDriver, IoError, PointId, Quality, Sample, Tick, Value};
 use dcs_sim::{
     ChannelId, ChannelMap, ConfigError, Direction, Fault, PointBinding, ProcessElement, SimDriver,
 };
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// One register's declaration: its address and initial value. The
@@ -55,6 +67,23 @@ pub struct RegisterDecl {
 pub enum BankError {
     /// Two declarations name the same register address.
     DuplicateRegister(u16),
+    /// A declared field wire names a register the bank does not serve.
+    UnknownWireRegister {
+        /// The register the write lands on.
+        driven: u16,
+        /// The register the wire carries it to.
+        observing: u16,
+    },
+    /// A declared field wire's ends carry different value kinds — the
+    /// driven register's value cannot land on the observing register.
+    WireKindMismatch {
+        /// The register the write lands on.
+        driven: u16,
+        /// The register the wire carries it to.
+        observing: u16,
+    },
+    /// A declared field wire loops a register onto itself.
+    SelfWire(u16),
 }
 
 impl fmt::Display for BankError {
@@ -62,6 +91,17 @@ impl fmt::Display for BankError {
         match self {
             Self::DuplicateRegister(register) => {
                 write!(f, "register {register} is declared more than once")
+            }
+            Self::UnknownWireRegister { driven, observing } => write!(
+                f,
+                "field wire {driven} -> {observing} names a register the bank does not declare"
+            ),
+            Self::WireKindMismatch { driven, observing } => write!(
+                f,
+                "field wire {driven} -> {observing} joins registers of different kinds"
+            ),
+            Self::SelfWire(register) => {
+                write!(f, "field wire loops register {register} onto itself")
             }
         }
     }
@@ -105,6 +145,10 @@ fn describe_element_error(error: &ConfigError) -> String {
             "a bool_flow element's gate must read a Bool register, but register {} is {kind:?}",
             point.0
         ),
+        ConfigError::ElementContactKind { point, kind } => format!(
+            "a threshold element's contact must drive a Bool register, but register {} is {kind:?}",
+            point.0
+        ),
         ConfigError::InvalidTimeConstant { point, value } => format!(
             "lag driving register {} has non-positive or non-finite time constant {value}",
             point.0
@@ -131,6 +175,18 @@ fn describe_element_error(error: &ConfigError) -> String {
         ),
         ConfigError::InvalidGain { point, value } => format!(
             "scaled_flow element driving register {} has non-finite gain {value}",
+            point.0
+        ),
+        ConfigError::InvalidBound {
+            point,
+            bound,
+            value,
+        } => format!(
+            "threshold element driving register {} has non-finite {bound} bound {value}",
+            point.0
+        ),
+        ConfigError::NonPositiveBand { point, on, off } => format!(
+            "threshold element driving register {} declares no hysteresis band: on {on} equals off {off}",
             point.0
         ),
         ConfigError::NonFiniteInitial { point, value } => format!(
@@ -206,8 +262,13 @@ fn channel_map(decls: impl IntoIterator<Item = RegisterDecl>) -> Result<ChannelM
 /// bank's own unchanged. The driver's internal mutex serializes every
 /// request the server's per-connection handler threads issue, and
 /// nothing in it reads a clock or a random source.
+///
+/// `wires` is the declared field wiring — `(driven, observing)`
+/// register pairs [`with_wires`](Self::with_wires) validated — which
+/// every write follows before returning.
 pub struct RegisterBank {
     driver: SimDriver,
+    wires: Vec<(u16, u16)>,
 }
 
 impl RegisterBank {
@@ -216,7 +277,7 @@ impl RegisterBank {
     /// [`Quality::Good`](dcs_core::Quality::Good) at [`Tick::ZERO`].
     pub fn new(decls: impl IntoIterator<Item = RegisterDecl>) -> Result<Self, BankError> {
         let map = channel_map(decls)?;
-        Self::serve(map).map_err(|error| match error {
+        Self::serve(map, Vec::new()).map_err(|error| match error {
             DynamicsError::Register(error) => error,
             // A declarations-only map merges no elements, so no element
             // failure can arise.
@@ -250,16 +311,60 @@ impl RegisterBank {
                 error,
             })?;
         }
-        Self::serve(map)
+        Self::serve(map, Vec::new())
+    }
+
+    /// Declares the bank's field wiring and returns it.
+    ///
+    /// Each `(driven, observing)` pair is a wire between terminals:
+    /// every write landing on `driven` — a point-wise
+    /// [`write`](Self::write) or an exchange-published output — also
+    /// lands on `observing` in the same request, so an exchange
+    /// publishing a looped-back output answers the wired input's
+    /// transition in that exchange's own census. Wires cascade — a
+    /// write a wire carried onto another wired register follows that
+    /// register's own wire — and a wiring cycle terminates at the
+    /// register first visited, so a request never loops.
+    ///
+    /// The declaration is the device's own field wiring — the analogue
+    /// of the physical terminal wiring a manifest records — not a
+    /// controller-side route: it applies inside the exchange's publish
+    /// step, before the census latches.
+    ///
+    /// Fails with [`BankError::UnknownWireRegister`] when an end names a
+    /// register the bank does not declare,
+    /// [`BankError::WireKindMismatch`] when the ends carry different
+    /// value kinds, or [`BankError::SelfWire`] on a degenerate loop.
+    pub fn with_wires(
+        mut self,
+        wires: impl IntoIterator<Item = (u16, u16)>,
+    ) -> Result<Self, BankError> {
+        let wires: Vec<(u16, u16)> = wires.into_iter().collect();
+        for &(driven, observing) in &wires {
+            if driven == observing {
+                return Err(BankError::SelfWire(driven));
+            }
+            let (Ok(driven_sample), Ok(observing_sample)) =
+                (self.read(driven), self.read(observing))
+            else {
+                return Err(BankError::UnknownWireRegister { driven, observing });
+            };
+            if driven_sample.value.kind() != observing_sample.value.kind() {
+                return Err(BankError::WireKindMismatch { driven, observing });
+            }
+        }
+        self.wires = wires;
+        Ok(self)
     }
 
     /// The driver serving a fully validated register map.
-    fn serve(map: ChannelMap) -> Result<Self, DynamicsError> {
+    fn serve(map: ChannelMap, wires: Vec<(u16, u16)>) -> Result<Self, DynamicsError> {
         // Every inconsistency the map could carry was already reported:
         // declarations deduplicated by `channel_map`, elements validated
         // as they merged — `new`'s element-free map cannot fail either.
         Ok(Self {
             driver: SimDriver::new(map).expect("the merged register map validated"),
+            wires,
         })
     }
 
@@ -285,18 +390,39 @@ impl RegisterBank {
     /// and returns that tick. A real write stores a `Good` sample, so
     /// it overwrites a standing quality injection.
     ///
+    /// The write then follows the declared field wiring: each wire the
+    /// register drives lands the same value on its observing register —
+    /// a cascade through wired registers that terminates at the first
+    /// already-visited register, so a wiring cycle never loops.
+    ///
     /// Fails with [`BusError::UnknownRegister`] when the device serves
     /// no such register and [`BusError::KindMismatch`] when `value`'s
     /// kind differs from the register's declared kind — never a silent
     /// coercion.
     pub fn write(&self, register: u16, value: Value) -> Result<Tick, BusError> {
+        let mut visited = BTreeSet::from([register]);
+        let mut pending = vec![(register, value)];
+        while let Some((register, value)) = pending.pop() {
+            self.write_one(register, value)?;
+            for &(driven, observing) in &self.wires {
+                if driven == register && visited.insert(observing) {
+                    pending.push((observing, value));
+                }
+            }
+        }
+        Ok(self.driver.tick())
+    }
+
+    /// Writes one register without following the field wiring — the
+    /// step [`write`](Self::write) repeats per landed register.
+    fn write_one(&self, register: u16, value: Value) -> Result<(), BusError> {
         let point = PointId(u64::from(register));
         match self.driver.write(point, value) {
             Ok(()) => {
                 // The written sample is Good; drop the quality
                 // injection it overwrites.
                 let _ = self.driver.clear_fault(point);
-                Ok(self.driver.tick())
+                Ok(())
             }
             Err(IoError::UnknownPoint(_)) => Err(BusError::UnknownRegister { register }),
             Err(IoError::TypeMismatch {
@@ -363,7 +489,10 @@ impl RegisterBank {
     /// element — a `bool_flow` stands its `on_rate` or `off_rate` by
     /// its `Bool` gate, a `flow_sum` sums its declared inputs plus
     /// `bias`, a `scaled_flow` stands at `gain` times its `Float`
-    /// input, an `integrator` accumulates `u·dt` — and stamps its
+    /// input, an `integrator` accumulates `u·dt`, a `threshold`
+    /// evaluates its `Float` input against the declared `on`/`off`
+    /// bounds and drives the contact onto its `Bool` register — and
+    /// stamps its
     /// output register `Good`; a non-`Good` input freezes the element
     /// and propagates its quality to the output register's sample, a
     /// `flow_sum` propagating the worst of its inputs' qualities.
@@ -412,7 +541,7 @@ impl fmt::Debug for RegisterBank {
 mod tests {
     use super::*;
     use dcs_core::{QualityReason, ValueKind};
-    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator, ScaledFlow};
+    use dcs_sim::{BoolFlow, FirstOrderLag, FlowSum, Integrator, ScaledFlow, Threshold};
 
     fn bank() -> RegisterBank {
         RegisterBank::new([
@@ -588,6 +717,10 @@ mod tests {
             },
             RegisterDecl {
                 register: 20,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 21,
                 initial: Value::Bool(false),
             },
         ]
@@ -772,12 +905,298 @@ mod tests {
             time_constant: -1.0,
             initial: 0.0,
         }));
-        let error = RegisterBank::with_dynamics(decls, contested).unwrap_err();
+        let error = RegisterBank::with_dynamics(decls.clone(), contested).unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("dynamics element 3 (driving register 10)"),
             "{error}"
+        );
+
+        // A threshold's contact on a Float register names the element
+        // and the register it drives.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(12),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 12) is invalid: a threshold element's contact must drive a Bool register, but register 12 is Float"
+        );
+        // A non-finite bound names the element, its register, and the
+        // bound that offended.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: f64::NAN,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 20) is invalid: threshold element driving register 20 has non-finite on bound NaN"
+        );
+        // Equal bounds declare no hysteresis band.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: 7.5,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dynamics element 0 (driving register 20) is invalid: threshold element driving register 20 declares no hysteresis band: on 7.5 equals off 7.5"
+        );
+        // And a threshold input on a Bool register is the
+        // vocabulary's ordinary Float-end rejection.
+        let error = RegisterBank::with_dynamics(
+            decls.clone(),
+            vec![ProcessElement::Threshold(Threshold {
+                input: PointId(20),
+                output: PointId(21),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("register 20 is Bool"), "{error}");
+    }
+
+    /// The protection-loop document — the shared fixture both
+    /// `--dynamics` seams merge: a `threshold` on level register 10
+    /// driving the `sis-active` Bool register 30, gating the
+    /// `bool_flow` emergency draw on 12, summed with the inflow on 11
+    /// into net register 13, integrated back into the level.
+    const PROTECTION_DYNAMICS: &str =
+        include_str!("../../dcs-sim/fixtures/protection_dynamics.json");
+
+    fn protection_decls() -> Vec<RegisterDecl> {
+        vec![
+            RegisterDecl {
+                register: 10,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 11,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 12,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 13,
+                initial: Value::Float(0.0),
+            },
+            RegisterDecl {
+                register: 30,
+                initial: Value::Bool(false),
+            },
+        ]
+    }
+
+    fn protection_elements() -> Vec<ProcessElement> {
+        serde_json::from_str(PROTECTION_DYNAMICS).unwrap()
+    }
+
+    #[test]
+    fn a_declared_threshold_drives_the_contact_register_over_the_bank() {
+        let bank = RegisterBank::with_dynamics(protection_decls(), protection_elements()).unwrap();
+        // Element initials seed the registers they drive: the level at
+        // the integrator's initial, the contact released.
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(6.0));
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+
+        // The level climbing past `on` asserts the contact; the gated
+        // draw engages on the same step and pulls the level back.
+        bank.step(1.0);
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(10.0));
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(true));
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(-20.0));
+        assert_eq!(bank.read(10).unwrap().value, Value::Float(-6.0));
+
+        // Back below `off`, the contact releases and the draw stops.
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(false));
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(0.0));
+    }
+
+    #[test]
+    fn a_non_good_threshold_input_holds_the_contact_and_propagates_quality() {
+        let bank = RegisterBank::with_dynamics(protection_decls(), protection_elements()).unwrap();
+        // Push the level past `on` so the contact stands asserted.
+        bank.step(1.0);
+        bank.step(1.0);
+        assert_eq!(bank.read(30).unwrap().value, Value::Bool(true));
+
+        // Fault the level register: the threshold freezes its standing
+        // contact and stamps the injected quality on it — and the
+        // propagated quality freezes the gated draw in turn.
+        bank.inject_quality(10, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+        bank.step(1.0);
+        assert_eq!(
+            bank.read(30).unwrap(),
+            Sample::new(
+                Value::Bool(true),
+                Quality::Bad(QualityReason::DeviceFault),
+                Tick(3)
+            )
+        );
+        assert_eq!(
+            bank.read(12).unwrap().quality,
+            Quality::Bad(QualityReason::DeviceFault)
+        );
+        assert_eq!(bank.read(12).unwrap().value, Value::Float(-20.0));
+    }
+
+    /// The wired-rig fixture: an output register wired onto an input
+    /// register — the DO→DI loopback a rig's field wiring plays.
+    fn wired_bank() -> RegisterBank {
+        RegisterBank::new([
+            RegisterDecl {
+                register: 0,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 2,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 4,
+                initial: Value::Float(0.0),
+            },
+        ])
+        .unwrap()
+        .with_wires([(0, 2)])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_declared_wire_lands_each_write_on_the_observing_register() {
+        let bank = wired_bank();
+
+        // The write's tick stamps both ends — the wired register's
+        // sample is the same request's, not a later step's.
+        bank.write(0, Value::Bool(true)).unwrap();
+        assert_eq!(
+            bank.read(2).unwrap(),
+            Sample::good(Value::Bool(true), Tick(0))
+        );
+
+        // The wire re-asserts on every write, at whatever tick the
+        // bank stands on.
+        bank.step(0.5);
+        bank.write(0, Value::Bool(false)).unwrap();
+        assert_eq!(
+            bank.read(2).unwrap(),
+            Sample::good(Value::Bool(false), Tick(1))
+        );
+
+        // And a direct write to the observing register stands until
+        // the next driven write — the wire is field wiring, not a
+        // read-time alias.
+        bank.write(2, Value::Bool(true)).unwrap();
+        assert_eq!(bank.read(2).unwrap().value, Value::Bool(true));
+    }
+
+    #[test]
+    fn wires_cascade_and_a_cycle_terminates() {
+        let bank = RegisterBank::new([
+            RegisterDecl {
+                register: 0,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 1,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 2,
+                initial: Value::Bool(false),
+            },
+        ])
+        .unwrap()
+        .with_wires([(0, 1), (1, 2)])
+        .unwrap();
+        bank.write(0, Value::Bool(true)).unwrap();
+        for register in [0, 1, 2] {
+            assert_eq!(bank.read(register).unwrap().value, Value::Bool(true));
+        }
+
+        // A wiring loop settles instead of hanging the request: each
+        // register takes the write once.
+        let bank = RegisterBank::new([
+            RegisterDecl {
+                register: 0,
+                initial: Value::Bool(false),
+            },
+            RegisterDecl {
+                register: 1,
+                initial: Value::Bool(false),
+            },
+        ])
+        .unwrap()
+        .with_wires([(0, 1), (1, 0)])
+        .unwrap();
+        bank.write(0, Value::Bool(true)).unwrap();
+        assert_eq!(bank.read(1).unwrap().value, Value::Bool(true));
+    }
+
+    #[test]
+    fn invalid_wires_are_named_errors() {
+        let decls = || {
+            RegisterBank::new([
+                RegisterDecl {
+                    register: 0,
+                    initial: Value::Bool(false),
+                },
+                RegisterDecl {
+                    register: 4,
+                    initial: Value::Float(0.0),
+                },
+            ])
+            .unwrap()
+        };
+        // An end the bank does not serve.
+        assert_eq!(
+            decls().with_wires([(0, 9)]).map(|_| ()),
+            Err(BankError::UnknownWireRegister {
+                driven: 0,
+                observing: 9
+            })
+        );
+        // Ends of different kinds.
+        assert_eq!(
+            decls().with_wires([(0, 4)]).map(|_| ()),
+            Err(BankError::WireKindMismatch {
+                driven: 0,
+                observing: 4
+            })
+        );
+        // A register looped onto itself.
+        assert_eq!(
+            decls().with_wires([(0, 0)]).map(|_| ()),
+            Err(BankError::SelfWire(0))
         );
     }
 }

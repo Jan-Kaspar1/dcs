@@ -44,13 +44,16 @@ use dcs_core::{
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
-use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, image_value, kill, settled_receipts, sim_tcp_document, spawn_controller,
+    spawn_controller_logged, spawn_plant, write_model,
+};
+
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out.
 const PLANT_MODEL: &str = concat!(
@@ -83,125 +86,13 @@ const OPERATOR: &str = "ops-lead";
 const MOVED_SETPOINT: f64 = 55.0;
 const RESTED_SETPOINT: f64 = 61.0;
 
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads stderr until its `listening on <addr>` line,
-/// and returns the running process plus the lines that preceded it —
-/// the state-file resume report lives there.
-fn spawn_logged(binary: &Path, args: &[String]) -> (Spawned, Vec<String>) {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut preamble = Vec::new();
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
-        }
-        match line.trim().strip_prefix("listening on ") {
-            Some(addr) => break addr.parse().unwrap(),
-            None => preamble.push(line.trim().to_string()),
-        }
-    };
-    (
-        Spawned {
-            child,
-            addr,
-            _stderr: stderr,
-        },
-        preamble,
-    )
-}
-
-/// Spawns `binary` and returns the running process — the plain shape
-/// for processes that report nothing before their address.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    spawn_logged(binary, args).0
-}
-
-/// A plant-server process serving the shared tank-loop plant on an
-/// ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    spawn_controller_logged(model, extra).0
-}
-
-/// The state-file restart's spawn: the resume report is a stderr line
-/// before `listening on`, so the preamble comes back with the process.
-fn spawn_controller_logged(model: &Path, extra: &[String]) -> (Spawned, Vec<String>) {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn_logged(Path::new(CONTROLLER), &args)
-}
-
-fn kill(spawned: &mut Spawned) {
-    spawned.child.kill().unwrap();
-    spawned.child.wait().unwrap();
-}
-
 /// Writes the controller-side model for a plant server at `plant`: the
-/// shared tank-loop model with every device's kind re-pointed at
-/// `sim-tcp` carrying the plant's address — the remote-sim path through
-/// the assembly driver registry — and the setpoint point 11 moved
-/// image-side: an internal writable `In` point, the operator value the
-/// attributed commands target.
+/// shared tank-loop model re-pointed at `sim-tcp` per [`sim_tcp_document`]
+/// — the remote-sim path through the assembly driver registry — and the
+/// setpoint point 11 moved image-side: an internal writable `In` point,
+/// the operator value the attributed commands target.
 fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    for device in document["devices"].as_array_mut().unwrap() {
-        device["kind"] = "sim-tcp".into();
-        device["parameters"] = serde_json::json!({ "address": plant.to_string() });
-    }
+    let mut document = sim_tcp_document(MODEL_SOURCE, plant, SimTcp::PerDevice);
     let setpoint = document["io_points"]
         .as_array_mut()
         .unwrap()
@@ -210,20 +101,7 @@ fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
         .unwrap();
     setpoint.as_object_mut().unwrap().remove("channel");
     setpoint["initial"] = serde_json::json!({ "float": 25.0 });
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap()
-        .value
+    write_model(dir, name, &document).0
 }
 
 /// Asserts the field carries exactly `owner`'s last write and records
@@ -383,7 +261,9 @@ fn poll_pair_card(pair: &PairSpec) -> CardPoll {
 }
 
 /// The card's I/O-health line, mirroring the page's `ioHealthLine`:
-/// link degradation, boundary failures, the attributed last fault,
+/// link degradation, boundary failures (including failed cyclic
+/// exchanges), a cyclic driver's working-counter mismatches and missed
+/// deadlines, the attributed last fault,
 /// scan overruns — read from the source peer's snapshot. A card with
 /// no landed snapshot reports the fetch's failure, or waits out its
 /// first poll, instead of inventing health.
@@ -407,6 +287,27 @@ fn io_health_line(poll: &CardPoll) -> (String, bool) {
             "{} failed read(s), {} failed write(s)",
             health.failed_reads, health.failed_writes
         ));
+    }
+    if health.failed_exchanges > 0 {
+        troubles.push(format!("{} failed exchange(s)", health.failed_exchanges));
+    }
+    if let Some(exchange) = health
+        .driver
+        .as_ref()
+        .and_then(|driver| driver.exchange.as_ref())
+    {
+        if exchange.working_counter_mismatches > 0 {
+            troubles.push(format!(
+                "{} working-counter mismatch(es)",
+                exchange.working_counter_mismatches
+            ));
+        }
+        if exchange.missed_deadlines > 0 {
+            troubles.push(format!(
+                "{} missed exchange deadline(s)",
+                exchange.missed_deadlines
+            ));
+        }
     }
     if let Some(fault) = &health.last_error {
         troubles.push(format!(
@@ -504,17 +405,6 @@ fn masked(value: serde_json::Value, masks: &[(String, String)]) -> serde_json::V
     serde_json::from_str(&text).unwrap()
 }
 
-/// The settled-command journal entries of a served journal, in order.
-fn settled_receipts(journal: &[JournalEntry]) -> Vec<CommandReceipt> {
-    journal
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// One scripted run of the M8 operations scenario documented in the
 /// module header. Returns the run's auditable record as JSON two runs
 /// must reproduce exactly: both pairs' field traces, the journal
@@ -527,8 +417,8 @@ fn run_operations(tag: &str) -> serde_json::Value {
 
     // Two shared plants, each serving one redundant pair — the
     // plant-wide surface has two real pairs to aggregate.
-    let plant_a = spawn_plant();
-    let plant_b = spawn_plant();
+    let plant_a = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let plant_b = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
     let model_a = controller_model(&dir, "pair-a.json", plant_a.addr);
     let model_b = controller_model(&dir, "pair-b.json", plant_b.addr);
 
@@ -547,6 +437,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
             "--journal-file".to_string(),
             journal_a_active.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let a_standby_args = vec![
         "--standby".to_string(),
@@ -556,13 +447,14 @@ fn run_operations(tag: &str) -> serde_json::Value {
         "--state-file".to_string(),
         state_a_standby.to_str().unwrap().to_string(),
     ];
-    let mut a_standby_process = spawn_controller(&model_a, &a_standby_args);
+    let mut a_standby_process = spawn_controller(&model_a, &a_standby_args, DT);
     let b_active_process = spawn_controller(
         &model_b,
         &[
             "--journal-file".to_string(),
             journal_b_active.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let b_standby_process = spawn_controller(
         &model_b,
@@ -572,6 +464,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
             "--journal-file".to_string(),
             journal_b_standby.to_str().unwrap().to_string(),
         ],
+        DT,
     );
 
     let a_active = MonitorClient::new(a_active_process.addr);
@@ -608,7 +501,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
     // from the state file — the preamble reports the restored tick —
     // and replays the journal file into the served ring.
     kill(&mut a_standby_process);
-    let (resumed_process, preamble) = spawn_controller_logged(&model_a, &a_standby_args);
+    let (resumed_process, preamble) = spawn_controller_logged(&model_a, &a_standby_args, DT);
     a_standby_process = resumed_process;
     a_standby = MonitorClient::new(a_standby_process.addr);
     assert!(
@@ -619,9 +512,21 @@ fn run_operations(tag: &str) -> serde_json::Value {
     );
 
     // `GET /journal` answers the pre-restart entries verbatim —
-    // replayed, not re-journaled — and the file's run-2 marker
-    // separates the two lifetimes at the restored tick.
-    assert_eq!(a_standby.journal(0).unwrap(), before_restart);
+    // replayed, not re-journaled — behind the restart's served
+    // boundary entry, the file's run-2 marker separating the two
+    // lifetimes at the restored tick.
+    let served = a_standby.journal(0).unwrap();
+    assert_eq!(&served[..before_restart.len()], &before_restart[..]);
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: Tick(PRE),
+            event: JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(file_boundaries(&journal_a_standby), vec![(1, 0), (2, PRE)]);
 
     // The pair cadence resumes: the restarted standby reconverges on

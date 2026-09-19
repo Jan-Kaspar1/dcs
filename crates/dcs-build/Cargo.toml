@@ -8,11 +8,16 @@ license.workspace = true
 [dependencies]
 dcs-core = { path = "../dcs-core" }
 dcs-model = { path = "../dcs-model" }
+serde_json = "1.0.151"
 
 [dev-dependencies]
 dcs-assembly = { path = "../dcs-assembly" }
 dcs-controller = { path = "../dcs-controller" }
 dcs-core = { path = "../dcs-core" }
+dcs-ethercat = { path = "../dcs-ethercat" }
+dcs-monitor = { path = "../dcs-monitor" }
 dcs-runtime = { path = "../dcs-runtime" }
 dcs-sim = { path = "../dcs-sim" }
-serde_json = "1.0.151"
+# The Wago cyclic-binding test parses the emitted station layout and
+# miss threshold under the served contract's own parameter grammar.
+dcs-sim-bus = { path = "../dcs-sim-bus" }

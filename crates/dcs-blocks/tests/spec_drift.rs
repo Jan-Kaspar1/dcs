@@ -4,6 +4,23 @@
 //! in `io_requirements` order, and the same parameters (name, kind,
 //! declared range) in `describe` order.
 //!
+//! The same sweep is the decision-82 drift authority: each check also
+//! derives the kind's [`BlockInterface`] from its descriptor — the one
+//! adaptation every consumer uses — and asserts the five collections
+//! carry exactly the declared spec/descriptor surface, then derives the
+//! served schema through `block_interfaces` — the function `GET
+//! /schema` runs — and pins its complete five-category wire shape and
+//! its validity against the emitted registry JSON Schema
+//! (`SchemaView::json_schema`, the `dcs-model interface-schema`
+//! artifact), so the build-time spec, the registry-constructed
+//! `describe()`, the registered kind set, and the served schema cannot
+//! drift.
+//! `dcs-controller`'s registry test pins runtime registration to
+//! `dcs_blocks::KINDS`; the coverage assertion here pins every kind in
+//! that list to a checked spec, descriptor, derived interface, and
+//! served-schema document — a newly registered kind without one fails
+//! the sweep.
+//!
 //! `dcs-build` cannot depend on this crate, so the specs are data
 //! mirrors kept honest here. Coverage is recorded against a checked-in
 //! kind list: [`dcs_blocks::KINDS`] names every kind the standard
@@ -16,29 +33,42 @@
 
 use std::collections::BTreeSet;
 
-use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_INT, POSITIVE_INT};
+use dcs_blocks::describe::{FINITE_F64, NONNEGATIVE_F64, NONNEGATIVE_INT, POSITIVE_INT};
 use dcs_blocks::{
     AdvanceMode, AlarmLimits, AlarmMonitor, AnalogInput, AnalogOutput, AutoStart,
     BackwashCoordinator, BackwashCoordinatorConfig, BackwashSequence, BackwashSequenceConfig,
-    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BoolGate, BoolLatchingAlarm,
-    CoordinatorOutputs, Counter, DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger,
-    FailoverSelect, FaultPolicy, FilterIo, FlowPacedRatio, FlowPacedRatioConfig, GateOperation,
-    GroupOutputs, Interlock, LatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect,
-    OverrunPolicy, PermissiveInputs, Pid, PidConfig, PumpGroup, PumpGroupConfig, PumpIo,
-    QueuePolicy, QueuedState, RateLimiter, RatioOutputs, RotationPolicy, Scaling, Sequencer,
-    SequencerStep, SetpointTable, SignalFilter, SrLatch, ThresholdChain, ThresholdOutputs, Timer,
-    Totalizer, Valve,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BackwashStep, BlowerGroup, BlowerGroupConfig,
+    BlowerIo, BlowerOutputs, BlowerRotation, BoolGate, BoolLatchingAlarm, CoordinationStrategy,
+    CoordinatorOutputs, Counter, DemandFallback, DemandFallbackConfig, DemandFallbackIo,
+    DeviationMonitor, DigitalInput, DigitalOutput, Edge, EdgeTrigger, FailoverSelect, FaultPolicy,
+    FeedforwardSum, FeedforwardSumConfig, FeedforwardSumIo, FilterIo, FlowPacedRatio,
+    FlowPacedRatioConfig, GateOperation, GroupOutputs, HeaderCoordinator, HeaderCoordinatorConfig,
+    HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmConfig, ManagedAlarmIo,
+    ManagedBoolLatchingAlarm, ManagedLatchingAlarm, ManualStation, MedianVoter, Motor,
+    OverrideSelect, OverrunPolicy, PermissiveInputs, PhaseMode, PhaseMonitor, PhaseMonitorIo, Pid,
+    PidConfig, PumpGroup, PumpGroupConfig, PumpIo, QueuePolicy, QueuedState, RateLimiter,
+    RateOfRise, RatioOutputs, Rationalization, RotationPolicy, Scaling, Sequencer, SequencerStep,
+    SetpointTable, SignalFilter, SrLatch, StagingAuthority, SurgeGuard, SurgeGuardConfig,
+    SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer, Totalizer, UnitBounds, Valve, ZoneIo,
 };
-use dcs_build::Spec;
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec,
-    BackwashSequenceSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
-    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    BackwashSequenceSpec, BlowerGroupSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec,
+    DemandFallbackSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
+    FailoverSelectSpec, FeedforwardSumSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec,
+    InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs,
+    ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec,
+    PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, RateOfRiseSpec, SequencerSpec,
+    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
-use dcs_core::{ComponentDescriptor, ParameterRange, PointId, Value, ValueKind};
+use dcs_build::{DynamicSpec, Spec, port};
+use dcs_core::{
+    AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
+    CommandDecl, ComponentDescriptor, ConfigCapability, Direction, EventDecl, EventEmission,
+    EventField, EventFieldKind, EventRetention, INTERFACE_VERSION, ParameterRange, PointId,
+    PortDescriptor, PortRole, SchemaView, StatePersistence, Tick, Value, ValueKind,
+};
 use dcs_runtime::Component;
 
 /// Asserts `spec` declares the same kind string and ports `descriptor`
@@ -60,7 +90,372 @@ fn check_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) -> Strin
         .collect();
     assert_eq!(spec_ports, descriptor_ports, "port vocabulary drifted");
 
+    // The declared behavior vocabulary: where the spec enumerates the
+    // kind's native commands and events, they must equal the
+    // descriptor's — a `None` set is instance-dependent and unchecked,
+    // matching `declared_parameters`' convention.
+    if let Some(declared) = spec.declared_commands() {
+        assert_eq!(
+            declared,
+            descriptor.commands.as_slice(),
+            "declared command vocabulary drifted"
+        );
+    }
+    if let Some(declared) = spec.declared_events() {
+        assert_eq!(
+            declared,
+            descriptor.events.as_slice(),
+            "declared event vocabulary drifted"
+        );
+    }
+
+    check_block_interface(spec, descriptor);
+
     spec.kind().to_string()
+}
+
+/// The decision-82 half of the sweep: the [`BlockInterface`] derived
+/// from `descriptor` must carry exactly the surface `spec` and
+/// `descriptor` declare — every port in `measurements` or `state`, the
+/// parameters as tunable `configuration`, the adapted generic command
+/// surface, and the adapted journaled transitions.
+fn check_block_interface<S: Spec>(spec: &S, descriptor: &ComponentDescriptor) {
+    let interface = BlockInterface::from_descriptor(descriptor);
+    assert_eq!(interface.version, INTERFACE_VERSION);
+    assert_eq!(interface.kind, spec.kind(), "interface kind drifted");
+
+    // The served-schema pin — this sweep's half of the
+    // `served-block-schema-live-resources` consequence: the serving
+    // layer derives each instance's document through `block_interfaces`
+    // over the snapshot's descriptors, and the wire shape must carry
+    // the complete five-category schema. Running the serving function
+    // here pins every kind the sweep covers — every registered kind,
+    // per the coverage assertion — to a served schema that can never
+    // silently lack a category.
+    let served = dcs_core::block_interfaces(std::slice::from_ref(descriptor));
+    assert_eq!(served.as_slice(), std::slice::from_ref(&interface));
+    let document = serde_json::to_value(&served[0]).unwrap();
+    let object = document.as_object().unwrap();
+    for key in [
+        "version",
+        "kind",
+        "measurements",
+        "configuration",
+        "state",
+        "commands",
+        "events",
+    ] {
+        assert!(
+            object.contains_key(key),
+            "kind {}'s served schema lacks {key:?}",
+            spec.kind()
+        );
+    }
+    assert_eq!(
+        serde_json::from_value::<BlockInterface>(document.clone()).unwrap(),
+        interface,
+        "kind {}'s served schema does not round-trip the contract",
+        spec.kind()
+    );
+
+    // The emitted-registry-schema pin: the document `GET /schema`
+    // serves must satisfy the hand-maintained JSON Schema
+    // `dcs-model interface-schema` emits — the consumer-facing half of
+    // the served contract. This descriptor is kind-level, so annotate
+    // its ports with bound points and the measurements with units to
+    // exercise the served form's optional fields too, then wrap the
+    // interface in the `SchemaView` envelope the endpoint stamps.
+    let mut served_descriptor = descriptor.clone();
+    for (index, port) in served_descriptor.ports.iter_mut().enumerate() {
+        port.point = Some(PointId(index as u64 + 1));
+    }
+    let mut served = dcs_core::block_interfaces(std::slice::from_ref(&served_descriptor))
+        .into_iter()
+        .next()
+        .unwrap();
+    for measurement in &mut served.measurements {
+        measurement.unit = Some("u".to_string());
+    }
+    let registry_document = serde_json::to_value(&SchemaView {
+        publication: 1,
+        tick: Tick(0),
+        interfaces: vec![dcs_core::ComponentInterface {
+            name: served_descriptor.name.clone(),
+            interface: served,
+        }],
+    })
+    .unwrap();
+    let validator = registry_schema_validator();
+    assert!(
+        validator.is_valid(&registry_document),
+        "kind {}'s served interface fails the emitted registry schema: {}",
+        spec.kind(),
+        validator
+            .iter_errors(&registry_document)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+
+    // Every port lands in exactly one collection — `state` when it
+    // hints `Status`, `measurements` otherwise — carrying the port's
+    // name, direction, value kind, and role.
+    for port in &descriptor.ports {
+        if port.role == Some(PortRole::Status) {
+            let entry = interface
+                .state
+                .iter()
+                .find(|entry| entry.name == port.name)
+                .unwrap_or_else(|| panic!("state port {:?} missing from interface", port.name));
+            assert_eq!(entry.direction, port.direction);
+            assert_eq!(entry.kind, port.kind);
+            assert_eq!(entry.role, port.role);
+            assert_eq!(entry.persistence, StatePersistence::BoundPoint);
+        } else {
+            let entry = interface
+                .measurements
+                .iter()
+                .find(|entry| entry.name == port.name)
+                .unwrap_or_else(|| {
+                    panic!("measurement port {:?} missing from interface", port.name)
+                });
+            assert_eq!(entry.direction, port.direction);
+            assert_eq!(entry.kind, port.kind);
+            assert_eq!(entry.role, port.role);
+        }
+    }
+    assert_eq!(
+        interface.measurements.len() + interface.state.len(),
+        descriptor.ports.len(),
+        "interface carried resources no port declared"
+    );
+
+    // Configuration is the descriptor's parameter surface — tunable,
+    // range-carrying — matching the spec's declared parameter set where
+    // the spec enumerates one.
+    let configuration: Vec<(_, _, _, _)> = interface
+        .configuration
+        .iter()
+        .map(|property| {
+            (
+                property.name.as_str(),
+                property.kind,
+                property.range,
+                property.capability,
+            )
+        })
+        .collect();
+    let declared: Vec<(_, _, _, _)> = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.as_str(),
+                parameter.kind,
+                parameter.range,
+                ConfigCapability::Tunable,
+            )
+        })
+        .collect();
+    assert_eq!(configuration, declared, "configuration drifted");
+    if let Some(spec_parameters) = spec.declared_parameters() {
+        let spec_parameters: Vec<(_, _, _, _)> = spec_parameters
+            .iter()
+            .map(|decl| (decl.name, decl.kind, decl.range, ConfigCapability::Tunable))
+            .collect();
+        assert_eq!(
+            configuration, spec_parameters,
+            "configuration drifted from the spec's declared parameters"
+        );
+    }
+
+    // Commands adapt the generic surface — the point-command triple on
+    // every `In` port plus `set_parameter` per configuration entry —
+    // and the kind's declared commands sit beside them under the
+    // `Declared` provenance. Names are unique across the collection.
+    let in_ports: Vec<_> = descriptor
+        .ports
+        .iter()
+        .filter(|port| port.direction == Direction::In)
+        .collect();
+    assert_eq!(
+        interface.commands.len(),
+        in_ports.len() * 3 + descriptor.parameters.len() + descriptor.commands.len(),
+        "command surface drifted"
+    );
+    let command_names: BTreeSet<_> = interface
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(
+        command_names.len(),
+        interface.commands.len(),
+        "command names must be unique"
+    );
+    for port in &in_ports {
+        for (verb, adapted, arguments) in [
+            ("write_value", AdaptedCommand::WriteValue, true),
+            ("force_point", AdaptedCommand::ForcePoint, true),
+            ("unforce_point", AdaptedCommand::UnforcePoint, false),
+        ] {
+            let name = format!("{verb}:{}", port.name);
+            let command = interface
+                .commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("command {name:?} missing from interface"));
+            assert_eq!(command.adapted, adapted);
+            assert_eq!(
+                command.availability,
+                CommandAvailability::BoundPointWritable
+            );
+            if arguments {
+                assert_eq!(command.request.len(), 1);
+                assert_eq!(command.request[0].name, "value");
+                assert_eq!(command.request[0].kind, port.kind);
+            } else {
+                assert!(command.request.is_empty());
+            }
+        }
+    }
+    for parameter in &descriptor.parameters {
+        let name = format!("set_parameter:{}", parameter.name);
+        let command = interface
+            .commands
+            .iter()
+            .find(|command| command.name == name)
+            .unwrap_or_else(|| panic!("command {name:?} missing from interface"));
+        assert_eq!(command.adapted, AdaptedCommand::SetParameter);
+        assert_eq!(command.availability, CommandAvailability::Always);
+        assert_eq!(command.request.len(), 1);
+        assert_eq!(command.request[0].name, "value");
+        assert_eq!(command.request[0].kind, parameter.kind);
+    }
+    // Every declared command surfaces verbatim — name, request schema,
+    // availability — with `Declared` provenance and no bound point.
+    for declared in &descriptor.commands {
+        let command = interface
+            .commands
+            .iter()
+            .find(|command| command.name == declared.name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "declared command {:?} missing from interface",
+                    declared.name
+                )
+            });
+        assert_eq!(command.adapted, AdaptedCommand::Declared);
+        assert_eq!(command.request, declared.request);
+        assert_eq!(command.availability, declared.availability);
+        assert_eq!(command.point, None);
+    }
+
+    // Events adapt the journaled transitions: `point_changed` on the
+    // `Bool`/`Int` ports the model may mark `journaled`,
+    // `quality_changed` on every port, `command_settled`, and
+    // `step_failed` — all durable-journal retention — plus the kind's
+    // declared events under the `Declared` provenance.
+    let journaled_ports = descriptor
+        .ports
+        .iter()
+        .filter(|port| matches!(port.kind, ValueKind::Bool | ValueKind::Int))
+        .count();
+    assert_eq!(
+        interface.events.len(),
+        descriptor.ports.len() + journaled_ports + 2 + descriptor.events.len(),
+        "event surface drifted"
+    );
+    let event_names: BTreeSet<_> = interface
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    assert_eq!(
+        event_names.len(),
+        interface.events.len(),
+        "event names must be unique"
+    );
+    for port in &descriptor.ports {
+        let quality_changed = interface
+            .events
+            .iter()
+            .find(|event| event.name == format!("quality_changed:{}", port.name))
+            .unwrap_or_else(|| panic!("quality_changed for {:?} missing", port.name));
+        assert_eq!(quality_changed.adapted, AdaptedEvent::QualityChanged);
+        assert_eq!(quality_changed.emission, EventEmission::OnObservedChange);
+        assert_eq!(quality_changed.retention, EventRetention::Journal);
+        if matches!(port.kind, ValueKind::Bool | ValueKind::Int) {
+            let point_changed = interface
+                .events
+                .iter()
+                .find(|event| event.name == format!("point_changed:{}", port.name))
+                .unwrap_or_else(|| panic!("point_changed for {:?} missing", port.name));
+            assert_eq!(point_changed.adapted, AdaptedEvent::PointChanged);
+            assert_eq!(point_changed.emission, EventEmission::WhenJournaled);
+            assert_eq!(
+                point_changed.payload,
+                [
+                    EventField {
+                        name: "from".to_string(),
+                        kind: EventFieldKind::Value(port.kind),
+                        optional: true,
+                    },
+                    EventField {
+                        name: "to".to_string(),
+                        kind: EventFieldKind::Value(port.kind),
+                        optional: false,
+                    },
+                ]
+            );
+        }
+    }
+    for (name, adapted, emission) in [
+        (
+            "command_settled",
+            AdaptedEvent::CommandSettled,
+            EventEmission::OnCommandSettled,
+        ),
+        (
+            "step_failed",
+            AdaptedEvent::StepFailed,
+            EventEmission::OnStepFailure,
+        ),
+    ] {
+        let event = interface
+            .events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("event {name:?} missing from interface"));
+        assert_eq!(event.adapted, adapted);
+        assert_eq!(event.emission, emission);
+        assert_eq!(event.retention, EventRetention::Journal);
+    }
+    // Every declared event surfaces verbatim — name, payload schema,
+    // retention — with `Declared` provenance, `KindEmitted` emission,
+    // and no bound point.
+    for declared in &descriptor.events {
+        let event = interface
+            .events
+            .iter()
+            .find(|event| event.name == declared.name)
+            .unwrap_or_else(|| panic!("declared event {:?} missing from interface", declared.name));
+        assert_eq!(event.adapted, AdaptedEvent::Declared);
+        assert_eq!(event.emission, EventEmission::KindEmitted);
+        assert_eq!(event.payload, declared.payload);
+        assert_eq!(event.retention, declared.retention);
+        assert_eq!(event.point, None);
+    }
+}
+
+/// The compiled served-registry schema — built once; `check` runs it
+/// per kind.
+fn registry_schema_validator() -> &'static jsonschema::Validator {
+    static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> = std::sync::OnceLock::new();
+    VALIDATOR.get_or_init(|| {
+        jsonschema::validator_for(&SchemaView::json_schema())
+            .expect("the emitted registry schema must be a usable schema")
+    })
 }
 
 /// Asserts `spec` declares the same interface `descriptor` reports:
@@ -106,6 +501,19 @@ fn specs_match_registered_kinds_descriptors() {
         low: 10.0,
         high: 90.0,
         hysteresis: 5.0,
+    };
+    // The decision-70 pair: the codes the components carry and the
+    // prose record the specs require — the parameter check compares
+    // only the declared vocabulary.
+    let codes = Rationalization {
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+    let record = dcs_build::Rationalization {
+        consequence: "c".to_string(),
+        required_action: "a".to_string(),
+        reference: "r".to_string(),
     };
     let mut covered = BTreeSet::new();
 
@@ -169,14 +577,74 @@ fn specs_match_registered_kinds_descriptors() {
             .describe(),
     ));
     covered.insert(check(
-        &LatchingAlarmSpec::new(Default::default()),
-        &LatchingAlarm::new("lal", point(1), point(2), point(3), point(4), limits)
+        &LatchingAlarmSpec::new(Default::default(), record.clone()),
+        &LatchingAlarm::new("lal", point(1), point(2), point(3), point(4), limits, codes)
             .unwrap()
             .describe(),
     ));
     covered.insert(check(
-        &BoolLatchingAlarmSpec::new(Default::default()),
-        &BoolLatchingAlarm::new("bal", point(1), point(2), point(3), point(4)).describe(),
+        &BoolLatchingAlarmSpec::new(Default::default(), record.clone()),
+        &BoolLatchingAlarm::new("bal", point(1), point(2), point(3), point(4), codes).describe(),
+    ));
+    // The managed siblings' `shelve`/`oos`/`suppress` inputs are
+    // optional — declared only where bound — so each spec is checked
+    // against the fully bound and the unmanaged instance.
+    let managed_config = ManagedAlarmConfig {
+        max_shelve_ticks: 5,
+        priority: 1,
+        class: 2,
+        response_ticks: 30,
+    };
+    let managed_io = |input: usize| ManagedAlarmIo {
+        input: point(input as u64),
+        ack: point(2),
+        shelve: Some(point(3)),
+        oos: Some(point(4)),
+        suppress: Some(point(5)),
+        alarm: point(6),
+        unacknowledged: point(7),
+        shelved: point(8),
+        suppressed: point(9),
+        out_of_service: point(10),
+    };
+    let unmanaged_io = |input: usize| ManagedAlarmIo {
+        shelve: None,
+        oos: None,
+        suppress: None,
+        ..managed_io(input)
+    };
+    let all_managed = ManagedInputs {
+        shelve: true,
+        oos: true,
+        suppress: true,
+    };
+    covered.insert(check(
+        &ManagedLatchingAlarmSpec::new(Default::default(), all_managed, record.clone()),
+        &ManagedLatchingAlarm::new("mlal", managed_io(1), limits, managed_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &ManagedLatchingAlarmSpec::new(
+            Default::default(),
+            ManagedInputs::default(),
+            record.clone(),
+        ),
+        &ManagedLatchingAlarm::new("mlal", unmanaged_io(1), limits, managed_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &ManagedBoolLatchingAlarmSpec::new(Default::default(), all_managed, record.clone()),
+        &ManagedBoolLatchingAlarm::new("mbal", managed_io(1), managed_config).describe(),
+    ));
+    covered.insert(check(
+        &ManagedBoolLatchingAlarmSpec::new(
+            Default::default(),
+            ManagedInputs::default(),
+            record.clone(),
+        ),
+        &ManagedBoolLatchingAlarm::new("mbal", unmanaged_io(1), managed_config).describe(),
     ));
     covered.insert(check(
         &InterlockSpec::new(Default::default(), 2),
@@ -356,6 +824,150 @@ fn specs_match_registered_kinds_descriptors() {
         .unwrap()
         .describe(),
     ));
+    // `blower-group`'s per-blower `cmd_i`/`run_i`/`fault_i`/`avail_i`/
+    // `capacity_i`/`vent_i` families are instance-dependent — `N` is
+    // the spec's `blowers`, matching the pump-group convention — and
+    // `approve` is the optional port, declared only where bound. Its
+    // parameter set is indexed by the unit count — a different key set
+    // per instance — so, like `sequencer`, the spec's recorded
+    // treatment is `declared_parameters() -> None` and `build` leaves
+    // the map to `from_parameters`; the descriptor's parameter
+    // vocabulary is pinned here.
+    let blower_io = |base: u64| BlowerIo {
+        cmd: point(base),
+        run: point(base + 1),
+        fault: point(base + 2),
+        avail: point(base + 3),
+        capacity: point(base + 4),
+        vent: point(base + 5),
+    };
+    let blower_bounds = UnitBounds {
+        min_flow: 20.0,
+        max_flow: 100.0,
+        max_current: 90.0,
+    };
+    let blower_outputs = |base: u64| BlowerOutputs {
+        staged: point(base),
+        none_available: point(base + 1),
+        all_faulted: point(base + 2),
+        staging_pending: point(base + 3),
+        transition: point(base + 4),
+    };
+    let blower_config = BlowerGroupConfig {
+        staging_authority: StagingAuthority::Automatic,
+        stage_up: 0.9,
+        stage_down: 0.8,
+        min_run_ticks: 0,
+        min_start_interval_ticks: 0,
+        vent_ticks: 2,
+        rotation: BlowerRotation::NoRotation,
+    };
+    let blower_group = |approve: Option<PointId>| {
+        BlowerGroup::new(
+            "bg",
+            point(1),
+            approve,
+            vec![blower_io(10), blower_io(20)],
+            vec![blower_bounds; 2],
+            blower_outputs(30),
+            blower_config,
+        )
+        .unwrap()
+    };
+    covered.insert(check_interface(
+        &BlowerGroupSpec::new(Default::default(), 2, true),
+        &blower_group(Some(point(2))).describe(),
+    ));
+    check_interface(
+        &BlowerGroupSpec::new(Default::default(), 2, false),
+        &blower_group(None).describe(),
+    );
+    assert!(
+        BlowerGroupSpec::new(Default::default(), 2, true)
+            .declared_parameters()
+            .is_none(),
+        "blower-group's parameter set is not statically enumerable"
+    );
+    let blower_parameters: Vec<(String, _, _)> = blower_group(None)
+        .describe()
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), parameter.kind, parameter.range))
+        .collect();
+    assert_eq!(
+        blower_parameters,
+        vec![
+            (
+                "staging_authority".to_string(),
+                ValueKind::Int,
+                Some(ParameterRange {
+                    min: Value::Int(0),
+                    max: Value::Int(2),
+                })
+            ),
+            (
+                "stage_up".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "stage_down".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "min_run_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            (
+                "min_start_interval_ticks".to_string(),
+                ValueKind::Int,
+                Some(NONNEGATIVE_INT)
+            ),
+            (
+                "unit_1_min_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_1_max_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_1_max_current".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_min_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_max_flow".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            (
+                "unit_2_max_current".to_string(),
+                ValueKind::Float,
+                Some(NONNEGATIVE_F64)
+            ),
+            ("vent_ticks".to_string(), ValueKind::Int, Some(POSITIVE_INT)),
+            (
+                "rotation".to_string(),
+                ValueKind::Int,
+                Some(ParameterRange {
+                    min: Value::Int(0),
+                    max: Value::Int(2),
+                })
+            ),
+        ],
+        "blower-group's indexed parameter vocabulary drifted"
+    );
+
     covered.insert(check(
         &SrLatchSpec::new(Default::default()),
         &SrLatch::new("srl", point(1), point(2), point(3)).describe(),
@@ -388,9 +1000,25 @@ fn specs_match_registered_kinds_descriptors() {
         .unwrap()
         .describe(),
     ));
+    // `failover-select`'s `backup_unhealthy` is an optional port —
+    // declared only where bound, so models emitted before the port
+    // existed keep assembling; the spec is checked against both
+    // instances.
+    covered.insert(check(
+        &FailoverSelectSpec::new(Default::default()).with_backup_unhealthy(),
+        &FailoverSelect::new(
+            "fsel",
+            point(1),
+            point(2),
+            point(3),
+            point(4),
+            Some(point(5)),
+        )
+        .describe(),
+    ));
     covered.insert(check(
         &FailoverSelectSpec::new(Default::default()),
-        &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4)).describe(),
+        &FailoverSelect::new("fsel", point(1), point(2), point(3), point(4), None).describe(),
     ));
     // `flow-paced-ratio`'s `trim` is the optional port — declared only
     // where bound, so the spec is checked against both instances.
@@ -430,6 +1058,104 @@ fn specs_match_registered_kinds_descriptors() {
     covered.insert(check(
         &DeviationMonitorSpec::new(Default::default()),
         &DeviationMonitor::new("dev", point(1), point(2), point(3), point(4), 0.1, 4)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &PhaseMonitorSpec::new(Default::default()),
+        &PhaseMonitor::new(
+            "phm",
+            PhaseMonitorIo {
+                input: point(1),
+                phase: point(2),
+                capture: point(3),
+                deviation: point(4),
+                exceeded: point(5),
+                overdue: point(6),
+            },
+            0.5,
+            4,
+            PhaseMode::Absolute,
+        )
+        .unwrap()
+        .describe(),
+    ));
+    // `surge-guard`'s `current` is the optional port — declared only
+    // where bound, so the spec is checked against both instances.
+    let guard_config = SurgeGuardConfig {
+        min_flow: 50.0,
+        max_pressure: 30.0,
+        min_current: 40.0,
+        on_guard: dcs_blocks::GuardResponse::Clamp,
+        trip_value: 0.0,
+    };
+    let guard_io = |current: Option<PointId>| SurgeGuardIo {
+        demand: point(1),
+        flow: point(2),
+        pressure: point(3),
+        current,
+        surge_trip: point(4),
+        out: point(5),
+        guarding: point(6),
+        tripped: point(7),
+    };
+    covered.insert(check(
+        &SurgeGuardSpec::new(Default::default(), true),
+        &SurgeGuard::new("sg", guard_io(Some(point(8))), guard_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &SurgeGuardSpec::new(Default::default(), false),
+        &SurgeGuard::new("sg", guard_io(None), guard_config)
+            .unwrap()
+            .describe(),
+    ));
+    covered.insert(check(
+        &DemandFallbackSpec::new(Default::default()),
+        &DemandFallback::new(
+            "dfb",
+            DemandFallbackIo {
+                input: point(1),
+                pv: point(2),
+                out: point(3),
+                fallback_active: point(4),
+            },
+            DemandFallbackConfig {
+                on_bad: dcs_blocks::FallbackResponse::Hold,
+                fallback_flow: 25.0,
+                safe_flow: 5.0,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
+    covered.insert(check(
+        &FeedforwardSumSpec::new(Default::default()),
+        &FeedforwardSum::new(
+            "ffs",
+            FeedforwardSumIo {
+                ff: point(1),
+                trim: point(2),
+                out: point(3),
+                clamped: point(4),
+                fallback_active: point(5),
+            },
+            FeedforwardSumConfig {
+                trim_min: -10.0,
+                trim_max: 10.0,
+                min_demand: 0.0,
+                max_demand: 100.0,
+                on_bad_ff: dcs_blocks::BadTermResponse::Drop,
+                on_bad_trim: dcs_blocks::BadTermResponse::Drop,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
+    covered.insert(check(
+        &RateOfRiseSpec::new(Default::default()),
+        &RateOfRise::new("ror", point(1), point(2), point(3), 0.5, 0.0)
             .unwrap()
             .describe(),
     ));
@@ -644,6 +1370,51 @@ fn specs_match_registered_kinds_descriptors() {
         ],
         "backwash-sequence's indexed parameter vocabulary drifted"
     );
+    // `header-coordinator`'s per-zone `valve_pos_i`/`airflow_i`/
+    // `pulsing_i`/`pulse_grant_i` families are instance-dependent —
+    // `N` is the spec's `zones`, matching the interlock's `trips`
+    // convention.
+    covered.insert(check(
+        &HeaderCoordinatorSpec::new(Default::default(), 2),
+        &HeaderCoordinator::new(
+            "hdr",
+            point(1),
+            vec![
+                ZoneIo {
+                    valve_pos: point(10),
+                    airflow: point(11),
+                    pulsing: point(12),
+                    pulse_grant: point(13),
+                },
+                ZoneIo {
+                    valve_pos: point(20),
+                    airflow: point(21),
+                    pulsing: point(22),
+                    pulse_grant: point(23),
+                },
+            ],
+            HeaderOutputs {
+                pressure_sp: point(30),
+                blower_demand: point(31),
+                most_open: point(32),
+                at_bound: point(33),
+                pulse_blocked: point(34),
+            },
+            HeaderCoordinatorConfig {
+                strategy: CoordinationStrategy::ConstantPressure,
+                pressure_hold: 10.0,
+                pressure_min: 4.0,
+                pressure_max: 16.0,
+                mov_band_lo: 85.0,
+                mov_band_hi: 95.0,
+                adjust_ticks: 3,
+                min_total_airflow: 1.0,
+                max_pulsing: 1,
+            },
+        )
+        .unwrap()
+        .describe(),
+    ));
 
     // The coverage guard: the table must pin exactly the kinds the
     // standard registry serves — the checked-in `dcs_blocks::KINDS`
@@ -768,6 +1539,108 @@ fn backwash_coordinator_spec_tracks_filter_count() {
 }
 
 #[test]
+fn header_coordinator_spec_tracks_zone_count() {
+    // The `valve_pos_i`/`airflow_i`/`pulsing_i`/`pulse_grant_i`
+    // families are instance-dependent: the spec's port list must
+    // follow the constructed component's.
+    let config = HeaderCoordinatorConfig {
+        strategy: CoordinationStrategy::ConstantPressure,
+        pressure_hold: 10.0,
+        pressure_min: 4.0,
+        pressure_max: 16.0,
+        mov_band_lo: 85.0,
+        mov_band_hi: 95.0,
+        adjust_ticks: 3,
+        min_total_airflow: 1.0,
+        max_pulsing: 1,
+    };
+    for zones in [1usize, 2, 5] {
+        let zone_io: Vec<ZoneIo> = (0..zones as u64)
+            .map(|n| ZoneIo {
+                valve_pos: point(10 + n * 4),
+                airflow: point(11 + n * 4),
+                pulsing: point(12 + n * 4),
+                pulse_grant: point(13 + n * 4),
+            })
+            .collect();
+        let component = HeaderCoordinator::new(
+            "hdr",
+            point(1),
+            zone_io,
+            HeaderOutputs {
+                pressure_sp: point(2),
+                blower_demand: point(3),
+                most_open: point(4),
+                at_bound: point(5),
+                pulse_blocked: point(6),
+            },
+            config,
+        )
+        .unwrap();
+        check(
+            &HeaderCoordinatorSpec::new(Default::default(), zones),
+            &component.describe(),
+        );
+    }
+}
+
+#[test]
+fn blower_group_spec_tracks_blower_count() {
+    // The `cmd_i`/`run_i`/`fault_i`/`avail_i`/`capacity_i`/`vent_i`
+    // families are instance-dependent: the spec's port list must
+    // follow the constructed component's — with and without the
+    // optional `approve` port.
+    let config = BlowerGroupConfig {
+        staging_authority: StagingAuthority::Automatic,
+        stage_up: 0.9,
+        stage_down: 0.8,
+        min_run_ticks: 0,
+        min_start_interval_ticks: 0,
+        vent_ticks: 2,
+        rotation: BlowerRotation::NoRotation,
+    };
+    let bounds = UnitBounds {
+        min_flow: 20.0,
+        max_flow: 100.0,
+        max_current: 90.0,
+    };
+    for blowers in [1usize, 2, 5] {
+        for approve in [None, Some(point(9))] {
+            let blower_io: Vec<BlowerIo> = (0..blowers as u64)
+                .map(|n| BlowerIo {
+                    cmd: point(10 + n * 6),
+                    run: point(11 + n * 6),
+                    fault: point(12 + n * 6),
+                    avail: point(13 + n * 6),
+                    capacity: point(14 + n * 6),
+                    vent: point(15 + n * 6),
+                })
+                .collect();
+            let component = BlowerGroup::new(
+                "bg",
+                point(1),
+                approve,
+                blower_io,
+                vec![bounds; blowers],
+                BlowerOutputs {
+                    staged: point(2),
+                    none_available: point(3),
+                    all_faulted: point(4),
+                    staging_pending: point(5),
+                    transition: point(6),
+                },
+                config,
+            )
+            .unwrap();
+            check_interface(
+                &BlowerGroupSpec::new(Default::default(), blowers, approve.is_some()),
+                &component.describe(),
+            );
+        }
+    }
+}
+
+#[test]
 fn bool_gate_spec_tracks_input_count() {
     // The `in_N` set is instance-dependent, like the interlock's
     // `trip_N` set: the spec's port list must follow the constructed
@@ -841,4 +1714,125 @@ fn backwash_sequence_spec_tracks_meas_and_step_counts() {
             &component.describe(),
         );
     }
+}
+
+/// A kind declaring native commands and events: the descriptor's
+/// `commands`/`events` — mirrored by the spec's `declared_commands`/
+/// `declared_events` — surface in the derived [`BlockInterface`]
+/// beside the adapted entries under the `Declared` provenance, so the
+/// spec, descriptor, and served schema cannot fork.
+#[test]
+fn declared_vocabulary_surfaces_in_the_derived_interface() {
+    let descriptor = ComponentDescriptor {
+        name: "drv".to_string(),
+        kind: "drive".to_string(),
+        label: "drv".to_string(),
+        ports: vec![
+            PortDescriptor {
+                name: "run".to_string(),
+                direction: Direction::In,
+                kind: ValueKind::Bool,
+                role: Some(PortRole::Setpoint),
+                point: None,
+            },
+            PortDescriptor {
+                name: "tripped".to_string(),
+                direction: Direction::Out,
+                kind: ValueKind::Bool,
+                role: Some(PortRole::Status),
+                point: None,
+            },
+        ],
+        parameters: Vec::new(),
+        commands: vec![CommandDecl {
+            name: "stroke_test".to_string(),
+            request: vec![CommandArgument {
+                name: "ticks".to_string(),
+                kind: ValueKind::Int,
+            }],
+            availability: CommandAvailability::KindDeclared,
+        }],
+        events: vec![EventDecl {
+            name: "stroke_complete".to_string(),
+            payload: vec![
+                EventField {
+                    name: "ticks".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "detail".to_string(),
+                    kind: EventFieldKind::Text,
+                    optional: true,
+                },
+            ],
+            retention: EventRetention::Journal,
+        }],
+    };
+    let mut spec = DynamicSpec::new(
+        "drive",
+        vec![
+            port("run", Direction::In, ValueKind::Bool),
+            port("tripped", Direction::Out, ValueKind::Bool),
+        ],
+    );
+    spec.declared_commands = Some(descriptor.commands.clone());
+    spec.declared_events = Some(descriptor.events.clone());
+
+    check_interface(&spec, &descriptor);
+
+    // The declared command sits beside the adapted `run`-port triple
+    // under its own provenance; the declared event beside the adapted
+    // transitions and block-level entries.
+    let interface = descriptor.interface();
+    let command = interface
+        .commands
+        .iter()
+        .find(|command| command.name == "stroke_test")
+        .unwrap();
+    assert_eq!(command.adapted, AdaptedCommand::Declared);
+    assert_eq!(command.availability, CommandAvailability::KindDeclared);
+    assert_eq!(
+        command.request,
+        [CommandArgument {
+            name: "ticks".to_string(),
+            kind: ValueKind::Int,
+        }]
+    );
+    assert_eq!(command.point, None);
+    let event = interface
+        .events
+        .iter()
+        .find(|event| event.name == "stroke_complete")
+        .unwrap();
+    assert_eq!(event.adapted, AdaptedEvent::Declared);
+    assert_eq!(event.emission, EventEmission::KindEmitted);
+    assert_eq!(event.retention, EventRetention::Journal);
+    assert_eq!(event.point, None);
+}
+
+#[test]
+#[should_panic(expected = "declared command vocabulary drifted")]
+fn a_spec_missing_the_declared_vocabulary_fails_the_drift_guard() {
+    // The drift authority's other half: a descriptor declaring a
+    // native command the spec does not mirror must fail. A static spec
+    // gets this for free — `Spec::declared_commands` defaults to
+    // `Some(&[])` — while a `DynamicSpec` opts in by enumerating the
+    // (here empty) set.
+    let descriptor = ComponentDescriptor {
+        name: "drv".to_string(),
+        kind: "drive".to_string(),
+        label: "drv".to_string(),
+        ports: Vec::new(),
+        parameters: Vec::new(),
+        commands: vec![CommandDecl {
+            name: "stroke_test".to_string(),
+            request: Vec::new(),
+            availability: CommandAvailability::KindDeclared,
+        }],
+        events: Vec::new(),
+    };
+    let mut spec = DynamicSpec::new("drive", Vec::new());
+    spec.declared_commands = Some(Vec::new());
+    check_interface(&spec, &descriptor);
 }

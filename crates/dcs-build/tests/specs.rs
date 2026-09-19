@@ -18,15 +18,37 @@ use std::collections::BTreeSet;
 use dcs_assembly::{AssemblyError, assemble, sim_driver};
 use dcs_build::specs::{
     AlarmMonitorSpec, AnalogInputSpec, AnalogOutputSpec, BackwashCoordinatorSpec,
-    BackwashSequenceSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec, DeviationMonitorSpec,
-    DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec, FailoverSelectSpec, FlowPacedRatioSpec,
-    InterlockSpec, LatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec,
-    OverrideSelectSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, SequencerSpec, SignalFilterSpec,
-    SrLatchSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec, ValveSpec,
+    BackwashSequenceSpec, BlowerGroupSpec, BoolGateSpec, BoolLatchingAlarmSpec, CounterSpec,
+    DemandFallbackSpec, DeviationMonitorSpec, DigitalInputSpec, DigitalOutputSpec, EdgeTriggerSpec,
+    FailoverSelectSpec, FeedforwardSumSpec, FlowPacedRatioSpec, HeaderCoordinatorSpec,
+    InterlockSpec, LatchingAlarmSpec, ManagedBoolLatchingAlarmSpec, ManagedInputs,
+    ManagedLatchingAlarmSpec, ManualStationSpec, MedianVoterSpec, MotorSpec, OverrideSelectSpec,
+    PhaseMonitorSpec, PidSpec, PumpGroupSpec, RateLimiterSpec, RateOfRiseSpec, SequencerSpec,
+    SignalFilterSpec, SrLatchSpec, SurgeGuardSpec, ThresholdChainSpec, TimerSpec, TotalizerSpec,
+    ValveSpec,
 };
-use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Value, parameters};
+use dcs_build::{BuildError, Direction, PlantBuilder, PointId, Rationalization, Value, parameters};
 use dcs_core::IoDriver;
 use dcs_model::PlantModel;
+
+/// A complete decision-70 record — the alarm specs' required typed
+/// argument a composed plant cannot omit.
+fn record() -> Rationalization {
+    Rationalization {
+        consequence: "c".to_string(),
+        required_action: "a".to_string(),
+        reference: "r".to_string(),
+    }
+}
+
+/// The decision-70 rationalization codes both latching kinds require.
+fn rationalization_codes() -> dcs_build::Parameters {
+    parameters([
+        ("priority", Value::Int(1)),
+        ("class", Value::Int(2)),
+        ("response_ticks", Value::Int(30)),
+    ])
+}
 
 /// Builds `plant`, reloads the emitted document through `dcs-model`'s
 /// loader — which validates it — and assembles it through the standard
@@ -52,11 +74,13 @@ fn latching_alarm_spec_emits_an_assembling_document() {
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let lal = plant.add(LatchingAlarmSpec::new(parameters([
+    let mut parameter_map = parameters([
         ("low_limit", Value::Float(10.0)),
         ("high_limit", Value::Float(90.0)),
         ("hysteresis", Value::Float(5.0)),
-    ])));
+    ]);
+    parameter_map.extend(rationalization_codes());
+    let lal = plant.add(LatchingAlarmSpec::new(parameter_map, record()));
     plant.connect(pv, lal.input);
     plant.connect(ack, lal.ack);
     plant.connect(&lal.alarm, alarm);
@@ -64,6 +88,15 @@ fn latching_alarm_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, LatchingAlarmSpec::KIND);
+    // The emitted instance carries the decision-70 record.
+    assert_eq!(
+        model.components[0].rationalization,
+        Some(Rationalization {
+            consequence: "c".to_string(),
+            required_action: "a".to_string(),
+            reference: "r".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -77,7 +110,10 @@ fn bool_latching_alarm_spec_emits_an_assembling_document() {
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let bal = plant.add(BoolLatchingAlarmSpec::new(Default::default()));
+    let bal = plant.add(BoolLatchingAlarmSpec::new(
+        rationalization_codes(),
+        record(),
+    ));
     plant.connect(input, bal.input);
     plant.connect(ack, bal.ack);
     plant.connect(&bal.alarm, alarm);
@@ -85,28 +121,244 @@ fn bool_latching_alarm_spec_emits_an_assembling_document() {
 
     let model = build_load_assemble(plant);
     assert_eq!(model.components[0].kind, BoolLatchingAlarmSpec::KIND);
-    assert!(model.components[0].parameters.is_empty());
+    // The emitted instance carries the codes and the record.
+    assert_eq!(
+        model.components[0].parameters.len(),
+        3,
+        "the declared set is exactly the rationalization codes"
+    );
+    assert!(model.components[0].rationalization.is_some());
 }
 
 #[test]
 fn bool_latching_alarm_rejects_an_undeclared_parameter() {
-    // The kind declares no parameters: a stray key — a `latching-alarm`
-    // tunable carried onto the Bool sibling, say — is `UnknownParameter`
-    // naming the key at `build`, before the document exists.
+    // The declared set is exactly the rationalization codes: a stray
+    // key — a `latching-alarm` tunable carried onto the Bool sibling,
+    // say — is `UnknownParameter` naming the key at `build`, before the
+    // document exists.
     let mut plant = PlantBuilder::new();
     let input = plant.internal_input::<bool>(PointId(10), false, true);
     let ack = plant.internal_input::<bool>(PointId(11), false, true);
     let alarm = plant.internal_output::<bool>(PointId(12), false);
     let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
 
-    let bal = plant.add(BoolLatchingAlarmSpec::new(parameters([(
-        "hysteresis",
-        Value::Float(0.5),
-    )])));
+    let mut parameter_map = rationalization_codes();
+    parameter_map.insert("hysteresis".to_string(), Value::Float(0.5));
+    let bal = plant.add(BoolLatchingAlarmSpec::new(parameter_map, record()));
     plant.connect(input, bal.input);
     plant.connect(ack, bal.ack);
     plant.connect(&bal.alarm, alarm);
     plant.connect(&bal.unacknowledged, unacknowledged);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::UnknownParameter { ref parameter, .. }) if parameter == "hysteresis"
+    ));
+}
+
+#[test]
+fn bool_latching_alarm_rejects_a_missing_rationalization_code() {
+    // The codes are required declared data: a map missing
+    // `response_ticks` is `MissingParameter` naming the key at `build`.
+    let mut plant = PlantBuilder::new();
+    let input = plant.internal_input::<bool>(PointId(10), false, true);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(12), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(13), false);
+
+    let mut parameter_map = rationalization_codes();
+    parameter_map.remove("response_ticks");
+    let bal = plant.add(BoolLatchingAlarmSpec::new(parameter_map, record()));
+    plant.connect(input, bal.input);
+    plant.connect(ack, bal.ack);
+    plant.connect(&bal.alarm, alarm);
+    plant.connect(&bal.unacknowledged, unacknowledged);
+
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::MissingParameter { ref parameter, .. }) if parameter == "response_ticks"
+    ));
+}
+
+/// The managed-alarm parameter set both managed latching kinds carry:
+/// the shelving bound plus the decision-70 rationalization fields.
+fn managed_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("max_shelve_ticks", Value::Int(5)),
+        ("priority", Value::Int(1)),
+        ("class", Value::Int(2)),
+        ("response_ticks", Value::Int(30)),
+    ])
+}
+
+/// The `managed-latching-alarm` plant the tests wire: a scripted level
+/// on the device, the writable internal `In` points the operator
+/// commands ride — `ack` plus whichever managed inputs the spec
+/// declares — and internal carriers for the five status outputs.
+fn managed_latching_plant(
+    parameters_map: dcs_build::Parameters,
+    managed: ManagedInputs,
+) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level-raw", Direction::In);
+
+    let pv = plant.field_input::<f64>(PointId(10), level_raw, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let shelve = plant.internal_input::<bool>(PointId(12), false, true);
+    let oos = plant.internal_input::<bool>(PointId(13), false, true);
+    let suppress = plant.internal_input::<bool>(PointId(14), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mla = plant.add(ManagedLatchingAlarmSpec::new(
+        parameters_map,
+        managed,
+        record(),
+    ));
+    plant.connect(pv, mla.input);
+    plant.connect(ack, mla.ack);
+    if let Some(shelve_port) = mla.managed.shelve {
+        plant.connect(shelve, shelve_port);
+    }
+    if let Some(oos_port) = mla.managed.oos {
+        plant.connect(oos, oos_port);
+    }
+    if let Some(suppress_port) = mla.managed.suppress {
+        plant.connect(suppress, suppress_port);
+    }
+    plant.connect(&mla.alarm, alarm);
+    plant.connect(&mla.unacknowledged, unacknowledged);
+    plant.connect(&mla.managed.shelved, shelved);
+    plant.connect(&mla.managed.suppressed, suppressed);
+    plant.connect(&mla.managed.out_of_service, out_of_service);
+    plant
+}
+
+fn managed_limits() -> dcs_build::Parameters {
+    let mut map = managed_parameters();
+    map.insert("low_limit".to_string(), Value::Float(10.0));
+    map.insert("high_limit".to_string(), Value::Float(90.0));
+    map.insert("hysteresis".to_string(), Value::Float(5.0));
+    map
+}
+
+#[test]
+fn managed_latching_alarm_spec_emits_an_assembling_document() {
+    // The fully managed form and a partly bound form both assemble —
+    // the optional managed inputs follow the spec flags.
+    let model = build_load_assemble(managed_latching_plant(
+        managed_limits(),
+        ManagedInputs {
+            shelve: true,
+            oos: true,
+            suppress: true,
+        },
+    ));
+    assert_eq!(model.components[0].kind, ManagedLatchingAlarmSpec::KIND);
+    for name in ["shelve", "oos", "suppress"] {
+        assert!(model.components[0].ports.contains_key(name));
+    }
+
+    let model = build_load_assemble(managed_latching_plant(
+        managed_limits(),
+        ManagedInputs {
+            shelve: true,
+            oos: false,
+            suppress: false,
+        },
+    ));
+    assert_eq!(model.components[0].kind, ManagedLatchingAlarmSpec::KIND);
+    assert!(model.components[0].ports.contains_key("shelve"));
+    assert!(!model.components[0].ports.contains_key("oos"));
+    assert!(!model.components[0].ports.contains_key("suppress"));
+}
+
+#[test]
+fn managed_latching_alarm_rejects_a_missing_managed_parameter() {
+    // The managed set is required declared data: a map missing
+    // `max_shelve_ticks` is `MissingParameter` naming the key at
+    // `build`, before the document exists.
+    let mut parameters_map = managed_limits();
+    parameters_map.remove("max_shelve_ticks");
+    assert!(matches!(
+        managed_latching_plant(parameters_map, ManagedInputs::default()).build(),
+        Err(BuildError::MissingParameter { ref parameter, .. }) if parameter == "max_shelve_ticks"
+    ));
+}
+
+#[test]
+fn managed_bool_latching_alarm_spec_emits_an_assembling_document() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let power_fail = plant.channel::<bool>(sim, "power-fail", Direction::In);
+
+    let input = plant.field_input::<bool>(PointId(10), power_fail, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let shelve = plant.internal_input::<bool>(PointId(12), false, true);
+    let oos = plant.internal_input::<bool>(PointId(13), false, true);
+    let suppress = plant.internal_input::<bool>(PointId(14), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mbal = plant.add(ManagedBoolLatchingAlarmSpec::new(
+        managed_parameters(),
+        ManagedInputs {
+            shelve: true,
+            oos: true,
+            suppress: true,
+        },
+        record(),
+    ));
+    plant.connect(input, mbal.input);
+    plant.connect(ack, mbal.ack);
+    plant.connect(shelve, mbal.managed.shelve.unwrap());
+    plant.connect(oos, mbal.managed.oos.unwrap());
+    plant.connect(suppress, mbal.managed.suppress.unwrap());
+    plant.connect(&mbal.alarm, alarm);
+    plant.connect(&mbal.unacknowledged, unacknowledged);
+    plant.connect(&mbal.managed.shelved, shelved);
+    plant.connect(&mbal.managed.suppressed, suppressed);
+    plant.connect(&mbal.managed.out_of_service, out_of_service);
+
+    let model = build_load_assemble(plant);
+    assert_eq!(model.components[0].kind, ManagedBoolLatchingAlarmSpec::KIND);
+}
+
+#[test]
+fn managed_bool_latching_alarm_rejects_an_undeclared_parameter() {
+    // The Bool managed sibling declares the managed set only: a
+    // `latching-alarm` limit tunable carried over is `UnknownParameter`
+    // naming the key at `build`, before the document exists.
+    let mut plant = PlantBuilder::new();
+    let input = plant.internal_input::<bool>(PointId(10), false, true);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let alarm = plant.internal_output::<bool>(PointId(20), false);
+    let unacknowledged = plant.internal_output::<bool>(PointId(21), false);
+    let shelved = plant.internal_output::<bool>(PointId(22), false);
+    let suppressed = plant.internal_output::<bool>(PointId(23), false);
+    let out_of_service = plant.internal_output::<bool>(PointId(24), false);
+
+    let mut parameters_map = managed_parameters();
+    parameters_map.insert("hysteresis".to_string(), Value::Float(0.5));
+    let mbal = plant.add(ManagedBoolLatchingAlarmSpec::new(
+        parameters_map,
+        ManagedInputs::default(),
+        record(),
+    ));
+    plant.connect(input, mbal.input);
+    plant.connect(ack, mbal.ack);
+    plant.connect(&mbal.alarm, alarm);
+    plant.connect(&mbal.unacknowledged, unacknowledged);
+    plant.connect(&mbal.managed.shelved, shelved);
+    plant.connect(&mbal.managed.suppressed, suppressed);
+    plant.connect(&mbal.managed.out_of_service, out_of_service);
 
     assert!(matches!(
         plant.build(),
@@ -645,6 +897,277 @@ fn deviation_monitor_rejects_an_out_of_range_window() {
     ));
 }
 
+/// The `phase-monitor` plant the tests wire: scripted channels for
+/// `in`, `phase`, and `capture`, internal carriers for the three
+/// outputs.
+fn phase_monitor_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let input_raw = plant.channel::<f64>(sim, "value", Direction::In);
+    let phase_raw = plant.channel::<bool>(sim, "phase", Direction::In);
+    let capture_raw = plant.channel::<bool>(sim, "capture", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), input_raw, false);
+    let phase = plant.field_input::<bool>(PointId(11), phase_raw, false);
+    let capture = plant.field_input::<bool>(PointId(12), capture_raw, false);
+    let deviation = plant.internal_output::<f64>(PointId(20), 0.0);
+    let exceeded = plant.internal_output::<bool>(PointId(21), false);
+    let overdue = plant.internal_output::<bool>(PointId(22), false);
+
+    let monitor = plant.add(PhaseMonitorSpec::new(parameters_map));
+    plant.connect(input, monitor.input);
+    plant.connect(phase, monitor.phase);
+    plant.connect(capture, monitor.capture);
+    plant.connect(&monitor.deviation, deviation);
+    plant.connect(&monitor.exceeded, exceeded);
+    plant.connect(&monitor.overdue, overdue);
+    plant
+}
+
+#[test]
+fn phase_monitor_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(phase_monitor_plant(parameters([
+        ("bound", Value::Float(0.5)),
+        ("limit_ticks", Value::Int(5)),
+        ("mode", Value::Int(0)),
+    ])));
+    assert_eq!(model.components[0].kind, PhaseMonitorSpec::KIND);
+}
+
+#[test]
+fn phase_monitor_rejects_an_out_of_range_mode() {
+    // `mode` declares the binary code range `0..=1`; a code outside it
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    assert!(matches!(
+        phase_monitor_plant(parameters([
+            ("bound", Value::Float(0.5)),
+            ("limit_ticks", Value::Int(5)),
+            ("mode", Value::Int(4)),
+        ]))
+        .build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "mode"
+    ));
+}
+
+/// The `surge-guard` plant the tests wire: scripted channels for
+/// `demand`, `flow`, `pressure`, `current`, and `surge_trip`,
+/// internal carriers for the three outputs. `current` wires only
+/// when the spec declares the port.
+fn surge_guard_plant(parameters_map: dcs_build::Parameters, current: bool) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let demand_raw = plant.channel::<f64>(sim, "demand", Direction::In);
+    let flow_raw = plant.channel::<f64>(sim, "flow", Direction::In);
+    let pressure_raw = plant.channel::<f64>(sim, "pressure", Direction::In);
+    let current_raw = plant.channel::<f64>(sim, "current", Direction::In);
+    let trip_raw = plant.channel::<bool>(sim, "surge-trip", Direction::In);
+
+    let demand = plant.field_input::<f64>(PointId(10), demand_raw, false);
+    let flow = plant.field_input::<f64>(PointId(11), flow_raw, false);
+    let pressure = plant.field_input::<f64>(PointId(12), pressure_raw, false);
+    let surge_trip = plant.field_input::<bool>(PointId(14), trip_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let guarding = plant.internal_output::<bool>(PointId(21), false);
+    let tripped = plant.internal_output::<bool>(PointId(22), false);
+
+    let guard = plant.add(SurgeGuardSpec::new(parameters_map, current));
+    plant.connect(demand, guard.demand);
+    plant.connect(flow, guard.flow);
+    plant.connect(pressure, guard.pressure);
+    if let Some(current_port) = guard.current {
+        let motor_current = plant.field_input::<f64>(PointId(13), current_raw, false);
+        plant.connect(motor_current, current_port);
+    }
+    plant.connect(surge_trip, guard.surge_trip);
+    plant.connect(&guard.out, out);
+    plant.connect(&guard.guarding, guarding);
+    plant.connect(&guard.tripped, tripped);
+    plant
+}
+
+fn surge_guard_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("min_flow", Value::Float(50.0)),
+        ("max_pressure", Value::Float(30.0)),
+        ("min_current", Value::Float(40.0)),
+        ("on_guard", Value::Int(0)),
+        ("trip_value", Value::Float(0.0)),
+    ])
+}
+
+#[test]
+fn surge_guard_spec_emits_an_assembling_document() {
+    // Both forms assemble: `current` bound, and the unwired port
+    // omitted — the "a unit without the signal leaves the port
+    // unbound" half the registry's `get("current")` serves.
+    for current in [true, false] {
+        let model = build_load_assemble(surge_guard_plant(surge_guard_parameters(), current));
+        assert_eq!(model.components[0].kind, SurgeGuardSpec::KIND);
+        assert_eq!(
+            model.components[0].ports.contains_key("current"),
+            current,
+            "the optional port follows the spec flag"
+        );
+    }
+}
+
+#[test]
+fn surge_guard_rejects_an_out_of_range_response() {
+    // `on_guard` declares the binary code range `0..=1`; a code
+    // outside it is `ParameterOutOfRange` at `build`, before the
+    // document exists.
+    let mut parameters_map = surge_guard_parameters();
+    parameters_map.insert("on_guard".to_string(), Value::Int(4));
+    assert!(matches!(
+        surge_guard_plant(parameters_map, true).build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "on_guard"
+    ));
+}
+
+/// The `demand-fallback` plant the tests wire: scripted channels for
+/// `in` and `pv`, internal carriers for the two outputs.
+fn demand_fallback_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let demand_raw = plant.channel::<f64>(sim, "demand", Direction::In);
+    let pv_raw = plant.channel::<f64>(sim, "pv", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), demand_raw, false);
+    let pv = plant.field_input::<f64>(PointId(11), pv_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let fallback_active = plant.internal_output::<bool>(PointId(21), false);
+
+    let fallback = plant.add(DemandFallbackSpec::new(parameters_map));
+    plant.connect(input, fallback.input);
+    plant.connect(pv, fallback.pv);
+    plant.connect(&fallback.out, out);
+    plant.connect(&fallback.fallback_active, fallback_active);
+    plant
+}
+
+fn demand_fallback_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("on_bad", Value::Int(0)),
+        ("fallback_flow", Value::Float(25.0)),
+        ("safe_flow", Value::Float(5.0)),
+    ])
+}
+
+#[test]
+fn demand_fallback_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(demand_fallback_plant(demand_fallback_parameters()));
+    assert_eq!(model.components[0].kind, DemandFallbackSpec::KIND);
+}
+
+#[test]
+fn demand_fallback_rejects_an_out_of_range_response() {
+    // `on_bad` declares the code range `0..=2`; a code outside it is
+    // `ParameterOutOfRange` at `build`, before the document exists.
+    let mut parameters_map = demand_fallback_parameters();
+    parameters_map.insert("on_bad".to_string(), Value::Int(4));
+    assert!(matches!(
+        demand_fallback_plant(parameters_map).build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "on_bad"
+    ));
+}
+
+/// The `feedforward-sum` plant the tests wire: scripted channels for
+/// `ff` and `trim`, internal carriers for the three outputs.
+fn feedforward_sum_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let ff_raw = plant.channel::<f64>(sim, "ff", Direction::In);
+    let trim_raw = plant.channel::<f64>(sim, "trim", Direction::In);
+
+    let ff = plant.field_input::<f64>(PointId(10), ff_raw, false);
+    let trim = plant.field_input::<f64>(PointId(11), trim_raw, false);
+    let out = plant.internal_output::<f64>(PointId(20), 0.0);
+    let clamped = plant.internal_output::<bool>(PointId(21), false);
+    let fallback_active = plant.internal_output::<bool>(PointId(22), false);
+
+    let sum = plant.add(FeedforwardSumSpec::new(parameters_map));
+    plant.connect(ff, sum.ff);
+    plant.connect(trim, sum.trim);
+    plant.connect(&sum.out, out);
+    plant.connect(&sum.clamped, clamped);
+    plant.connect(&sum.fallback_active, fallback_active);
+    plant
+}
+
+fn feedforward_sum_parameters() -> dcs_build::Parameters {
+    parameters([
+        ("trim_min", Value::Float(-10.0)),
+        ("trim_max", Value::Float(10.0)),
+        ("min_demand", Value::Float(0.0)),
+        ("max_demand", Value::Float(100.0)),
+        ("on_bad_ff", Value::Int(0)),
+        ("on_bad_trim", Value::Int(0)),
+    ])
+}
+
+#[test]
+fn feedforward_sum_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(feedforward_sum_plant(feedforward_sum_parameters()));
+    assert_eq!(model.components[0].kind, FeedforwardSumSpec::KIND);
+}
+
+#[test]
+fn feedforward_sum_rejects_an_out_of_range_response() {
+    // `on_bad_ff`/`on_bad_trim` declare the binary code range `0..=1`;
+    // a code outside it is `ParameterOutOfRange` at `build`, before
+    // the document exists.
+    for parameter in ["on_bad_ff", "on_bad_trim"] {
+        let mut parameters_map = feedforward_sum_parameters();
+        parameters_map.insert(parameter.to_string(), Value::Int(4));
+        assert!(matches!(
+            feedforward_sum_plant(parameters_map).build(),
+            Err(BuildError::ParameterOutOfRange { parameter: found, .. })
+                if found == parameter
+        ));
+    }
+}
+
+/// The `rate-of-rise` plant the tests wire: a scripted `in` channel
+/// and internal carriers for the `rate` and `rising` outputs.
+fn rate_of_rise_plant(parameters_map: dcs_build::Parameters) -> PlantBuilder {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let level_raw = plant.channel::<f64>(sim, "level", Direction::In);
+
+    let input = plant.field_input::<f64>(PointId(10), level_raw, false);
+    let rate = plant.internal_output::<f64>(PointId(20), 0.0);
+    let rising = plant.internal_output::<bool>(PointId(21), false);
+
+    let monitor = plant.add(RateOfRiseSpec::new(parameters_map));
+    plant.connect(input, monitor.input);
+    plant.connect(&monitor.rate, rate);
+    plant.connect(&monitor.rising, rising);
+    plant
+}
+
+#[test]
+fn rate_of_rise_spec_emits_an_assembling_document() {
+    let model = build_load_assemble(rate_of_rise_plant(parameters([
+        ("rate_limit", Value::Float(0.5)),
+        ("initial_rate", Value::Float(0.0)),
+    ])));
+    assert_eq!(model.components[0].kind, RateOfRiseSpec::KIND);
+}
+
+#[test]
+fn rate_of_rise_rejects_a_non_positive_bound() {
+    // `rate_limit` declares the strictly positive range; a zero bound
+    // is `ParameterOutOfRange` at `build`, before the document exists.
+    assert!(matches!(
+        rate_of_rise_plant(parameters([
+            ("rate_limit", Value::Float(0.0)),
+            ("initial_rate", Value::Float(0.0)),
+        ]))
+        .build(),
+        Err(BuildError::ParameterOutOfRange { ref parameter, .. }) if parameter == "rate_limit"
+    ));
+}
+
 #[test]
 fn field_input_stale_after_emits_and_enforces_the_budget() {
     let mut plant = PlantBuilder::new();
@@ -667,7 +1190,7 @@ fn field_input_stale_after_emits_and_enforces_the_budget() {
     let driver = sim_driver(&reloaded).unwrap();
     let mut executor = assemble(&reloaded, &dcs_controller::registry(), &driver).unwrap();
     driver.write(pv.into(), Value::Float(7.0)).unwrap();
-    executor.run(3).unwrap();
+    executor.run(3);
     let sample = executor
         .snapshot()
         .points
@@ -680,6 +1203,58 @@ fn field_input_stale_after_emits_and_enforces_the_budget() {
         dcs_core::Quality::Uncertain(dcs_core::QualityReason::Stale)
     );
     assert_eq!(sample.tick, dcs_core::Tick(3));
+}
+
+#[test]
+fn journaled_declaration_lands_on_the_emitted_points() {
+    let mut plant = PlantBuilder::new();
+    let sim = plant.device("sim").id;
+    let fault_raw = plant.channel::<bool>(sim, "fault", Direction::In);
+
+    // The lifecycle-audit shapes: a journaled field `in` status point,
+    // a journaled writable `ack` command point, and a journaled
+    // internal `out` status point — marked by handle or bare id.
+    let pv = plant.field_input::<bool>(PointId(10), fault_raw, false);
+    let ack = plant.internal_input::<bool>(PointId(11), false, true);
+    let _alarm = plant.internal_output::<bool>(PointId(12), false);
+    let _unmarked = plant.internal_output::<bool>(PointId(13), false);
+    plant.journaled(pv);
+    plant.journaled(ack);
+    plant.journaled(PointId(12));
+
+    let model = plant.build().unwrap();
+    for point in &model.io_points {
+        assert_eq!(point.journaled, point.id.0 != 13, "{point:?}");
+    }
+
+    // The emitted document reloads through `dcs-model`'s validating
+    // loader unchanged — the flag survives the document contract.
+    let json = serde_json::to_string_pretty(&model).unwrap();
+    assert_eq!(PlantModel::load(&json).unwrap(), model);
+}
+
+#[test]
+fn journaled_float_point_is_a_build_error() {
+    // The durable record's low-volume bound rides `build`'s validation:
+    // a journaled `Float` point is `Invalid(JournaledFloat)` naming the
+    // point, not a silently emitted declaration.
+    let mut plant = PlantBuilder::new();
+    let setpoint = plant.internal_input::<f64>(PointId(10), 0.0, true);
+    plant.journaled(setpoint);
+    assert!(matches!(
+        plant.build(),
+        Err(BuildError::Invalid(ref errors))
+            if errors.contains(&dcs_model::ValidationError::JournaledFloat {
+                point: PointId(10)
+            })
+    ));
+}
+
+#[test]
+#[should_panic(expected = "journaled names undeclared io_point 77")]
+fn journaled_names_a_declared_point() {
+    let mut plant = PlantBuilder::new();
+    plant.journaled(PointId(77));
 }
 
 /// The `backwash-coordinator` plant both reorder cases wire: three
@@ -920,6 +1495,8 @@ fn every_registered_kind_has_a_spec() {
         AlarmMonitorSpec::KIND,
         LatchingAlarmSpec::KIND,
         BoolLatchingAlarmSpec::KIND,
+        ManagedLatchingAlarmSpec::KIND,
+        ManagedBoolLatchingAlarmSpec::KIND,
         InterlockSpec::KIND,
         OverrideSelectSpec::KIND,
         ValveSpec::KIND,
@@ -942,6 +1519,13 @@ fn every_registered_kind_has_a_spec() {
         DeviationMonitorSpec::KIND,
         BackwashCoordinatorSpec::KIND,
         BackwashSequenceSpec::KIND,
+        HeaderCoordinatorSpec::KIND,
+        BlowerGroupSpec::KIND,
+        PhaseMonitorSpec::KIND,
+        SurgeGuardSpec::KIND,
+        DemandFallbackSpec::KIND,
+        FeedforwardSumSpec::KIND,
+        RateOfRiseSpec::KIND,
     ]
     .into_iter()
     .collect();

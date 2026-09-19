@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-ai",
+      "channels": {
+        "well_level": { "direction": "in", "value_type": "float" },
+        "well_inflow": { "direction": "in", "value_type": "float" },
+        "sis_draw": { "direction": "in", "value_type": "float" },
+        "net_flow": { "direction": "in", "value_type": "float" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "sim-di",
+      "channels": {
+        "sis_active": { "direction": "in", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "well_level" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "well_inflow" },
+      "writable": true
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "sis_draw" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "net_flow" }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 2, "name": "sis_active" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "well-level",
+      "source": 10,
+      "unit": "m",
+      "description": "Wet-well level measurement"
+    },
+    {
+      "id": 101,
+      "name": "well-inflow",
+      "source": 11,
+      "unit": "m3/h",
+      "description": "Inflow into the wet well"
+    },
+    {
+      "id": 102,
+      "name": "sis-draw",
+      "source": 12,
+      "unit": "m3/h",
+      "description": "Protection layer emergency draw"
+    },
+    {
+      "id": 103,
+      "name": "net-flow",
+      "source": 13,
+      "unit": "m3/h",
+      "description": "Summed net flow into the well"
+    },
+    {
+      "id": 104,
+      "name": "sis-active",
+      "source": 30,
+      "description": "Protection layer actuation contact"
+    }
+  ],
+  "components": [],
+  "connections": []
+}

@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "level": [
+            { "tick": 0, "value": 5.0 },
+            { "tick": 5, "value": 6.0 },
+            { "tick": 6, "value": 7.0 },
+            { "tick": 7, "value": 7.25 },
+            { "tick": 10, "value": 5.0 },
+            { "tick": 11, "value": 2.0 },
+            { "tick": 15, "value": 3.0 },
+            { "tick": 16, "value": 4.0 },
+            { "tick": 17, "value": 99.0, "quality": "bad", "reason": "communication_fault" },
+            { "tick": 19, "value": 9.0 },
+            { "tick": 22, "value": 9.0, "quality": "uncertain", "reason": "stale" },
+            { "tick": 25, "value": 9.0 }
+          ]
+        }
+      },
+      "channels": {
+        "level": { "direction": "in", "value_type": "float" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "level" }
+    },
+    {
+      "id": 20,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 21,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    },
+    {
+      "id": 22,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
+    },
+    {
+      "id": 23,
+      "direction": "out",
+      "value_type": "bool",
+      "initial": { "bool": false }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "wet-well-level",
+      "source": 10,
+      "unit": "m",
+      "description": "Measured wet-well level the rate-of-rise watches"
+    },
+    {
+      "id": 101,
+      "name": "level-rate",
+      "source": 20,
+      "unit": "m/tick",
+      "description": "Per-scan first difference of the level — the evidence beside the flag"
+    },
+    {
+      "id": 102,
+      "name": "level-rising-fast",
+      "source": 21,
+      "description": "Rise-exceeds-bound condition feeding the station's rate-of-rise alarm"
+    },
+    {
+      "id": 103,
+      "name": "level-rate-covered",
+      "source": 22,
+      "unit": "m/tick",
+      "description": "Per-scan first difference of the declared-initial instance"
+    },
+    {
+      "id": 104,
+      "name": "level-rising-fast-covered",
+      "source": 23,
+      "description": "The declared-initial instance's flag — asserted until the first Good pair"
+    }
+  ],
+  "components": [
+    {
+      "id": 1,
+      "kind": "rate-of-rise",
+      "parameters": {
+        "rate_limit": { "float": 0.5 },
+        "initial_rate": { "float": 0.0 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "rate": { "direction": "out", "value_type": "float" },
+        "rising": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 2,
+      "kind": "rate-of-rise",
+      "parameters": {
+        "rate_limit": { "float": 0.5 },
+        "initial_rate": { "float": 0.75 }
+      },
+      "ports": {
+        "in": { "direction": "in", "value_type": "float" },
+        "rate": { "direction": "out", "value_type": "float" },
+        "rising": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 1, "name": "in" } }
+    },
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 2, "name": "in" } }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "rate" } },
+      "to": { "point": 20 }
+    },
+    {
+      "from": { "port": { "component": 1, "name": "rising" } },
+      "to": { "point": 21 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "rate" } },
+      "to": { "point": 22 }
+    },
+    {
+      "from": { "port": { "component": 2, "name": "rising" } },
+      "to": { "point": 23 }
+    }
+  ]
+}

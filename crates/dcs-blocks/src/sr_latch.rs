@@ -327,6 +327,7 @@ mod tests {
             id: ComponentId(31),
             kind: SrLatch::KIND.to_string(),
             parameters: Parameters::new(),
+            rationalization: None,
             ports: BTreeMap::new(),
         };
         let block = SrLatch::from_parameters("srl", SET, RESET, OUT, &instance.parameters).unwrap();
