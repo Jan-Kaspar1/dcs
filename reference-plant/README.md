@@ -95,6 +95,16 @@ ci/availability.py     the pair contract's command-availability leg —
                        both peers' adopted receipt log, and the
                        kind-declared advance's refusal exercised where
                        the tooling publishes verdicts
+ci/failover.py         the pair contract's automatic-failover leg —
+                       the manifest's failover_budget arming the
+                       standby's --auto-promote, the field-owning
+                       container stopped, the surviving peer's miss
+                       run and self-promotion at the declared budget
+                       asserted through its served surface and the
+                       plant's writer claim, the run continuing
+                       bumplessly, and the durable journal's
+                       transition record audited beside a
+                       severed-standby variant reporting no failover
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -490,6 +500,41 @@ served-available command settling a refusal at the standby's role
 gate, and a standby reporting different verdicts — must report the
 named diagnostic rather than pass silently.
 
+The stage's automatic-failover leg — `ci/failover.py` on the same
+declared deployment — then proves the unattended half of the
+redundancy contract on the customer's pair: a dead active's armed
+standby self-promoting at its declared miss budget with no operator
+request. The manifest's `failover_budget` is what arms it — the
+declaration instantiates as the standby's `--auto-promote` flag, so
+a declared pair without the field tracks and switches manually but
+never self-promotes. The leg converges the pair, stops the
+field-owning container — the honest severance a dead controller is —
+and drives the surviving peer's scans: each `POST /scan`'s
+checkpoint pull fails, `GET /role` reports the miss run as `standby`
+under the `degraded` sync state, and the field's writer claim keeps
+fencing a foreign attachment — the dead owner's silence is exactly
+the failure the claim exists to fence. At the declared budget's scan
+boundary the leg asserts `GET /role` settles `active` at the
+expected tick, and probes the plant's writer claim through the
+run's plant-protocol client: a foreign attachment's mutation stays
+`fenced` while the promoted peer's own writes demonstrably land —
+the claim the promotion took before its gate lifted now names this
+peer. The run must continue bumplessly: subsequent driven scans
+keep writing the field, the promoted peer's steps move the process
+the dead owner left frozen, and a receipted kind-declared command
+settles `applied`. The promoted peer's durable `--journal-file`
+must carry `standby → promoting → active` in `seq` order attributed
+to the budget boundary — the automatic transition reading
+distinguishably from an operator-requested switch: where the
+recorded non-operator marker of the attributed role switch has
+landed the entry names it; where it has not, the entry carries no
+operator actor rather than a fabricated one. A variant run severs
+the standby instead: the field owner's writes run undisturbed and
+nothing reports a failover. A violated contract fails
+`failover-failed`; two passes must produce the identical
+`failover-digest`, a divergence failing
+`failover-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -569,6 +614,14 @@ and the redundant controller pair:
 - `plant.listen` — the plant server's listen address.
 - `controllers` — the duty controller and its tracking standby
   (`standby` names the peer it follows).
+- `controllers[].failover_budget` — **optional**, on a standby entry
+  only: the consecutive-missed-pull budget at which the tracking
+  standby self-promotes when its active dies — the declaration that
+  arms automatic failover. It instantiates as the invocation's
+  `--auto-promote` flag carrying exactly it; declaring the pair's
+  `standby` wiring alone never arms it. A standby deployment without
+  the field switches only through the operator's receipted
+  `demote`/`promote` path.
 - `controllers[].state_file` / `controllers[].journal_file` —
   **optional** per-controller container paths for the runtime's two
   durability files: `state_file` is the restart-recovery checkpoint —
@@ -599,8 +652,11 @@ environment — the identity checkpoint negotiation verifies on the
 wire. The check's `deploy` stage parses the file through `docker
 compose config` (or an equivalent YAML parser) and asserts it agrees
 with the manifest on every field — release, images, mounts,
-fingerprint, listen addresses, and pair wiring; a divergence fails
-`rig-mismatch`, an unparsable file `rig-invalid`, a host with
+fingerprint, listen addresses, pair wiring, and the standby's
+`failover_budget` against its `--auto-promote` flag — a declared
+budget with no flag, a flag with no declaration, a diverging value,
+or the field placed on the duty entry each fail `rig-mismatch`, an
+unparsable file `rig-invalid`, a host with
 neither parser `rig-unverifiable`.
 
 Running the rig is the customer action: with the release's images
@@ -620,8 +676,14 @@ other as `?peer=`:
 http://localhost:8080/?peer=localhost:8081
 ```
 
-The documented switchover is `POST /demote` on the field-owning peer's
-published port followed by `POST /promote` on the converged standby's;
+The declared `failover_budget` rides ctrl-b's `--auto-promote` flag:
+with ctrl-a dead — stopped, crashed, or partitioned — the tracking
+standby's checkpoint pulls miss, and at the third consecutive miss it
+self-promotes at a scan boundary, taking the plant's writer claim so
+a still-alive old owner's writes fence at the field rather than
+doubling them. The documented manual switchover stays `POST /demote`
+on the field-owning peer's published port followed by `POST /promote`
+on the converged standby's;
 `docker compose -f deploy/compose.yaml down` removes the containers
 and the rig network.
 
@@ -681,6 +743,12 @@ landing on the field owner's monitor — the checkpoint read refusing
 to answer, or the demoted peer stranding `unsynchronized` instead of
 tracking its real successor — is `peer-announce-failed`; two
 peer-announce passes diverging is `peer-announce-nondeterministic`;
+an armed standby failing to self-promote at its declared budget —
+the miss run unreported, the writer claim not fencing foreign writes
+while the promoted peer's writes land, the run not continuing, or
+the durable journal's transition record diverging — is
+`failover-failed`; two failover-leg passes diverging is
+`failover-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
