@@ -37,11 +37,22 @@
 //! record rather than silently dropping the audit trail; a missing
 //! file is a cold start. Point history stays volatile: only the
 //! journal persists.
+//!
+//! One path has one live writer. The open takes an exclusive advisory
+//! lock on the file held for the process lifetime, so two processes
+//! configured with the same `--journal-file` — a same-host deployment
+//! misconfiguration — cannot both run: each recorder continues `seq`
+//! numbering from its own replay point, and concurrent writers would
+//! interleave duplicate `seq`s, leaving the file un-replayable for
+//! *every* subsequent startup. The second opener's bind instead fails
+//! naming the file and the live-holder conflict. The lock releases
+//! with the holder's file descriptor, so an ordinary restart —
+//! including a killed process's — re-acquires it immediately.
 
 use dcs_core::{JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -200,23 +211,45 @@ pub(super) struct JournalFile {
 }
 
 impl JournalFile {
-    /// Opens `path` as this process's journal file: an existing file is
-    /// replayed into a [`Replay`] first — any unreadable, torn, or
-    /// corrupt record fails by name — then this run's boundary marker
-    /// is appended; a missing file is a cold start, created holding
-    /// `run` 1's marker. `tick` is the tick this run starts at — the
-    /// restored tick for a `--state-file` resume, `0` cold.
+    /// Opens `path` as this process's journal file: the append handle
+    /// takes an exclusive advisory lock held until the file closes —
+    /// a second live writer on the same path fails here naming the
+    /// conflict, because two writers each continuing `seq` from their
+    /// own replay point would interleave duplicate `seq`s and leave
+    /// the record un-replayable at the next startup. Under the lock, an
+    /// existing file is replayed into a [`Replay`] first — any
+    /// unreadable, torn, or corrupt record fails by name — then this
+    /// run's boundary marker is appended; a missing file is a cold
+    /// start, created holding `run` 1's marker. `tick` is the tick this
+    /// run starts at — the restored tick for a `--state-file` resume,
+    /// `0` cold.
     pub(super) fn open(path: &Path, capacity: usize, tick: Tick) -> io::Result<(Self, Replay)> {
-        let replay = match File::open(path) {
-            Ok(file) => replay(file, path, capacity)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Replay::default(),
-            Err(error) => return Err(named(path, "cannot read journal file", error)),
-        };
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .map_err(|error| named(path, "cannot open journal file", error))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(named(
+                    path,
+                    "cannot open journal file",
+                    "a live process already holds its writer lock — two writers \
+                     on one --journal-file interleave duplicate seqs and leave \
+                     the record un-replayable; give each process its own journal \
+                     file (the holder's identity is `fuser`/`lsof` on the path)",
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(named(path, "cannot lock journal file", error));
+            }
+        }
+        let replay = match File::open(path) {
+            Ok(file) => replay(file, path, capacity)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Replay::default(),
+            Err(error) => return Err(named(path, "cannot read journal file", error)),
+        };
         let mut sink = Self {
             path: path.to_path_buf(),
             file,
@@ -575,6 +608,49 @@ mod tests {
         // The repaired file replays fine — the failures named the
         // record, not the file itself.
         crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_live_writer_on_the_same_path_fails_naming_the_conflict() {
+        let dir = scratch("shared");
+        let path = dir.join("journal.jsonl");
+
+        // The first writer binds and journals, holding the file's
+        // writer lock for its lifetime.
+        let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        first.note_settled(receipt(10, 1), Tick(1));
+
+        // The misconfiguration — a second writer on the same path —
+        // fails its bind naming the file and the live-holder conflict
+        // rather than interleaving duplicate seqs from its own replay
+        // point into the record.
+        let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO) {
+            Ok(_) => panic!("a second live writer on one journal file must fail its bind"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+        assert!(message.contains("writer lock"), "{message}");
+
+        // The holder keeps appending undisturbed, and once it dies —
+        // the lock releasing with its descriptor — the next opener
+        // replays the single-writer file and continues the seq domain
+        // across the run boundary.
+        first.note_settled(receipt(11, 2), Tick(2));
+        drop(first);
+        let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        second.note_settled(receipt(12, 3), Tick(3));
+        assert_eq!(second.journal(0).last().unwrap().seq, 4);
+        let data = read_journal_file(&path).unwrap();
+        assert_eq!(
+            data.entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(data.boundaries.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
