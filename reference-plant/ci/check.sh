@@ -314,6 +314,24 @@
 #                journal file — exit nonzero naming the failure; two
 #                passes produce identical digests
 #                (report-failed, report-nondeterministic)
+#                The stage's command-switch leg, ci/command_switch.py
+#                on the same declared deployment: with the pair settled
+#                and tracking, the exercise sequencer's kind-declared
+#                `advance` is invoked through the released `dcs-ctl
+#                invoke` consumer tooling before and after a receipted
+#                demote/promote — each submission settling exactly once
+#                with the applied receipt attributed to the serving peer
+#                and exactly one `command_settled` journal entry, no
+#                replay of the old peer's settlement — the emitted
+#                `step_completed` records continuing in tick order on
+#                the promoted peer with unchanged component attribution
+#                and no pre-promotion re-emission, a further invoke
+#                submitted immediately before the restore switch
+#                settling exactly once on the new active (never lost,
+#                never double-applied), and the pair's launch roles
+#                restored; two passes produce identical digests
+#                (command-switch-failed,
+#                command-switch-nondeterministic)
 #                The stage's managed-lifecycle leg,
 #                ci/managed_lifecycle.py on the same declared
 #                deployment: with the pair tracking, the emitted
@@ -1508,6 +1526,52 @@ for tamper in expect-quiet unreachable-monitor unreadable-journal; do
     echo "  $tamper: reported, report-failed"
 done
 
+# The pair contract's command-switch leg, on the same
+# manifest-declared deployment: ci/command_switch.py converges the
+# pair, holds the exercise sequencer's `run` so one `step_completed`
+# emits, invokes the kind-declared `advance` through the released
+# `dcs-ctl invoke` on the field owner — asserting the accepted
+# submission settles applied with exactly one `command_settled`
+# journal entry — switches, invokes the same declared command on the
+# promoted peer with the same exactly-once attribution and no replay
+# of the old peer's settlement, joins the emitted-event records
+# continuing in tick order with unchanged attribution and no
+# pre-promotion re-emission, carries a further invoke submitted
+# immediately before the restore switch to exactly one applied
+# settlement on the new active, and restores the launch roles. Two
+# passes must produce identical digests.
+run_command_switch() {
+    python3 ci/command_switch.py \
+        --ctl "$TOOLS/dcs-ctl" \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+[ -x "$TOOLS/dcs-ctl" ] \
+    || fail "command-switch-failed: the release tooling ships no dcs-ctl binary"
+FIRST="$(run_command_switch)" \
+    || fail "command-switch-failed: the command-switch leg did not hold — its evidence lines are above"
+SECOND="$(run_command_switch)" \
+    || fail "command-switch-failed: the command-switch leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "command-switch-nondeterministic: two command-switch passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a submission settling zero times and one
+# settling twice must each surface the named diagnostic — never a
+# silently miscounted exactly-once proof.
+for tamper in zero-settlement double-settlement; do
+    if out="$(run_command_switch --tamper "$tamper" 2>&1)"; then
+        fail "command-switch-unchecked: a $tamper case passed the command-switch leg"
+    fi
+    [[ "$out" == *"expected exactly one settlement"* ]] \
+        || fail "command-switch-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, command-switch-failed"
+done
+
 # The pair contract's managed-alarm lifecycle leg, on the same
 # manifest-declared deployment: ci/managed_lifecycle.py converges the
 # pair and exercises the emitted model's declared managed-alarm
@@ -1561,7 +1625,8 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/availability.py ci/burst_order.py ci/consumers.py \
+for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
+        ci/consumers.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py \
         ci/managed_lifecycle.py ci/pair.py ci/peer_announce.py \

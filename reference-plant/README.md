@@ -134,19 +134,29 @@ ci/standby_restart.py  the pair contract's standby-restart leg —
                        writes, receipts, and journal run undisturbed,
                        then promoting to prove the pair left whole
 ci/report.py           the pair contract's alarm-report leg — the
-                       released `dcs-alarm-report` computing the
-                       declared AlarmReport metric set over the
-                       driven pair's served journal and the field
-                       owner's durable journal file, its refusal
-                       modes exiting nonzero
+                        released `dcs-alarm-report` computing the
+                        declared AlarmReport metric set over the
+                        driven pair's served journal and the field
+                        owner's durable journal file, its refusal
+                        modes exiting nonzero
+ci/command_switch.py   the pair contract's command-switch leg — the
+                        exercise sequencer's kind-declared `advance`
+                        invoked through the released `dcs-ctl invoke`
+                        before and after a receipted demote/promote,
+                        each submission settling exactly once with
+                        the receipt attributed to the serving peer,
+                        the emitted events continuing monotonically
+                        with unchanged attribution, a carried invoke
+                        settling exactly once across the restore
+                        switch, and the pair's launch roles restored
 ci/managed_lifecycle.py  the pair contract's managed-alarm
-                       lifecycle leg — the emitted model's whole
-                       managed-alarm surface exercised end to end
-                       on the deployed pair: activation, attributed
-                       ack, the bounded shelve and its auto-release,
-                       the named never-shelvable refusal, and the
-                       designed oos/suppress wiring through its
-                       suppressed trip and return to service
+                        lifecycle leg — the emitted model's whole
+                        managed-alarm surface exercised end to end
+                        on the deployed pair: activation, attributed
+                        ack, the bounded shelve and its auto-release,
+                        the named never-shelvable refusal, and the
+                        designed oos/suppress wiring through its
+                        suppressed trip and return to service
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -717,6 +727,36 @@ failing `report-nondeterministic`. The leg's doctored cases — an
 expectation asserting the driven alarm left no activation, a dead
 monitor address, and a missing journal path — must each report the
 named diagnostic rather than pass silently.
+
+The stage's command-switch leg — `ci/command_switch.py` on the same
+declared deployment — then proves the consumer side of the
+command-across-promotion contract on the customer's pair: a declared
+command invoked through the released tooling while a switchover lands
+keeps its receipt — never lost, never double-applied. With the pair
+settled and tracking, the leg holds the exercise sequencer's `run`
+input across its declared step length so one `step_completed` emits,
+then submits the kind-declared `advance` through `dcs-ctl invoke` on
+the field owner — the `accepted` submission must settle `applied`
+with exactly one `command_settled` journal entry on the serving peer,
+adopted identically on the tracking standby. The `demote`/`promote`
+switch lands; on the promoted peer the leg reopens the table and
+submits the same declared command in its default-one shape — exactly
+one settlement there too, each submission's count attributed to the
+peer that served it and the old peer's settlement replayed on neither
+side. The promoted peer's emitted-event record must continue the
+pre-promotion `step_completed` entries as its prefix — new entries at
+greater ticks with unchanged component attribution and none
+re-emitted. A further `advance` submitted immediately before the
+restore switch — still `Accepted` when the boundary lands — rides the
+promotion's final-sync checkpoint and must settle exactly once
+`applied` on the restored active with no applied settlement on the
+demoted peer. The leg restores the pair's launch roles, leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `command-switch-failed`; two passes must
+produce the identical `command-switch-digest`, a divergence failing
+`command-switch-nondeterministic`. The leg's doctored cases — a
+submission settling zero times and one settling twice — must each
+report the named diagnostic rather than pass silently.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole
