@@ -22,6 +22,12 @@ declares:
   matching its declared address and publishing its monitor port, and
   the tracking standby's `--standby` flag plus startup ordering wired
   to the peer the manifest names;
+- `controllers[].failover_budget` — the optional automatic-failover
+  declaration on a standby entry (decision 28): a declared budget must
+  ride the invocation's `--auto-promote` flag carrying exactly it, a
+  budget the manifest omits means the flag is absent, and the field
+  belongs to a tracking standby only — a duty entry declaring it
+  diverges the same way;
 - `controllers[].state_file` / `controllers[].journal_file` — the
   optional durability paths (decisions 35 and 36): each declared
   container path must be covered by a read-write mount and carried as
@@ -348,6 +354,45 @@ def main():
                 flag(svc["argv"], "--standby") is None,
                 f"{name} passes --standby {flag(svc['argv'], '--standby')!r} "
                 f"but the manifest declares it a duty controller",
+            )
+        # Automatic failover: the optional failover_budget declaration
+        # arms the tracking standby's --auto-promote flag with the
+        # missed-pull budget at which it self-promotes. A declared
+        # budget means the flag carries exactly it and the field
+        # belongs on a standby entry only; a flag the manifest does
+        # not declare diverges the same way.
+        budget = controller.get("failover_budget")
+        promote_flag = flag(svc["argv"], "--auto-promote")
+        if "standby" in controller:
+            if budget is None:
+                expect(
+                    promote_flag is None,
+                    f"{name} passes --auto-promote {promote_flag!r} but "
+                    "the manifest declares no failover_budget",
+                )
+            else:
+                expect(
+                    isinstance(budget, int)
+                    and not isinstance(budget, bool)
+                    and budget >= 1,
+                    f"manifest failover_budget {budget!r} for {name} is "
+                    "not a positive integer",
+                )
+                expect(
+                    promote_flag == str(budget),
+                    f"{name} --auto-promote is {promote_flag!r}, manifest "
+                    f"failover_budget is {budget!r}",
+                )
+        else:
+            expect(
+                budget is None,
+                f"{name} declares failover_budget {budget!r} — automatic "
+                "failover arms a tracking standby, which this entry is not",
+            )
+            expect(
+                promote_flag is None,
+                f"{name} passes --auto-promote {promote_flag!r} but the "
+                "manifest declares it a duty controller",
             )
         if plant_name:
             expect(

@@ -51,7 +51,7 @@ mod signal;
 mod state;
 mod telemetry;
 
-pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement};
+pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement, RevertedParameter};
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,

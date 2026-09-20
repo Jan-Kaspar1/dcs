@@ -125,7 +125,7 @@ pub fn read_journal_file(path: &Path) -> io::Result<JournalData> {
                     ));
                 }
                 next_seq = entry.seq + 1;
-                data.entries.push(entry);
+                data.entries.push(*entry);
             }
             JournalRecord::RunBoundary { run, tick } => {
                 data.boundaries.push(RunBoundary {
@@ -144,8 +144,9 @@ pub fn read_journal_file(path: &Path) -> io::Result<JournalData> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum JournalRecord {
-    /// A journaled entry, verbatim.
-    Entry(JournalEntry),
+    /// A journaled entry, verbatim — boxed beside the small
+    /// `RunBoundary` marker so the record's size stays the marker's.
+    Entry(Box<JournalEntry>),
     /// The start of a new process lifetime in this file — see the
     /// module docs for the fields' meaning.
     RunBoundary {
@@ -230,7 +231,7 @@ impl JournalFile {
     /// Appends `entry` as one line — the write every journaled entry
     /// takes at the recording point.
     pub(super) fn append(&mut self, entry: &JournalEntry) -> io::Result<()> {
-        self.write(&JournalRecord::Entry(entry.clone()))
+        self.write(&JournalRecord::Entry(Box::new(entry.clone())))
     }
 
     /// Serializes `record` as one line and appends it — a direct
@@ -296,7 +297,7 @@ fn replay(file: File, path: &Path, capacity: usize) -> io::Result<Replay> {
                     }
                     _ => {}
                 }
-                replayed.entries.push_back(entry);
+                replayed.entries.push_back(*entry);
                 while replayed.entries.len() > capacity {
                     replayed.entries.pop_front();
                 }
@@ -374,20 +375,20 @@ mod tests {
                     run: 1,
                     tick: Tick::ZERO
                 },
-                JournalRecord::Entry(JournalEntry {
+                JournalRecord::Entry(Box::new(JournalEntry {
                     seq: 1,
                     tick: Tick(1),
                     event: dcs_core::JournalEvent::CommandSettled {
                         receipt: receipt(10, 1)
                     },
-                }),
-                JournalRecord::Entry(JournalEntry {
+                })),
+                JournalRecord::Entry(Box::new(JournalEntry {
                     seq: 2,
                     tick: Tick(2),
                     event: dcs_core::JournalEvent::CommandSettled {
                         receipt: receipt(11, 2)
                     },
-                }),
+                })),
             ]
         );
         drop(recorder);

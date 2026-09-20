@@ -174,7 +174,7 @@ fn mixed_sim_and_bus_kinds_assemble_scan_and_route() {
         // the remote level register at each step, so the loop closes
         // over the register protocol.
         for _ in 0..400 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         let Value::Float(valve) = driver.read(VALVE).unwrap().value else {
@@ -242,7 +242,7 @@ fn sim_bus_run_matches_the_all_local_reference() {
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1);
         }
         serde_json::to_string(&executor.snapshot()).unwrap()
@@ -258,7 +258,7 @@ fn sim_bus_run_matches_the_all_local_reference() {
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         executor.snapshot()
@@ -294,7 +294,7 @@ fn two_identical_sim_bus_runs_produce_identical_snapshots() {
             let mut executor = assemble(&model, &registry(), &driver).unwrap();
             driver.write(SETPOINT, Value::Float(50.0)).unwrap();
             for _ in 0..50 {
-                executor.scan().unwrap();
+                executor.scan();
                 driver.step(0.1).unwrap();
             }
             serde_json::to_string(&executor.snapshot()).unwrap()
@@ -312,7 +312,7 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         let model = mixed_model(addr);
         let driver = build_driver(&model);
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor
                 .snapshot()
@@ -370,7 +370,7 @@ fn server_loss_surfaces_named_io_errors_and_degrades_the_scan() {
         // The local simulated backend is unaffected, and the scan
         // degrades the remote input to Bad rather than panicking.
         driver.write(SETPOINT, Value::Float(40.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         let sample = snapshot
             .points

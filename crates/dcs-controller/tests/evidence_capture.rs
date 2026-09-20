@@ -198,9 +198,30 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
         // The standby's next scan pulls the checkpoint carrying the
         // still-`Accepted` receipt — the re-queue keeps the command
         // alive across the pair — then the active's own boundary
-        // settles it at the same tick.
+        // settles it at the same tick. Per #689 the tracker's quiesced
+        // scan carries the adopted receipt rather than settling it, so
+        // one further pull adopts the applied checkpoint and the two
+        // logs converge on the single settlement.
         standby_client.advance(1).unwrap();
         active_client.advance(1).unwrap();
+        standby_client.advance(1).unwrap();
+        // #689's one-cycle lag, healed: the tracker's quiesced scan
+        // carried the adopted receipt without settling it, so the
+        // staged outputs it computed lagged the field by the command's
+        // effect and the adopting pull named divergence. The next
+        // cycle reads the commanded field and stages matching outputs,
+        // so the following pull's same-tick comparison resyncs to
+        // tracking — bounded here, deterministically one more cycle.
+        for _ in 0..5 {
+            if matches!(
+                standby_client.role().unwrap().sync,
+                Some(dcs_core::StandbySync::Tracking { .. })
+            ) {
+                break;
+            }
+            active_client.advance(1).unwrap();
+            standby_client.advance(1).unwrap();
+        }
 
         // The finding: the peer that never saw the submission serves an
         // empty receipt log. Now the checkpoint carries the audit — the
