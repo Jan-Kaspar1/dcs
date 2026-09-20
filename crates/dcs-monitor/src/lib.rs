@@ -62,7 +62,11 @@
 //!   `?since=<seq>` returns only samples newer than the caller's last
 //!   seen sequence — an evicted stretch surfaces as a numbering gap
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
-//!   journal in scan order; `?since=<seq>` filters likewise
+//!   journal in scan order; `?since=<seq>` filters likewise. The tail
+//!   is bounded, but `run_boundary` entries are pinned: evicting one
+//!   would silently merge two process lifetimes in the served audit,
+//!   so the markers outlive ordinary event volume and answer ahead of
+//!   the retained tail in `seq` order
 //! - `GET /schema` → `200` [`SchemaView`] — the served block-interface
 //!   registry of the schema-driven-interface decision: one instance-level
 //!   [`BlockInterface`](dcs_core::BlockInterface) per component instance,
@@ -98,7 +102,9 @@
 //!   the checkpoint is always a consistent between-scans capture. A
 //!   pull's `?peer=` announces the pulling monitor's own address — the
 //!   follow-peer half of the tracking-source contract, accepted only
-//!   when it names the request's own source address — so this instance
+//!   when it names the request's own source address (a wildcard-bound
+//!   puller's `0.0.0.0` resolves to that address, so a demotion never
+//!   follows an undialable source) — so this instance
 //!   knows where to track if it is later demoted
 //! - `GET /role` → `200` [`RoleReport`] — the instance's reported role
 //!   in a redundant pair (`active`, `standby`, or a transition state)
@@ -176,7 +182,12 @@
 //! marker line separates process lifetimes within the file, and a
 //! restart's marker also journals once as a `run_boundary` entry so a
 //! `GET /journal` consumer attributes entries to a process lifetime —
-//! so `GET /journal` answers continuously across a restart; a file that
+//! so `GET /journal` answers continuously across a restart. Those
+//! served markers are pinned out of the tail's bound: ordinary event
+//! volume can age the boundary past the retained window, but the
+//! served answer keeps it — pinned entries answer ahead of the
+//! retained tail, and the replay keeps a marker its own tail bound
+//! evicted. A file that
 //! cannot be replayed fails startup naming the file and the offending
 //! record, and a missing file is a cold start. A run resumed through
 //! `--state-file` diffs its first scan against the restored executor
@@ -594,9 +605,11 @@ pub struct Monitor<'d> {
     /// is later demoted tracks its successor here, so a launched active
     /// demoted mid-run reconverges and stays promotable instead of
     /// stranding `unsynchronized` forever. An announce lands only when
-    /// it names the pulling connection's own source address — the read
-    /// endpoint cannot rewrite the tracking source for an unrelated
-    /// client. Outside `shared`: the value is request-path
+    /// it names the pulling connection's own source address — or the
+    /// wildcard a `0.0.0.0`-bound puller sends, which resolves to that
+    /// address — so the read endpoint can neither rewrite the tracking
+    /// source for an unrelated client nor record one no peer can
+    /// dial. Outside `shared`: the value is request-path
     /// bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
 }
@@ -757,7 +770,10 @@ impl<'d> Monitor<'d> {
     /// the configured [`with_standby_source`](Self::with_standby_source)
     /// when set, else the monitor address a tracking peer announced
     /// through its `GET /checkpoint?peer=` pulls — an announce accepted
-    /// only from the connection it names as its own address. The
+    /// only from the connection it names as its own address, with a
+    /// wildcard-announced IP resolved to that address and a port-0
+    /// claim refused, so the recorded source is always one a demotion
+    /// could dial. The
     /// announced fallback is the follow-peer half of the
     /// tracking-source contract: a peer launched without a source — an
     /// active never told its peer — that is later demoted tracks its
@@ -1149,9 +1165,10 @@ impl<'d> Monitor<'d> {
                 // puller's claim about itself, so it lands only from
                 // the connection it claims — `checkpoint_peer` accepts
                 // a `?peer=` naming the request's own source address
+                // (resolving a wildcard-bound puller's `0.0.0.0` to it)
                 // and ignores any other, so the read endpoint cannot
                 // rewrite the demotion tracking source for an
-                // unrelated client.
+                // unrelated client or record one that cannot be dialed.
                 if let Some(announced) = checkpoint_peer(query, remote) {
                     *self.announced.lock().unwrap() = Some(announced);
                 }
@@ -1586,10 +1603,13 @@ fn history_query(query: &str) -> Result<(Vec<PointId>, u64), String> {
 /// announced IP — a `0.0.0.0`-bound puller announcing "my port on
 /// every interface" — resolves to the source the connection proves.
 /// Any other value is a client claiming an address that is not its
-/// own and announces nothing, as do an absent or unparseable `peer`
-/// and a request whose source cannot be read: the checkpoint itself is
-/// still served, keeping older pullers and plain `GET /checkpoint`
-/// readers compatible.
+/// own and announces nothing, as do an absent or unparseable `peer`,
+/// a request whose source cannot be read, and a port-0 claim: no
+/// monitor listens on port 0, so installing the resolved
+/// `<remote>:0` would record a source no demotion could ever pull —
+/// the same stranding the wildcard address caused. The checkpoint
+/// itself is still served in every case, keeping older pullers and
+/// plain `GET /checkpoint` readers compatible.
 fn checkpoint_peer(query: &str, remote: Option<SocketAddr>) -> Option<SocketAddr> {
     let announced = query_pairs(query).find_map(|(key, value)| {
         if key == "peer" {
@@ -1598,6 +1618,9 @@ fn checkpoint_peer(query: &str, remote: Option<SocketAddr>) -> Option<SocketAddr
             None
         }
     })?;
+    if announced.port() == 0 {
+        return None;
+    }
     let remote = remote?;
     if announced.ip() == remote.ip() {
         Some(announced)
@@ -1949,7 +1972,9 @@ impl MonitorClient {
     }
 
     /// `GET /journal`: the retained transition-journal entries with a
-    /// `seq` above `since` (`0` fetches everything retained).
+    /// `seq` above `since` (`0` fetches everything retained) — the
+    /// pinned `run_boundary` markers included, ahead of the bounded
+    /// tail.
     pub fn journal(&self, since: u64) -> io::Result<Vec<JournalEntry>> {
         self.get_json(&format!("/journal?since={since}"))
     }
@@ -2225,5 +2250,45 @@ mod tests {
         assert_eq!(journal_query("since=7"), Ok(7));
         assert_eq!(journal_query(""), Ok(0));
         assert!(journal_query("since=soon").is_err());
+    }
+
+    /// The `?peer=` announce contract behind the
+    /// `checkpoint-announced-peer-unroutable-wildcard` finding: the
+    /// recorded tracking source is always a dialable address — the
+    /// puller's own claim when the connection proves it, or the
+    /// wildcard resolved to that proven source — and an unroutable or
+    /// foreign announce never lands at all.
+    #[test]
+    fn checkpoint_peer_records_only_a_dialable_self_claim() {
+        let remote: SocketAddr = "172.22.0.4:51000".parse().unwrap();
+        // The wildcard announce a `0.0.0.0`-bound puller sends —
+        // unroutable verbatim — resolves to the connection's proven
+        // source with the puller's announced monitor port.
+        assert_eq!(
+            checkpoint_peer("peer=0.0.0.0:8081", Some(remote)),
+            Some("172.22.0.4:8081".parse().unwrap())
+        );
+        assert_eq!(
+            checkpoint_peer("peer=[::]:8081", Some(remote)),
+            Some("172.22.0.4:8081".parse().unwrap())
+        );
+        // A claim naming the connection's own address lands verbatim.
+        assert_eq!(
+            checkpoint_peer("peer=172.22.0.4:8081", Some(remote)),
+            Some("172.22.0.4:8081".parse().unwrap())
+        );
+        // A foreign address announces nothing — the read endpoint
+        // cannot plant a tracking source for an unrelated client.
+        assert_eq!(checkpoint_peer("peer=10.9.9.9:8081", Some(remote)), None);
+        // Nothing parseable, absent, or sourceless lands either.
+        assert_eq!(checkpoint_peer("", Some(remote)), None);
+        assert_eq!(checkpoint_peer("peer=nonsense", Some(remote)), None);
+        assert_eq!(checkpoint_peer("peer=host:8081", Some(remote)), None);
+        assert_eq!(checkpoint_peer("peer=0.0.0.0:8081", None), None);
+        // A port-0 announce can never name a listening monitor:
+        // accepting it would install an undialable `<remote>:0`
+        // tracking source — the same strand the wildcard caused.
+        assert_eq!(checkpoint_peer("peer=0.0.0.0:0", Some(remote)), None);
+        assert_eq!(checkpoint_peer("peer=172.22.0.4:0", Some(remote)), None);
     }
 }

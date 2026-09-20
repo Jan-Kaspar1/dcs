@@ -7,13 +7,16 @@
 //! conflict; once the holder is gone the file replays for the next
 //! writer, `seq` numbering continuing across the run boundary.
 
-use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    Command, Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+};
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorConfig, read_journal_file};
+use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
 use dcs_runtime::{Executor, PointMap};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::thread;
 
 /// The same minimal in-memory driver the other monitor tests use.
 struct StubDriver {
@@ -122,5 +125,137 @@ fn a_second_monitor_on_the_same_journal_file_fails_its_bind_naming_the_conflict(
         "a single-writer file replays with contiguous seqs"
     );
     assert_eq!(data.boundaries.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #623's regression: `run_boundary` entries are the served markers a
+/// `GET /journal` consumer attributes entries to a process lifetime
+/// with — a bounded tail that evicts them under ordinary event volume
+/// merges two lifetimes invisibly, exactly what the marker exists to
+/// prevent. A journal file holding two lifetimes, a flood of journaled
+/// commands past the tail's bound, and a restart — whose replay must
+/// recover the marker its own retained tail already lost — and
+/// `GET /journal` still answers every served lifetime's boundary.
+#[test]
+fn served_run_boundaries_survive_a_flood_past_the_tail_bound() {
+    let dir = scratch("pinned-boundary");
+    let path = dir.join("journal.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let bind = || {
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(path.clone()),
+                journal_capacity: 8,
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    let flood = |monitor: &Monitor| {
+        thread::scope(|scope| {
+            scope.spawn(|| monitor.serve());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let client = MonitorClient::new(monitor.local_addr());
+                // More journaled commands than the ring retains — the
+                // reproduction's flood.
+                for value in 0..16_u64 {
+                    client
+                        .command(&Command::WriteValue {
+                            point: PointId(10),
+                            kind: ValueKind::Float,
+                            value: Value::Float(value as f64),
+                        })
+                        .unwrap();
+                    client.advance(1).unwrap();
+                }
+                client
+            }));
+            monitor.shutdown();
+            result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    };
+
+    // Two earlier lifetimes on the file: run 1 journals its census;
+    // run 2 journals its boundary and floods past the tail bound, so
+    // its own marker already lies outside the file's retained replay
+    // tail.
+    let first = bind();
+    first.paced_scan();
+    drop(first);
+    let second = bind();
+    flood(&second);
+    drop(second);
+
+    // The third lifetime replays the file — run 2's boundary already
+    // outside the retained tail — then floods again. `GET /journal`
+    // must still answer both served lifetimes' markers.
+    let third = bind();
+    thread::scope(|scope| {
+        scope.spawn(|| third.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let client = MonitorClient::new(third.local_addr());
+            for value in 0..16_u64 {
+                client
+                    .command(&Command::WriteValue {
+                        point: PointId(10),
+                        kind: ValueKind::Float,
+                        value: Value::Float(value as f64),
+                    })
+                    .unwrap();
+                client.advance(1).unwrap();
+            }
+            let journal = client.journal(0).unwrap();
+            let runs = journal
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    JournalEvent::RunBoundary { run } => Some((entry.seq, *run)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                runs.iter().map(|&(_, run)| run).collect::<Vec<_>>(),
+                vec![2, 3],
+                "event volume must not evict the served run-boundary markers: {journal:?}"
+            );
+            assert!(
+                journal.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+                "the served journal stays in seq order: {journal:?}"
+            );
+            // The tail is still bounded: the pinned markers answer
+            // ahead of the retained window and the ordinary eviction
+            // between them reads as the usual seq gap.
+            let tail = &journal[runs.len()..];
+            assert_eq!(tail.len(), 8);
+            assert!(tail[0].seq > runs[1].0 + 1);
+            // The `since` cursor still filters on seq — a consumer
+            // after the last boundary sees only the retained tail.
+            let since_boundary = client.journal(runs[1].0).unwrap();
+            assert_eq!(
+                since_boundary
+                    .iter()
+                    .map(|entry| entry.seq)
+                    .collect::<Vec<_>>(),
+                tail.iter().map(|entry| entry.seq).collect::<Vec<_>>()
+            );
+        }));
+        third.shutdown();
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+    drop(third);
+
+    // The file itself was never in doubt: all three markers endure.
+    let data = read_journal_file(&path).unwrap();
+    assert_eq!(
+        data.boundaries
+            .iter()
+            .map(|boundary| boundary.run)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

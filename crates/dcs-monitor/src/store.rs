@@ -16,7 +16,12 @@
 //! - the **served history rings** — the per-point [`HistorySample`]
 //!   retention `GET /history` reads;
 //! - the **served journal** — the [`JournalEntry`] retention
-//!   `GET /journal` reads;
+//!   `GET /journal` reads, plus the pinned run-boundary markers the
+//!   ring's bound would otherwise evict: a `run_boundary` entry is the
+//!   semantic marker the run-attribution contract stands on, so aging
+//!   one out of the tail migrates it to the pinned stream instead of
+//!   dropping it — bounded by the process lifetimes the journal
+//!   records, not by event volume;
 //! - the **routed emission stores** — the bounded
 //!   [`EventRecord`](dcs_core::EventRecord) ring `History`-declared
 //!   emissions land in and the latest-emission view `Latest`-declared
@@ -43,7 +48,7 @@
 
 use dcs_core::{
     CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
-    PointHistory, PointId, PublicationHealth, Sample, TelemetrySnapshot, Tick,
+    JournalEvent, PointHistory, PointId, PublicationHealth, Sample, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -138,6 +143,14 @@ struct Inner {
     rings: BTreeMap<PointId, Ring>,
     /// Served journal entries, oldest first.
     journal: VecDeque<JournalEntry>,
+    /// The `run_boundary` entries the served ring's bound evicted,
+    /// pinned aside rather than dropped: the markers are the
+    /// run-attribution contract's only record that a new process
+    /// lifetime began, so they outlive ordinary event volume. Every
+    /// pinned entry precedes the ring's front in `seq`, and their
+    /// count is bounded by the process lifetimes the journal records —
+    /// one per run — not by `journal_capacity`.
+    boundaries: VecDeque<JournalEntry>,
     /// The bounded event-history ring: `History`-retained emission
     /// records, oldest first — the diagnostic stream the resource
     /// view's `events` joins beside the journal tail.
@@ -164,6 +177,10 @@ struct Inner {
     /// Journal entries appended since the last publish — the next
     /// publication's event delta, drained there.
     pending_journal: VecDeque<JournalEntry>,
+    /// The `run_boundary` entries the pending delta's bound evicted —
+    /// the same pinning rule the served ring follows, so a publication
+    /// delta keeps its lifetime markers under a between-scans flood.
+    pending_boundaries: VecDeque<JournalEntry>,
     /// The `seq` the next publication takes — never reused.
     next_seq: u64,
     /// Publications produced since the store was created — the
@@ -180,6 +197,24 @@ struct Inner {
     journal_capacity: usize,
     /// Event-history retention bound — the `History`-retained ring's.
     event_history_capacity: usize,
+}
+
+/// Evicts `ring` down to `capacity` oldest-first, migrating each
+/// evicted `run_boundary` marker into `pinned` instead of dropping it —
+/// the pinning rule the served ring and the pending delta share. Every
+/// migrated entry precedes `ring`'s front in `seq`, so `pinned` stays
+/// `seq`-ordered and entirely older than the ring.
+fn evict_journal(
+    ring: &mut VecDeque<JournalEntry>,
+    pinned: &mut VecDeque<JournalEntry>,
+    capacity: usize,
+) {
+    while ring.len() > capacity {
+        let evicted = ring.pop_front().unwrap();
+        if matches!(evicted.event, JournalEvent::RunBoundary { .. }) {
+            pinned.push_back(evicted);
+        }
+    }
 }
 
 impl Inner {
@@ -239,6 +274,7 @@ impl Store {
                 window: VecDeque::new(),
                 rings: BTreeMap::new(),
                 journal: VecDeque::new(),
+                boundaries: VecDeque::new(),
                 event_history: VecDeque::new(),
                 latest_events: BTreeMap::new(),
                 pending_events: VecDeque::new(),
@@ -246,6 +282,7 @@ impl Store {
                 receipts: Arc::new(Vec::new()),
                 pending_history: BTreeMap::new(),
                 pending_journal: VecDeque::new(),
+                pending_boundaries: VecDeque::new(),
                 next_seq: 1,
                 published: 0,
                 coalesced: 0,
@@ -284,17 +321,25 @@ impl Store {
     /// Appends one journaled entry to the served ring and to the
     /// pending event delta the next publication drains — incremental,
     /// so a between-scans control-plane event reaches the served
-    /// stream immediately.
+    /// stream immediately. Both streams evict oldest-first past the
+    /// bound, except a `run_boundary` marker never drops: eviction
+    /// migrates it to the pinned stream its serve merges back in
+    /// `seq` order.
     pub(crate) fn push_journal(&self, entry: JournalEntry) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
         inner.journal.push_back(entry.clone());
-        while inner.journal.len() > inner.journal_capacity {
-            inner.journal.pop_front();
-        }
+        evict_journal(
+            &mut inner.journal,
+            &mut inner.boundaries,
+            inner.journal_capacity,
+        );
         inner.pending_journal.push_back(entry);
-        while inner.pending_journal.len() > inner.journal_capacity {
-            inner.pending_journal.pop_front();
-        }
+        evict_journal(
+            &mut inner.pending_journal,
+            &mut inner.pending_boundaries,
+            inner.journal_capacity,
+        );
     }
 
     /// Routes a `History`-retained emission: stamped with the routed
@@ -384,7 +429,13 @@ impl Store {
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
-            journal: inner.pending_journal.drain(..).collect(),
+            journal: inner
+                .pending_boundaries
+                .drain(..)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .chain(inner.pending_journal.drain(..))
+                .collect(),
             events: inner.pending_events.drain(..).collect(),
         });
         inner.window.push_back(publication.clone());
@@ -443,13 +494,16 @@ impl Store {
     }
 
     /// Retained journal entries with a `seq` above `since`, oldest
-    /// first.
+    /// first — the pinned run-boundary markers ahead of the ring's
+    /// tail. Every pinned `seq` precedes the ring's front, so the
+    /// concatenation stays in `seq` order and an evicted stretch still
+    /// reads as a numbering gap.
     pub(crate) fn journal(&self, since: u64) -> Vec<JournalEntry> {
-        self.inner
-            .lock()
-            .unwrap()
-            .journal
+        let inner = self.inner.lock().unwrap();
+        inner
+            .boundaries
             .iter()
+            .chain(inner.journal.iter())
             .filter(|entry| entry.seq > since)
             .cloned()
             .collect()

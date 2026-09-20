@@ -26,7 +26,11 @@
 //! `Bad` samples rather than aborting — so recording always follows a
 //! completed scan. Both streams evict oldest-first past the
 //! configured capacity and number entries with never-reused `seq`s, so
-//! consumers detect eviction as a numbering gap. `record_scan` also
+//! consumers detect eviction as a numbering gap — with one exception:
+//! a `run_boundary` entry is the semantic marker the run-attribution
+//! contract stands on, so eviction migrates it to a pinned stream the
+//! served journal keeps exposing rather than letting ordinary event
+//! volume age it out. `record_scan` also
 //! returns the materialized snapshot — the monitor publishes it into the
 //! store as the completed scan's immutable read model rather than
 //! rebuilding it per request.
@@ -49,6 +53,10 @@ pub struct MonitorConfig {
     /// Samples retained per point in the history rings; `0` retains none.
     pub history_capacity: usize,
     /// Entries retained in the transition journal; `0` retains none.
+    /// `run_boundary` markers are exempt: an evicted one migrates to a
+    /// pinned stream the served journal still answers, since the
+    /// marker is the only record a consumer has that a new process
+    /// lifetime began.
     pub journal_capacity: usize,
     /// Records retained in the event-history ring — the bounded store
     /// `History`-declared emissions route to; `0` retains none. The
@@ -166,7 +174,11 @@ impl Recorder {
             config.publication_capacity,
             config.event_history_capacity,
         );
-        for entry in replay.entries {
+        // The replay seeds the ring in `seq` order: boundary markers
+        // the file's retained tail already aged out push first, so the
+        // store's pinning stream picks them up the same way live
+        // eviction would have.
+        for entry in replay.boundaries.into_iter().chain(replay.entries) {
             store.push_journal(entry);
         }
         let mut recorder = Self {
