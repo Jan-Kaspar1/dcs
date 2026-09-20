@@ -34,7 +34,15 @@
 //! answering the named `not_converged` refusal with no field hand-off,
 //! a receipted write to the tracking standby answering the named
 //! `not_active` rejection with no phantom effect or audit, and the
-//! same promote succeeding once the standby tracks — the `consumers`
+//! same promote succeeding once the standby tracks — plus the pair
+//! contract's failure-handover leg: a proven duty-pump field-channel
+//! fault through the plant protocol's declared `inject_fault` handing
+//! `duty` to the standby pump inside the declared bound with the
+//! faulted pump's `fault`/`avail` reporting the exclusion and the
+//! managed fault alarm annunciating with journaled `point_changed`
+//! evidence, the all-out `none_available`/`all_faulted` annunciation
+//! on losing every pump, and the declared recovery with the pair's
+//! controller roles unmoved — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -58,7 +66,7 @@
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
 //! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
-//! `refusal-failed`, and the
+//! `refusal-failed`, `handover-failed`, and the
 //! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -404,6 +412,31 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("expect-applied: reported, refusal-failed"),
         "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
+    // The pair contract's failure-handover leg ran and held: the
+    // proven duty-pump channel fault handed duty to the standby pump
+    // inside the declared bound, the all-out conditions annunciated on
+    // losing every pump, and the restored inputs produced the declared
+    // recovery — its digest line reports the evidence, and both
+    // doctored cases reported their named diagnostic.
+    let handover_line = stdout
+        .lines()
+        .find(|line| line.contains("handover-digest"))
+        .unwrap_or_else(|| panic!("the handover leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "duty handed to the standby pump at tick",
+        "all-out annunciated",
+        "inputs restored by tick",
+    ] {
+        assert!(
+            handover_line.contains(phrase),
+            "the handover digest names no '{phrase}' evidence: {handover_line}"
+        );
+    }
+    assert!(
+        stdout.contains("keeps-duty: reported, handover-failed")
+            && stdout.contains("none-available-silent: reported, handover-failed"),
+        "the handover leg's doctored cases did not report their named diagnostics:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -659,6 +692,64 @@ fn a_doctored_write_expectation_reports_refusal_failed() {
         stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
         "expected the named not_active evidence, got:\n{stderr}"
     );
+}
+
+/// A doctored handover leg expecting the failed pump to keep `duty`,
+/// or `none_available` never to report once every pump is out, is the
+/// `handover-failed` diagnostic — exercised against a copied tree at
+/// script level with the locally built tooling, the same seam the
+/// refusal test uses. The driver's `keeps-duty` and
+/// `none-available-silent` tampers flip the leg's own expectations;
+/// the pair's honest handover must fail each naming the actual
+/// evidence — never a silently wrong pass.
+#[test]
+fn a_doctored_handover_expectation_reports_handover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-handover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    for (tamper, evidence) in [
+        ("keeps-duty", "keep duty"),
+        ("none-available-silent", "never to report"),
+    ] {
+        let output = Command::new("python3")
+            .arg("ci/handover.py")
+            .arg("--plant-server")
+            .arg(tools.join("dcs-plant-server"))
+            .arg("--controller")
+            .arg(tools.join("dcs-controller"))
+            .args([
+                "--model",
+                "model/plant.json",
+                "--dynamics",
+                "model/dynamics.json",
+                "--scenario",
+                "ci/scenario.json",
+                "--manifest",
+                "deploy/manifest.json",
+                "--tamper",
+                tamper,
+            ])
+            .current_dir(&dir)
+            .output()
+            .expect("python3 runs the failure-handover leg");
+        assert!(
+            !output.status.success(),
+            "a doctored {tamper} expectation passed the handover leg"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(evidence),
+            "expected the named {tamper} evidence, got:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A served registry document diverging from the recorded artifact's

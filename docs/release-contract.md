@@ -282,7 +282,18 @@ the named `not_active` rejection with the point unchanged in the
 active's served snapshot and no command-side journal entry on either
 peer recording it as anything but the refusal, and the same promote
 succeeding once the standby tracks — the active's field writes,
-receipts, and journal undisturbed throughout — the `consumers` stage,
+receipts, and journal undisturbed throughout — and the pair
+contract's failure-handover leg on the same declared deployment: with
+the pair settled and the group holding a duty demand, a proven
+duty-pump field-channel fault injected through the plant protocol's
+declared `inject_fault` handing `duty` to the standby pump inside the
+declared bound — `staged` reporting the surviving pump against the
+standing demand, the faulted pump's `fault`/`avail` reporting the
+exclusion, and the managed fault alarm annunciating with journaled
+`point_changed` evidence — the remaining pump's faulted channel then
+annunciating `none_available`/`all_faulted` with their managed alarms,
+each restored input producing the declared recovery, and the pair's
+controller roles unmoved throughout — the `consumers` stage,
 which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
