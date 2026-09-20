@@ -114,7 +114,15 @@ ci/failover.py         the pair contract's automatic-failover leg —
                        plant's writer claim, the run continuing
                        bumplessly, and the durable journal's
                        transition record audited beside a
-                       severed-standby variant reporting no failover
+                       severed-standby variant reporting no failover —
+                       then the declared measurement contract on the
+                       settled pair: the primary level source's
+                       quality fault serving the backup under the
+                       managed alarm's journaled annunciation, the
+                       backup's as well engaging the declared
+                       on_bad_demand fallback, and the restores
+                       returning the selection and the alarms per
+                       their lifecycle
 ci/divergence.py       the pair contract's staged-vs-field
                        divergence leg — the tracking standby's
                        checkpoint pulls withheld through an
@@ -621,7 +629,22 @@ recorded non-operator marker of the attributed role switch has
 landed the entry names it; where it has not, the entry carries no
 operator actor rather than a fabricated one. A variant run severs
 the standby instead: the field owner's writes run undisturbed and
-nothing reports a failover. A violated contract fails
+nothing reports a failover. A measurement run on a freshly
+converged pair then exercises the declared measurement contract —
+the emitted model's failover-select, threshold chain, and managed
+`backup-active` alarm resolved from the artifact's own wiring:
+degrading the primary level source's field channel asserts
+`backup_active` while the station keeps controlling on the
+selected backup measurement and the managed alarm annunciates with
+journaled `point_changed` evidence; degrading the backup as well
+engages the declared all-sources-bad fallback — the selection
+untrusted, `demand` at `on_bad_demand` with the alarmed state
+standing — rather than control on bad data; restoring the backup
+then the primary returns the selection to the primary and the
+alarm per its declared lifecycle — the unacknowledged latch
+standing until the receipted ack clears it — the durable journal
+carrying the transitions in driven order and the pair's roles
+unchanged. A violated contract fails
 `failover-failed`; two passes must produce the identical
 `failover-digest`, a divergence failing
 `failover-nondeterministic`.

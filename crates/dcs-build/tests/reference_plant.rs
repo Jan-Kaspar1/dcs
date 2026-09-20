@@ -459,15 +459,19 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("landed-announce: reported, peer-announce-failed"),
         "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
     );
-    // The pair contract's automatic-failover leg ran and held: the
-    // declared failover_budget armed the standby's --auto-promote, the
-    // severed field owner left the surviving peer's miss run reported,
-    // the self-promotion landed at the declared budget's boundary, the
+    // The pair contract's failover leg ran and held: the declared
+    // failover_budget armed the standby's --auto-promote, the severed
+    // field owner left the surviving peer's miss run reported, the
+    // self-promotion landed at the declared budget's boundary, the
     // plant's writer claim fenced foreign writes while the promoted
-    // peer's writes landed, the run continued, and the severed-standby
-    // variant left the owner undisturbed — its digest line reports the
-    // evidence, and the early-promotion case reported its named
-    // diagnostic.
+    // peer's writes landed, the run continued, the severed-standby
+    // variant left the owner undisturbed, and the measurement run
+    // walked the declared failover-select/on_bad_demand seam — the
+    // degraded primary annunciating the managed backup-active alarm
+    // while the chain controlled on the backup, the all-bad state
+    // engaging the declared safe demand, the restores returning the
+    // selection and the alarm — its digest line reports the evidence,
+    // and the doctored cases reported the named diagnostic.
     let failover_line = stdout
         .lines()
         .find(|line| line.contains("failover-digest"))
@@ -476,16 +480,25 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "self-promoted at tick",
         "persisted journal records",
         "undisturbed at tick",
+        "annunciated at tick",
+        "declared safe demand at tick",
+        "re-selected the primary at tick",
     ] {
         assert!(
             failover_line.contains(phrase),
             "the failover digest names no '{phrase}' evidence: {failover_line}"
         );
     }
-    assert!(
-        stdout.contains("early-promotion: reported, failover-failed"),
-        "the failover leg's doctored case did not report its named diagnostic:\n{stdout}"
-    );
+    for line in [
+        "early-promotion: reported, failover-failed",
+        "controls-on-bad: reported, failover-failed",
+        "nonzero-fallback: reported, failover-failed",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the failover leg's doctored cases lack '{line}':\n{stdout}"
+        );
+    }
     // The failover declaration's deploy-stage divergences each
     // reported the named mismatch.
     for line in [
