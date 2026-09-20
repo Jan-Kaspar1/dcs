@@ -54,6 +54,34 @@ container while the active keeps scanning; peer management and takeover
 semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 11–15) and are not part of this image.
 
+### Rolling a revised model
+
+The no-interruption path is the pair roll: start a third container as
+`--standby <active> --revised` mounting the revised document, let it
+converge `reinitialized` on the active's checkpoint stream under the
+documented carryover rule, then demote the old peer and promote it —
+the field writer changes models at a scan boundary without the process
+ever stopping (decision 25).
+
+A lone controller has no peer to carry the run, so its roll is the
+scheduled outage the restart already is — the unattended-station
+deployment class the lifecycle evidence names. The container runs with
+a persistent `--state-file` mount; for the roll the deployment stops
+it, swaps its mounted model for the revised document, and restarts it
+armed `--revised` on the same state file. The persisted checkpoint's
+foreign fingerprint crosses the model boundary through the same
+carryover rule the pair uses — carried setpoints, the output image,
+and the force set survive where a cold start would lose them — the run
+resumes at the last persisted cycle, and the crossing's carryover
+report prints at startup and lands in the durable record when
+`--journal-file` runs. A revision the rule cannot carry fails startup
+naming the `CarryoverError` and leaves the state file untouched, so
+the operator rolls back to the previous document and restarts into the
+known-good checkpoint; restarting on the revised document *without*
+`--revised` still refuses the fingerprint, so the crossing never
+happens undeclared. The outage is bounded by the restart itself — the
+pair roll remains the path when the process must not stop.
+
 ## Plant container image
 
 `Dockerfile.plant` packages the `dcs-plant-server` binary — the shared
