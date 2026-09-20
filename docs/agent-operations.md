@@ -1,6 +1,6 @@
 # Local agent pool operations
 
-Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation explicitly selects `swe-2-high` with `--permission-mode dangerous`, authorized by the user on 2026-09-14. This gives local Devin full tool access as the WSL user; clones provide work separation, not a security sandbox. Model fallback is rejected.
+Run the commands below in Ubuntu WSL as `kaspar`, except for the Windows startup registration. Authenticate `gh` and the local `devin` CLI before starting. Every managed agent invocation runs with full tool access — `devin -p --permission-mode dangerous` for `swe-2-*` models, `opencode run --auto` for `opencode/*` models — authorized by the user on 2026-09-14 and extended to OpenCode free models on 2026-09-17. This gives agents full tool access as the WSL user; clones provide work separation, not a security sandbox. The `models` config list is validated against a verified free-model allow-list; paid fallback is rejected. Worker clones rotate through `models` by slot so parallel jobs spread across separate model quotas; the planner and review lane use the first configured model. OpenCode invocations are not resumable through the Devin session id, so retries carry repair context in the prompt instead.
 
 ## Installation and startup
 
@@ -47,6 +47,23 @@ The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/
 The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
 
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
+
+## Admission control
+
+Every managed invocation — worker, retry, repair, planner, and reviewer — must reserve a durable inference lease in SQLite before it spawns. Inference capacity is accounted separately from workspace: a PR awaiting CI keeps its clone reservation in `jobs` while releasing its inference lease. `model_caps` still orders worker preference in dispatch, but the lease is the authoritative check on every launch path, including preserved-clone retries.
+
+Models are grouped into quota groups — sets of models sharing one provider budget. Without an explicit `scheduler` config section, one group is derived per unique entry in `models`, seeded from `model_caps` (uncapped models start at four slots). Provider feedback is scoped to the affected group:
+
+- A rate-limit or provider-outage receipt cools down only that group (bounded exponential cooldown, honoring a `Retry-After` hint); other groups keep dispatching, and retries migrate to any group with capacity instead of dying again on the throttled model. Recovery reopens with a single probe session, never a retry wave.
+- Authentication and credit failures block the group until `dcs-agents admission reset <group>` after the credential problem is resolved; sleeping cannot fix them, so they are never auto-retried.
+- A quota-killed job is requeued automatically once per failed invocation, bounded by `scheduler.max_quota_requeues` (default 4). Ordinary task failures stay blocked for operator `retry`.
+- Group targets adapt: halved on a congestion event (floor 1), and raised by one only after a `quiet_seconds` window that contained both refused demand and a verified useful completion, up to `ceiling`. A new congestion event restarts the window.
+
+Provider-error visibility differs by backend: Devin writes failures into the invocation log directly, but opencode emits provider failures as `stream error` events in its own log while the process itself stays silent — a rate-limited stream otherwise freezes until the hard timeout. OpenCode invocations therefore spawn with `--print-logs` (mirroring those events into `output.log`) and carry a runner stall watchdog: no log writes for `stall_seconds` (default 1200) fails the invocation early, and a tail ending in a provider `stream error` fails after `error_stall_seconds` (default 180) instead. A timeout receipt whose tail carries a `stream error` still classifies as rate/endpoint — the freeze is scoped cooldown evidence, not a generic timeout.
+
+Interrupted sessions are resumed rather than restarted: a retry launch passes `--resume <id>` for Devin sessions and `--session <id>` for opencode sessions, using the session id captured after each invocation (`devin list` filtered by checkout; the opencode `session` table matched by invocation-key title). A stored id that the backend reports missing is cleared so the next retry starts fresh.
+
+`dcs-agents admission` prints group targets, modes, active leases, and deduplicated outcome counts; `dcs-agents admission reset <group>` clears a blocked or cooling group. An optional `scheduler` section in `config.json` defines named groups (`models`, `initial`, `ceiling`, `external_slots` for consumers outside the pool) plus `quiet_seconds`, `cooldown_seconds`, and `max_cooldown_seconds`. Global `pause` remains the manual and integrity control and still gates all admission.
 
 ## Architecture review lane
 

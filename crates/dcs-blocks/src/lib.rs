@@ -87,6 +87,10 @@
 //!   ordered request queue and an exclusive held grant gated by the
 //!   declared permissives, with a declared queue policy and operator
 //!   reorder;
+//! - [`BackwashSequence`] — the per-filter backwash step contract:
+//!   timed and measured step advance with declared overrun policy, the
+//!   coordinator grant handshake, attributed triggers with an
+//!   auto-start permission, and the declared abort/fault-step paths.
 //! - [`HeaderCoordinator`] — shared aeration-header coordination: the
 //!   declared constant-pressure, most-open-valve-reset, or
 //!   direct-airflow strategy driving the bounded set-point and
@@ -129,6 +133,7 @@ mod alarm_monitor;
 mod analog_input;
 mod analog_output;
 mod backwash_coordinator;
+mod backwash_sequence;
 mod blower_group;
 mod bool_gate;
 mod bool_latching_alarm;
@@ -174,6 +179,10 @@ pub use analog_output::{AnalogOutput, RawOutput};
 pub use backwash_coordinator::{
     BackwashCoordinator, BackwashCoordinatorConfig, CoordinatorOutputs, FilterIo, PermissiveInputs,
     QueuePolicy, QueuedState,
+};
+pub use backwash_sequence::{
+    AdvanceMode, AutoStart, BackwashSequence, BackwashSequenceConfig, BackwashSequenceInputs,
+    BackwashSequenceOutputs, BackwashStep, FaultPolicy, OverrunPolicy,
 };
 pub use blower_group::{
     BlowerGroup, BlowerGroupConfig, BlowerIo, BlowerOutputs, BlowerRotation, StagingAuthority,
@@ -264,6 +273,7 @@ pub const KINDS: &[&str] = &[
     FlowPacedRatio::KIND,
     DeviationMonitor::KIND,
     BackwashCoordinator::KIND,
+    BackwashSequence::KIND,
     HeaderCoordinator::KIND,
     BlowerGroup::KIND,
     PhaseMonitor::KIND,

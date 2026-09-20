@@ -337,7 +337,14 @@ declared retention (see `journaled` above). `GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
-its live values, command availability, and attributed events.
+its live values, command availability, and attributed events. The
+served availability is live per rule: a `kind_declared` command joins
+the snapshot `command_verdicts` section's published standing verdict —
+`available` while the kind's probe permits invocation, `false` carrying
+the kind's named refusal reason where it refuses — while
+`bound_point_writable` answers live from the point's mark and `always`
+is unconditionally invocable. The verdict is advisory: submissions
+settle through the receipted path either way.
 
 Some kinds are variable-arity: the declared `ports` set fixes the
 instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;
@@ -562,6 +569,54 @@ order and grant mid-queue.
 recorded composition — a three-filter FIFO bank beside a two-filter
 operator-managed bank driving the reorder point; per-port semantics
 live beside `BackwashCoordinator::KIND`.
+
+The per-filter backwash contract architecture decisions 57-60 record
+adds one variable-arity kind. `backwash-sequence` runs one filter's
+declared step table — `sequencer`'s shape extended with the
+sequence-domain rules the general timed table does not carry:
+measured advance, the coordinator grant handshake, trigger
+attribution, and the abort/fault steps. The `parameters` are
+`step_count` plus `auto_start`, `abort_step`, `on_fault_step`
+(`Int`s — `abort_step`/`on_fault_step` in `1..=step_count`),
+`on_fault_policy`, and per step `n` the entries `step_<n>_ticks`
+(the timed duration or, under the measured modes, the overrun
+timeout), `step_<n>_out` (the `Float` `out` drives while the step
+reports), `step_<n>_advance` (`Int` — `0` timed, `1` measured:
+advance when the selected `meas_i` reads `Good` at or above
+`step_<n>_bound`, `2` whichever first), `step_<n>_on_overrun` (`Int`
+— `0` advance anyway, `1` hold and raise `overrun`), and the
+measured modes' `step_<n>_bound` (`Float`) and `step_<n>_meas`
+(`Int` selecting among `meas_1`…`meas_K`). The port set is the four
+triggers `trig_time`, `trig_headloss`, `trig_turbidity`,
+`trig_operator` (`in`, `Bool`), `grant` (`in`, `Bool`) — the
+coordinator's run permissive — `abort` and `fault` (`in`, `Bool`),
+the indexed `meas_<i>` (`in`, `Float`) family, and the outputs:
+`request` (`out`, `Bool`) asserting from the first armed trigger
+until `done` or `aborted` drops it — the grant release —
+`active`, `pending`, `done`, `aborted`, `overrun` (`out`, `Bool`),
+`trigger_source` (`out`, `Int` — `0` none, `1` time, `2` headloss,
+`3` turbidity, `4` operator — the first asserted source when the
+request arms, simultaneous edges resolving in declaration order, and
+held for the backwash's duration), `step` (`out`, `Int`, 1-based),
+`out` (`out`, `Float`), and `phase_<n>` (`out`, `Bool`, one per
+declared step) asserting while `step` reports `n`. `auto_start` `0`
+arms `request` on any trigger edge; `1` latches automatic edges into
+`pending` until a `trig_operator` edge releases the run attributed
+to the captured source — `trig_operator` and `abort` conventionally
+bind writable internal `in` points so writes ride the journaled
+receipted command path. `abort` while armed drives `abort_step`,
+raises `aborted`, and drops `request`; while unarmed it cancels a
+latched `pending`. A proven `fault` drives `on_fault_step` under
+`on_fault_policy` — `0` holds there with `request` still armed (the
+grant keeps its holder), a `trig_operator` edge with the fault
+cleared resuming the table; `1` takes the abort path. Non-`Good`
+inputs read fail-safe: an unproven `grant` holds the table, an
+untrusted `meas_i` cannot satisfy its bound so the timeout/overrun
+rule governs, and every other control input reads as not asserted.
+`crates/dcs-assembly/fixtures/backwash_sequence.json` is the
+recorded composition — a four-step timed/measured/first-of table
+under each fault policy beside a `pending`-latched two-step table;
+per-port semantics live beside `BackwashSequence::KIND`.
 
 The post-wash verification checks architecture decision 61 records
 add one fixed-arity kind. `phase-monitor` reads `in` (`in`, `Float`)

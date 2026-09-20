@@ -13,15 +13,16 @@ use dcs_assembly::{
     AssemblyError, BuildError, ComponentRegistry, DriverRegistry, assemble, resolve_drivers,
 };
 use dcs_blocks::{
-    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BlowerGroup, BlowerIo,
-    BlowerOutputs, BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DemandFallback,
-    DemandFallbackIo, DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect,
-    FeedforwardSum, FeedforwardSumIo, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator,
-    HeaderOutputs, Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm,
-    ManagedLatchingAlarm, ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs,
-    PhaseMonitor, PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RateOfRise, RatioOutputs,
-    Sequencer, SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs,
-    Timer, Totalizer, Valve, ZoneIo,
+    AlarmMonitor, AnalogInput, AnalogOutput, BackwashCoordinator, BackwashSequence,
+    BackwashSequenceInputs, BackwashSequenceOutputs, BlowerGroup, BlowerIo, BlowerOutputs,
+    BoolGate, BoolLatchingAlarm, CoordinatorOutputs, Counter, DemandFallback, DemandFallbackIo,
+    DeviationMonitor, DigitalInput, DigitalOutput, EdgeTrigger, FailoverSelect, FeedforwardSum,
+    FeedforwardSumIo, FilterIo, FlowPacedRatio, GroupOutputs, HeaderCoordinator, HeaderOutputs,
+    Interlock, LatchingAlarm, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
+    ManualStation, MedianVoter, Motor, OverrideSelect, PermissiveInputs, PhaseMonitor,
+    PhaseMonitorIo, Pid, PumpGroup, PumpIo, RateLimiter, RateOfRise, RatioOutputs, Sequencer,
+    SignalFilter, SrLatch, SurgeGuard, SurgeGuardIo, ThresholdChain, ThresholdOutputs, Timer,
+    Totalizer, Valve, ZoneIo,
 };
 use dcs_core::ValueKind;
 use dcs_model::PlantModel;
@@ -486,6 +487,51 @@ pub fn registry() -> ComponentRegistry {
                     active: spec.require("active")?,
                     queued: spec.require("queued")?,
                     resource_blocked: spec.require("resource_blocked")?,
+                },
+                spec.parameters,
+            ))
+        })
+        .with(BackwashSequence::KIND, |spec| {
+            // `meas_1` … `meas_K` are the measured inputs
+            // `step_<n>_meas` selects among — a contiguous indexed
+            // family, so a gap or a missing member fails `UnboundPort`
+            // naming it rather than shifting the selection indices.
+            // `phase_1` … `phase_N` are the generated per-step flags —
+            // contiguous too; `new` rejects a count that does not
+            // equal the declared `step_count`.
+            let meas = spec
+                .indexed_families(["meas_"])?
+                .into_iter()
+                .map(|[meas]| meas)
+                .collect();
+            let phases = spec
+                .indexed_families(["phase_"])?
+                .into_iter()
+                .map(|[phase]| phase)
+                .collect();
+            boxed(BackwashSequence::from_parameters(
+                spec.name.as_str(),
+                BackwashSequenceInputs {
+                    trig_time: spec.require("trig_time")?,
+                    trig_headloss: spec.require("trig_headloss")?,
+                    trig_turbidity: spec.require("trig_turbidity")?,
+                    trig_operator: spec.require("trig_operator")?,
+                    grant: spec.require("grant")?,
+                    abort: spec.require("abort")?,
+                    fault: spec.require("fault")?,
+                    meas,
+                },
+                BackwashSequenceOutputs {
+                    request: spec.require("request")?,
+                    active: spec.require("active")?,
+                    pending: spec.require("pending")?,
+                    done: spec.require("done")?,
+                    aborted: spec.require("aborted")?,
+                    overrun: spec.require("overrun")?,
+                    trigger_source: spec.require("trigger_source")?,
+                    step: spec.require("step")?,
+                    out: spec.require("out")?,
+                    phases,
                 },
                 spec.parameters,
             ))
