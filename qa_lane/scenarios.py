@@ -2266,8 +2266,7 @@ def scenario_parameter_tune_carryover(ctx):
         command = {'command': {'set_parameter': {
             'component': component, 'name': name,
             'value': {'float': tuned}}}, 'actor': 'qa-lane'}
-        _, before = http_json('GET', base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, base)
         status, receipt = http_json('POST', base + '/command', command)
         ref = save_evidence(ctx['evidence_dir'],
                             'parameter-tune-submission.json',
@@ -6659,8 +6658,7 @@ def scenario_force_carryover(ctx):
         # The release on the new active: a settled `applied` receipt,
         # an empty forces list, and the held-value rule resuming at
         # Good — the force's last stamp persists as the held sample.
-        _, before = http_json('GET', peer_base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, peer_base)
         unforce_body = {'point': target}
         status, receipt = http_json(
             'POST', peer_base + '/command',
@@ -7016,17 +7014,61 @@ def _outcome_key(receipt):
     return name
 
 
-def _settled_outcome(ctx, base, index):
-    """The outcome key of `receipts[index]` once it is final — None
-    while it still reads `accepted` or the log cannot be read."""
+def _receipt_window(ctx, base):
+    """The retained receipt tail and the absolute submission index of
+    its first entry — the (log, high-water) pair the bounded-log audit
+    correlates by.
+
+    `GET /receipts` serves the bounded tail alone; its place in the
+    submission sequence comes from the admission counters the
+    checkpoint carries beside the same log under one capture —
+    `command_admission.attempts` counts every submission and each
+    appends exactly one receipt, so `attempts - len(receipts)` is the
+    evicted prefix's length. A monitor whose checkpoint predates the
+    receipts section cannot speak for the log's place in the
+    sequence; the bare receipts read answers with base 0 — the
+    never-evicted log's genuine numbering.
+    """
     try:
-        _, body = http_json('GET', base + '/receipts')
+        _, body = http_json('GET', base + '/checkpoint')
+        carried = body.get('receipts')
+        if isinstance(carried, list):
+            receipts = _receipt_list(carried)
+            attempts = (body.get('command_admission') or {}) \
+                .get('attempts')
+            if isinstance(attempts, int) \
+                    and not isinstance(attempts, bool):
+                return receipts, max(0, attempts - len(receipts))
+            return receipts, 0
+    except Exception:
+        pass
+    _, body = http_json('GET', base + '/receipts')
+    return _receipt_list(body), 0
+
+
+def _next_receipt_index(ctx, base):
+    """The absolute submission index the next POST /command receipt
+    takes — the log's high-water `base + len(receipts)`."""
+    receipts, base_index = _receipt_window(ctx, base)
+    return base_index + len(receipts)
+
+
+def _settled_outcome(ctx, base, index):
+    """The outcome key of the receipt logged at absolute submission
+    `index` once its verdict is final — None while it still reads
+    `accepted` or the log cannot be read, 'evicted' when the bounded
+    tail already dropped the settled entry. `index` is the submission
+    sequence the window slides under — never a position in the tail."""
+    try:
+        receipts, base_index = _receipt_window(ctx, base)
     except Exception:
         return None
-    receipts = _receipt_list(body)
-    if len(receipts) <= index:
+    position = index - base_index
+    if position < 0:
+        return 'evicted'
+    if position >= len(receipts):
         return None
-    outcome = _outcome_key(receipts[index])
+    outcome = _outcome_key(receipts[position])
     return None if outcome == 'accepted' else outcome
 
 
@@ -7081,7 +7123,8 @@ class _Overlay:
                          '/checkpoint', '/role', '/signals', '/']
         # The command-flood leg's admission record: flood carries the
         # served bound and the probe point; submissions logs every
-        # (status, normalized outcome, receipt-log index) the flood met.
+        # (status, normalized outcome, absolute submission index) the
+        # flood met.
         self.flood = flood
         self.submissions = []
         self._receipts_base = None
@@ -7166,9 +7209,10 @@ class _Overlay:
 
     def _record_submission(self, status, receipt):
         """One flood submission's verdict: its HTTP status, its
-        receipt's normalized outcome, and the receipt-log index the
-        append-only log assigns it — every POST /command appends exactly
-        one receipt, in submission order."""
+        receipt's normalized outcome, and the absolute submission index
+        the log assigns it — every POST /command appends exactly one
+        receipt, in submission order, so the index counts from the
+        admission high-water the flood started at."""
         if status is not None:
             self.statuses.append(status)
         self.submissions.append({
@@ -7183,7 +7227,7 @@ class _Overlay:
                 self.base, [self._flood_command()] * count):
             self._record_submission(status, receipt)
 
-    def start(self):
+    def start(self, ctx):
         if self.kind == 'stalled-reader':
             # Issue the request, then go silent without reading a byte
             # of the response until the leg ends — the held-connection
@@ -7205,9 +7249,12 @@ class _Overlay:
             # served queue bound until the named queue_full rejection
             # appears — the whole batch lands inside one server read
             # buffer, faster than a scan boundary drains pending entries.
+            # The audit tracks each submission's absolute index — the
+            # receipt log is a bounded tail that can roll under the
+            # flood, so a position read at start would chase the window
+            # instead of the entry.
             try:
-                _, body = http_json('GET', self.base + '/receipts')
-                self._receipts_base = len(_receipt_list(body))
+                self._receipts_base = _next_receipt_index(ctx, self.base)
             except Exception as exc:
                 self.errors.append('receipts base: ' + str(exc)[:150])
             rounds = 0
@@ -7229,7 +7276,7 @@ class _Overlay:
             # admission path stays loaded through the leg's scan window.
             self._flood_burst(ADMISSION_TRICKLE)
 
-    def finish(self):
+    def finish(self, ctx):
         """Drains held resources and returns the leg's named evidence
         failures — interference that never happened, or a consumer that
         met a server fault."""
@@ -7321,22 +7368,28 @@ class _Overlay:
                                 'audited')
             elif not (no_receipt or http_errors or outside):
                 # Every admitted command's receipt must settle applied
-                # at its scan boundary — the receipt log is append-only
-                # and each submission's index is known.
+                # at its scan boundary. The receipt log is a bounded
+                # tail a flood can out-roll, so each submission is
+                # tracked by absolute index against the checkpoint's
+                # (log, high-water) pair; an index the window already
+                # passed is a settled entry the tail coalesced — pending
+                # receipts never evict.
                 pending = [submission['index']
                            for submission in self.submissions
                            if submission['outcome'] == 'accepted']
 
                 def drained():
                     try:
-                        _, body = http_json('GET',
-                                            self.base + '/receipts')
+                        receipts, base_index = _receipt_window(
+                            ctx, self.base)
                     except Exception:
                         return None
-                    receipts = _receipt_list(body)
                     for index in pending:
-                        if len(receipts) <= index \
-                                or _outcome_key(receipts[index]) \
+                        position = index - base_index
+                        if position < 0:
+                            continue
+                        if position >= len(receipts) \
+                                or _outcome_key(receipts[position]) \
                                 != 'applied':
                             return None
                     return True
@@ -7370,7 +7423,7 @@ def _consumer_leg(ctx, base, targets, overlay, want):
     h0 = _history_cursor(ctx, base, targets['watch'])
     deadline = time.monotonic() + LEG_DEADLINE
     try:
-        overlay.start()
+        overlay.start(ctx)
     except Exception as exc:
         overlay.errors.append('start: ' + str(exc)[:150])
     end = None
@@ -7390,14 +7443,13 @@ def _consumer_leg(ctx, base, targets, overlay, want):
     if end is None:
         failures.append('scan outputs stopped advancing under '
                         + overlay.kind + ' at tick ' + str(tick0))
-        failures += overlay.finish()
+        failures += overlay.finish(ctx)
         return None, failures
 
     # The leg's receipted probes: one writable write (the leg's
     # alternating value), one statically invalid write — the two
     # command-path outcomes every leg must reproduce identically.
-    _, receipts_body = http_json('GET', base + '/receipts')
-    index = len(_receipt_list(receipts_body))
+    index = _next_receipt_index(ctx, base)
     http_json('POST', base + '/command',
               {'command': {'write_value': {
                   'point': targets['write'], 'kind': 'bool',
@@ -7419,7 +7471,7 @@ def _consumer_leg(ctx, base, targets, overlay, want):
         'GET', base + '/history?point=' + str(targets['watch'])
         + '&since=' + str(h0))
     seqs = _history_seqs(history_body, targets['watch'])
-    failures += overlay.finish()
+    failures += overlay.finish(ctx)
 
     tick1 = end.get('tick') or 0
     published1 = _publication(end).get('published') or 0
@@ -12428,8 +12480,7 @@ def scenario_fenced_writer_degrade(ctx):
         # The promoted writer undisturbed end to end: a receipted
         # command settles applied and its write lands on the field —
         # then a second restores the point's standing value.
-        _, receipts0 = http_json('GET', peer_base + '/receipts')
-        index = len(_receipt_list(receipts0))
+        index = _next_receipt_index(ctx, peer_base)
         writes = []
         for value in (not baseline, baseline):
             write_command = {'command': {'write_value': {
@@ -12765,19 +12816,18 @@ def _rejected_reason(receipt):
 
 
 def _submitted_receipt(ctx, base, index, command):
-    """The receipt log's entry for the submission appended at `index`
-    once its outcome is terminal — None while it still reads
-    `accepted` or the log cannot be read. The bounded ring answers at
-    `index` until it evicts; past that the submission is the log's
-    newest entry."""
+    """The receipt logged at absolute submission `index` once its
+    outcome is terminal — None while it still reads `accepted` or the
+    log cannot be read. `index` is the submission sequence the bounded
+    window slides under — never a position in the tail."""
     try:
-        _, body = http_json('GET', base + '/receipts')
+        receipts, base_index = _receipt_window(ctx, base)
     except Exception:
         return None
-    receipts = _receipt_list(body)
-    if not receipts:
+    position = index - base_index
+    if not 0 <= position < len(receipts):
         return None
-    receipt = receipts[index] if index < len(receipts) else receipts[-1]
+    receipt = receipts[position]
     if receipt.get('command') != command:
         return None
     if _outcome_key(receipt) == 'accepted':
@@ -12930,8 +12980,7 @@ def scenario_command_availability(ctx):
 
         def submit(command):
             """POST the command and wait out its terminal receipt."""
-            _, before = http_json('GET', base + '/receipts')
-            index = len(_receipt_list(before))
+            index = _next_receipt_index(ctx, base)
             status, receipt = http_json(
                 'POST', base + '/command',
                 {'command': command, 'actor': 'qa-lane'})
@@ -14461,8 +14510,7 @@ def _starvation_pass(ctx, active, peer, point, value, floors):
     recovery = {}
     floor = floors.get(active, 0)
     try:
-        _, before = http_json('GET', base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, base)
         status, receipt = http_json(
             'POST', base + '/command',
             {'command': {'write_value': {'point': point, 'kind': 'bool',

@@ -212,9 +212,15 @@ class Feed:
         # command_queue section reports: small so the test flood is tiny.
         self.capacity = 4
         self.bounded = True
+        self.attempts = 0         # lifetime submissions — the log's high-water
         self.full_rejections = 0
         self.high_water = 0
         self.flood_pending = set()  # receipt indices admitted on the flood channel
+        # The receipt log's retention bound: None keeps every receipt —
+        # a value evicts the settled prefix past the cap on each append,
+        # the served bounded-tail behavior the audit must correlate
+        # across.
+        self.receipt_cap = None
         # Fault injection for the named-failure cases.
         self.freeze = False           # scans stop advancing
         self.freeze_on_connect = False  # ... once a consumer holds one
@@ -232,6 +238,7 @@ class Feed:
     # precedes admission, and a queue at capacity takes the named
     # queue_full rejection — exactly one receipt per submission.
     def _admit(self, body, flood=False):
+        self.attempts += 1
         write = body['command']['write_value']
         depth = self._depth()
         if write['point'] == 10:
@@ -258,6 +265,19 @@ class Feed:
                        'actor': body.get('actor')}
             self._journal_entry()
         self.receipts.append(receipt)
+        if self.receipt_cap is not None:
+            # The bounded tail's eviction: the settled prefix past the
+            # cap leaves the window; pending receipts never evict.
+            excess = len(self.receipts) - self.receipt_cap
+            settled = next(
+                (i for i, entry in enumerate(self.receipts)
+                 if 'accepted' in entry['outcome']), len(self.receipts))
+            evicted = min(excess, settled)
+            if evicted > 0:
+                del self.receipts[:evicted]
+                self.flood_pending = {i - evicted
+                                      for i in self.flood_pending
+                                      if i >= evicted}
         return receipt
 
     # The plant half: one completed scan per measurement read, applying
@@ -309,13 +329,20 @@ class Feed:
                     'depth': min(self.window, published),
                     'window': self.window},
                 'command_queue': {
-                    'attempts': len(self.receipts),
+                    'attempts': self.attempts,
                     'full_rejections': self.full_rejections,
                     'capacity': self.capacity,
                     'depth': self._depth(),
                     'high_water': self.high_water}}
         if (method, route) == ('GET', '/receipts'):
             return 200, list(self.receipts)
+        if (method, route) == ('GET', '/checkpoint'):
+            return 200, {
+                'receipts': list(self.receipts),
+                'command_admission': {
+                    'attempts': self.attempts,
+                    'full_rejections': self.full_rejections,
+                    'high_water': self.high_water}}
         if (method, route) == ('GET', '/history'):
             params = dict(part.split('=', 1) for part in query.split('&'))
             point, since = int(params['point']), int(params['since'])
@@ -6742,6 +6769,18 @@ class CommandAdmissionTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never settled applied', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_bounded_receipt_window_still_audits(self):
+        # The qa-20260917-035 reproduction: the receipt log's bounded
+        # tail rolls under the flood — settled receipts evict while
+        # submissions still land — so the settlement audit correlates
+        # absolute submission indexes against the window's high-water,
+        # not positions in the tail.
+        self.feed.receipt_cap = 8
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertGreater(self.feed.attempts, len(self.feed.receipts))
         report.validate_scenario(record)
 
 
