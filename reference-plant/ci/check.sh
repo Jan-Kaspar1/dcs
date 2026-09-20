@@ -395,6 +395,27 @@
 #                inputs restored; two passes produce identical digests
 #                (managed-lifecycle-failed,
 #                managed-lifecycle-nondeterministic)
+#                The stage's managed-carryover leg,
+#                ci/managed_carryover.py on the same declared
+#                deployment — the consumer-side proof that the managed
+#                alarm kinds' checkpointed run state carries across a
+#                takeover on the customer-owned pair (WW-ENG-003,
+#                WW-ALM-002, WW-LCM-001): with the pair tracking, a
+#                per-pump fault alarm put out of service through its
+#                wired oos point and tripped suppressed so its alarm
+#                reports process truth with the latch withheld, and
+#                the shelvable low-level alarm shelved mid-run through
+#                its writable journaled shelve point, the documented
+#                demote/promote landing inside the declared
+#                max_shelve_ticks bound — the promoted peer asserting
+#                shelved still stands and releases at the tick the
+#                continued countdown expires, never a bound restarted
+#                at the switch, out_of_service and suppressed standing
+#                with evaluation held, every written point carried,
+#                and both durable journals' ordered records continuous
+#                across the switch — then every driven input and the
+#                pair's roles restored; two passes produce identical
+#                digests (carry-failed, carry-nondeterministic)
 #                The stage's staging leg, ci/staging.py on the same
 #                declared deployment — the consumer-side proof that
 #                the deployed pair stages and de-stages on level
@@ -1750,6 +1771,54 @@ for tamper in expect-applied expect-standing; do
     echo "  $tamper: reported, managed-lifecycle-failed"
 done
 
+# The pair contract's managed run-state carryover leg, on the same
+# manifest-declared deployment: ci/managed_carryover.py converges the
+# pair, puts the per-pump fault alarm out of service through its wired
+# oos point and trips it suppressed, shelves the declared shelvable
+# alarm through its writable journaled shelve point mid-run, and lands
+# the documented demote/promote inside the declared max_shelve_ticks
+# bound — the promoted peer asserting shelved stands carried and
+# releases at the tick the continued countdown expires rather than a
+# bound restarted at the switch, out_of_service and suppressed
+# standing with evaluation held, and both durable journals' ordered
+# records continuous across the switch — then restores every driven
+# input and the pair's roles. Two passes must produce identical
+# digests.
+run_managed_carryover() {
+    python3 ci/managed_carryover.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_managed_carryover)" \
+    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
+SECOND="$(run_managed_carryover)" \
+    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "carry-nondeterministic: two managed-carryover passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg expecting the promoted peer to expire the
+# shelve a fresh bound after the switch — the countdown restarted —
+# and a leg expecting the promoted peer to have dropped the carried
+# out-of-service must each surface the named diagnostic rather than
+# passing silently.
+for tamper in restarted-bound dropped-oos; do
+    if out="$(run_managed_carryover --tamper "$tamper" 2>&1)"; then
+        fail "carry-unchecked: a $tamper case passed the managed-carryover leg"
+    fi
+    case "$tamper" in
+        restarted-bound) expected="expected the restarted bound's expiry" ;;
+        dropped-oos) expected="expected the dropped carry" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "carry-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, carry-failed"
+done
+
 # The pair contract's staging leg, on the same manifest-declared
 # deployment: ci/staging.py holds both pumps out of service through
 # receipted writes on their declared oos points so the declared inflow
@@ -1809,7 +1878,8 @@ for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py \
-        ci/managed_lifecycle.py ci/negotiation.py ci/pair.py \
+        ci/managed_carryover.py ci/managed_lifecycle.py \
+        ci/negotiation.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
