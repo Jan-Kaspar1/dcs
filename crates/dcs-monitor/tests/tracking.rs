@@ -16,7 +16,7 @@ use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -196,7 +196,17 @@ struct Serving {
 impl Serving {
     fn start(monitor: Monitor<'static>) -> Self {
         let monitor = Arc::new(monitor);
-        let client = MonitorClient::new(monitor.local_addr());
+        let bound = monitor.local_addr();
+        // A wildcard-bound monitor is reached through loopback — the
+        // test client never dials the unspecified address.
+        let client = MonitorClient::new(SocketAddr::new(
+            match bound.ip() {
+                IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                ip => ip,
+            },
+            bound.port(),
+        ));
         let serving = Arc::clone(&monitor);
         Self {
             monitor,
@@ -249,6 +259,18 @@ impl DrivenStandby {
         failover: Option<u32>,
         build: fn(&'static StubDriver) -> Executor<'static>,
     ) -> (Self, Serving) {
+        Self::start_binding(failover, build, "127.0.0.1:0")
+    }
+
+    /// `standby_bind` is the standby monitor's listen address —
+    /// `0.0.0.0:0` reproduces the wildcard bind every container
+    /// deployment carries, whose `local_addr` is the unroutable
+    /// announce the follow-peer contract must resolve.
+    fn start_binding(
+        failover: Option<u32>,
+        build: fn(&'static StubDriver) -> Executor<'static>,
+        standby_bind: &str,
+    ) -> (Self, Serving) {
         let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(3.0)),
             (PointId(20), Value::Float(0.0)),
@@ -274,7 +296,7 @@ impl DrivenStandby {
             peer = peer.with_failover(budget);
         }
         let standby = Serving::start(
-            Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
+            Monitor::bind_peer(standby_bind, peer, signal_index())
                 .unwrap()
                 .driven(Driven {
                     track: Some(active_addr),
@@ -638,6 +660,56 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
         Some("127.0.0.1:12345".parse().unwrap())
     );
     lonely.stop();
+}
+
+/// The QA finding `follow-peer-announces-unroutable-bind-address`: a
+/// tracking standby whose monitor binds the wildcard — every container
+/// deployment's `--listen 0.0.0.0:<port>` — announces that bind
+/// address through its `GET /checkpoint?peer=` pulls, and the serving
+/// monitor resolves it to the pull connection's proven source rather
+/// than recording the unroutable wildcard. Demoting the field owner
+/// then follows the resolved address: the demoted peer's checkpoint
+/// pull targets a routable address — the pull's source IP, loopback in
+/// this in-process rig, the peer's container IP on the shipped rig —
+/// and reconverges, staying promotable instead of looping back onto
+/// itself forever.
+#[test]
+fn a_wildcard_bound_peers_announce_tracks_a_routable_source() {
+    let (standby, active) = DrivenStandby::start_binding(None, executor, "0.0.0.0:0");
+    let standby_bound = standby.standby.monitor.local_addr();
+    assert!(
+        standby_bound.ip().is_unspecified(),
+        "the standby binds the wildcard like the container deployment: {standby_bound}"
+    );
+
+    // The tracking pull announces `local_addr` — `0.0.0.0:<port>`, the
+    // reproduction's unroutable address — and the serving monitor
+    // resolves the wildcard to the pull's proven source: the recorded
+    // follow-peer source is the connection's IP, never the wildcard.
+    standby.standby.client.advance(1).unwrap();
+    let resolved = active.monitor.tracking_source();
+    assert_eq!(
+        resolved,
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            standby_bound.port()
+        )),
+        "the announced wildcard resolves to the connection's source"
+    );
+
+    // Demotion follows the resolved source: the pull reaches the
+    // announcing peer — not the demoted peer's own loopback where
+    // nothing listens on that port — so the demoted standby
+    // reconverges and stays promotable.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer reconverges on the resolved source: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
 }
 
 /// The paced-standby reproduction of the QA finding
