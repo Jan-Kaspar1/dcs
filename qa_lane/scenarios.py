@@ -2,8 +2,8 @@
 
 Each scenario drives the redundant controller pair through the monitor
 endpoints documented in docs/packaging.md (GET /role, /signals,
-/snapshot, /receipts, /journal, /schema, /resources; POST /command,
-/demote, /promote) and returns one report-schema scenario case. Stdlib
+/snapshot, /receipts, /journal, /history, /schema, /resources; POST
+/command, /demote, /promote) and returns one report-schema scenario case. Stdlib
 only — the Lenovo host needs nothing but Python and Docker. The
 restart scenario also triggers the runner-owned container lifecycle
 action ctx['restart_controller'] carries and reads the per-controller
@@ -11797,10 +11797,12 @@ def scenario_command_availability(ctx):
 # `cargo build -p dcs-monitor --bin dcs-ctl` beside the image
 # binaries), handed to the scenario as ctx['dcs_ctl']; every asserted
 # read and mutation travels through CLI invocations against the
-# published monitor addresses. The leg is read-mostly by construction:
-# its single mutation is the writable-safe declared command the
-# served-interface case's selection logic picks, and the refusal
-# probes are rejected before they can perturb the plant.
+# published monitor addresses — the whole served-resource surface,
+# role/signals/schema beside resources, the keyed and per-component
+# events reads, receipts, and history. The leg is read-mostly by
+# construction: its single mutation is the writable-safe declared
+# command the served-interface case's selection logic picks, and the
+# refusal probes are rejected before they can perturb the plant.
 
 DCS_CTL_TIMEOUT = 20   # bound on one dcs-ctl invocation
 CTL_DEADLINE = 30      # bound on the journaled-settlement wait
@@ -11849,6 +11851,20 @@ def _ctl_command_args(command):
     return None
 
 
+def _emitted_match(events, command):
+    """The emitted-events entry covering `command`'s settlement — or
+    any kind-emitted event — out of one component's attributed list:
+    the produced-event proof both `events` read shapes owe."""
+    for entry in events or []:
+        event = (entry or {}).get('event') or {}
+        settled = (event.get('command_settled') or {}) \
+            .get('receipt') or {}
+        if settled.get('command') == command \
+                or event.get('event_emitted'):
+            return entry
+    return None
+
+
 def scenario_dcs_ctl(ctx):
     """The shipped dcs-ctl binary against the deployed pair — the
     replaceable-consumer contract exercised through the operator CLI
@@ -11858,12 +11874,18 @@ def scenario_dcs_ctl(ctx):
                 'the lane-built dcs-ctl binary reports exactly one '
                 'active and one standby across the pair, its schema '
                 'read covers every component kind the rig model '
-                'declares, the command the served-interface selection '
-                'logic picks settles a receipt journaled with the '
-                '--actor the leg passed, the emitted-events read '
-                'attributes a produced event to its component, and an '
-                'undeclared or unavailable invocation is refused by '
-                'name — never silently accepted')
+                'declares, the resources read serves one live record '
+                'per declared component beside the picked component\'s '
+                'interface-parallel entry, the command the '
+                'served-interface selection logic picks settles a '
+                'receipt journaled with the --actor the leg passed '
+                'and listed by the receipts read, the emitted-events '
+                'read — keyed across the model and per component — '
+                'attributes a produced event to its component, the '
+                'history read returns a declared measurement point\'s '
+                'retained samples, and an undeclared or unavailable '
+                'invocation is refused by name — never silently '
+                'accepted')
     transcript = []
 
     def done(outcome, detail=None):
@@ -11978,6 +12000,33 @@ def scenario_dcs_ctl(ctx):
                      + ' declared instances across '
                      + str(len(kinds)) + ' kinds ('
                      + ', '.join(kinds) + ')')
+        declared_kinds = {str(record.get('name')): record.get('kind')
+                          for record in declared}
+
+        # The whole-model resources read: the served ResourceView —
+        # one live record per declared component, each kind-matched to
+        # the index's declaration.
+        rc, resources, err = ctl(base, 'resources')
+        if rc != 0 or not isinstance(resources, dict):
+            return done('failed', 'dcs-ctl resources failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        live = {}
+        for record in resources.get('components') or []:
+            if isinstance(record, dict) and record.get('name'):
+                live[str(record['name'])] = record
+        mismatch = [name for name in sorted(declared_kinds)
+                    if (live.get(name) or {}).get('kind')
+                    != declared_kinds[name]]
+        if sorted(live) != sorted(declared_kinds) or mismatch:
+            return done(
+                'failed', 'the resources read does not answer one '
+                'kind-matched record per declared component: served '
+                + ', '.join(sorted(live)[:8]) + ' against '
+                + str(len(declared)) + ' declared'
+                + (('; mismatched kinds: ' + ', '.join(mismatch[:8]))
+                   if mismatch else ''))
+        case.observe('resources read serves one live record per '
+                     'declared component (' + str(len(live)) + ')')
 
         picked = _pick_declared_command(schema.get('interfaces') or [],
                                         signals)
@@ -11992,6 +12041,42 @@ def scenario_dcs_ctl(ctx):
         case.observe('picked command: ' + str(component) + ' '
                      + str(spec.get('name')) + ' -> dcs-ctl '
                      + ' '.join(argv) + ' --actor ' + CTL_ACTOR)
+
+        # The named-component resources read: the picked instance's
+        # ComponentResources entry — name- and kind-matched, its live
+        # collections parallel to the interface's declared ones.
+        rc, res_entry, err = ctl(base, 'resources', component)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'dcs-ctl-resources.json',
+                            {'view': resources, 'component': component,
+                             'entry': res_entry})
+        case.evidence('file', ref, 'the ResourceView and '
+                      + str(component) + '\'s entry')
+        if rc != 0 or not isinstance(res_entry, dict):
+            return done('failed', 'dcs-ctl resources ' + str(component)
+                        + ' failed: exit ' + str(rc) + ' '
+                        + str(err)[:200])
+        interface = served.get(component) or {}
+        collections = ('measurements', 'configuration', 'state',
+                       'commands', 'events')
+        absent = [name for name in collections
+                  if not isinstance(res_entry.get(name), list)]
+        short = [name for name in collections[:-1]
+                 if isinstance(res_entry.get(name), list)
+                 and len(res_entry[name])
+                 != len(interface.get(name) or [])]
+        if res_entry.get('name') != component \
+                or res_entry.get('kind') != interface.get('kind') \
+                or absent or short:
+            return done('failed', 'the resources entry for '
+                        + str(component) + ' does not mirror the '
+                        'served interface: name='
+                        + str(res_entry.get('name')) + ' kind='
+                        + str(res_entry.get('kind')) + ' absent='
+                        + json.dumps(absent) + ' non-parallel='
+                        + json.dumps(short))
+        case.observe('resources entry for ' + str(component)
+                     + ' mirrors the interface\'s collections')
 
         # The journal cursor ahead of the submission: earlier legs
         # already settled identical commands into the ring — the
@@ -12095,33 +12180,115 @@ def scenario_dcs_ctl(ctx):
         case.observe('journal carries the settled receipt attributed '
                      'to ' + CTL_ACTOR)
 
-        # The emitted-events read: the produced event — the command's
-        # settled receipt — attributed to its component.
+        # The emitted-events reads: the produced event — the command's
+        # settled receipt — attributed to its component, both in the
+        # keyed whole-model view and the per-component list.
+        rc_all, keyed, err_all = ctl(base, 'events')
         rc, events, err = ctl(base, 'events', component)
         ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-events.json',
-                            {'component': component, 'exit': rc,
-                             'events': events})
-        case.evidence('file', ref, 'the emitted-events read for '
-                      + str(component))
+                            {'component': component,
+                             'keyed': {'exit': rc_all, 'events': keyed},
+                             'exit': rc, 'events': events})
+        case.evidence('file', ref, 'the emitted-events reads — keyed '
+                      'across the model and for ' + str(component))
+        if rc_all != 0 or not isinstance(keyed, dict):
+            return done('failed', 'dcs-ctl events failed: exit '
+                        + str(rc_all) + ' ' + str(err_all)[:200])
         if rc != 0 or not isinstance(events, list):
             return done('failed', 'dcs-ctl events failed for '
                         + str(component) + ': exit ' + str(rc) + ' '
                         + str(err)[:200])
-        match = None
-        for entry in events:
-            event = (entry or {}).get('event') or {}
-            settled_receipt = (event.get('command_settled') or {}) \
-                .get('receipt') or {}
-            if settled_receipt.get('command') == command \
-                    or event.get('event_emitted'):
-                match = entry
-                break
+        unkeyed = [name for name in sorted(declared_kinds)
+                   if not isinstance(keyed.get(name), list)]
+        if unkeyed:
+            return done('failed', 'the keyed events read serves no '
+                        'attributed list for '
+                        + ', '.join(unkeyed[:8]))
+        match = _emitted_match(events, command)
         if match is None:
             return done('failed', 'the emitted-events read attributes '
+                        'no produced event to ' + str(component))
+        if _emitted_match(keyed.get(component), command) is None:
+            return done('failed', 'the keyed events read attributes '
                         'no produced event to ' + str(component))
         case.observe('events read attributes '
                      + next(iter(match.get('event') or {}), '?')
                      + ' to ' + str(component))
+
+        # The settled-command read: the receipt log carries this leg's
+        # attributed invoke — the command audit's listing half beside
+        # the journal's durable record.
+        rc, receipts, err = ctl(base, 'receipts')
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-receipts.json',
+                            {'exit': rc, 'receipts': receipts})
+        case.evidence('file', ref, 'the settled-command receipt list')
+        if rc != 0 or not isinstance(receipts, list):
+            return done('failed', 'dcs-ctl receipts failed: exit '
+                        + str(rc) + ' ' + str(err)[:200])
+        own = next((entry for entry in receipts
+                    if isinstance(entry, dict)
+                    and entry.get('command') == command
+                    and entry.get('actor') == CTL_ACTOR), None)
+        if own is None:
+            return done('failed', 'the receipt log never recorded the '
+                        'leg\'s attributed invoke')
+        outcome = own.get('outcome') or {}
+        if 'applied' not in outcome and 'rejected' not in outcome:
+            return done('failed', 'the attributed invoke\'s receipt '
+                        'never settled: ' + json.dumps(outcome)[:200])
+        case.observe('receipts carries the attributed invoke settled '
+                     + next(iter(outcome)))
+
+        # The retained-samples read on a declared measurement point —
+        # the picked component's bound measurement first, else any
+        # served instance's.
+        history_point = None
+        ordered = sorted(
+            schema.get('interfaces') or [],
+            key=lambda entry: entry.get('name') != component)
+        for entry in ordered:
+            for measurement in ((entry.get('interface') or {})
+                                .get('measurements') or []):
+                if isinstance(measurement, dict) \
+                        and measurement.get('point') is not None:
+                    history_point = measurement['point']
+                    break
+            if history_point is not None:
+                break
+        if history_point is None:
+            return done('inconclusive', 'no served measurement binds a '
+                        'point for the history read')
+        rc, history, err = ctl(base, 'history', '--point',
+                               str(history_point))
+        ref = save_evidence(ctx['evidence_dir'], 'dcs-ctl-history.json',
+                            {'point': history_point, 'exit': rc,
+                             'history': history})
+        case.evidence('file', ref, 'retained samples for declared '
+                      'point ' + str(history_point))
+        if rc != 0 or not isinstance(history, list):
+            return done('failed', 'dcs-ctl history failed for point '
+                        + str(history_point) + ': exit ' + str(rc)
+                        + ' ' + str(err)[:200])
+        record = next((item for item in history
+                       if isinstance(item, dict)
+                       and item.get('point') == history_point), None)
+        if record is None:
+            return done('failed', 'the history read serves no record '
+                        'for declared point ' + str(history_point))
+        samples = record.get('samples')
+        if not isinstance(samples, list) or not samples:
+            return done('failed', 'declared point ' + str(history_point)
+                        + ' retains no served samples')
+        bad = [item for item in samples
+               if not isinstance(item, dict)
+               or not isinstance(item.get('seq'), int)
+               or not isinstance(item.get('sample'), dict)]
+        if bad:
+            return done('failed', 'the history read serves malformed '
+                        'samples: ' + json.dumps(bad[:2])[:300])
+        case.observe('history retains ' + str(len(samples))
+                     + ' samples for declared point '
+                     + str(history_point))
 
         # The refusal legs: an invoke the served contract does not
         # declare, and — when the resource view advertises one — a
@@ -12141,11 +12308,10 @@ def scenario_dcs_ctl(ctx):
             'exit': rc, 'receipt': refused, 'stderr': err}
 
         unavailable = None
-        try:
-            _, resources = http_json('GET', base + '/resources')
-        except Exception:
-            resources = {}
-        for record in (resources or {}).get('components') or []:
+        rc, fresh, _err = ctl(base, 'resources')
+        if rc != 0 or not isinstance(fresh, dict):
+            fresh = {}
+        for record in fresh.get('components') or []:
             interface = served.get(record.get('name')) or {}
             states = {state.get('name'): state
                       for state in record.get('commands') or []}

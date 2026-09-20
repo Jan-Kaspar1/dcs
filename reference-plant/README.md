@@ -115,6 +115,14 @@ ci/divergence.py       the pair contract's staged-vs-field
                        promotion refused not_converged with no field
                        hand-off, and a write-free control window
                        reconverging and promoting normally
+ci/standby_restart.py  the pair contract's standby-restart leg —
+                       the tracking standby's container stopped and
+                       relaunched onto its declared
+                       --state-file/--journal-file, resuming at the
+                       persisted tick and reconverging to tracking
+                       inside the declared window while the active's
+                       writes, receipts, and journal run undisturbed,
+                       then promoting to prove the pair left whole
 ci/report.py           the pair contract's alarm-report leg — the
                        released `dcs-alarm-report` computing the
                        declared AlarmReport metric set over the
@@ -594,6 +602,37 @@ doctored case — the field-side write skipped while the refusal is
 still asserted — must report the named diagnostic rather than
 pass silently.
 
+The stage's standby-restart leg — `ci/standby_restart.py` on the
+same declared deployment — then proves the standby half of the
+restart-recovery contract on the customer's pair: the
+non-field-owning peer restarted onto its declared files must
+resume, re-pull, and reconverge to tracking while the active's
+field ownership never falters. With the pair tracking and a
+receipted command settled `applied` into both peers' adopted log,
+the leg stops the tracking standby's container and keeps driving
+the field owner — each driven scan's writes landing on the
+simulated field and a second command settling `applied` — then
+relaunches the standby on the manifest's wiring with its declared
+`--state-file`/`--journal-file`. The startup preamble must report
+the resume at the persisted tick — never a silent cold start at
+tick zero — the served `GET /role` must report `standby`
+unsynchronized rather than a field claim, and the durable journal
+must carry the restart's `run_boundary` ordered after run 1's
+entries with the `seq` order continuing across it. Driven
+tracking-first ticks must reconverge the resumed peer to
+`tracking` inside the leg's declared window, the adopted receipt
+log identical on both peers — the downtime command included — and
+the active's journal running undisturbed throughout. The
+documented `demote`/`promote` switch on the reconverged pair then
+proves the restart left no wedge: the restarted peer promotes and
+the demoted owner reconverges `tracking` on it. A violated
+contract fails `standby-restart-failed`; two passes must produce
+the identical `standby-restart-digest`, a divergence failing
+`standby-restart-nondeterministic`. The leg's doctored cases — a
+state file gone missing at the restart point, and the restart's
+assertions held against a peer never restarted — must report the
+named diagnostic rather than pass silently.
+
 The stage's alarm-report leg — `ci/report.py` on the same declared
 deployment — then proves the released alarm flood and performance
 tool produces the declared `AlarmReport` metric set (WW-ALM-004)
@@ -721,7 +760,12 @@ and the redundant controller pair:
   surviving the process lifetime. Each declared path must land on
   writable deployment storage and rides the invocation's
   `--state-file`/`--journal-file` flags; a deployment without durable
-  storage omits both fields and the flags stay absent.
+  storage omits both fields and the flags stay absent. A restarted
+  tracking standby resumes from its declared files exactly as the
+  lone controller does — rejoining in standby at the persisted tick
+  and reconverging to `tracking` on its peer's checkpoints —
+  `ci/standby_restart.py` exercises that promise on the deployed
+  pair.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -847,6 +891,13 @@ perturbed output, the promote not answering `not_converged` or handing
 the field off, the active disturbed, or the write-free control window
 not reconverging and promoting — is `divergence-missed`; two
 divergence-leg passes diverging is `divergence-nondeterministic`;
+a tracking standby failing its declared-files restart — the resume
+unreported or at the wrong tick, the rejoin claiming the field, the
+reconvergence out of window, the durable boundary unordered, the
+active's writes, receipts, or journal disturbed, or the pair unable
+to promote afterward — is `standby-restart-failed`; two
+standby-restart passes diverging is
+`standby-restart-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
