@@ -144,7 +144,7 @@ fn coordinator(name: &str) -> BackwashCoordinator {
 type Outputs = [Sample; 9];
 
 fn iterate(executor: &mut Executor<'_>, sim: &SimDriver, outputs: &mut Vec<Outputs>) {
-    executor.scan().unwrap();
+    executor.scan();
     sim.step(DT);
     outputs.push([
         sim.read(GRANT_1).unwrap(),

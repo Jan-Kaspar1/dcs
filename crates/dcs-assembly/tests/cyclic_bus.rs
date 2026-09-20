@@ -195,7 +195,7 @@ fn the_sim_cyclic_kind_resolves_and_exchanges_once_per_scan() {
         // boundary.
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         for _ in 0..10 {
-            executor.scan().unwrap();
+            executor.scan();
         }
         // The manual exchange above plus the ten scans' exchanges.
         let exchange = executor

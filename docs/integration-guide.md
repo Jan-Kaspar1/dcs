@@ -352,15 +352,15 @@ let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // The plant side drives the `in` point; each scan publishes the peak.
 driver.write(PointId(1), Value::Float(5.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(1), Value::Float(3.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(2), Value::Bool(true)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(3.0));
 
 // The snapshot carries the instance's descriptor and diagnostics.
@@ -449,8 +449,8 @@ published verdict and the refusal must be the same expression. The
 verdict is advisory only: submissions still validate, queue, and settle
 through the receipted path, and a verdict dispatch disagrees with
 settles honestly rather than failing the scan. The default reports
-every declared command invocable, matching the read model's earlier
-unconditional `available`.
+every declared command invocable — the unconditional `available` a
+publication carrying no verdict still serves.
 
 ### Declaring an emitted event
 
@@ -501,10 +501,14 @@ A generic consumer needs no kind-specific code:
 - `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a
   declared command through the same receipted path without a browser.
 
-A `KindDeclared` command reports `available` in the resource view even
-when the kind's predicate would refuse this submission — the served
-refusal is the settled `command_refused` receipt's, so consumers should
-surface that named reason rather than pre-judging availability.
+A `KindDeclared` command's served `available` joins the published
+verdict: while the kind's predicate refuses, the resource view reports
+`available: false` carrying the kind's named refusal reason. The served
+answer is advisory — it is the last completed scan's standing verdict,
+so a submission still validates, queues, and settles through the
+receipted path, and a refusal the verdict predates (an argument-domain
+check, an `invoke_command` invariant) still lands on the settled
+`command_refused` receipt for consumers to surface.
 
 ## Adding a device kind
 
@@ -851,12 +855,12 @@ let components = ComponentRegistry::new().with(AnalogInput::<f64>::KIND, |spec| 
 let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // `raw` starts at its declared initial 5.0 -> the first scan writes 50.0.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(50.0));
 
 // The plant side moves the input; the next scan follows.
 driver.write(PointId(1), Value::Float(10.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(100.0));
 ```
 
@@ -1304,7 +1308,7 @@ assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(0.0));
 
 // One exchange ran at the read boundary and the input phase served the
 // fresh latch — while the per-point `read` never transported.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.exchange_count(), 1);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
@@ -1313,7 +1317,7 @@ assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 // it: the one-scan actuation delay.
 driver.write(PointId(2), Value::Float(7.0)).unwrap();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(0.0)));
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
 // The link drops: exchanges fail, each counted once at the boundary,
@@ -1321,14 +1325,14 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // `stale_after_ticks` budget.
 bus.set_link_down(true);
 bus.field_set(PointId(1), Value::Float(9.0)); // unseen until an exchange lands
-executor.scan().unwrap(); // miss 1 of 3: held value, still inside the budget
+executor.scan(); // miss 1 of 3: held value, still inside the budget
 assert_eq!(executor.snapshot().io_health.failed_exchanges, 1);
 assert_eq!(executor.snapshot().io_health.failed_reads, 0);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
 // Miss 2: the held sample's acquisition stamp lags past the declared
 // budget — `Uncertain(Stale)`.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap().quality,
     Quality::Uncertain(QualityReason::Stale)
@@ -1337,7 +1341,7 @@ assert_eq!(
 // Miss 3 reaches `exchange_miss_threshold`: reads escalate to
 // `Disconnected` — an ordinary boundary fault degrading the held value
 // to `Bad`.
-executor.scan().unwrap();
+executor.scan();
 let health = &executor.snapshot().io_health;
 assert_eq!(health.failed_exchanges, 3);
 assert_eq!(health.failed_reads, 1);
@@ -1361,7 +1365,7 @@ assert_eq!(
 // The link returns: the next exchange completes — misses reset, the
 // link recovers, and the field's asserted value lands fresh.
 bus.set_link_down(false);
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap(),
     Sample::good(Value::Float(9.0), Tick(6))
@@ -1374,7 +1378,7 @@ let gate = dcs_runtime::WriteGate::closed(&driver);
 let mut standby = assemble(&model, &ComponentRegistry::new(), &gate).unwrap();
 bus.field_set(PointId(1), Value::Float(2.0));
 gate.write(PointId(2), Value::Float(5.0)).unwrap(); // accepted and dropped
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(standby.sample(PointId(1)).unwrap().value, Value::Float(2.0));
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
@@ -1382,7 +1386,7 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // publish it.
 gate.open();
 gate.write(PointId(2), Value::Float(5.0)).unwrap();
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
 ```
 

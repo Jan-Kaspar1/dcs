@@ -1,15 +1,20 @@
 # syntax=docker/dockerfile:1
 
-# Build stage: compile the plant server with the workspace-pinned toolchain.
+# Build stage: compile the plant server plus the dcs-plant-ctl
+# plant-side tool with the workspace-pinned toolchain.
 FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p dcs-plant
+RUN cargo build --release --locked -p dcs-plant -p dcs-sim-net
 
-# Runtime stage: minimal image carrying only the plant server binary.
+# Runtime stage: minimal image carrying the plant server binary with
+# dcs-plant-ctl beside it — the entrypoint is unchanged; the tool runs
+# via `docker exec` against the server's loopback listener for live
+# perturbation of the running plant.
 FROM debian:bookworm-slim AS runtime
 RUN useradd --no-create-home --shell /usr/sbin/nologin --uid 10001 dcs
 COPY --from=build /src/target/release/dcs-plant-server /usr/local/bin/dcs-plant-server
+COPY --from=build /src/target/release/dcs-plant-ctl /usr/local/bin/dcs-plant-ctl
 USER dcs
 ENTRYPOINT ["dcs-plant-server"]
 CMD ["--help"]

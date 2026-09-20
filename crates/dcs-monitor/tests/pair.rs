@@ -13,7 +13,10 @@ use dcs_core::{
     JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PairClient, PairError, PeerStatus};
+use dcs_monitor::{
+    Monitor, MonitorClient, PAIR_FAULT_KINDS_VERSION, PairClient, PairError, PairFaultKind,
+    PairHealth, PeerStatus,
+};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -188,6 +191,70 @@ fn status_of(pair: &PairClient, addr: SocketAddr) -> &PeerStatus {
         .status()
 }
 
+fn assert_fault_kinds(health: &PairHealth, expected: &[PairFaultKind]) {
+    assert_eq!(health.fault_kinds_version, Some(PAIR_FAULT_KINDS_VERSION));
+    assert_eq!(health.faults.len(), health.fault_kinds.len());
+    assert_eq!(health.fault_kinds, expected);
+}
+
+#[test]
+fn pair_health_fault_kinds_roundtrip() {
+    for kind in PairFaultKind::ALL {
+        let health = PairHealth {
+            active: Some("127.0.0.1:5800".parse().unwrap()),
+            faults: vec!["diagnostic detail".to_string()],
+            fault_kinds_version: Some(PAIR_FAULT_KINDS_VERSION),
+            fault_kinds: vec![kind],
+        };
+        let json = serde_json::to_value(&health).unwrap();
+        assert_eq!(json["fault_kinds_version"], 1);
+        assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
+        assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
+    }
+}
+
+#[test]
+fn legacy_pair_health_accepts_absent_fault_kind_fields() {
+    for faults in [vec![], vec!["legacy diagnostic detail"]] {
+        let json = serde_json::json!({
+            "active": "127.0.0.1:5800",
+            "faults": faults,
+        });
+        let health: PairHealth = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(health.active, Some("127.0.0.1:5800".parse().unwrap()));
+        assert_eq!(health.faults, faults);
+        assert_eq!(health.fault_kinds_version, None);
+        assert!(health.fault_kinds.is_empty());
+        assert_eq!(serde_json::to_value(&health).unwrap(), json);
+    }
+}
+
+#[test]
+fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
+    let health = PairHealth {
+        active: Some("127.0.0.1:5800".parse().unwrap()),
+        faults: vec![],
+        fault_kinds_version: Some(PAIR_FAULT_KINDS_VERSION),
+        fault_kinds: vec![],
+    };
+    let json = serde_json::to_value(&health).unwrap();
+    assert_eq!(json["fault_kinds_version"], 1);
+    assert!(json.get("fault_kinds").is_none());
+    assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
+}
+
+#[test]
+fn pair_health_rejects_unknown_fault_kinds() {
+    let json = serde_json::json!({
+        "active": null,
+        "faults": ["unknown diagnostic detail"],
+        "fault_kinds_version": 1,
+        "fault_kinds": ["unknown_pair_fault"],
+    });
+    assert!(serde_json::from_value::<PairHealth>(json).is_err());
+    assert!(serde_json::from_str::<PairFaultKind>(r#""unknown_pair_fault""#).is_err());
+}
+
 #[test]
 fn role_endpoints_are_polled_and_the_active_sources_the_view() {
     let active = PeerRig::start(Role::Active);
@@ -293,10 +360,15 @@ fn dropped_standby_is_a_named_redundancy_fault_while_the_active_view_runs() {
     let mut pair = PairClient::new([active.addr, standby_addr]);
     pair.poll_roles();
     assert_eq!(pair.source(), Some(active.addr));
+    assert_fault_kinds(&pair.health(), &[]);
 
     // The standby process drops: serving stops and the listener closes.
     standby.stop();
     pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::PeerUnreachable]);
+    assert_eq!(health.faults[0], format!("{standby_addr} unreachable"));
 
     // The named redundancy fault — a peer outage is pair health, not a
     // plant fault.
@@ -322,7 +394,27 @@ fn dropped_standby_is_a_named_redundancy_fault_while_the_active_view_runs() {
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
     assert_eq!(active.client.receipts().unwrap().len(), 1);
 
+    let active_addr = active.addr;
     active.stop();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, None);
+    assert_fault_kinds(
+        &health,
+        &[
+            PairFaultKind::PeerUnreachable,
+            PairFaultKind::PeerUnreachable,
+            PairFaultKind::NoActivePeer,
+        ],
+    );
+    assert_eq!(
+        health.faults,
+        [
+            format!("{active_addr} unreachable"),
+            format!("{standby_addr} unreachable"),
+            "no peer reports role active".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -441,6 +533,10 @@ fn a_command_is_never_sent_to_a_standby_role_peer() {
     let b = PeerRig::start(Role::Standby);
     let mut pair = PairClient::new([a.addr, b.addr]);
     pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, None);
+    assert_fault_kinds(&health, &[PairFaultKind::NoActivePeer]);
+    assert_eq!(health.faults[0], "no peer reports role active");
 
     let error = pair
         .command(&write_value(10, ValueKind::Float, Value::Float(1.0)))
@@ -479,6 +575,7 @@ fn dual_active_is_a_named_redundancy_fault_and_commands_have_no_target() {
     }
     let health = pair.health();
     assert_eq!(health.active, None);
+    assert_fault_kinds(&health, &[PairFaultKind::DualActive]);
     assert!(
         health
             .faults
@@ -524,6 +621,7 @@ fn dual_active_is_a_named_redundancy_fault_and_commands_have_no_target() {
     let health = pair.health();
     assert_eq!(health.active, Some(promoted.addr));
     assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
     let receipt = pair
         .command(&write_value(10, ValueKind::Float, Value::Float(1.0)))
         .unwrap();
@@ -549,6 +647,7 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     let health = pair.health();
     assert_eq!(health.active, Some(active.addr));
     assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
 
     // Past the grace — here a zero grace, so the first observed report
     // already exceeds it — a peer still reporting unsynchronized cannot
@@ -562,6 +661,7 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     lapsed.poll_roles();
     let health = lapsed.health();
     assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyUnsynchronizedPastGrace]);
     assert!(
         health
             .faults
@@ -584,6 +684,7 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     let health = lapsed.health();
     assert_eq!(health.active, Some(active.addr));
     assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
 
     // The page carries the same verdict: its pairHealth faults a peer
     // still reporting "unsynchronized" past the same grace — over the

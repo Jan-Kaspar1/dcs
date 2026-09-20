@@ -144,6 +144,60 @@ fn the_variants_share_the_station_plant() {
 }
 
 #[test]
+fn the_bus_dynamics_decouple_the_backup_level_quality() {
+    // The register-addressed dynamics document carries the same
+    // decoupled form the point-addressed primary's does: the backup
+    // level register is a second integrator on the net-flow sum, not an
+    // element consuming the primary register's sample — so neither
+    // instrument's stamped quality reaches the other and both
+    // failover-select states are producible on the served field.
+    let server = station_kinds::serve_bus_bank().expect("the bank binds");
+    let bank = server.bank();
+    let bad = Quality::Bad(QualityReason::CommunicationFault);
+    let level_primary = points::LEVEL_PRIMARY.0 as u16;
+    let level_backup = points::LEVEL_BACKUP.0 as u16;
+
+    // A standing inflow moves the well: both instrument registers are
+    // integrators on the net-flow sum, the backup tracking the level at
+    // the declaration's offset below the primary.
+    bank.write(points::INFLOW.0 as u16, Value::Float(0.5))
+        .unwrap();
+    bank.step(1.0);
+    assert_eq!(
+        bank.read(level_primary).unwrap(),
+        Sample::good(Value::Float(1.3), Tick(1))
+    );
+    assert_eq!(
+        bank.read(level_backup).unwrap(),
+        Sample::good(Value::Float(-1.5), Tick(1))
+    );
+
+    // The primary-faulted/backup-healthy direction: the stamped Bad
+    // stays on the primary register while the backup keeps advancing
+    // on the well's net flow, Good — unproducible while the backup
+    // element consumed the primary's sample.
+    bank.inject_quality(level_primary, bad).unwrap();
+    bank.step(1.0);
+    assert_eq!(bank.read(level_primary).unwrap().quality, bad);
+    assert_eq!(
+        bank.read(level_backup).unwrap(),
+        Sample::good(Value::Float(-1.0), Tick(2))
+    );
+
+    // The backup-faulted/primary-healthy direction: with the primary
+    // restored, a fault stamped on the backup leaves the primary's
+    // served sample Good.
+    bank.clear_quality(level_primary).unwrap();
+    bank.inject_quality(level_backup, bad).unwrap();
+    bank.step(1.0);
+    assert_eq!(
+        bank.read(level_primary).unwrap(),
+        Sample::good(Value::Float(2.3), Tick(3))
+    );
+    assert_eq!(bank.read(level_backup).unwrap().quality, bad);
+}
+
+#[test]
 fn both_documents_validate_and_lint_clean() {
     for source in [LOCAL_DOCUMENT, BUS_DOCUMENT] {
         // The overlay's placeholder address never reaches the loader —

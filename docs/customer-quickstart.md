@@ -32,7 +32,15 @@ Its `README.md` walks the full customer path:
    `--state-file`/`--journal-file` flags: `state_file` lets a
    restarted container resume in place at its persisted checkpoint,
    `journal_file` keeps the attributed operator-action record durable
-   past the process lifetime. These fields are also what make the
+   past the process lifetime. The standby entry's optional
+   `failover_budget` is the declaration that arms automatic failover:
+   it instantiates as the invocation's `--auto-promote` flag — the
+   consecutive-missed-pull budget at which the tracking standby
+   self-promotes when its active dies, taking the plant's writer
+   claim at a scan boundary. Declaring the pair's `standby` wiring
+   alone never arms it — a standby without the field switches only
+   through the operator's receipted `demote`/`promote` path. The
+   persistence fields are also what make the
    recorded dead-active recovery a warm resume rather than a cold
    start — when an active dies while its standby cannot promote, the
    deliberate path is restarting a fresh active, whose unconditional
@@ -65,7 +73,17 @@ faulted pump's `fault`/`avail` reporting the exclusion and the managed
 fault alarm carrying journaled `point_changed` evidence — losing every
 pump raises `none_available`/`all_faulted` with their managed alarms,
 and restoring each input produces the declared recovery with the
-pair's controller roles unmoved throughout.
+pair's controller roles unmoved throughout. The stage's
+automatic-failover leg (`ci/failover.py`) then
+proves the unattended half: the declared `failover_budget` arms the
+standby's `--auto-promote`, the field-owning container is stopped, and
+the surviving peer self-promotes at the declared miss budget — its
+served role reporting the miss run then `active`, the plant's writer
+claim fencing foreign attachments while the promoted peer's writes
+land, driven scans and receipted commands continuing uninterrupted,
+and the durable journal recording the transition distinguishably from
+an operator-requested switch; a variant severing the standby leaves
+the active's writes undisturbed and reports no failover.
 
 The served operator surface a monitoring or UI consumer can rely on —
 proved by the check's `surface` stage against the emitted model — is:

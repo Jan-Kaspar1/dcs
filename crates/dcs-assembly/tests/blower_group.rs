@@ -158,7 +158,7 @@ fn boolean(driver: &FanoutDriver, point: PointId) -> bool {
 /// last `step` made current: a script entry at tick `t` takes effect at
 /// scan `t + 1`.
 fn scan(executor: &mut Executor, driver: &FanoutDriver) {
-    executor.scan().unwrap();
+    executor.scan();
     driver.step(0.1).unwrap();
 }
 
