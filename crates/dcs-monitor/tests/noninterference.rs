@@ -1329,8 +1329,11 @@ fn published_reads_cover_every_execution_mode() {
             monitor.checkpoint()
         });
 
-        // The restart: a fresh executor restored from the checkpoint,
-        // a fresh monitor replaying the same journal file.
+        // The restart: the old monitor's process lifetime ends — its
+        // drop releases the journal file's writer lock — then a fresh
+        // executor restored from the checkpoint and a fresh monitor
+        // replaying the same journal file take over.
+        drop(monitor);
         let restored =
             Executor::restore(driver, point_map(), components(), &checkpoint, None).unwrap();
         let monitor = Monitor::bind_paced_peer_with(

@@ -182,7 +182,13 @@
 //! `--state-file` diffs its first scan against the restored executor
 //! state and the replayed record's last observations, so the audit
 //! trail continues rather than re-journaling what it already recorded.
-//! Point history stays volatile; only the journal persists.
+//! Point history stays volatile; only the journal persists. The file is
+//! single-writer: the bind holds an exclusive advisory lock on the path
+//! for the monitor's lifetime, so two monitors configured with the same
+//! `journal_file` cannot interleave duplicate `seq`s into one
+//! un-replayable record — the second bind fails naming the file and the
+//! live-holder conflict, and a dead holder's lock releases with its
+//! descriptor so a restart re-acquires it.
 //!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the

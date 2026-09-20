@@ -98,7 +98,13 @@
 //! is overwritten per save and consumed by restore, the journal is
 //! append-only and consumed by review; a `--state-file`-resumed run
 //! keeps appending to the same journal file in the restored tick
-//! domain.
+//! domain. The file is single-writer: the monitor bind holds an
+//! exclusive advisory lock on the path for the process lifetime, so a
+//! second live process pointed at the same `--journal-file` — a
+//! misconfiguration that would interleave duplicate `seq`s into an
+//! un-replayable record — exits nonzero naming the file and the
+//! conflict, while a dead holder's lock releases with its descriptor
+//! and a restart re-acquires it.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -568,7 +574,10 @@ controller scan.
                   continuing seq numbering across a restart; a
                   run-boundary marker separates process lifetimes, a
                   corrupt record exits nonzero naming it, and a missing
-                  file is a cold start. Requires --listen
+                  file is a cold start. The file is single-writer: a
+                  second live process on the same PATH exits nonzero
+                  naming the writer-lock conflict — never point two
+                  controllers at one journal file. Requires --listen
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
