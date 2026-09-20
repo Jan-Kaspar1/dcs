@@ -12,7 +12,9 @@
 //! startup the file replays into the in-memory ring and `seq` numbering
 //! continues where it left off, so `GET /journal` answers continuously
 //! across a restart and a retained eviction still reads as a numbering
-//! gap.
+//! gap — except a `run_boundary` entry never drops: the tail's bound
+//! migrating one aside keeps every recorded lifetime boundary served
+//! no matter the event volume that follows.
 //!
 //! One [`JournalRecord`] per line:
 //!
@@ -181,6 +183,12 @@ pub(super) enum JournalRecord {
 pub(super) struct Replay {
     /// The file's last `capacity` entries, oldest first.
     pub entries: VecDeque<JournalEntry>,
+    /// The served `run_boundary` entries the retained tail's bound
+    /// evicted during replay, in `seq` order — pinned aside under the
+    /// same rule the live ring applies, so a restart's served journal
+    /// still exposes every recorded lifetime boundary the tail alone
+    /// would have dropped.
+    pub boundaries: Vec<JournalEntry>,
     /// The `seq` the next journaled entry takes.
     pub next_seq: u64,
     /// Run-boundary markers the file already holds.
@@ -195,6 +203,7 @@ impl Default for Replay {
     fn default() -> Self {
         Self {
             entries: VecDeque::new(),
+            boundaries: Vec::new(),
             next_seq: 1,
             runs: 0,
             qualities: HashMap::new(),
@@ -332,7 +341,14 @@ fn replay(file: File, path: &Path, capacity: usize) -> io::Result<Replay> {
                 }
                 replayed.entries.push_back(*entry);
                 while replayed.entries.len() > capacity {
-                    replayed.entries.pop_front();
+                    // The pinning rule the served ring applies live: an
+                    // evicted run-boundary entry is set aside rather
+                    // than dropped — the marker is the record's only
+                    // sign that a new process lifetime began.
+                    let evicted = replayed.entries.pop_front().unwrap();
+                    if matches!(evicted.event, JournalEvent::RunBoundary { .. }) {
+                        replayed.boundaries.push(evicted);
+                    }
                 }
             }
             JournalRecord::RunBoundary { .. } => replayed.runs += 1,
