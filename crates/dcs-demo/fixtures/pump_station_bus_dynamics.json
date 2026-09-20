@@ -33,11 +33,10 @@
     }
   },
   {
-    "first_order_lag": {
-      "input": 10,
+    "integrator": {
+      "input": 13,
       "output": 11,
-      "time_constant": 0.5,
-      "initial": 0.8
+      "initial": -2.0
     }
   }
 ]

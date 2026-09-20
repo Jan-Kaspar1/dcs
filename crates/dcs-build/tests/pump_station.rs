@@ -5,8 +5,12 @@
 //! `pump_station.json` is the emitted PlantModel,
 //! `pump_station_dynamics.json` the decision-44 dynamics declaration —
 //! a declared inflow plus two `bool_flow` pump draws summed into the
-//! level integrator, with a first-order lag producing the backup
-//! measurement. These tests assert the helper re-emits the checked-in
+//! level integrator, with a second integrator on the same net flow
+//! producing the backup measurement — the decoupled form
+//! `reference-plant/model/dynamics.json` records, seeded below the
+//! primary's initial so the backup tracks the well on a lower datum
+//! and neither instrument's served quality reaches the other. These
+//! tests assert the helper re-emits the checked-in
 //! document exactly, that the document validates and lints clean,
 //! assembles through the standard registries, serde-roundtrips, and
 //! that a scripted run over the merged dynamics shows the closed
@@ -55,7 +59,7 @@ use dcs_build::station::{
 use dcs_build::{PointId, Value};
 use dcs_core::{
     AdaptedCommand, Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, JournalEntry,
-    JournalEvent, Quality, QualityReason, Sample, ValueKind,
+    JournalEvent, Quality, QualityReason, Sample, Tick, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
@@ -375,7 +379,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         observe(&executor, &mut scans);
         match scan {
             // Pump-down phase done — drop the inflow below zero so the
@@ -709,6 +713,67 @@ fn dynamics_document_loads_through_the_dynamics_merge() {
     // revalidates — the same path `dcs-plant-server --dynamics` takes.
     let model = fixture_model();
     build_driver(&model);
+}
+
+#[test]
+fn dynamics_decouples_the_backup_level_quality_from_the_primary() {
+    // The two instrument points are independent integrators on the
+    // net-flow sum — the `reference-plant/model/dynamics.json` form —
+    // so neither served sample's quality reaches the other: a faulted
+    // primary leaves a healthy backup to fail over to, and a faulted
+    // backup cannot hide behind the primary. The lag the backup
+    // element used to be consumed the primary's sample, stamping its
+    // injected quality onto the backup and making the
+    // primary-faulted/backup-healthy state unproducible. The backup's
+    // seed sits below the chain's `start` setpoint, so the failover
+    // leg's selected trajectory keeps the scripted run's pinned
+    // envelope — only the quality path decouples.
+    let model = fixture_model();
+    let layout = ids();
+    let driver = build_driver(&model);
+    let sim = driver
+        .sim()
+        .expect("the station's devices all serve the local sim");
+    let bad = Quality::Bad(QualityReason::CommunicationFault);
+
+    // A standing inflow moves the well: both integrators accumulate
+    // the same net flow, so the backup tracks the level at the
+    // declaration's offset below the primary.
+    sim.write(layout.inflow, Value::Float(0.5)).unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(
+        sim.read(layout.level_primary).unwrap(),
+        Sample::good(Value::Float(1.3), Tick(1))
+    );
+    assert_eq!(
+        sim.read(layout.level_backup).unwrap(),
+        Sample::good(Value::Float(-1.5), Tick(1))
+    );
+
+    // The primary-faulted/backup-healthy direction: the injected Bad
+    // stays on the primary's served sample while the backup keeps
+    // advancing on the well's net flow, Good.
+    sim.inject_fault(layout.level_primary, Fault::Quality(bad))
+        .unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(sim.read(layout.level_primary).unwrap().quality, bad);
+    assert_eq!(
+        sim.read(layout.level_backup).unwrap(),
+        Sample::good(Value::Float(-1.0), Tick(2))
+    );
+
+    // The backup-faulted/primary-healthy direction: with the primary
+    // restored, a fault stamped on the backup leaves the primary's
+    // served sample Good.
+    sim.clear_fault(layout.level_primary).unwrap();
+    sim.inject_fault(layout.level_backup, Fault::Quality(bad))
+        .unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(
+        sim.read(layout.level_primary).unwrap(),
+        Sample::good(Value::Float(2.3), Tick(3))
+    );
+    assert_eq!(sim.read(layout.level_backup).unwrap().quality, bad);
 }
 
 #[test]

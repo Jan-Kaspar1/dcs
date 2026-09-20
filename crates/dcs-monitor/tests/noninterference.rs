@@ -798,7 +798,7 @@ fn run(case: &Case, with_consumers: bool) -> (Artifacts, ConsumerLog, Duration) 
             Op::Scans(scans) => {
                 for _ in 0..*scans {
                     let start = Instant::now();
-                    monitor.monitor.paced_scan().unwrap();
+                    monitor.monitor.paced_scan();
                     slowest = slowest.max(start.elapsed());
                     // The paced period's stand-in: gives concurrent
                     // consumers a real share of the run's duration.
@@ -975,7 +975,7 @@ fn a_stalled_reader_adds_no_scan_boundary_delay_and_no_liveness_dependency() {
         // lock, so the paced loop's scans complete on schedule.
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..20 {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
         }
         assert!(
             Instant::now() < deadline,
@@ -1219,7 +1219,7 @@ fn published_reads_cover_every_execution_mode() {
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
             for _ in 0..3 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             assert_published_surfaces(&monitor, &client, Tick(3));
         });
@@ -1321,10 +1321,10 @@ fn published_reads_cover_every_execution_mode() {
         let first_client = MonitorClient::new(monitor.local_addr());
         let checkpoint = serving(&monitor, || {
             for _ in 0..4 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             first_client.command(&write_value(10, 3.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &first_client, Tick(5));
             monitor.checkpoint()
         });
@@ -1342,9 +1342,9 @@ fn published_reads_cover_every_execution_mode() {
         .unwrap();
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             client.command(&write_value(10, 5.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &client, Tick(7));
             // The served journal is continuous across the restart:
             // the replayed pre-restart entries stand beside the

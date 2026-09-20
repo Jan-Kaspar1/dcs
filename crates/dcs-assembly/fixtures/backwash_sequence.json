@@ -1,0 +1,649 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": 1,
+      "kind": "sim-scripted",
+      "parameters": {
+        "script": {
+          "trig-time": [
+            { "tick": 0, "value": true },
+            { "tick": 1, "value": false }
+          ],
+          "trig-headloss": [{ "tick": 0, "value": false }],
+          "trig-turbidity": [
+            { "tick": 0, "value": false },
+            { "tick": 22, "value": true },
+            { "tick": 23, "value": false }
+          ],
+          "grant": [
+            { "tick": 0, "value": false },
+            { "tick": 3, "value": true }
+          ],
+          "fault": [
+            { "tick": 0, "value": false },
+            { "tick": 24, "value": true },
+            { "tick": 26, "value": false }
+          ],
+          "meas-1": [
+            { "tick": 0, "value": 0.0 },
+            { "tick": 8, "value": 60.0, "quality": "uncertain", "reason": "unspecified" },
+            { "tick": 10, "value": 60.0 }
+          ],
+          "meas-2": [
+            { "tick": 0, "value": 0.0 },
+            { "tick": 12, "value": 2.0 }
+          ],
+          "trig-turbidity-b": [
+            { "tick": 0, "value": true },
+            { "tick": 1, "value": false }
+          ],
+          "trig-time-b": [
+            { "tick": 0, "value": false },
+            { "tick": 9, "value": true },
+            { "tick": 10, "value": false }
+          ],
+          "trig-headloss-b": [{ "tick": 0, "value": false }],
+          "grant-b": [{ "tick": 0, "value": true }],
+          "fault-b": [
+            { "tick": 0, "value": false },
+            { "tick": 13, "value": true },
+            { "tick": 15, "value": false }
+          ]
+        }
+      },
+      "channels": {
+        "trig-time": { "direction": "in", "value_type": "bool" },
+        "trig-headloss": { "direction": "in", "value_type": "bool" },
+        "trig-turbidity": { "direction": "in", "value_type": "bool" },
+        "grant": { "direction": "in", "value_type": "bool" },
+        "fault": { "direction": "in", "value_type": "bool" },
+        "meas-1": { "direction": "in", "value_type": "float" },
+        "meas-2": { "direction": "in", "value_type": "float" },
+        "trig-turbidity-b": { "direction": "in", "value_type": "bool" },
+        "trig-time-b": { "direction": "in", "value_type": "bool" },
+        "trig-headloss-b": { "direction": "in", "value_type": "bool" },
+        "grant-b": { "direction": "in", "value_type": "bool" },
+        "fault-b": { "direction": "in", "value_type": "bool" },
+        "request": { "direction": "out", "value_type": "bool" },
+        "active": { "direction": "out", "value_type": "bool" },
+        "pending": { "direction": "out", "value_type": "bool" },
+        "done": { "direction": "out", "value_type": "bool" },
+        "aborted": { "direction": "out", "value_type": "bool" },
+        "overrun": { "direction": "out", "value_type": "bool" },
+        "trigger-source": { "direction": "out", "value_type": "int" },
+        "step": { "direction": "out", "value_type": "int" },
+        "out": { "direction": "out", "value_type": "float" },
+        "phase-1": { "direction": "out", "value_type": "bool" },
+        "phase-2": { "direction": "out", "value_type": "bool" },
+        "phase-3": { "direction": "out", "value_type": "bool" },
+        "phase-4": { "direction": "out", "value_type": "bool" },
+        "request-b": { "direction": "out", "value_type": "bool" },
+        "active-b": { "direction": "out", "value_type": "bool" },
+        "pending-b": { "direction": "out", "value_type": "bool" },
+        "done-b": { "direction": "out", "value_type": "bool" },
+        "aborted-b": { "direction": "out", "value_type": "bool" },
+        "overrun-b": { "direction": "out", "value_type": "bool" },
+        "source-b": { "direction": "out", "value_type": "int" },
+        "step-b": { "direction": "out", "value_type": "int" },
+        "out-b": { "direction": "out", "value_type": "float" },
+        "phase-b1": { "direction": "out", "value_type": "bool" },
+        "phase-b2": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "io_points": [
+    {
+      "id": 10,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-time" }
+    },
+    {
+      "id": 11,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-headloss" }
+    },
+    {
+      "id": 12,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-turbidity" }
+    },
+    {
+      "id": 13,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant" }
+    },
+    {
+      "id": 14,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "fault" }
+    },
+    {
+      "id": 15,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "meas-1" }
+    },
+    {
+      "id": 16,
+      "direction": "in",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "meas-2" }
+    },
+    {
+      "id": 17,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-turbidity-b" }
+    },
+    {
+      "id": 18,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-time-b" }
+    },
+    {
+      "id": 19,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "trig-headloss-b" }
+    },
+    {
+      "id": 20,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "grant-b" }
+    },
+    {
+      "id": 21,
+      "direction": "in",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "fault-b" }
+    },
+    {
+      "id": 30,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 31,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 32,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 33,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": { "bool": false },
+      "writable": true
+    },
+    {
+      "id": 40,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request" }
+    },
+    {
+      "id": 41,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "active" }
+    },
+    {
+      "id": 42,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pending" }
+    },
+    {
+      "id": 43,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "done" }
+    },
+    {
+      "id": 44,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "aborted" }
+    },
+    {
+      "id": 45,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "overrun" }
+    },
+    {
+      "id": 46,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "trigger-source" }
+    },
+    {
+      "id": 47,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "step" }
+    },
+    {
+      "id": 48,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "out" }
+    },
+    {
+      "id": 49,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-1" }
+    },
+    {
+      "id": 50,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-2" }
+    },
+    {
+      "id": 51,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-3" }
+    },
+    {
+      "id": 52,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-4" }
+    },
+    {
+      "id": 60,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "request-b" }
+    },
+    {
+      "id": 61,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "active-b" }
+    },
+    {
+      "id": 62,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "pending-b" }
+    },
+    {
+      "id": 63,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "done-b" }
+    },
+    {
+      "id": 64,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "aborted-b" }
+    },
+    {
+      "id": 65,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "overrun-b" }
+    },
+    {
+      "id": 66,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "source-b" }
+    },
+    {
+      "id": 67,
+      "direction": "out",
+      "value_type": "int",
+      "channel": { "device": 1, "name": "step-b" }
+    },
+    {
+      "id": 68,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 1, "name": "out-b" }
+    },
+    {
+      "id": 69,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-b1" }
+    },
+    {
+      "id": 70,
+      "direction": "out",
+      "value_type": "bool",
+      "channel": { "device": 1, "name": "phase-b2" }
+    }
+  ],
+  "signals": [
+    {
+      "id": 100,
+      "name": "filter-1-backwash-request",
+      "source": 40,
+      "description": "Filter 1 armed backwash request to the bank coordinator"
+    },
+    {
+      "id": 101,
+      "name": "filter-1-backwash-step",
+      "source": 47,
+      "description": "Filter 1 backwash sequence position"
+    },
+    {
+      "id": 102,
+      "name": "filter-1-backwash-trigger",
+      "source": 46,
+      "description": "Trigger source attributed to filter 1's in-flight backwash"
+    },
+    {
+      "id": 103,
+      "name": "filter-1-backwash-overrun",
+      "source": 45,
+      "description": "Filter 1 measured step standing past its overrun timeout"
+    },
+    {
+      "id": 104,
+      "name": "filter-1-operator-start",
+      "source": 30,
+      "description": "Operator start for filter 1's backwash sequence"
+    },
+    {
+      "id": 105,
+      "name": "filter-1-operator-abort",
+      "source": 31,
+      "description": "Operator abort for filter 1's backwash sequence"
+    },
+    {
+      "id": 106,
+      "name": "filter-2-backwash-pending",
+      "source": 62,
+      "description": "Filter 2 automatic trigger held for operator release"
+    },
+    {
+      "id": 107,
+      "name": "filter-2-backwash-aborted",
+      "source": 64,
+      "description": "Filter 2 backwash aborted on the declared fault path"
+    }
+  ],
+  "components": [
+    {
+      "id": 20,
+      "kind": "backwash-sequence",
+      "parameters": {
+        "step_count": { "int": 4 },
+        "auto_start": { "int": 0 },
+        "abort_step": { "int": 4 },
+        "on_fault_step": { "int": 4 },
+        "on_fault_policy": { "int": 0 },
+        "step_1_ticks": { "int": 2 },
+        "step_1_out": { "float": 10.0 },
+        "step_1_advance": { "int": 0 },
+        "step_1_on_overrun": { "int": 0 },
+        "step_2_ticks": { "int": 3 },
+        "step_2_out": { "float": 20.0 },
+        "step_2_advance": { "int": 1 },
+        "step_2_bound": { "float": 50.0 },
+        "step_2_meas": { "int": 1 },
+        "step_2_on_overrun": { "int": 1 },
+        "step_3_ticks": { "int": 3 },
+        "step_3_out": { "float": 30.0 },
+        "step_3_advance": { "int": 2 },
+        "step_3_bound": { "float": 1.0 },
+        "step_3_meas": { "int": 2 },
+        "step_3_on_overrun": { "int": 0 },
+        "step_4_ticks": { "int": 1 },
+        "step_4_out": { "float": 40.0 },
+        "step_4_advance": { "int": 0 },
+        "step_4_on_overrun": { "int": 0 }
+      },
+      "ports": {
+        "trig_time": { "direction": "in", "value_type": "bool" },
+        "trig_headloss": { "direction": "in", "value_type": "bool" },
+        "trig_turbidity": { "direction": "in", "value_type": "bool" },
+        "trig_operator": { "direction": "in", "value_type": "bool" },
+        "grant": { "direction": "in", "value_type": "bool" },
+        "abort": { "direction": "in", "value_type": "bool" },
+        "fault": { "direction": "in", "value_type": "bool" },
+        "meas_1": { "direction": "in", "value_type": "float" },
+        "meas_2": { "direction": "in", "value_type": "float" },
+        "request": { "direction": "out", "value_type": "bool" },
+        "active": { "direction": "out", "value_type": "bool" },
+        "pending": { "direction": "out", "value_type": "bool" },
+        "done": { "direction": "out", "value_type": "bool" },
+        "aborted": { "direction": "out", "value_type": "bool" },
+        "overrun": { "direction": "out", "value_type": "bool" },
+        "trigger_source": { "direction": "out", "value_type": "int" },
+        "step": { "direction": "out", "value_type": "int" },
+        "out": { "direction": "out", "value_type": "float" },
+        "phase_1": { "direction": "out", "value_type": "bool" },
+        "phase_2": { "direction": "out", "value_type": "bool" },
+        "phase_3": { "direction": "out", "value_type": "bool" },
+        "phase_4": { "direction": "out", "value_type": "bool" }
+      }
+    },
+    {
+      "id": 21,
+      "kind": "backwash-sequence",
+      "parameters": {
+        "step_count": { "int": 2 },
+        "auto_start": { "int": 1 },
+        "abort_step": { "int": 2 },
+        "on_fault_step": { "int": 2 },
+        "on_fault_policy": { "int": 1 },
+        "step_1_ticks": { "int": 2 },
+        "step_1_out": { "float": 5.0 },
+        "step_1_advance": { "int": 0 },
+        "step_1_on_overrun": { "int": 0 },
+        "step_2_ticks": { "int": 2 },
+        "step_2_out": { "float": 15.0 },
+        "step_2_advance": { "int": 0 },
+        "step_2_on_overrun": { "int": 0 }
+      },
+      "ports": {
+        "trig_time": { "direction": "in", "value_type": "bool" },
+        "trig_headloss": { "direction": "in", "value_type": "bool" },
+        "trig_turbidity": { "direction": "in", "value_type": "bool" },
+        "trig_operator": { "direction": "in", "value_type": "bool" },
+        "grant": { "direction": "in", "value_type": "bool" },
+        "abort": { "direction": "in", "value_type": "bool" },
+        "fault": { "direction": "in", "value_type": "bool" },
+        "request": { "direction": "out", "value_type": "bool" },
+        "active": { "direction": "out", "value_type": "bool" },
+        "pending": { "direction": "out", "value_type": "bool" },
+        "done": { "direction": "out", "value_type": "bool" },
+        "aborted": { "direction": "out", "value_type": "bool" },
+        "overrun": { "direction": "out", "value_type": "bool" },
+        "trigger_source": { "direction": "out", "value_type": "int" },
+        "step": { "direction": "out", "value_type": "int" },
+        "out": { "direction": "out", "value_type": "float" },
+        "phase_1": { "direction": "out", "value_type": "bool" },
+        "phase_2": { "direction": "out", "value_type": "bool" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "point": 10 },
+      "to": { "port": { "component": 20, "name": "trig_time" } }
+    },
+    {
+      "from": { "point": 11 },
+      "to": { "port": { "component": 20, "name": "trig_headloss" } }
+    },
+    {
+      "from": { "point": 12 },
+      "to": { "port": { "component": 20, "name": "trig_turbidity" } }
+    },
+    {
+      "from": { "point": 30 },
+      "to": { "port": { "component": 20, "name": "trig_operator" } }
+    },
+    {
+      "from": { "point": 13 },
+      "to": { "port": { "component": 20, "name": "grant" } }
+    },
+    {
+      "from": { "point": 31 },
+      "to": { "port": { "component": 20, "name": "abort" } }
+    },
+    {
+      "from": { "point": 14 },
+      "to": { "port": { "component": 20, "name": "fault" } }
+    },
+    {
+      "from": { "point": 15 },
+      "to": { "port": { "component": 20, "name": "meas_1" } }
+    },
+    {
+      "from": { "point": 16 },
+      "to": { "port": { "component": 20, "name": "meas_2" } }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "request" } },
+      "to": { "point": 40 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "active" } },
+      "to": { "point": 41 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "pending" } },
+      "to": { "point": 42 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "done" } },
+      "to": { "point": 43 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "aborted" } },
+      "to": { "point": 44 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "overrun" } },
+      "to": { "point": 45 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "trigger_source" } },
+      "to": { "point": 46 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "step" } },
+      "to": { "point": 47 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "out" } },
+      "to": { "point": 48 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "phase_1" } },
+      "to": { "point": 49 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "phase_2" } },
+      "to": { "point": 50 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "phase_3" } },
+      "to": { "point": 51 }
+    },
+    {
+      "from": { "port": { "component": 20, "name": "phase_4" } },
+      "to": { "point": 52 }
+    },
+    {
+      "from": { "point": 18 },
+      "to": { "port": { "component": 21, "name": "trig_time" } }
+    },
+    {
+      "from": { "point": 19 },
+      "to": { "port": { "component": 21, "name": "trig_headloss" } }
+    },
+    {
+      "from": { "point": 17 },
+      "to": { "port": { "component": 21, "name": "trig_turbidity" } }
+    },
+    {
+      "from": { "point": 32 },
+      "to": { "port": { "component": 21, "name": "trig_operator" } }
+    },
+    {
+      "from": { "point": 20 },
+      "to": { "port": { "component": 21, "name": "grant" } }
+    },
+    {
+      "from": { "point": 33 },
+      "to": { "port": { "component": 21, "name": "abort" } }
+    },
+    {
+      "from": { "point": 21 },
+      "to": { "port": { "component": 21, "name": "fault" } }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "request" } },
+      "to": { "point": 60 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "active" } },
+      "to": { "point": 61 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "pending" } },
+      "to": { "point": 62 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "done" } },
+      "to": { "point": 63 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "aborted" } },
+      "to": { "point": 64 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "overrun" } },
+      "to": { "point": 65 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "trigger_source" } },
+      "to": { "point": 66 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "step" } },
+      "to": { "point": 67 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "out" } },
+      "to": { "point": 68 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "phase_1" } },
+      "to": { "point": 69 }
+    },
+    {
+      "from": { "port": { "component": 21, "name": "phase_2" } },
+      "to": { "point": 70 }
+    }
+  ]
+}

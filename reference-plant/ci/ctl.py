@@ -25,9 +25,11 @@ naming each failure on stderr:
   `--actor`;
 - `resources` reports the per-command availability — a command bound
   to a point the model never marked writable reads `available: false`
-  beside the named refusal, and the kind-declared `advance`'s own
-  refusal settles `command_refused` into the component's attributed
-  events once the completed table's predicate holds;
+  beside the named refusal, the completed table's `advance` reports
+  `available: false` carrying the kind's named refusal — the published
+  verdict joined into the served command state — and the refused
+  submission still settles `command_refused` into the component's
+  attributed events;
 - the refusal modes exit nonzero naming the failure rather than
   passing silently: an undeclared command answers `unknown_command`,
   a malformed `invoke` argument fails its declared-kind parse, and an
@@ -398,7 +400,8 @@ def run(args):
         # The same refused invocation through the receipted path:
         # admission accepts, the boundary settles `command_refused` —
         # the named refusal the resource view's attributed events then
-        # carry beside the per-command availability.
+        # carry, and the same standing verdict the per-command
+        # availability joins.
         submitted(
             "invoke advance refused",
             answered("invoke", component, "advance", "--actor", ACTOR),
@@ -411,13 +414,23 @@ def run(args):
                 entry.get("name"): entry for entry in resources.get("commands", [])
             }
             record["command_states"] = command_states
-            for name in ("advance", "reset"):
-                state = command_states.get(name)
-                if not isinstance(state, dict) or state.get("available") is not True:
-                    failures.append(
-                        f"resources: {name} serves {state!r} — the declared "
-                        "commands stay admissible"
-                    )
+            advance = command_states.get("advance")
+            if (
+                not isinstance(advance, dict)
+                or advance.get("available") is not False
+                or "run to its end" not in (advance.get("refusal") or "")
+            ):
+                failures.append(
+                    f"resources: the completed table's `advance` serves "
+                    f"{advance!r} — the published verdict joined into "
+                    "the command state"
+                )
+            reset = command_states.get("reset")
+            if not isinstance(reset, dict) or reset.get("available") is not True:
+                failures.append(
+                    f"resources: `reset` serves {reset!r} — the "
+                    "always-available command stays admissible"
+                )
             held_reset = command_states.get("write_value:reset")
             if (
                 not isinstance(held_reset, dict)

@@ -149,7 +149,8 @@ pub mod points {
 
     /// The primary wet-well level measurement — the integrator's output.
     pub const LEVEL_PRIMARY: PointId = PointId(10);
-    /// The backup level measurement — the first-order lag's output.
+    /// The backup level measurement — the second net-flow integrator's
+    /// lower-datum output, decoupled from the primary's quality.
     pub const LEVEL_BACKUP: PointId = PointId(11);
     /// The declared station inflow — a `flow_sum` input.
     pub const INFLOW: PointId = PointId(12);

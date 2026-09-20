@@ -78,7 +78,12 @@
 //! therefore drops the claim into a named refusal rather than a field
 //! any attachment can write through, and the returning owner's
 //! `ensure_writer` re-arms deterministically instead of racing an
-//! interposer that could otherwise seize the field first.
+//! interposer that could otherwise seize the field first. A live
+//! attachment whose write or step is refused `Unclaimed` re-arms its
+//! recorded owner once through the conditional `ensure_writer` grant
+//! and retries, so a claim-state reset behind a live connection
+//! reclaims instead of demoting the healthy owner; a genuinely stolen
+//! field refuses that re-arm as fenced.
 //!
 //! The claim tracks the live connections holding it, so a grant joining
 //! a token another live attachment already holds is flagged

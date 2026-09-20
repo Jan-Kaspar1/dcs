@@ -101,17 +101,77 @@ class RuntimeTests(unittest.TestCase):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.opencode = '/bin/true'
         metadata = self.runtime.spawn('worker-01', clone, 'test prompt',
-                                      model='opencode/muse-spark-1.3-contributor-free',
-                                      resume_session='ignored-for-opencode')
+                                      model='opencode/muse-spark-1.3-contributor-free')
         spec = json.loads((Path(metadata['invocation']) / 'spec.json').read_text())
         self.assertEqual(spec['command'][:4], ['/bin/true', 'run', '--model',
                                                'opencode/muse-spark-1.3-contributor-free'])
         self.assertIn('--auto', spec['command'])
-        self.assertNotIn('--resume', spec['command'])
+        self.assertIn('--print-logs', spec['command'])
+        self.assertNotIn('--session', spec['command'])
         self.assertNotIn('swe-2-high', spec['command'])
+        self.assertEqual(spec['stall_seconds'], self.runtime.stall_seconds)
         deadline = time.monotonic() + 5
         while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
             time.sleep(.05)
+
+    def test_spawn_resumes_opencode_session(self):
+        clone = self.runtime.prepare_clone('worker-01')
+        self.runtime.opencode = '/bin/true'
+        metadata = self.runtime.spawn('worker-01', clone, 'test prompt',
+                                      model='opencode/muse-spark-1.3-contributor-free',
+                                      resume_session='ses_abc123')
+        spec = json.loads((Path(metadata['invocation']) / 'spec.json').read_text())
+        self.assertIn('--session', spec['command'])
+        self.assertIn('ses_abc123', spec['command'])
+        deadline = time.monotonic() + 5
+        while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
+            time.sleep(.05)
+
+    def test_opencode_session_id_reads_titled_session(self):
+        import sqlite3
+        db_path = self.root / 'opencode.db'
+        db = sqlite3.connect(db_path)
+        db.execute('CREATE TABLE session(id TEXT, title TEXT, directory TEXT, time_created REAL)')
+        db.execute("INSERT INTO session VALUES('ses_old','issue-1-1-0','/home/x',10)")
+        db.execute("INSERT INTO session VALUES('ses_new','issue-1-2-0','/home/x',20)")
+        db.commit(); db.close()
+        self.runtime.opencode_db = db_path
+        found = self.runtime.session_id(self.source, model='opencode/muse', key='issue-1-2-0')
+        self.assertEqual(found, 'ses_new')
+        self.assertIsNone(self.runtime.session_id(self.source, model='opencode/muse', key='issue-9-9-9'))
+        self.runtime.opencode_db = self.root / 'missing.db'
+        self.assertIsNone(self.runtime.session_id(self.source, model='opencode/muse', key='issue-1-2-0'))
+
+    def test_runner_stall_kills_silent_child(self):
+        spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .5,
+                'error_stall_seconds': .3,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path)
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('hang', result.get('error', ''))
+
+    def test_runner_error_stall_kills_stream_error_faster(self):
+        spec = {'command': [sys.executable, '-c',
+                            'print("stream error: rate limit exceeded", flush=True); '
+                            'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': 60,
+                'error_stall_seconds': .5,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path)
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
 
     def test_spawn_uses_configured_devin_model(self):
         clone = self.runtime.prepare_clone('worker-01')

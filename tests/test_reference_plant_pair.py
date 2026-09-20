@@ -1,11 +1,12 @@
-"""The redundant-pair leg's event-parity seam, unit-tested against
-faked served resources: pair.event_records collects every
-`event_emitted` across all components in served order — outer resource
-name as `component`, tick and retention carried, the full inner
-EmittedEvent with `fields` the ordered `list(fields.items())` —
-excluding local seq and publication markers, and pair.assert_event_parity
-returns the collected records when both peers equal the expected list
-and raises pair.Abort('event-parity-failed: …') otherwise, with the
+"""The emit-identical parity leg's extraction/assertion seam,
+unit-tested against faked served resources:
+event_parity.event_records collects every `event_emitted` across all
+components in served order — outer resource name as `component`, tick
+and retention carried, the full inner EmittedEvent with `fields` the
+ordered `list(fields.items())` — excluding local seq and publication
+markers, and event_parity.assert_event_parity returns the collected
+records when both peers equal the expected list and raises
+event_parity.Abort('event-parity-failed: …') otherwise, with the
 named divergences — empty streams against a nonempty expected, a
 missing record, a reattributed inner or outer component, changed
 identity, value, field order, tick, or retention — each failing and an
@@ -17,10 +18,10 @@ from pathlib import Path
 
 _CI_DIR = Path(__file__).resolve().parents[1] / "reference-plant" / "ci"
 sys.path.insert(0, str(_CI_DIR))
-_PAIR_PATH = _CI_DIR / "pair.py"
-_pair_spec = importlib.util.spec_from_file_location("pair", _PAIR_PATH)
-pair = importlib.util.module_from_spec(_pair_spec)
-_pair_spec.loader.exec_module(pair)
+_PATH = _CI_DIR / "event_parity.py"
+_spec = importlib.util.spec_from_file_location("event_parity", _PATH)
+event_parity = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(event_parity)
 
 
 def emitted(component, event, **fields):
@@ -120,7 +121,7 @@ class EventRecordsTests(unittest.TestCase):
     def test_collects_all_in_served_order_with_full_inner_event(self):
         view = active_view()
         view["publication"] = 10
-        records = pair.event_records(view)
+        records = event_parity.event_records(view)
         self.assertEqual(records, expected_records())
         inner = records[1]["event"]
         self.assertEqual(inner["component"], "pump")
@@ -129,16 +130,16 @@ class EventRecordsTests(unittest.TestCase):
 
     def test_empty_resources_collect_no_records(self):
         self.assertEqual(
-            pair.event_records(
+            event_parity.event_records(
                 {"publication": 3, "components": [resources("pump", [])]}
             ),
             [],
         )
-        self.assertEqual(pair.event_records({"components": []}), [])
+        self.assertEqual(event_parity.event_records({"components": []}), [])
 
     def test_local_seq_and_retention_absent_from_inner_event(self):
         view = active_view()
-        records = pair.event_records(view)
+        records = event_parity.event_records(view)
         self.assertNotIn("seq", records[0])
         self.assertNotIn("seq", records[0]["event"])
         self.assertEqual(records[0]["retention"], "journal")
@@ -146,7 +147,7 @@ class EventRecordsTests(unittest.TestCase):
 
 class ParityTests(unittest.TestCase):
     """The assertion half: records returned when both peers match the
-    expected list, pair.Abort carrying the event-parity-failed message
+    expected list, event_parity.Abort carrying the event-parity-failed message
     for each named divergence, and local-seq-only drift ignored."""
 
     def setUp(self):
@@ -155,7 +156,7 @@ class ParityTests(unittest.TestCase):
         self.standby = active_view()
 
     def parity(self):
-        return pair.assert_event_parity(
+        return event_parity.assert_event_parity(
             self.active, self.standby, self.expected
         )
 
@@ -165,13 +166,13 @@ class ParityTests(unittest.TestCase):
     def test_empty_streams_against_nonempty_expected_fail(self):
         self.active["components"] = [resources("pump", [])]
         self.standby["components"] = [resources("pump", [])]
-        with self.assertRaises(pair.Abort) as raised:
+        with self.assertRaises(event_parity.Abort) as raised:
             self.parity()
         self.assertIn("event-parity-failed", str(raised.exception))
 
     def test_missing_record_fails(self):
         del self.standby["components"][1]["events"][0]
-        with self.assertRaises(pair.Abort) as raised:
+        with self.assertRaises(event_parity.Abort) as raised:
             self.parity()
         message = str(raised.exception)
         self.assertIn("event-parity-failed", message)
@@ -181,19 +182,19 @@ class ParityTests(unittest.TestCase):
         self.standby["components"][1]["events"][0]["event"][
             "event_emitted"
         ]["event"]["component"] = "blower"
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_outer_component_reattribution_fails(self):
         self.standby["components"][1]["name"] = "pump-b"
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_changed_field_value_fails(self):
         self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
         ]["event"]["fields"]["note"] = "drifted"
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_changed_field_order_fails(self):
@@ -203,7 +204,7 @@ class ParityTests(unittest.TestCase):
         self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
         ]["event"]["fields"] = dict(reversed(list(fields.items())))
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_changed_identity_fails(self):
@@ -211,17 +212,17 @@ class ParityTests(unittest.TestCase):
             "event_emitted"
         ]["event"]
         inner["event"] = "stroke_complete"
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_changed_tick_fails(self):
         self.standby["components"][0]["events"][0]["tick"] = 11
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_changed_retention_fails(self):
         self.standby["components"][0]["events"][0]["retention"] = "history"
-        with self.assertRaises(pair.Abort):
+        with self.assertRaises(event_parity.Abort):
             self.parity()
 
     def test_unrelated_local_seq_difference_is_ignored(self):

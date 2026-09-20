@@ -37,53 +37,35 @@ first behavioral, not merely static, exercise. The run:
   settled receipt, and its own `role_changed` transitions — with the
   entry `seq` order intact.
 
-With `--parity` the script runs the emit-identical leg instead
-(decision 84, WW-FND-003): the declared pair converges the same way,
-then the served registry's first kind-declared event names the emitter
-— the emitted model's `sequencer` and its `step_completed` — whose
-writable boolean `run` input is held through the field owner's
-receipted `POST /command` path while the same write at the standby's
-role boundary answers the named `not_active` refusal. The apply tick
-scans the owner first — a field-carried write is one the quiesced
-peer cannot issue, so the standby's next pull must land the
-post-application checkpoint — and the remaining driven scans pace
-standby-first, each `POST /scan` pulling and applying the owner's
-checkpoint before the tracking peer scans. The declared step table
-runs out until the counted emission set stands, and both peers'
-`GET /resources` views must collect the same routed `event_emitted`
-records: identical outer and inner component attribution, declared
-event identities, ordered payload fields, tick, and retention — the
-stream-local `seq` positions excluded, each peer's store numbering its
-own — while the standby still reports `tracking`. A divergence, a
-dropped record, or a hollow stream reports `event-parity-failed` on
-stderr and exits 1; a clean pass prints one `event-parity-digest
-<sha256>` line the check compares across two passes
-(`event-parity-nondeterministic`).
+The leg's ordering-sensitive bring-up is the exported rig the sibling
+pair-stage legs share — `launch_pair` resolves the declared pair out
+of the manifest, instantiates the declared persistence under
+runner-owned scratch, spawns the plant server and both released
+controllers (the standby wired at the owner's monitor, or at a
+dead address under `--tamper broken-peer-flag`), and returns the
+`PairRig` carrying the processes, urls, persistence files, and the
+plant-protocol client; the rig's `converge`, `tick`, and `switch`
+carry the tracking-first driven ticks, the standby convergence, and
+the documented demote/promote/handover/transition-audit switch.
 
 Usage:
 
     pair.py --plant-server PATH --controller PATH \
         --model model/plant.json --dynamics model/dynamics.json \
-        --scenario ci/scenario.json --manifest deploy/manifest.json \
-        [--parity]
+        --scenario ci/scenario.json --manifest deploy/manifest.json
 
 On success one `pair-digest <sha256>` line prints — the check runs two
 passes and compares them (`pair-nondeterministic`). A contract
 violation reports `pair: …` lines on stderr and exits 1 — the check's
 `pair-failed`. `--tamper broken-peer-flag` wires the tracking peer's
 `--standby` at an address nothing serves, so the leg proves its own
-convergence assertion fires. Under `--parity` the tamper choices
-`dropped-event-record` and `reattributed-event-record` doctor the
-standby's served resource view — a missing emission record and a
-re-attributed one — so the leg proves its parity assertion fires:
-each must report `event-parity-failed`.
+convergence assertion fires.
 """
 
 import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -135,10 +117,12 @@ def closed_port():
     return f"{address[0]}:{address[1]}"
 
 
-def spawn_peer(controller, model, dt, plant_addr, standby, files):
+def spawn_peer(controller, model, dt, plant_addr, standby, files, auto_promote=None):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
-    owner), `files` the controller's declared persistence paths under
+    owner), `auto_promote` the manifest's declared failover budget
+    arming that standby's self-promotion (None leaves promotion
+    manual), `files` the controller's declared persistence paths under
     the leg's scratch directory. Returns `(process, monitor_url,
     preamble)`: `monitor_url` is None when the process exits before
     reporting a listener — the preamble then carries the startup
@@ -156,6 +140,8 @@ def spawn_peer(controller, model, dt, plant_addr, standby, files):
     ]
     if standby is not None:
         argv += ["--standby", standby]
+    if auto_promote is not None:
+        argv += ["--auto-promote", str(auto_promote)]
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
@@ -284,9 +270,28 @@ def declared_command(schema):
     return commands[0] if commands else None
 
 
+def spawn_plant(plant_server, model, dynamics):
+    """Spawn `dcs-plant-server <model> --dynamics <doc>` listening on
+    an ephemeral loopback address — the simulated plant the rig's
+    controllers remote against. Returns `(process, address)`."""
+    plant = subprocess.Popen(
+        [
+            plant_server,
+            model,
+            "--dynamics",
+            dynamics,
+            "--listen",
+            "127.0.0.1:0",
+        ],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return plant, simulate.listen_address(plant, "dcs-plant-server")
+
+
 def persistence_files(scratch, entry):
     """The controller's declared persistence file basenames
-    instantiated under the leg's runner-owned scratch directory — the
+    instantiated under the rig's runner-owned scratch directory — the
     manifest's container paths become per-peer files."""
     root = os.path.join(scratch, entry["name"])
     os.makedirs(root, exist_ok=True)
@@ -298,436 +303,336 @@ def persistence_files(scratch, entry):
     }
 
 
-def spawn_rig(args, duty_decl, standby_decl, duty_files, standby_files, tamper):
-    """Spawn the manifest-declared rig: `dcs-plant-server` on the
-    checked-in model and dynamics, then the two controllers as
-    released `--driven --remote` instances — the tracking peer's
-    `--standby` at the spawned duty monitor (or, under the
-    broken-peer-flag tamper, at an address nothing serves). Returns
-    `(plant, duty, duty_url, standby, standby_url)` with the spawned
-    processes held for the caller's cleanup."""
-    plant = subprocess.Popen(
-        [
-            args.plant_server,
-            args.model,
-            "--dynamics",
-            args.dynamics,
-            "--listen",
-            "127.0.0.1:0",
-        ],
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    plant_addr = simulate.listen_address(plant, "dcs-plant-server")
-    duty, duty_url, preamble = spawn_peer(
-        args.controller, args.model, args.dt, plant_addr, None, duty_files
-    )
-    if duty_url is None:
-        raise Abort(
-            f"the duty controller {duty_decl['name']} exited at "
-            f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-        )
-    # The manifest's standby wiring names the peer by its deployment
-    # address; the driven run wires the tracking peer at the spawned
-    # duty monitor — or, under the broken-peer-flag tamper, at an
-    # address nothing serves.
-    target = duty_url.removeprefix("http://")
-    if tamper == "broken-peer-flag":
-        target = closed_port()
-    standby, standby_url, preamble = spawn_peer(
-        args.controller,
-        args.model,
-        args.dt,
-        plant_addr,
-        target,
-        standby_files,
-    )
-    if standby_url is None:
-        raise Abort(
-            f"the standby controller {standby_decl['name']} exited at "
-            f"startup: {'; '.join(preamble) or 'no diagnostic'}"
-        )
-    return plant, duty, duty_url, standby, standby_url
+def scan_pair(tracked_url, owner_url, failures):
+    """The tracking-first scan ordering one driven pair tick needs —
+    the tracking peer's `POST /scan` pulling and applying the owner's
+    latest checkpoint, then the field owner's. Returns `(tracked,
+    owner)` — both served snapshots."""
+    return scan(tracked_url, failures), scan(owner_url, failures)
 
 
-def converge_to_tracking(duty_url, standby_url, failures):
-    """The convergence phase both legs share: each driven tick scans
-    the tracking peer first — its `POST /scan` pulling and applying
-    the owner's checkpoint — then the field owner, so the peers rest
-    at the same tick with identical images until `GET /role` reports
-    the standby `tracking` and the owner `active`. Returns `(ticks,
-    standby_role, duty_role)`."""
-    ticks = []
-    for _ in range(CONVERGE_TICKS):
-        tracked = scan(standby_url, failures)
-        owner = scan(duty_url, failures)
+def tick(tracked_url, owner_url, failures, diverged=None):
+    """One driven pair tick — `scan_pair`'s ordering plus the
+    identical-image assertion. A one-tick lag the next pull heals is
+    the carried-command shape (issue #689): the tracker's quiesced
+    scan carries an adopted receipt instead of settling it, so its
+    image trails the owner's by the command's effect until the
+    following pull adopts the settlement. The tick absorbs exactly
+    that: on a mismatch it runs one more tracking-first pair tick
+    and requires convergence there — anything still diverged aborts
+    with the recorded wording. Returns `(tracked, owner)`."""
+    tracked, owner = scan_pair(tracked_url, owner_url, failures)
+    if select_snapshot(tracked) != select_snapshot(owner):
+        tracked, owner = scan_pair(tracked_url, owner_url, failures)
         if select_snapshot(tracked) != select_snapshot(owner):
             failures.append(
-                "the tracking peer's image diverged from the field "
-                f"owner's at tick {owner['tick']}"
+                (
+                    diverged
+                    or "the tracking peer's image diverged from the field "
+                    "owner's at tick {tick}"
+                ).format(tick=owner["tick"])
             )
             raise Abort
-        ticks.append(owner["tick"])
-    standby_role = get(f"{standby_url}/role", "GET /role", failures)
-    duty_role = get(f"{duty_url}/role", "GET /role", failures)
-    sync = standby_role.get("sync")
-    if standby_role.get("role") != "standby" or not (
-        isinstance(sync, dict) and "tracking" in sync
-    ):
-        failures.append(
-            "the tracking peer never reported tracking — GET /role "
-            f"answers {standby_role}"
-        )
-        raise Abort
-    if duty_role.get("role") != "active":
-        failures.append(
-            f"the field owner reports {duty_role.get('role')!r}, "
-            "expected active"
-        )
-        raise Abort
-    return ticks, standby_role, duty_role
+    return tracked, owner
 
 
-def event_records(view):
-    """The routed `event_emitted` records a served `GET /resources`
-    view carries — every component's `events` in served order,
-    projected to the comparable record: the outer resource `name` the
-    emission attributes under as `component`, `tick` and `retention`
-    carried, and the full inner EmittedEvent with `fields` the ordered
-    item list. The entry's stream-local `seq` and the view's
-    `publication` marker are excluded — local stream positions, not
-    routed identity."""
-    records = []
-    for component in view.get("components", []):
-        for entry in component.get("events", []):
-            emitted = (
-                entry.get("event", {}).get("event_emitted", {}).get("event")
+class PairRig:
+    """The launched manifest-declared pair — the rig the pair-stage
+    legs share: the spawned plant server and both released
+    controllers, their monitor urls and startup preambles, the
+    declared persistence files under the rig's runner-owned scratch,
+    and the plant-protocol client. `close` stops the children and
+    removes the scratch root."""
+
+    def __init__(self, declared):
+        self.manifest, self.duty_decl, self.standby_decl = declared
+        self.fingerprint = int(self.manifest["model"]["fingerprint"], 16)
+        self.scratch = tempfile.mkdtemp(prefix="dcs-pair-")
+        self.duty_files = persistence_files(self.scratch, self.duty_decl)
+        self.standby_files = persistence_files(self.scratch, self.standby_decl)
+        self.plant = self.duty = self.standby = None
+        self.plant_addr = None
+        self.plant_io = None
+        self.duty_url = self.standby_url = None
+        self.duty_preamble = self.standby_preamble = []
+
+    def close(self):
+        """Stop the spawned children — tracking peer, field owner,
+        plant — close the plant client, and remove the scratch root."""
+        if self.plant_io is not None:
+            self.plant_io.close()
+        stop(self.standby)
+        stop(self.duty)
+        stop(self.plant)
+        shutil.rmtree(self.scratch, ignore_errors=True)
+
+    def peer_name(self, url):
+        """The manifest name of the peer serving `url`."""
+        return {
+            self.duty_url: self.duty_decl["name"],
+            self.standby_url: self.standby_decl["name"],
+        }[url]
+
+    def tick(self, tracked_url, owner_url, failures, diverged=None):
+        """One driven pair tick — the module `tick` on the rig's
+        peers."""
+        return tick(tracked_url, owner_url, failures, diverged)
+
+    def converge(self, failures, count=CONVERGE_TICKS):
+        """The standby-convergence phase: `count` driven ticks scanning
+        the tracking peer first so each pull applies the owner's
+        latest checkpoint and the peers rest at the same tick with
+        identical images — then the role reports, the standby expected
+        `tracking` and the field owner `active`. Returns the converge
+        record: `ticks`, the final `owner` snapshot, and both role
+        reports."""
+        ticks = []
+        for _ in range(count):
+            _tracked, owner = self.tick(
+                self.standby_url, self.duty_url, failures
             )
-            if not isinstance(emitted, dict):
-                continue
-            records.append(
-                {
-                    "component": component.get("name"),
-                    "tick": entry.get("tick"),
-                    "retention": entry.get("retention", "journal"),
-                    "event": dict(
-                        emitted,
-                        fields=list(emitted.get("fields", {}).items()),
-                    ),
-                }
-            )
-    return records
-
-
-def record_divergence(records, expected):
-    """The first difference between a peer's collected records and the
-    expected set — the mismatched record's served and expected forms,
-    or the first expected record a shorter stream dropped."""
-    for index, (got, want) in enumerate(zip(records, expected)):
-        if got != want:
-            return (
-                f"record {index} serves "
-                f"{json.dumps(got, sort_keys=True, default=str)}, "
-                f"expected {json.dumps(want, sort_keys=True, default=str)}"
-            )
-    if len(records) < len(expected):
-        tail = json.dumps(expected[len(records):], sort_keys=True, default=str)
-        return (
-            f"{len(records)} records against the expected "
-            f"{len(expected)} — missing {tail}"
-        )
-    if len(records) > len(expected):
-        tail = json.dumps(records[len(expected):], sort_keys=True, default=str)
-        return (
-            f"{len(records)} records against the expected "
-            f"{len(expected)} — extra {tail}"
-        )
-    return "the streams differ"
-
-
-def assert_event_parity(active_view, standby_view, expected):
-    """Decision 84's emit-identical rule at the served surface: both
-    peers' collected `event_emitted` records must equal the expected
-    counted set — identical component attribution, declared
-    identities, ordered fields, tick, and retention, the stream-local
-    seqs excluded. A divergence raises Abort carrying
-    `event-parity-failed` and the first difference."""
-    for label, view in (("active", active_view), ("standby", standby_view)):
-        records = event_records(view)
-        if records != expected:
-            raise Abort(
-                f"event-parity-failed: the {label} peer's served "
-                f"emissions diverge — {record_divergence(records, expected)}"
-            )
-    return expected
-
-
-def doctor_view(view, tamper):
-    """Apply a parity tamper to a fetched served resource view — the
-    doctored standby whose missing or re-attributed emission record
-    the assertion must catch."""
-    for component in view.get("components", []):
-        events = component.get("events", [])
-        for index, entry in enumerate(events):
-            if "event_emitted" not in entry.get("event", {}):
-                continue
-            if tamper == "dropped-event-record":
-                del events[index]
-            elif tamper == "reattributed-event-record":
-                entry["event"]["event_emitted"]["event"]["component"] = (
-                    "doctored:0"
-                )
-            return
-
-
-def parity_pass(args, tamper):
-    """The emit-identical leg: converge the declared standby to
-    tracking, drive the emitted model's sequencer through the field
-    owner's receipted path until the counted `step_completed` set
-    stands, and assert both peers serve the same routed event
-    records. Returns `(digest_entries, evidence, failures)`."""
-    declared = manifest_pair(args.manifest)
-    if declared is None:
-        raise Abort(
-            "the manifest declares no standby pair — the event-parity "
-            "leg has nothing to exercise"
-        )
-    manifest, duty_decl, standby_decl = declared
-    with open(args.model) as handle:
-        model = json.load(handle)
-    scratch = tempfile.mkdtemp(prefix="dcs-event-parity-")
-    digest_entries, evidence, failures = [], {}, []
-    plant = duty = standby = None
-    try:
-        duty_files = persistence_files(scratch, duty_decl)
-        standby_files = persistence_files(scratch, standby_decl)
-        plant, duty, duty_url, standby, standby_url = spawn_rig(
-            args, duty_decl, standby_decl, duty_files, standby_files, tamper
-        )
-
-        # Phase 1 — the same convergence the switchover leg proves:
-        # the tracking peer scans first each tick until GET /role
-        # reports it `tracking`.
-        ticks, standby_role, duty_role = converge_to_tracking(
-            duty_url, standby_url, failures
-        )
-        evidence["converged"] = ticks[-1]
-        digest_entries.append(
-            {
-                "phase": "converge",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
-            }
-        )
-
-        # Phase 2 — the counted emission set. The served registry's
-        # first kind-declared event names the emitter; its component's
-        # writable boolean `run` input is held through the field
-        # owner's receipted path — refused `not_active` at the
-        # standby's role boundary, the pair's writes-stay-gated half —
-        # and the declared step table's scans run out, each tick
-        # having the tracking peer re-derive the same emissions from
-        # the adopted checkpoint.
-        schema = get(f"{duty_url}/schema", "GET /schema", failures)
-        events = simulate.declared_events(schema)
-        if not events:
-            failures.append(
-                "event-parity-failed: the served registry declares no "
-                "kind-emitted event — the leg has no counted set to "
-                "drive"
-            )
-            raise Abort
-        component, spec = events[0]
-        interfaces = {
-            entry["name"]: entry["interface"]
-            for entry in schema.get("interfaces", [])
-        }
-        write = next(
-            (
-                entry
-                for entry in interfaces.get(component, {}).get("commands", [])
-                if entry.get("name") == "write_value:run"
-            ),
-            None,
-        )
-        point = write.get("point") if write is not None else None
-        request_fields = (
-            {a["name"]: a["kind"] for a in write.get("request", [])}
-            if write is not None
-            else {}
-        )
-        writable = {
-            entry["id"] for entry in model["io_points"] if entry.get("writable")
-        }
-        if point is None or request_fields.get("value") != "bool" or (
-            point not in writable
-        ):
-            failures.append(
-                f"event-parity-failed: {component} serves no writable "
-                f"boolean `run` input to drive {spec['name']} — the leg "
-                "has no counted set to drive"
-            )
-            raise Abort
-        command = {
-            "write_value": {
-                "kind": "bool",
-                "point": point,
-                "value": {"bool": True},
-            }
-        }
-        status, receipt = request(
-            f"{duty_url}/command", {"command": command, "actor": ACTOR}
-        )
-        if status != 200 or simulate.receipt_outcome(receipt) != "accepted":
-            failures.append(
-                f"the `run` write driving {component}'s {spec['name']} "
-                f"answered {status} {receipt}, expected an accepted "
-                "receipt"
-            )
-            raise Abort
-        status, refusal = request(
-            f"{standby_url}/command", {"command": command, "actor": ACTOR}
-        )
-        reason = (
-            refusal.get("outcome", {}).get("rejected", {}).get("reason", {})
-            if isinstance(refusal, dict)
-            else {}
-        )
-        if status != 200 or "not_active" not in reason:
-            failures.append(
-                f"the standby's role boundary answered {status} "
-                f"{refusal}, expected a rejected not_active receipt — "
-                "the tracking peer's writes must stay gated"
-            )
-            raise Abort
-
-        scans = simulate.emission_scans(model, component)
-        if scans <= 0:
-            failures.append(
-                f"event-parity-failed: {component}'s declared step "
-                "table drives no emission — the leg has no counted set"
-            )
-            raise Abort
-        # The apply tick scans the owner first: a field-carried write
-        # is one the quiesced peer cannot issue, so the standby must
-        # not pull while the receipt still reads `Accepted` — its next
-        # pull carries the checkpoint captured after the application,
-        # the settled receipt and the field-side `run` value included.
-        owner = scan(duty_url, failures)
-        ticks = [owner["tick"]]
-        # The remaining emission scans pace standby-first again: each
-        # pull lands the owner's just-published checkpoint before the
-        # tracking peer re-derives the tick's emissions from it.
-        for _ in range(scans - 1):
-            tracked = scan(standby_url, failures)
-            owner = scan(duty_url, failures)
-            if select_snapshot(tracked) != select_snapshot(owner):
-                failures.append(
-                    "the tracking peer's image diverged from the field "
-                    f"owner's at tick {owner['tick']} — the adopted "
-                    "state no longer tracks"
-                )
-                raise Abort
             ticks.append(owner["tick"])
-        digest_entries.append(
-            {
-                "phase": "emissions",
-                "component": component,
-                "event": spec["name"],
-                "receipt": receipt,
-                "refusal": refusal,
-                "ticks": ticks,
-            }
-        )
-
-        # Phase 3 — the parity itself. The roles must not have moved —
-        # the tracking peer still standby, the owner still active —
-        # then both peers' served resource views collect their routed
-        # `event_emitted` records and the standby's must equal the
-        # active's: same component attribution, declared identities,
-        # ordered fields, tick, and retention.
-        standby_role = get(f"{standby_url}/role", "GET /role", failures)
-        duty_role = get(f"{duty_url}/role", "GET /role", failures)
+        standby_role = get(f"{self.standby_url}/role", "GET /role", failures)
+        duty_role = get(f"{self.duty_url}/role", "GET /role", failures)
         sync = standby_role.get("sync")
         if standby_role.get("role") != "standby" or not (
             isinstance(sync, dict) and "tracking" in sync
         ):
             failures.append(
-                "the tracking peer left its standby role across the "
-                f"emission drive — GET /role answers {standby_role}"
+                "the tracking peer never reported tracking — GET /role "
+                f"answers {standby_role}"
             )
             raise Abort
         if duty_role.get("role") != "active":
             failures.append(
-                f"the field owner reports {duty_role.get('role')!r} "
-                "across the emission drive, expected active"
+                f"the field owner reports {duty_role.get('role')!r}, "
+                "expected active"
             )
             raise Abort
-        duty_view = get(f"{duty_url}/resources", "GET /resources", failures)
-        standby_view = get(
-            f"{standby_url}/resources", "GET /resources", failures
-        )
-        expected = event_records(duty_view)
-        counted = [
-            record
-            for record in expected
-            if record["component"] == component
-            and record["event"]["event"] == spec["name"]
-        ]
-        declared_component = next(
-            (
-                entry
-                for entry in model["components"]
-                if f"{entry['kind']}:{entry['id']}" == component
+        return {
+            "ticks": ticks,
+            "owner": owner,
+            "duty_role": duty_role,
+            "standby_role": standby_role,
+        }
+
+    def served_transitions(self, url, failures):
+        """The `role_changed` stream the peer's served journal carries
+        — `(tick, from, to)` per entry, in `seq` order."""
+        journal = get(f"{url}/journal", "GET /journal", failures)
+        return role_transitions(journal)
+
+    def demote(self, url, failures, what="the field owner"):
+        """`POST /demote` asserting the answered RoleReport carries
+        `demoting`; returns the report. `what` names the peer in the
+        failure line."""
+        status, report = request(f"{url}/demote", {})
+        if status != 200 or report.get("role") != "demoting":
+            failures.append(
+                f"POST /demote on {what} answered {status} {report}, "
+                "expected a demoting report"
+            )
+            raise Abort
+        return report
+
+    def promote(self, url, failures, what="the converged standby", note=""):
+        """`POST /promote` asserting the answered RoleReport carries
+        `promoting`; returns the report. `note` appends the caller's
+        clause to the expectation wording."""
+        status, report = request(f"{url}/promote", {})
+        if status != 200 or report.get("role") != "promoting":
+            failures.append(
+                f"POST /promote on {what} answered {status} {report}, "
+                f"expected a promoting report{note}"
+            )
+            raise Abort
+        return report
+
+    def switch(
+        self,
+        demote_url,
+        promote_url,
+        failures,
+        handover=HANDOVER_TICKS,
+        demote_what="the field owner",
+        promote_what="the converged standby",
+        promote_note="",
+        audit_receipts=False,
+        after_promote=None,
+    ):
+        """The documented switch: `POST /demote` on the field owner
+        then `POST /promote` on the converged peer — each answered by
+        its RoleReport — then `handover` driven ticks scanning the
+        demoted peer first, asserting the run continues bumplessly:
+        identical images, the promoted peer settling `active`, the
+        demoted peer reconverged `tracking`, each peer's served
+        journal audited for the switch's role transitions appended to
+        its pre-switch record, and — with `audit_receipts` — the
+        adopted receipt logs asserted one identical log. `after_promote`,
+        when given, runs once after the promote report and before the
+        first handover tick — the last moment a leg can act on the
+        demoted peer before its tracking pulls begin. Returns the
+        switch record: the demote/promote reports, the handover
+        `ticks` and final `owner` snapshot, both role reports, the
+        promoted peer's receipts when audited, and each named peer's
+        served transitions."""
+        pre = {
+            url: self.served_transitions(url, failures)
+            for url in (demote_url, promote_url)
+        }
+        record = {
+            "demote": self.demote(demote_url, failures, demote_what),
+            "promote": self.promote(
+                promote_url, failures, promote_what, promote_note
             ),
-            {},
-        )
-        steps = sum(
-            1
-            for name in declared_component.get("parameters", {})
-            if re.fullmatch(r"step_\d+_ticks", name)
-        )
-        if not counted:
+            "ticks": [],
+            "owner": None,
+        }
+        if after_promote is not None:
+            after_promote()
+        for _ in range(handover):
+            _tracked, owner = self.tick(
+                demote_url,
+                promote_url,
+                failures,
+                diverged="the demoted peer's image diverged from the "
+                "promoted owner's at tick {tick} — the switch was not "
+                "bumpless",
+            )
+            record["ticks"].append(owner["tick"])
+            record["owner"] = owner
+        if not handover:
+            return record
+        demoted_role = get(f"{demote_url}/role", "GET /role", failures)
+        promoted_role = get(f"{promote_url}/role", "GET /role", failures)
+        if promoted_role.get("role") != "active":
             failures.append(
-                f"event-parity-failed: the active serves no emitted "
-                f"{spec['name']} record from {component} — the counted "
-                "set never stood"
+                f"the promoted peer reports {promoted_role.get('role')!r}, "
+                "expected active"
             )
             raise Abort
-        if steps and len(counted) != steps:
+        sync = demoted_role.get("sync")
+        if demoted_role.get("role") != "standby" or not (
+            isinstance(sync, dict) and "tracking" in sync
+        ):
             failures.append(
-                f"event-parity-failed: the active serves "
-                f"{len(counted)} {spec['name']} records from "
-                f"{component} against the declared step table's {steps}"
+                "the demoted peer never reconverged — GET /role "
+                f"answers {demoted_role}"
             )
             raise Abort
-        doctor_view(standby_view, tamper)
-        records = assert_event_parity(duty_view, standby_view, expected)
-        digest_entries.append(
-            {
-                "phase": "parity",
-                "component": component,
-                "event": spec["name"],
-                "counted": len(counted),
-                "records": records,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
-            }
+        record["demoted_role"] = demoted_role
+        record["promoted_role"] = promoted_role
+        if audit_receipts:
+            receipts_demoted = get(
+                f"{demote_url}/receipts", "GET /receipts", failures
+            )
+            receipts_promoted = get(
+                f"{promote_url}/receipts", "GET /receipts", failures
+            )
+            if receipts_demoted != receipts_promoted:
+                failures.append(
+                    "the peers' receipt logs diverged across the "
+                    "switch — the adopted audit is not one log"
+                )
+                raise Abort
+            record["receipts"] = receipts_promoted
+        expected = {
+            demote_url: [("active", "demoting"), ("demoting", "standby")],
+            promote_url: [
+                ("standby", "promoting"),
+                ("promoting", "active"),
+            ],
+        }
+        transitions = {}
+        for url in (demote_url, promote_url):
+            got = self.served_transitions(url, failures)
+            want = [
+                (frm, to) for _tick, frm, to in pre[url]
+            ] + expected[url]
+            if [(frm, to) for _tick, frm, to in got] != want:
+                failures.append(
+                    f"{self.peer_name(url)}'s served journal carries "
+                    f"the role transitions {got}, expected {want}"
+                )
+            transitions[self.peer_name(url)] = got
+        if failures:
+            raise Abort
+        record["transitions"] = transitions
+        return record
+
+
+def launch_pair(args, manifest, tamper=None, auto_promote=None):
+    """Resolve the declared standby pair and launch it on the released
+    tooling — the bring-up the pair-stage legs share: each
+    controller's declared persistence instantiated under a
+    runner-owned scratch directory, `dcs-plant-server` serving the
+    model and dynamics, then the two released `dcs-controller
+    --driven --remote` peers — the field owner first, then the
+    standby wired at the owner's monitor (or, under the
+    `broken-peer-flag` tamper, at an address nothing serves) — each
+    spawn's startup refusal reported through `Abort`. `manifest` is
+    the manifest path or `manifest_pair`'s resolved `(manifest, duty,
+    standby)` — callers resolving it themselves keep their own
+    no-pair wording. `auto_promote`, when given, arms the spawned
+    standby's `--auto-promote` flag — the manifest's declared
+    `failover_budget` carried to the invocation. Returns the
+    PairRig."""
+    declared = (
+        manifest_pair(manifest)
+        if isinstance(manifest, (str, os.PathLike))
+        else manifest
+    )
+    if declared is None:
+        raise Abort(
+            "the manifest declares no standby pair — the pair rig has "
+            "nothing to exercise"
         )
-        evidence["final_tick"] = ticks[-1]
-        evidence["counted"] = len(counted)
-        evidence["event"] = spec["name"]
-    except Abort as abort:
-        failures.extend(str(arg) for arg in abort.args)
-    except Exception as error:
-        failures.append(f"the run raised {error!r}")
-    finally:
-        stop(standby)
-        stop(duty)
-        stop(plant)
-        shutil.rmtree(scratch, ignore_errors=True)
-    return digest_entries, evidence, failures
+    rig = PairRig(declared)
+    try:
+        rig.plant, rig.plant_addr = spawn_plant(
+            args.plant_server, args.model, args.dynamics
+        )
+        rig.plant_io = simulate.PlantClient(rig.plant_addr)
+        rig.duty, rig.duty_url, rig.duty_preamble = spawn_peer(
+            args.controller,
+            args.model,
+            args.dt,
+            rig.plant_addr,
+            None,
+            rig.duty_files,
+        )
+        if rig.duty_url is None:
+            raise Abort(
+                f"the duty controller {rig.duty_decl['name']} exited at "
+                f"startup: "
+                f"{'; '.join(rig.duty_preamble) or 'no diagnostic'}"
+            )
+        # The manifest's standby wiring names the peer by its
+        # deployment address; the driven run wires the tracking peer at
+        # the spawned duty monitor — or, under the broken-peer-flag
+        # tamper, at an address nothing serves.
+        target = rig.duty_url.removeprefix("http://")
+        if tamper == "broken-peer-flag":
+            target = closed_port()
+        rig.standby, rig.standby_url, rig.standby_preamble = spawn_peer(
+            args.controller,
+            args.model,
+            args.dt,
+            rig.plant_addr,
+            target,
+            rig.standby_files,
+            auto_promote=auto_promote,
+        )
+        if rig.standby_url is None:
+            raise Abort(
+                f"the standby controller {rig.standby_decl['name']} "
+                f"exited at startup: "
+                f"{'; '.join(rig.standby_preamble) or 'no diagnostic'}"
+            )
+    except Exception:
+        rig.close()
+        raise
+    return rig
 
 
 def pair_pass(args, tamper):
@@ -739,32 +644,26 @@ def pair_pass(args, tamper):
             "the manifest declares no standby pair — the pair leg has "
             "nothing to exercise"
         )
-    manifest, duty_decl, standby_decl = declared
-    fingerprint = int(manifest["model"]["fingerprint"], 16)
-    scratch = tempfile.mkdtemp(prefix="dcs-pair-")
+    _manifest, duty_decl, standby_decl = declared
     digest_entries, evidence, failures = [], {}, []
-    plant = duty = standby = None
+    rig = None
     try:
-        duty_files = persistence_files(scratch, duty_decl)
-        standby_files = persistence_files(scratch, standby_decl)
-        plant, duty, duty_url, standby, standby_url = spawn_rig(
-            args, duty_decl, standby_decl, duty_files, standby_files, tamper
-        )
+        rig = launch_pair(args, declared, tamper)
+        duty_url, standby_url = rig.duty_url, rig.standby_url
+        duty_files, standby_files = rig.duty_files, rig.standby_files
 
         # Phase 1 — convergence. Each driven tick scans the tracking
         # peer first — its request pulling and applying the owner's
         # latest checkpoint — then the field owner, so the peers rest
         # at the same tick with identical images.
-        ticks, standby_role, duty_role = converge_to_tracking(
-            duty_url, standby_url, failures
-        )
-        evidence["converged"] = ticks[-1]
+        converged = rig.converge(failures)
+        evidence["converged"] = converged["ticks"][-1]
         digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "ticks": converged["ticks"],
+                "duty_role": converged["duty_role"],
+                "standby_role": converged["standby_role"],
             }
         )
 
@@ -812,14 +711,28 @@ def pair_pass(args, tamper):
                 "expected a rejected not_active receipt"
             )
             raise Abort
-        # The settling tick: the adopted receipt log — the pair's one
-        # command audit — must read identically on both peers.
-        tracked = scan(standby_url, failures)
-        owner = scan(duty_url, failures)
-        if select_snapshot(tracked) != select_snapshot(owner):
+        # The settling tick: the duty applies the admitted invoke at
+        # its scan boundary while the tracker carries its adopted
+        # receipt (issue #689) — a quiesced scan must not mint an
+        # `Applied` the line never ordered. `tick` absorbs exactly
+        # that one-tick lag and returns the reconverged pair, so the
+        # adopted audit reads as one log below. A field-moving invoke
+        # additionally names one cycle of divergence (staged
+        # pre-command outputs against the commanded field); bounded
+        # extra cycles heal the verdict before the switch reads
+        # convergence.
+        _tracked, owner = tick(standby_url, duty_url, failures)
+        for _ in range(5):
+            standby_role = get(f"{standby_url}/role", "GET /role", failures)
+            sync = standby_role.get("sync")
+            if isinstance(sync, dict) and "tracking" in sync:
+                break
+            scan(duty_url, failures)
+            _tracked, owner = tick(standby_url, duty_url, failures)
+        else:
             failures.append(
-                "the tracking peer's image diverged from the field "
-                f"owner's at tick {owner['tick']}"
+                "the tracking peer never reconverged after the "
+                "command's settling tick"
             )
             raise Abort
         receipts_duty = get(f"{duty_url}/receipts", "GET /receipts", failures)
@@ -866,80 +779,30 @@ def pair_pass(args, tamper):
                 f"{refused}, expected 409 already_active"
             )
             raise Abort
-        status, demote = request(f"{duty_url}/demote", {})
-        if status != 200 or demote.get("role") != "demoting":
-            failures.append(
-                f"POST /demote on the field owner answered {status} "
-                f"{demote}, expected a demoting report"
-            )
-            raise Abort
-        status, promote = request(f"{standby_url}/promote", {})
-        if status != 200 or promote.get("role") != "promoting":
-            failures.append(
-                f"POST /promote on the converged standby answered "
-                f"{status} {promote}, expected a promoting report"
-            )
-            raise Abort
-        evidence["switched_at"] = demote["tick"]
-        digest_entries.append(
-            {
-                "phase": "switch",
-                "refused_promote": refused,
-                "demote": demote,
-                "promote": promote,
-            }
-        )
-
         # Phase 4 — the run continues bumplessly: the demoted peer
         # tracks the new owner off the address its own pulls
         # announced, each driven tick keeping the peers identical, the
         # promoted peer serving active at the continuing tick.
-        ticks = []
-        for _ in range(HANDOVER_TICKS):
-            tracked = scan(duty_url, failures)
-            owner = scan(standby_url, failures)
-            if select_snapshot(tracked) != select_snapshot(owner):
-                failures.append(
-                    "the demoted peer's image diverged from the "
-                    f"promoted owner's at tick {owner['tick']} — the "
-                    "switch was not bumpless"
-                )
-                raise Abort
-            ticks.append(owner["tick"])
-        duty_role = get(f"{duty_url}/role", "GET /role", failures)
-        standby_role = get(f"{standby_url}/role", "GET /role", failures)
-        if standby_role.get("role") != "active":
-            failures.append(
-                f"the promoted peer reports {standby_role.get('role')!r}, "
-                "expected active"
-            )
-            raise Abort
-        sync = duty_role.get("sync")
-        if duty_role.get("role") != "standby" or not (
-            isinstance(sync, dict) and "tracking" in sync
-        ):
-            failures.append(
-                "the demoted peer never reconverged — GET /role "
-                f"answers {duty_role}"
-            )
-            raise Abort
-        receipts_duty = get(f"{duty_url}/receipts", "GET /receipts", failures)
-        receipts_standby = get(
-            f"{standby_url}/receipts", "GET /receipts", failures
+        switched = rig.switch(
+            duty_url, standby_url, failures, audit_receipts=True
         )
-        if receipts_duty != receipts_standby:
-            failures.append(
-                "the peers' receipt logs diverged across the switch — "
-                "the adopted audit is not one log"
-            )
-            raise Abort
+        evidence["switched_at"] = switched["demote"]["tick"]
+        digest_entries.append(
+            {
+                "phase": "switch",
+                "refused_promote": refused,
+                "demote": switched["demote"],
+                "promote": switched["promote"],
+            }
+        )
+        owner = switched["owner"]
         digest_entries.append(
             {
                 "phase": "handover",
-                "ticks": ticks,
-                "duty_role": duty_role,
-                "standby_role": standby_role,
-                "receipts": receipts_standby,
+                "ticks": switched["ticks"],
+                "duty_role": switched["demoted_role"],
+                "standby_role": switched["promoted_role"],
+                "receipts": switched["receipts"],
             }
         )
 
@@ -964,14 +827,9 @@ def pair_pass(args, tamper):
             duty_decl["name"]: duty_files,
             standby_decl["name"]: standby_files,
         }
-        urls = {
-            duty_decl["name"]: duty_url,
-            standby_decl["name"]: standby_url,
-        }
         persisted = {}
         for name in (duty_decl["name"], standby_decl["name"]):
-            served = get(f"{urls[name]}/journal", "GET /journal", failures)
-            transitions = role_transitions(served)
+            transitions = switched["transitions"][name]
             want = expected[name]
             if [(frm, to) for _tick, frm, to in transitions] != want:
                 failures.append(
@@ -1047,11 +905,14 @@ def pair_pass(args, tamper):
                                 f"{checkpoint.get('tick')} while the run "
                                 f"stood at {final_tick}"
                             )
-                        if checkpoint.get("model_fingerprint") != fingerprint:
+                        if (
+                            checkpoint.get("model_fingerprint")
+                            != rig.fingerprint
+                        ):
                             failures.append(
                                 f"{name}'s state file carries fingerprint "
                                 f"{checkpoint.get('model_fingerprint')}, the "
-                                f"manifest declares {fingerprint}"
+                                f"manifest declares {rig.fingerprint}"
                             )
                         record["state_tick"] = checkpoint.get("tick")
             persisted[name] = record
@@ -1062,10 +923,8 @@ def pair_pass(args, tamper):
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        stop(standby)
-        stop(duty)
-        stop(plant)
-        shutil.rmtree(scratch, ignore_errors=True)
+        if rig is not None:
+            rig.close()
     return digest_entries, evidence, failures
 
 
@@ -1078,50 +937,29 @@ def main():
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument(
-        "--parity",
-        action="store_true",
-        help="run the emit-identical standby event-parity leg instead "
-        "of the switchover leg",
-    )
-    parser.add_argument(
         "--tamper",
-        choices=[
-            "broken-peer-flag",
-            "dropped-event-record",
-            "reattributed-event-record",
-        ],
-        help="doctor the run — the pass must fail naming the evidence",
+        choices=["broken-peer-flag"],
+        help="doctor the pair's wiring — the pass must fail naming "
+        "the evidence",
     )
     args = parser.parse_args()
-
-    if args.tamper in ("dropped-event-record", "reattributed-event-record") and (
-        not args.parity
-    ):
-        parser.error(f"--tamper {args.tamper} exercises the parity leg — pass --parity")
 
     with open(args.scenario) as handle:
         args.dt = json.load(handle)["dt"]
 
-    leg = "event-parity" if args.parity else "pair"
     try:
-        if args.parity:
-            digest_entries, evidence, failures = parity_pass(args, args.tamper)
-        else:
-            digest_entries, evidence, failures = pair_pass(args, args.tamper)
+        digest_entries, evidence, failures = pair_pass(args, args.tamper)
     except Abort as abort:
         for line in abort.args:
-            eprint(f"{leg}: {line}")
+            eprint(f"pair: {line}")
         return 1
     for failure in failures:
-        if failure.startswith(f"{leg}-failed:"):
-            eprint(failure)
-        else:
-            eprint(f"{leg}: {failure}")
+        eprint(f"pair: {failure}")
     if args.tamper is not None:
         if not failures:
             eprint(
-                f"{leg}: the {args.tamper} case passed silently — the leg "
-                "never noticed the doctored run"
+                f"pair: the {args.tamper} case passed silently — the leg "
+                "never noticed the broken wiring"
             )
         return 1
     if failures:
@@ -1129,15 +967,6 @@ def main():
     digest = hashlib.sha256(
         json.dumps(digest_entries, sort_keys=True).encode()
     ).hexdigest()
-    if args.parity:
-        print(
-            f"event-parity-digest {digest} — {evidence['counted']} "
-            f"counted {evidence['event']} records identical on both "
-            f"peers, the standby tracking at tick "
-            f"{evidence['final_tick']} (converged at "
-            f"{evidence['converged']})"
-        )
-        return 0
     records = digest_entries[-1]["persisted"]
     counts = "+".join(
         str(len(record.get("journal_records", [])))

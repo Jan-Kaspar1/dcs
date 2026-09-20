@@ -121,7 +121,7 @@ pub struct IoHealth {
     /// also produced a `Bad` input sample.
     pub failed_reads: u64,
     /// Total output writes that failed at the scan's write boundary —
-    /// each also failed its scan with `ScanError`.
+    /// each degraded its scan, which still completed.
     pub failed_writes: u64,
     /// Cyclic process-image exchanges that failed at the scan's read
     /// boundary — one per failed `exchange` call on a driver
