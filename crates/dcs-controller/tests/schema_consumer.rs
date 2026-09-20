@@ -1497,7 +1497,24 @@ fn run_verification(tag: &str) -> Outcome {
         UI_RESTART_TICKS / 2,
         true,
     );
-    let after = read_ui_seen(&ui_seen_b).expect("the restarted UI process never rejoined");
+    // The restarted process's own observation is the evidence, and on
+    // a loaded runner its first polls can all land inside the phase —
+    // the seen file then trails the run's advance. Wait for the file
+    // to record a publication past what the first incarnation saw
+    // rather than reading a poll that predates it.
+    let deadline = Instant::now();
+    let after = loop {
+        if let Some(seen) = read_ui_seen(&ui_seen_b)
+            && seen["published"].as_u64() > before["published"].as_u64()
+        {
+            break seen;
+        }
+        assert!(
+            deadline.elapsed() < Duration::from_secs(10),
+            "the restarted UI process never observed a freshness advance"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     drop(ui);
     // The restart's evidence — the `ui_evidence_failures` shape:
     // neither incarnation met a fault, the restarted process read the
