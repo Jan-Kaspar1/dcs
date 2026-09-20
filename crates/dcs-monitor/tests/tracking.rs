@@ -184,6 +184,20 @@ fn emitter_executor(driver: &'static StubDriver) -> Executor<'static> {
     Executor::new(driver, PointMap::new(), vec![Box::new(Emitter { n: 0 })]).unwrap()
 }
 
+/// The dialable form of a bound monitor address: in this in-process
+/// rig a wildcard bind is reached through loopback — a deployment's
+/// answer to the same `local_addr` is the peer's `host:port` name.
+fn dialable(bound: SocketAddr) -> SocketAddr {
+    SocketAddr::new(
+        match bound.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        },
+        bound.port(),
+    )
+}
+
 /// One serving monitor: the `Arc` shares the handle so `stop` can drop
 /// the last reference — closing the listener so a later connect is
 /// refused, the simulated process outage the pair tests use.
@@ -196,17 +210,7 @@ struct Serving {
 impl Serving {
     fn start(monitor: Monitor<'static>) -> Self {
         let monitor = Arc::new(monitor);
-        let bound = monitor.local_addr();
-        // A wildcard-bound monitor is reached through loopback — the
-        // test client never dials the unspecified address.
-        let client = MonitorClient::new(SocketAddr::new(
-            match bound.ip() {
-                IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-                IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-                ip => ip,
-            },
-            bound.port(),
-        ));
+        let client = MonitorClient::new(dialable(monitor.local_addr()));
         let serving = Arc::clone(&monitor);
         Self {
             monitor,
@@ -259,16 +263,17 @@ impl DrivenStandby {
         failover: Option<u32>,
         build: fn(&'static StubDriver) -> Executor<'static>,
     ) -> (Self, Serving) {
-        Self::start_binding(failover, build, "127.0.0.1:0")
+        Self::start_binding(failover, build, "127.0.0.1:0", "127.0.0.1:0")
     }
 
-    /// `standby_bind` is the standby monitor's listen address —
-    /// `0.0.0.0:0` reproduces the wildcard bind every container
-    /// deployment carries, whose `local_addr` is the unroutable
-    /// announce the follow-peer contract must resolve.
+    /// `active_bind` and `standby_bind` are the monitors' listen
+    /// addresses — `0.0.0.0:0` reproduces the wildcard bind every
+    /// container deployment carries, whose `local_addr` is the
+    /// unroutable announce the follow-peer contract must resolve.
     fn start_binding(
         failover: Option<u32>,
         build: fn(&'static StubDriver) -> Executor<'static>,
+        active_bind: &str,
         standby_bind: &str,
     ) -> (Self, Serving) {
         let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
@@ -278,13 +283,16 @@ impl DrivenStandby {
         ])));
         let active = Serving::start(
             Monitor::bind_peer(
-                "127.0.0.1:0",
+                active_bind,
                 Peer::active(build(active_driver), None),
                 signal_index(),
             )
             .unwrap(),
         );
-        let active_addr = active.monitor.local_addr();
+        // The standby's configured track is the deployment's
+        // `--standby <host:port>` — the dialable name, never the
+        // active's wildcard bind address.
+        let active_addr = dialable(active.monitor.local_addr());
 
         let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(3.0)),
@@ -675,7 +683,8 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
 /// itself forever.
 #[test]
 fn a_wildcard_bound_peers_announce_tracks_a_routable_source() {
-    let (standby, active) = DrivenStandby::start_binding(None, executor, "0.0.0.0:0");
+    let (standby, active) =
+        DrivenStandby::start_binding(None, executor, "127.0.0.1:0", "0.0.0.0:0");
     let standby_bound = standby.standby.monitor.local_addr();
     assert!(
         standby_bound.ip().is_unspecified(),
@@ -708,6 +717,82 @@ fn a_wildcard_bound_peers_announce_tracks_a_routable_source() {
     assert!(
         matches!(report.sync, Some(StandbySync::Tracking { .. })),
         "the demoted peer reconverges on the resolved source: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The QA finding `checkpoint-announced-peer-unroutable-wildcard`'s
+/// full reproduction: *both* peers' monitors bound on the wildcard the
+/// documented container deployment's `--listen 0.0.0.0:<port>`
+/// produces, then the documented demote-then-promote switchover order.
+/// The demoted launched active's recorded tracking source is the
+/// standby's announced address resolved through its pull connection's
+/// proven source — never the unroutable `0.0.0.0` the pull announced —
+/// so the demoted peer pulls its successor and reconverges to
+/// `Tracking`. On the reported build this stranded `degraded` on
+/// `fetch from 0.0.0.0:<port>` forever, and the unconditional per-pull
+/// overwrite re-poisoned a manually corrected source within one pull
+/// cycle — only a process restart recovered, at the price of claim
+/// churn. Now each pull re-derives the recorded source from the
+/// connection itself, so the overwrite cannot drift it back.
+#[test]
+fn a_wildcard_bound_pair_reconverges_the_demoted_peer() {
+    let (standby, active) = DrivenStandby::start_binding(None, executor, "0.0.0.0:0", "0.0.0.0:0");
+    assert!(
+        active.monitor.local_addr().ip().is_unspecified()
+            && standby.standby.monitor.local_addr().ip().is_unspecified(),
+        "both peers bind the wildcard like the container deployment"
+    );
+
+    // Converge the standby: its tracking pull announces
+    // `0.0.0.0:<port>` — the reproduction's unroutable address — and
+    // the active records the connection-proven resolution.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+    assert_eq!(
+        active.monitor.tracking_source(),
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            standby.standby.monitor.local_addr().port()
+        )),
+        "the recorded source derives from the pull connection's remote \
+         address, never the announced wildcard"
+    );
+
+    // The documented switchover order: demote the field owner first,
+    // then promote the standby.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+    standby.standby.client.advance(1).unwrap();
+    assert_eq!(standby.standby.client.role().unwrap().role, Role::Active);
+
+    // The demoted peer's next scan cycle pulls the resolved source and
+    // reconverges — where the reported build looped on `fetch from
+    // 0.0.0.0:<port>: Connection refused` forever.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer reconverges on the resolved source: {report:?}"
+    );
+
+    // Every further pull re-derives the recorded source from the
+    // connection — the overwrite cannot re-poison it — and the
+    // demoted peer stays promotable, so fail-back works without a
+    // restart.
+    active.client.advance(1).unwrap();
+    let recorded = active.monitor.tracking_source().unwrap();
+    assert!(
+        !recorded.ip().is_unspecified() && recorded.port() != 0,
+        "the per-pull overwrite re-derives a dialable source: {recorded}"
     );
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
 }

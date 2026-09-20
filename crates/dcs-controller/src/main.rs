@@ -129,7 +129,9 @@
 //! pull also announces the pulling monitor's own address
 //! (`GET /checkpoint?peer=`), so the serving instance learns where its
 //! successor lives — an announce the serving side accepts only when it
-//! names the pulling connection's own source address. There,
+//! names the pulling connection's own source address, resolving the
+//! wildcard a `--listen 0.0.0.0` peer announces to that address so the
+//! recorded source is always one a demotion could dial. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -1411,7 +1413,9 @@ fn main() -> ExitCode {
 /// address a tracking peer announced through its `?peer=` pulls — the
 /// follow-peer half that lets a demoted launched active find its
 /// successor without a restart, the serving side accepting the
-/// announce only as the pulling connection's own source address. The
+/// announce only as the pulling connection's own source address (a
+/// wildcard `--listen 0.0.0.0` announce resolving to it, so the
+/// recorded source is never an undialable bind address). The
 /// puller follows the resolved source, respawning when it changes, and
 /// announces this monitor's own address on every pull so the serving
 /// peer learns where to track back. A
