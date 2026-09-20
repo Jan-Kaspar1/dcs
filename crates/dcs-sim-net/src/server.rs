@@ -45,9 +45,11 @@ struct Shared {
 /// [`PlantResponse::ClaimedShared`]. A connection's end drops only its
 /// own hold — the claim stands even with no holders left, so a dead
 /// owner keeps the field fenced for its token until a fresh claim
-/// preempts — while an explicit `release_writer` that empties the set
-/// releases the claim itself, the deliberate hand-back a mutation
-/// tool performs.
+/// preempts — while an explicit `release_writer` that removes the
+/// last live hold releases the claim itself, the deliberate hand-back
+/// a mutation tool performs. A release from an attachment holding
+/// nothing removes nothing — an empty set is the dead-owner state the
+/// claim exists to fence, not a hand-back.
 struct WriterClaim {
     owner: u64,
     /// The connection ids holding `owner`. An attachment not in this
@@ -297,12 +299,17 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             // (`release_hold` drops the hold but keeps the claim), so a
             // crashed owner's claim keeps fencing its token while a
             // tool that claimed conditionally can hand the field back.
+            // Only a release that actually removed a hold can empty the
+            // set: a `release_writer` from an attachment holding nothing
+            // must not dissolve the claim — an empty holder set is the
+            // dead-owner state the claim exists to fence, not the last
+            // holder's release.
             let mut writer = shared.writer.lock().unwrap();
-            if let Some(claim) = writer.as_mut() {
-                claim.holders.remove(&connection);
-                if claim.holders.is_empty() {
-                    *writer = None;
-                }
+            if let Some(claim) = writer.as_mut()
+                && claim.holders.remove(&connection)
+                && claim.holders.is_empty()
+            {
+                *writer = None;
             }
             PlantResponse::Done
         }

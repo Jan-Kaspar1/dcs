@@ -733,9 +733,11 @@ function describeSync(sync) {
   }
   if ("reinitialized" in sync) {
     const report = sync.reinitialized.report;
+    const reverted = (report.reverted_tuning || []).length;
     return "reinitialized under revised model at tick " + report.resumed_at +
       " (" + report.carried.length + " carried, " +
-      report.dropped.length + " dropped)";
+      report.dropped.length + " dropped" +
+      (reverted > 0 ? ", " + reverted + " reverted" : "") + ")";
   }
   return JSON.stringify(sync);
 }
@@ -2898,6 +2900,7 @@ function describeEvent(event) {
   }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;
+    const reverted = report.reverted_tuning || [];
     return "standby reinitialized under revised model at tick " +
       report.resumed_at + ": carried " +
       report.carried.map(c => pointName(c.point)).join(", ") +
@@ -2907,6 +2910,12 @@ function describeEvent(event) {
             : d.output_point ? pointName(d.output_point.point)
             : d.component ? "component " + d.component.name
             : "driver state").join(", ")
+        : "") +
+      (reverted.length > 0
+        ? "; reverted tuning " + reverted.map(r =>
+            r.component + "." + r.parameter + " " +
+            formatValue(r.checkpointed) + " → " +
+            formatValue(r.declared)).join(", ")
         : "");
   }
   if ("event_emitted" in event) {

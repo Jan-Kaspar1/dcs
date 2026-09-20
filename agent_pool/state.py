@@ -39,6 +39,20 @@ MIGRATIONS = [
     """
     DROP INDEX IF EXISTS live_group;
     """,
+    # 4: unified admission control — inference leases and quota-group state
+    """
+    CREATE TABLE IF NOT EXISTS admission_leases(
+      owner TEXT PRIMARY KEY, model TEXT NOT NULL, grps TEXT NOT NULL,
+      clone TEXT, invocation TEXT, probe INTEGER NOT NULL DEFAULT 0,
+      started REAL, updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS admission_groups(
+      grp TEXT PRIMARY KEY, target INTEGER NOT NULL, mode TEXT NOT NULL DEFAULT 'normal',
+      cooldown_until REAL, cooldown_len REAL NOT NULL DEFAULT 0,
+      window_start REAL NOT NULL DEFAULT 0, loaded REAL, useful INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS admission_outcomes(
+      invocation TEXT PRIMARY KEY, owner TEXT NOT NULL, grps TEXT NOT NULL,
+      category TEXT NOT NULL, useful INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL);
+    """,
 ]
 
 

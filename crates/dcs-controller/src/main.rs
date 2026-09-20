@@ -69,7 +69,17 @@
 //! unparseable file, an unsupported format version, or a fingerprint or
 //! structural mismatch (a state file captured under a different model)
 //! exits nonzero naming the reason rather than silently starting fresh;
-//! a missing file is a cold start. The standby path is unchanged — where
+//! a missing file is a cold start. A `--revised` run relaxes exactly
+//! the fingerprint half of that gate — the lone controller's
+//! scheduled-outage roll: a checkpoint captured under a different model
+//! crosses the boundary through the documented carryover rule,
+//! `Executor::reinitialize` in place of `Executor::apply`, resuming at
+//! the checkpointed tick with the carried setpoints, output image, and
+//! force set the rule names and the crossing's carryover report printed
+//! at startup and journaled when a monitor binds; a checkpoint the
+//! rule cannot carry fails startup naming the `CarryoverError`, the
+//! file untouched, and a matching fingerprint still resumes ordinarily.
+//! The standby path is unchanged — where
 //! a redundant peer exists it remains the preferred recovery story, its
 //! checkpoint stream converging a standby continuously rather than at
 //! the last persisted cycle.
@@ -112,7 +122,8 @@
 //! checkpoint is the heartbeat miss the failover budget counts. Each
 //! pull also announces the pulling monitor's own address
 //! (`GET /checkpoint?peer=`), so the serving instance learns where its
-//! successor lives. There,
+//! successor lives — an announce the serving side accepts only when it
+//! names the pulling connection's own source address. There,
 //! `GET /role` reports `standby` plus its convergence and
 //! `POST /promote` is the operator's switchover action: the gate lifts
 //! at the request's scan boundary, the next scan writes what the
@@ -180,6 +191,15 @@
 //! `POST /demote`-then-`POST /promote` order then moves the field writer
 //! to the revised model at a scan boundary.
 //!
+//! The same arm extends to the no-peer half: `--revised` with
+//! `--state-file` and no `--standby` rolls a revised model on a lone
+//! controller through the scheduled outage the restart already is —
+//! the restarted process resumes its own persisted checkpoint across
+//! the model boundary under the same classify-then-apply carryover
+//! rule instead of refusing on the fingerprint, so the setpoints,
+//! accumulated image, and forces the continuity clause names survive
+//! where a cold start would lose them.
+//!
 //! Automatic failover, per the failover decision: a standby armed with
 //! `--auto-promote N` treats the checkpoint pull as the heartbeat —
 //! `N` consecutive failed pulls is active loss, and the peer
@@ -219,10 +239,10 @@
 
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
-use dcs_core::{IoDriver, TelemetrySnapshot, Tick};
+use dcs_core::{CarryoverReport, IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
-use dcs_runtime::{Checkpoint, Executor, Peer, ScanError, TrackReport, WriteGate};
+use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -427,10 +447,13 @@ struct Options {
     /// The consecutive checkpoint-pull misses after which a tracking
     /// standby self-promotes — `None` keeps promotion manual-only.
     auto_promote: Option<u32>,
-    /// This standby's model is a deliberate revision: a pulled
-    /// checkpoint carrying a different fingerprint crosses the model
-    /// boundary through the documented carryover rule instead of
-    /// degrading on the mismatch.
+    /// This instance's model is a deliberate revision of the run's
+    /// previous one: on a tracking peer a pulled checkpoint carrying a
+    /// different fingerprint crosses the model boundary through the
+    /// documented carryover rule instead of degrading on the mismatch;
+    /// on a lone `--state-file` run the same arm routes a
+    /// foreign-fingerprint checkpoint through the carryover rule
+    /// instead of refusing the resume.
     revised: bool,
     /// Persist the run's checkpoint to this file at the end of every
     /// scan cycle and at each accepted command's admission boundary,
@@ -485,15 +508,23 @@ controller scan.
                   — so a demoted active reconverges and stays
                   promotable. Mutually exclusive with --standby;
                   requires --listen
-  --revised       declare this standby's model a deliberate revision of
-                  the active's: a pulled checkpoint whose model
-                  fingerprint differs crosses the boundary under the
-                  documented carryover rule — operator-writable internal
-                  points matched by declared identity carry their last
-                  values, component state reinitializes — and the peer
-                  reports reinitialized, promotable in place of tracking;
-                  a checkpoint breaking the rule is rejected with a named
-                  error before promotion. Requires --standby
+  --revised       declare this instance's model a deliberate revision of
+                  the run's previous one. On a --standby peer a pulled
+                  checkpoint whose model fingerprint differs crosses the
+                  boundary under the documented carryover rule —
+                  operator-writable internal points matched by declared
+                  identity carry their last values, component state
+                  reinitializes — and the peer reports reinitialized,
+                  promotable in place of tracking; a checkpoint breaking
+                  the rule is rejected with a named error before
+                  promotion. On a lone controller the flag arms the
+                  --state-file resume instead: a persisted checkpoint
+                  under a foreign fingerprint crosses through the same
+                  rule — the scheduled-outage roll — resuming at the
+                  checkpointed tick with the carryover report printed
+                  and journaled, while a rule-breaking checkpoint fails
+                  startup naming the CarryoverError and leaves the file
+                  untouched. Requires --standby or --state-file
   --remote ADDR   attach to the shared simulated plant at ADDR instead
                   of a local simulation
   --driven        serve the monitor without pacing: scans run only when
@@ -526,7 +557,10 @@ controller scan.
                   that cannot be resumed (unreadable, unparseable, an
                   unsupported format version, or a fingerprint/structural
                   mismatch with the loaded model) exits nonzero naming
-                  the reason; a missing file is a cold start
+                  the reason; a missing file is a cold start. With
+                  --revised, a foreign-fingerprint file instead crosses
+                  the model boundary under the carryover rule — the lone
+                  controller's scheduled-outage roll
   --journal-file PATH
                   persist the transition journal to PATH — one
                   line-delimited JSON record per journaled entry — and
@@ -671,9 +705,10 @@ impl Options {
         if auto_promote == Some(0) {
             return Err("--auto-promote must be at least one missed pull".to_string());
         }
-        if revised && standby.is_none() {
+        if revised && standby.is_none() && state_file.is_none() {
             return Err(
-                "--revised requires --standby: only a tracking peer rolls a revised model"
+                "--revised requires --standby or --state-file: a tracking peer or a \
+                 lone state-file resume rolls a revised model"
                     .to_string(),
             );
         }
@@ -751,19 +786,55 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("{addr:?} resolves to no address"))
 }
 
+/// What a `--state-file` resume did with an existing checkpoint — the
+/// answer [`resume_state_file`] reports so the caller can present and
+/// record the crossing a revision-armed resume ran.
+enum Resume {
+    /// No state file existed — a cold start.
+    Cold,
+    /// The checkpoint carried this run's model fingerprint and applied
+    /// under the strict restore negotiation.
+    Applied,
+    /// The checkpoint carried a foreign fingerprint and the
+    /// revision-armed resume crossed the model boundary under the
+    /// documented carryover rule — the report is the run's record of
+    /// what transferred, what initialized fresh, and what was named
+    /// dropped. Boxed — the report is a record of the crossing, not a
+    /// per-scan payload, and keeping the enum small keeps the common
+    /// `Applied`/`Cold` legs cheap to move.
+    Reinitialized(Box<CarryoverReport>),
+}
+
 /// The `--state-file` resume half: when `path` names an existing file it
 /// must hold a [`Checkpoint`] this run can take over — applied in place
 /// to the freshly assembled `executor` before the first scan, so the run
 /// continues at the checkpointed tick. A missing file is a cold start
-/// (`Ok(false)`); anything else that cannot resume — an unreadable file,
-/// contents that are not a checkpoint, or a [`RestoreError`] naming the
-/// version, fingerprint, or structural mismatch — fails the start, per
-/// the checkpoint-restore decision's all-or-nothing rule: never
-/// silently fresh over a state file that exists but cannot be resumed.
-fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, String> {
+/// ([`Resume::Cold`]); anything else that cannot resume — an unreadable
+/// file, contents that are not a checkpoint, or a [`RestoreError`]
+/// naming the version, fingerprint, or structural mismatch — fails the
+/// start, per the checkpoint-restore decision's all-or-nothing rule:
+/// never silently fresh over a state file that exists but cannot be
+/// resumed.
+///
+/// `revised` arms the lone controller's scheduled-outage roll — the
+/// rolling model-revision decision's carryover rule extended to this
+/// seam: a checkpoint whose model fingerprint differs from the freshly
+/// assembled run's routes through [`Executor::reinitialize`] instead of
+/// [`Executor::apply`], carrying the writable internal values, the
+/// output image, and the force set the rule names and answering
+/// [`Resume::Reinitialized`] with the crossing's report. A checkpoint
+/// the rule cannot carry fails startup naming the `CarryoverError` and
+/// — like every refused resume — leaves the file untouched; a matching
+/// fingerprint still resumes ordinarily through `apply`, and an
+/// unarmed mismatch still refuses on `RestoreError::FingerprintMismatch`.
+fn resume_state_file(
+    path: &Path,
+    executor: &mut Executor<'_>,
+    revised: bool,
+) -> Result<Resume, String> {
     let body = match std::fs::read(path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Resume::Cold),
         Err(error) => {
             return Err(format!(
                 "cannot read state file {}: {error}",
@@ -777,10 +848,21 @@ fn resume_state_file(path: &Path, executor: &mut Executor<'_>) -> Result<bool, S
             path.display()
         )
     })?;
+    if revised && checkpoint.model_fingerprint != executor.model_fingerprint() {
+        return executor
+            .reinitialize(&checkpoint)
+            .map(|report| Resume::Reinitialized(Box::new(report)))
+            .map_err(|error| {
+                format!(
+                    "cannot resume from state file {}: model-boundary carryover failed: {error}",
+                    path.display()
+                )
+            });
+    }
     executor
         .apply(&checkpoint)
         .map_err(|error| format!("cannot resume from state file {}: {error}", path.display()))?;
-    Ok(true)
+    Ok(Resume::Applied)
 }
 
 /// The `--state-file` persist hooked onto command admission: an
@@ -921,15 +1003,28 @@ fn main() -> ExitCode {
     // The --state-file resume half: an existing file holds the run's
     // last persisted checkpoint, applied to the fresh executor before
     // the first scan — the restarted process then continues the
-    // interrupted run at the checkpointed tick.
+    // interrupted run at the checkpointed tick. A --revised run whose
+    // file was captured under a different model crosses the boundary
+    // under the documented carryover rule instead — the lone roll's
+    // scheduled-outage resume — and the crossing's report is the run's
+    // record of what carried: printed here, journaled into the
+    // monitor's durable record below when one binds.
+    let mut resumed_crossing = None;
     if let Some(path) = &options.state_file {
-        match resume_state_file(path, &mut executor) {
-            Ok(true) => eprintln!(
+        match resume_state_file(path, &mut executor, options.revised) {
+            Ok(Resume::Applied) => eprintln!(
                 "resumed from state file {} at tick {}",
                 path.display(),
                 executor.tick().0
             ),
-            Ok(false) => {}
+            Ok(Resume::Reinitialized(report)) => {
+                eprintln!(
+                    "resumed from state file {} across the model boundary: {report}",
+                    path.display()
+                );
+                resumed_crossing = Some(report);
+            }
+            Ok(Resume::Cold) => {}
             Err(error) => return fail(error),
         }
     }
@@ -959,11 +1054,14 @@ fn main() -> ExitCode {
         Some(budget) => peer.with_failover(budget),
         None => peer,
     };
-    // A --revised standby declared its model a deliberate revision of
-    // the active's: the pull path routes a foreign-fingerprint
-    // checkpoint through the documented carryover rule rather than
-    // degrading on the mismatch the fingerprint gate would otherwise
-    // report.
+    // A --revised instance declared its model a deliberate revision of
+    // the run's previous one: on a tracking peer the pull path routes a
+    // foreign-fingerprint checkpoint through the documented carryover
+    // rule rather than degrading on the mismatch the fingerprint gate
+    // would otherwise report — and on a lone --state-file run the same
+    // arm already routed the resume through `Executor::reinitialize`
+    // above, the flag staying set so a later demotion keeps the
+    // declared intent on the pull path too.
     let mut peer = match options.revised {
         true => peer.with_revision(),
         false => peer,
@@ -1023,6 +1121,11 @@ fn main() -> ExitCode {
                 Ok(())
             })),
         });
+        // The armed-resume crossing's report joins the durable record
+        // behind the run-boundary marker the bind journaled.
+        if let Some(report) = &resumed_crossing {
+            monitor.note_reinitialized(report.as_ref().clone());
+        }
         // A launched active owns the field from startup: activation
         // runs the same claim-then-lift sequence a promotion does —
         // the plant's single-writer claim under this instance's token
@@ -1073,6 +1176,12 @@ fn main() -> ExitCode {
                 // tracking source, so a command the active admitted up
                 // to the promote request is carried.
                 let monitor = monitor.with_standby_source(active_addr);
+                // The armed-resume crossing's report joins the durable
+                // record behind the run-boundary marker the bind
+                // journaled.
+                if let Some(report) = &resumed_crossing {
+                    monitor.note_reinitialized(report.as_ref().clone());
+                }
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
@@ -1136,6 +1245,13 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
+                        for receipt in peer.take_superseded_commands() {
+                            eprintln!(
+                                "standby: pending command superseded at tick {}: {:?}",
+                                peer.tick().0,
+                                receipt.command
+                            );
+                        }
                         let scanned = peer.scan();
                         // Transitions the scan itself produced — a
                         // fenced write's claim loss and the demotion it
@@ -1193,6 +1309,12 @@ fn main() -> ExitCode {
                     },
                     None => monitor,
                 };
+                // The armed-resume crossing's report joins the durable
+                // record behind the run-boundary marker the bind
+                // journaled.
+                if let Some(report) = &resumed_crossing {
+                    monitor.note_reinitialized(report.as_ref().clone());
+                }
                 // The launched active's deferred startup activation —
                 // the same claim-then-lift sequence the driven path
                 // runs: the preemptive field claim lands only now, the
@@ -1279,15 +1401,17 @@ fn main() -> ExitCode {
 /// the configured `--standby`/`--peer` target when set, else the monitor
 /// address a tracking peer announced through its `?peer=` pulls — the
 /// follow-peer half that lets a demoted launched active find its
-/// successor without a restart. The puller follows the resolved source,
-/// respawning when it changes, and announces this monitor's own address
-/// on every pull so the serving peer learns where to track back. A
+/// successor without a restart, the serving side accepting the
+/// announce only as the pulling connection's own source address. The
+/// puller follows the resolved source, respawning when it changes, and
+/// announces this monitor's own address on every pull so the serving
+/// peer learns where to track back. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(SocketAddr, CheckpointPuller)>,
-) -> Result<Tick, ScanError> {
+) -> Tick {
     if let Some(source) = monitor.tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
             *puller = Some((
@@ -1338,7 +1462,7 @@ fn report_tracking(report: &TrackReport, active: SocketAddr) {
 /// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Result<Tick, ScanError>,
+    scan: impl FnMut() -> Tick,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -1369,9 +1493,9 @@ fn run_monitored(
 /// `persist` feeds `--state-file`: the run's transferable state is
 /// persisted at the end of every completed scan cycle — after the scan
 /// and the plant step, so a resumed run re-enters the loop at exactly
-/// this point — and a write failure fails the run like a scan or step
-/// failure does: a controller that cannot persist its recovery state
-/// exits naming the file rather than running on without it. On a
+/// this point — and a write failure fails the run like a step failure
+/// does: a controller that cannot persist its recovery state exits
+/// naming the file rather than running on without it. On a
 /// monitored run the closure routes through
 /// [`Monitor::persist_state`], so the cycle-end write and a command's
 /// admission-boundary write serialize on the same lock and can never
@@ -1385,7 +1509,7 @@ fn run_monitored(
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Result<Tick, ScanError>,
+    mut scan: impl FnMut() -> Tick,
     snapshot: impl Fn() -> TelemetrySnapshot,
     persist: impl Fn(&Path) -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
@@ -1396,9 +1520,7 @@ fn scan_loop(
     let mut scanned = 0_u64;
     loop {
         let started = Instant::now();
-        if let Err(error) = scan() {
-            return fail(format!("scan {} failed: {error}", snapshot().tick.0));
-        }
+        scan();
         if let Err(error) = step() {
             return fail(error);
         }
