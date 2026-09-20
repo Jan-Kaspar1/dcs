@@ -48,6 +48,7 @@ use dcs_core::{
     Role, RoleReport, StandbySync, TelemetrySnapshot,
 };
 use dcs_model::SignalIndex;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -176,7 +177,7 @@ pub const CONVERGENCE_GRACE: Duration = Duration::from_secs(5);
 /// settled-`active` peer plus the named faults of the last role poll;
 /// the page's `pairHealth` verdict for in-process consumers. See
 /// [`PairClient::health`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairHealth {
     /// The peer reporting settled `active` when exactly one does —
     /// `None` while no peer reports it or the dual-active fault stands.
@@ -187,6 +188,45 @@ pub struct PairHealth {
     /// reporting `active`, or more than one — the dual-active
     /// split-brain. Empty is the healthy pair.
     pub faults: Vec<String>,
+    #[doc = "Vocabulary version; absent on legacy prose-only verdicts."]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_kinds_version: Option<u32>,
+    #[doc = "Stable kinds, one per human-readable fault at the same index."]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fault_kinds: Vec<PairFaultKind>,
+}
+
+#[doc = "Version of the serialized pair-fault kind vocabulary, pinned by contract drift tests."]
+pub const PAIR_FAULT_KINDS_VERSION: u32 = 1;
+
+#[doc = "Stable redundancy fault names shared by the pair view and operator consumers."]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairFaultKind {
+    #[doc = "A configured peer's role poll failed."]
+    PeerUnreachable,
+    #[doc = "A peer continuously reported unsynchronized beyond the convergence grace."]
+    StandbyUnsynchronizedPastGrace,
+    #[doc = "No peer reported the settled active role."]
+    NoActivePeer,
+    #[doc = "More than one peer reported the settled active role."]
+    DualActive,
+    #[doc = "A standby reported degraded checkpoint synchronization."]
+    StandbyDegraded,
+    #[doc = "A standby reported staged outputs diverging from the field."]
+    StandbyDiverged,
+}
+
+impl PairFaultKind {
+    #[doc = "The complete vocabulary for this version, in drift-pin order."]
+    pub const ALL: [Self; 6] = [
+        Self::PeerUnreachable,
+        Self::StandbyUnsynchronizedPastGrace,
+        Self::NoActivePeer,
+        Self::DualActive,
+        Self::StandbyDegraded,
+        Self::StandbyDiverged,
+    ];
 }
 
 /// A client-side view presenting an active/standby controller pair as
@@ -329,11 +369,13 @@ impl PairClient {
     /// impossible). Pair health, never plant faults.
     pub fn health(&self) -> PairHealth {
         let mut faults = Vec::new();
+        let mut fault_kinds = Vec::new();
         let mut actives = Vec::new();
         for peer in &self.peers {
             match &peer.status {
                 PeerStatus::Unknown => {}
                 PeerStatus::Unreachable { .. } => {
+                    fault_kinds.push(PairFaultKind::PeerUnreachable);
                     faults.push(format!("{} unreachable", peer.addr));
                 }
                 PeerStatus::Reporting(report) => {
@@ -346,6 +388,7 @@ impl PairClient {
                                 .unsynced_since
                                 .is_some_and(|since| since.elapsed() >= self.convergence_grace)
                             {
+                                fault_kinds.push(PairFaultKind::StandbyUnsynchronizedPastGrace);
                                 faults.push(format!(
                                     "{} has not converged: unsynchronized past the \
                                      convergence grace",
@@ -354,9 +397,11 @@ impl PairClient {
                             }
                         }
                         Some(StandbySync::Degraded { detail }) => {
+                            fault_kinds.push(PairFaultKind::StandbyDegraded);
                             faults.push(format!("{} sync degraded: {detail}", peer.addr));
                         }
                         Some(StandbySync::Diverged { mismatches }) => {
+                            fault_kinds.push(PairFaultKind::StandbyDiverged);
                             faults.push(format!(
                                 "{} standby diverged: staged outputs mismatch the field at {}",
                                 peer.addr,
@@ -373,8 +418,10 @@ impl PairClient {
             }
         }
         if actives.is_empty() {
+            fault_kinds.push(PairFaultKind::NoActivePeer);
             faults.push("no peer reports role active".to_string());
         } else if actives.len() > 1 {
+            fault_kinds.push(PairFaultKind::DualActive);
             faults.push(format!(
                 "dual-active: {} report role active",
                 actives
@@ -390,6 +437,8 @@ impl PairClient {
                 _ => None,
             },
             faults,
+            fault_kinds_version: Some(PAIR_FAULT_KINDS_VERSION),
+            fault_kinds,
         }
     }
 
