@@ -259,14 +259,16 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
         .collect()
 }
 
-/// The checkpoint a client serves with its model fingerprint
-/// normalized out: the pair and reference models differ only in the
-/// plant address, so the rest of the transferable state — tick,
+/// The checkpoint a client serves with its model fingerprint and
+/// stream generation normalized out: the pair and reference models
+/// differ only in the plant address, and each process mints its own
+/// generation at boot, so the rest of the transferable state — tick,
 /// component states, output and internal images, forces, receipts,
 /// admission counters — must serialize identically.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
+    checkpoint.generation = None;
     serde_json::to_vec(&checkpoint).unwrap()
 }
 

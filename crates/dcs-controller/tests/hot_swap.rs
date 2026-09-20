@@ -415,6 +415,102 @@ fn a_demoted_launched_active_follows_its_successor_and_fails_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The QA finding `source-restarted-journaled-on-demote-track`: a
+/// demoted peer's first tracking pull on its uninterrupted successor
+/// lands a checkpoint whose tick trails the demoted run's own — the
+/// demotion cleared the alignment the regression heuristic stood on —
+/// and the old code journaled `source_restarted` for it, attributing
+/// the peer's own tracking reset to the source. The successor's stream
+/// still names the generation the demoted run's own checkpoints
+/// stamped, so no source boundary crossed and the journal must carry
+/// no `SourceRestarted` — while the demoted peer still reconverges as
+/// a promotable tracking standby.
+///
+/// The induction is one extra owner scan between the last convergence
+/// pull and the demote: on the paced rig the running scan loop opens
+/// that same gap between the demote request and the demoted peer's
+/// first pull.
+#[test]
+fn a_demoted_peers_reconvergence_journals_no_source_restart() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-track-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The reproduction's launch shape: the active names no peer; the
+    // standby tracks it by `--standby`, announcing its own monitor on
+    // every pull so the demoted run knows where its successor lives.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..5 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+
+    // The owner runs one scan past what the standby last pulled — the
+    // tick lead the demoted run will hold over its successor's stream.
+    active.advance(1).unwrap();
+    active.demote().unwrap();
+
+    // The first tracking cycle against the successor: the pulled
+    // checkpoint's tick trails the demoted run's own — the regression —
+    // but the stream's generation is the run's own, so no
+    // `source_restarted` may journal. The role settles `standby`.
+    active.advance(1).unwrap();
+    standby.promote().unwrap();
+    standby.advance(1).unwrap();
+
+    for _ in 0..3 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must reconverge on its successor: {report:?}"
+    );
+
+    // The defect's assertion: the demote-to-track transition is the
+    // peer's own tracking reset, so the journal names no source restart.
+    let journal = active.journal(0).unwrap();
+    assert!(
+        journal
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::SourceRestarted { .. })),
+        "the demoted peer's journal must carry no source_restarted: {journal:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Polls `client.role()` until `expect` holds or `timeout` passes — the
 /// paced run's convergence wait: roles are observed, never driven, so
 /// the wall clock supplies the cadence. Returns the satisfying report;
