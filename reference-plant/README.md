@@ -115,6 +115,16 @@ ci/failover.py         the pair contract's automatic-failover leg —
                        bumplessly, and the durable journal's
                        transition record audited beside a
                        severed-standby variant reporting no failover
+ci/divergence.py       the pair contract's staged-vs-field
+                       divergence leg — the tracking standby's
+                       checkpoint pulls withheld through an
+                       observation window while a field-side write
+                       lands through the run's plant-protocol
+                       client, the stale peer's served diverged
+                       report naming the perturbed output and its
+                       promotion refused not_converged with no field
+                       hand-off, and a write-free control window
+                       reconverging and promoting normally
 ci/standby_restart.py  the pair contract's standby-restart leg —
                        the tracking standby's container stopped and
                        relaunched onto its declared
@@ -598,6 +608,45 @@ nothing reports a failover. A violated contract fails
 `failover-digest`, a divergence failing
 `failover-nondeterministic`.
 
+The stage's staged-vs-field divergence leg — `ci/divergence.py` on
+the same declared deployment — then proves the failover-integrity
+clause's divergence half on the customer's pair, the honest answer
+promoting a stale standby gets. With the pair settled and tracking,
+the leg withholds the tracking standby's checkpoint pulls for an
+observation window — the driven run makes the partition literal, no
+scan reaching either peer — while a field-side write lands through
+the run's dedicated plant-protocol client, the same connection the
+simulate stage's `inject_fault`/`clear_fault` ops use: the client
+joins the field's writer claim under the duty's recorded owner
+token, writes the carried `p101-cmd` output the standby's staged
+image covers, and hands the hold back, so the standby's staged copy
+no longer matches the field it would take over. The pull path
+resumed, the stale peer's served `GET /role` must report `standby`
+under the `diverged` sync state naming the perturbed output with
+both sides' values — the journaled `divergence_detected` record
+carrying the same evidence on the served and durable records — and
+`POST /promote` must answer the named `409 not_converged` refusal
+with the diverged report attached: the gate never hands the field
+to an image the field no longer matches. No hand-off occurs — the
+duty stays `active`, the stale peer stays `standby` and diverged,
+no `role_changed` lands on either peer's journal, the injected
+write stands un-overwritten — and the active's writes, receipts,
+and journal run undisturbed throughout: the duty's next driven
+scan's write lands and restores the field, so the standby's next
+same-tick comparison matches again and journals
+`divergence_resolved`, the verdict clearing back to `tracking` on
+positive evidence. A control leg runs a fresh pair through the
+identical partition window with no field-side write: the resumed
+pull's comparison matches, the standby stays `tracking`, and the
+receipted `demote`/`promote` switch succeeds — proving the refusal
+names the staged-vs-field divergence rather than mere partition
+staleness. A violated contract fails `divergence-missed`; two
+passes must produce the identical `divergence-digest`, a
+divergence failing `divergence-nondeterministic`. The leg's
+doctored case — the field-side write skipped while the refusal is
+still asserted — must report the named diagnostic rather than
+pass silently.
+
 The stage's standby-restart leg — `ci/standby_restart.py` on the
 same declared deployment — then proves the standby half of the
 restart-recovery contract on the customer's pair: the
@@ -880,6 +929,13 @@ while the promoted peer's writes land, the run not continuing, or
 the durable journal's transition record diverging — is
 `failover-failed`; two failover-leg passes diverging is
 `failover-nondeterministic`;
+a staged-vs-field divergence leg failing to hold — the withheld-pull
+window's field-side write not landing through the plant protocol, the
+resumed pull not leaving the stale peer's report `diverged` naming the
+perturbed output, the promote not answering `not_converged` or handing
+the field off, the active disturbed, or the write-free control window
+not reconverging and promoting — is `divergence-missed`; two
+divergence-leg passes diverging is `divergence-nondeterministic`;
 a tracking standby failing its declared-files restart — the resume
 unreported or at the wrong tick, the rejoin claiming the field, the
 reconvergence out of window, the durable boundary unordered, the
