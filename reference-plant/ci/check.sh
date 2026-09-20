@@ -332,6 +332,36 @@
 #                restored; two passes produce identical digests
 #                (command-switch-failed,
 #                command-switch-nondeterministic)
+#                The stage's managed-lifecycle leg,
+#                ci/managed_lifecycle.py on the same declared
+#                deployment: with the pair tracking, the emitted
+#                model's whole managed-alarm surface exercises on the
+#                customer-owned pair (WW-ENG-003, WW-ALM-001,
+#                WW-ALM-002) — a field-held fault annunciating the
+#                backup-active managed Bool alarm's
+#                alarm/unacknowledged with the journaled point_changed
+#                record; the receipted ack settling applied under the
+#                leg's actor and clearing the latch; the shelvable
+#                low-level alarm's writable shelve point reporting
+#                shelved and auto-releasing at the declared
+#                max_shelve_ticks while the request still stands, the
+#                journaled edges measuring the bound; the
+#                never-shelvable high-level alarm's bound-but-
+#                unwritable shelve point answering the named
+#                not_writable refusal — journaled as a settled
+#                rejection, no state changed; the pump's oos point
+#                driving the declared out_of_service/suppressed wiring
+#                while the alarms the model wires without those inputs
+#                report neither, a driven fault proving alarm still
+#                reports process truth while suppression withholds the
+#                latch, and the return to service evaluating the
+#                standing condition as a fresh trip cleared by the
+#                receipted ack — every transition settled with actor
+#                attribution, the durable journal carrying the
+#                lifecycle in order, the pair's roles and driven
+#                inputs restored; two passes produce identical digests
+#                (managed-lifecycle-failed,
+#                managed-lifecycle-nondeterministic)
 #                The stage's emit-identical event-parity leg,
 #                ci/event_parity.py on the same declared deployment:
 #                with the pair tracking, the emitted model's sequencer
@@ -1555,6 +1585,54 @@ for tamper in zero-settlement double-settlement; do
     echo "  $tamper: reported, command-switch-failed"
 done
 
+# The pair contract's managed-alarm lifecycle leg, on the same
+# manifest-declared deployment: ci/managed_lifecycle.py converges the
+# pair and exercises the emitted model's declared managed-alarm
+# surface end to end — the field-driven activation asserting
+# alarm/unacknowledged with the journaled record, the receipted ack
+# clearing the latch under the leg's actor, the bounded shelve
+# reporting shelved and auto-releasing at the declared
+# max_shelve_ticks, the never-shelvable shelve write answering the
+# named not_writable refusal with no state change, and the pump's oos
+# driving the declared out_of_service/suppressed wiring through the
+# suppressed trip and the return to service — then restores every
+# driven input and audits the durable journal's ordered record. Two
+# passes must produce identical digests.
+run_managed_lifecycle() {
+    python3 ci/managed_lifecycle.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_managed_lifecycle)" \
+    || fail "managed-lifecycle-failed: the managed-alarm lifecycle leg did not hold — its evidence lines are above"
+SECOND="$(run_managed_lifecycle)" \
+    || fail "managed-lifecycle-failed: the managed-alarm lifecycle leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "managed-lifecycle-nondeterministic: two managed-lifecycle passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg asserting the never-shelvable shelve
+# write settled applied — shelving landing where the model declares
+# none — and a leg asserting the shelved flag still stands after the
+# declared bound's auto-release must each surface the named
+# diagnostic rather than passing silently.
+for tamper in expect-applied expect-standing; do
+    if out="$(run_managed_lifecycle --tamper "$tamper" 2>&1)"; then
+        fail "managed-lifecycle-unchecked: a $tamper case passed the managed-lifecycle leg"
+    fi
+    case "$tamper" in
+        expect-applied) expected="expected an applied receipt" ;;
+        expect-standing) expected="still standing" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "managed-lifecycle-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, managed-lifecycle-failed"
+done
+
 # The pair contract's emit-identical event-parity leg, on the same
 # manifest-declared deployment — decision 84's parity rule proven on
 # the consumer's deployed pair: ci/event_parity.py converges the
@@ -1606,8 +1684,8 @@ for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/event_parity.py \
         ci/failover.py \
-        ci/force_carryover.py ci/force_release.py ci/pair.py \
-        ci/peer_announce.py \
+        ci/force_carryover.py ci/force_release.py \
+        ci/managed_lifecycle.py ci/pair.py ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/standby_restart.py \
         ci/takeover.py ci/tune_carryover.py README.md; do
