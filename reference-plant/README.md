@@ -171,6 +171,12 @@ ci/managed_lifecycle.py  the pair contract's managed-alarm
                         the named never-shelvable refusal, and the
                         designed oos/suppress wiring through its
                         suppressed trip and return to service
+ci/staging.py          the pair contract's staging leg — the emitted
+                       threshold chain's level-driven demand staging
+                       exercised on the deployed pair: the unopposed
+                       rise through the declared crossings, the
+                       high-level annunciation, the bounded staging
+                       response, and the declared de-stage order
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -844,6 +850,41 @@ journal answering the same record. A violated contract fails
 expectation asserting the never-shelvable write settled applied,
 and one asserting the `shelved` flag still stands after the
 declared bound's own auto-release — must each report the named
+diagnostic rather than pass silently.
+
+The stage's staging leg — `ci/staging.py` on the same declared
+deployment — then proves the deployed pair stages and de-stages on
+level through the emitted model's declared setpoint chain
+(WW-ENG-003, WW-CTL-001, WW-CTL-002), the process behavior the
+lifecycle legs never reached. Receipted `write_value` holds on both
+pumps' declared writable `oos` points take every pump out of service
+before the first driven scan, so the declared inflow raises the
+wet-well level unopposed while the group's aggregated availability
+holds `staged` and the motor commands at zero whatever the demand
+reads. Through the active's monitor the leg asserts `demand` moves
+0→1→2 only at the chain's own declared crossings — `duty_call` with
+the `start` crossing, `lag_call` with `lag_start` — and that the
+`high` crossing asserts `high_level` beside the managed high-level
+alarm's `alarm`/`unacknowledged`, the journaled annunciation the
+durable record must carry. The receipted releases then restore the
+driven inputs and the standing demand stages the group: the duty
+pump answers first, the lag follows inside the declared
+`start_delay_ticks`, and each pump's `cmd`/`run` field outputs prove
+the delivered start. The staged pumps draw the level down through the
+declared de-stage order — the demand releasing at its `start` and
+`stop` crossings, never ahead of or behind the level the chain read,
+the most recently staged lag's run releasing before the duty's — down
+to the `below-cutoff` floor the journaled chain flag reports. A
+receipted `ack` clears the alarm's latch; every driven input stands
+restored and the pair's roles never moved; the field owner's durable
+journal file must carry the holds, the high-level annunciation, the
+staged runs, and the lag-first de-stage in `seq` order, the served
+journal answering the same record. A violated contract fails
+`staging-failed`; two passes must produce the identical
+`staging-digest`, a divergence failing `staging-nondeterministic`.
+The leg's doctored cases — an expectation asserting the wrong demand
+at the `lag_start` crossing, and one asserting the lag start landed
+inside a shortened delay bound — must each report the named
 diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer

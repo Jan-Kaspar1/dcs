@@ -76,8 +76,21 @@
 //! named `not_writable` refusal, and the pump `oos` drive's declared
 //! `out_of_service`/`suppressed` wiring through the suppressed trip
 //! and the return to service, the durable journal's ordered record
-//! audited and the pair's roles and driven inputs restored — and the
-//! `upgrade` stage, which repins the
+//! audited and the pair's roles and driven inputs restored — the pair
+//! contract's staging leg, which proves the deployed pair stages and
+//! de-stages on level through the emitted model's declared setpoint
+//! chain: both pumps held out of service through receipted `oos`
+//! writes so the declared inflow raises the level unopposed, the
+//! active's monitor asserting `demand` moves 0→1→2 only at the
+//! declared `start`/`lag_start` crossings with `duty_call`/`lag_call`
+//! reporting, the `high` crossing annunciating the managed high-level
+//! alarm with journaled evidence, the releases staging the group with
+//! the lag answering inside the declared `start_delay_ticks` and each
+//! pump's `cmd`/`run` field outputs proving the start, and the staged
+//! pumps drawing the level down through the declared de-stage order —
+//! the lag's run releasing before the duty's — to the `below-cutoff`
+//! floor, the durable journal audited for the ordered record and the
+//! pair's roles unchanged — and the `upgrade` stage, which repins the
 //! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -99,6 +112,7 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
+//! `staging-failed`/`staging-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -619,6 +633,37 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, managed-lifecycle-failed")),
             "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's staging leg ran and held: the out-of-service
+    // holds let the declared inflow raise the level unopposed through
+    // the emitted threshold chain's declared crossings — the demand
+    // staging 0→1→2, the high crossing annunciating the managed
+    // high-level alarm with journaled evidence — the releases staging
+    // the group inside the declared start delay, and the staged pumps
+    // drawing the level down through the declared de-stage order — its
+    // digest line reports the evidence, and each doctored expectation
+    // reported its named diagnostic.
+    let staging_line = stdout
+        .lines()
+        .find(|line| line.contains("staging-digest"))
+        .unwrap_or_else(|| panic!("the staging leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "demand 1 at tick",
+        "2 at tick",
+        "high annunciated at tick",
+        "staged at tick",
+        "pumped down by tick",
+    ] {
+        assert!(
+            staging_line.contains(phrase),
+            "the staging digest names no '{phrase}' evidence: {staging_line}"
+        );
+    }
+    for tamper in ["wrong-demand", "immediate-lag"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, staging-failed")),
+            "the staging leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

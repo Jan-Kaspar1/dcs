@@ -395,6 +395,34 @@
 #                inputs restored; two passes produce identical digests
 #                (managed-lifecycle-failed,
 #                managed-lifecycle-nondeterministic)
+#                The stage's staging leg, ci/staging.py on the same
+#                declared deployment — the consumer-side proof that
+#                the deployed pair stages and de-stages on level
+#                through the emitted model's declared setpoint chain
+#                (WW-ENG-003, WW-CTL-001, WW-CTL-002): both pumps held
+#                out of service through receipted write_value on their
+#                declared writable oos points so the declared inflow
+#                raises the wet-well level unopposed, the active's
+#                monitor asserting demand moves 0→1→2 only at the
+#                chain's own declared start/lag_start crossings with
+#                duty_call/lag_call reporting and the group's staged
+#                count and motor commands held at zero, the high
+#                crossing annunciating the managed high-level alarm
+#                with the journaled evidence; the releases restoring
+#                the driven inputs so the standing demand stages the
+#                group — the duty pump first, the lag inside the
+#                declared start_delay_ticks, each pump's cmd/run field
+#                outputs proving the delivered start — then the staged
+#                pumps drawing the level down through the declared
+#                de-stage order, the lag's run releasing before the
+#                duty's and the journaled transitions landing in the
+#                same order down to the below-cutoff floor; the
+#                receipted ack clearing the alarm's latch, every
+#                driven input restored, the pair's roles unchanged,
+#                and the durable journal audited for the ordered
+#                record the served journal answers identically; two
+#                passes produce identical digests
+#                (staging-failed, staging-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -1722,6 +1750,56 @@ for tamper in expect-applied expect-standing; do
     echo "  $tamper: reported, managed-lifecycle-failed"
 done
 
+# The pair contract's staging leg, on the same manifest-declared
+# deployment: ci/staging.py holds both pumps out of service through
+# receipted writes on their declared oos points so the declared inflow
+# raises the wet-well level unopposed — the active's monitor asserting
+# the emitted threshold chain's demand moves 0→1→2 only at the
+# declared start/lag_start crossings with duty_call/lag_call
+# reporting, the high crossing annunciating the managed high-level
+# alarm with journaled evidence — then the releases restore the driven
+# inputs and the standing demand stages the group, the lag answering
+# inside the declared start_delay_ticks with each pump's cmd/run field
+# outputs proving the start, before the staged pumps draw the level
+# down through the declared de-stage order — the lag's run releasing
+# before the duty's — to the below-cutoff floor; the receipted ack
+# clears the alarm's latch, every driven input is restored, the pair's
+# roles are unchanged, and the durable journal is audited for the
+# ordered record. Two passes must produce identical digests.
+run_staging() {
+    python3 ci/staging.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_staging)" \
+    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
+SECOND="$(run_staging)" \
+    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "staging-nondeterministic: two staging passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg asserting the wrong demand at the
+# lag_start crossing and a leg asserting the lag start landed inside
+# a shortened delay bound must each surface the named diagnostic —
+# never a silently unexercised contract.
+for tamper in wrong-demand immediate-lag; do
+    if out="$(run_staging --tamper "$tamper" 2>&1)"; then
+        fail "staging-unchecked: a $tamper case passed the staging leg"
+    fi
+    case "$tamper" in
+        wrong-demand) expected="expected the demand at 1" ;;
+        immediate-lag) expected="outside the declared start_delay_ticks bound" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "staging-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, staging-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -1734,7 +1812,8 @@ for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
         ci/managed_lifecycle.py ci/negotiation.py ci/pair.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
-        ci/schema_conformance.py ci/simulate.py ci/standby_restart.py \
+        ci/schema_conformance.py ci/simulate.py ci/staging.py \
+        ci/standby_restart.py \
         ci/takeover.py ci/tune_carryover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
