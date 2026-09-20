@@ -67,7 +67,17 @@
 //! the released `dcs-alarm-report` over the driven pair's served
 //! journal and manifest-declared durable journal file — the declared
 //! `AlarmReport` metric set asserted, the refusal modes exiting
-//! nonzero — and the `upgrade` stage, which repins the
+//! nonzero — the pair contract's managed-lifecycle leg, which
+//! exercises the emitted model's whole managed-alarm surface on the
+//! deployed pair — the field-driven activation's journaled
+//! `alarm`/`unacknowledged`, the receipted actor-attributed `ack`,
+//! the bounded shelve's `shelved` report and auto-release at the
+//! declared `max_shelve_ticks`, the never-shelvable shelve write's
+//! named `not_writable` refusal, and the pump `oos` drive's declared
+//! `out_of_service`/`suppressed` wiring through the suppressed trip
+//! and the return to service, the durable journal's ordered record
+//! audited and the pair's roles and driven inputs restored — and the
+//! `upgrade` stage, which repins the
 //! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -87,8 +97,9 @@
 //! `negotiation-failed`, `refusal-failed`, `takeover-failed`,
 //! `peer-announce-failed`,
 //! `divergence-missed`/`divergence-nondeterministic`,
-//! `report-failed`/`report-nondeterministic`, and
-//! the `surface-mismatch` paths
+//! `report-failed`/`report-nondeterministic`,
+//! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
+//! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -565,6 +576,36 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, report-failed")),
             "the report leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's managed-lifecycle leg ran and held: the
+    // emitted model's managed-alarm surface exercised end to end on
+    // the deployed pair — the field-driven activation, the attributed
+    // ack, the bounded shelve and its auto-release, the named
+    // never-shelvable refusal, and the designed suppression wiring —
+    // its digest line reports the evidence, and each doctored
+    // expectation reported its named diagnostic.
+    let lifecycle_line = stdout
+        .lines()
+        .find(|line| line.contains("managed-lifecycle-digest"))
+        .unwrap_or_else(|| panic!("the managed-lifecycle leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "annunciated at tick",
+        "acknowledged at tick",
+        "shelved at tick",
+        "released at tick",
+        "restored at tick",
+        "journal entries",
+    ] {
+        assert!(
+            lifecycle_line.contains(phrase),
+            "the managed-lifecycle digest names no '{phrase}' evidence: {lifecycle_line}"
+        );
+    }
+    for tamper in ["expect-applied", "expect-standing"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, managed-lifecycle-failed")),
+            "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(
