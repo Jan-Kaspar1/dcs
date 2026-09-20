@@ -56,13 +56,23 @@
 //! The run's tick is the journal and history attribution domain, so it
 //! never rewinds: a checkpoint stream that regresses — below the run's
 //! last alignment, or below the run's own tick before any alignment
-//! stood — is a restarted or replaced source beginning a new tick
-//! generation, not a continuation of the tracked line. Its state still
-//! applies — the tracked source is the live one — but the run resumes
-//! it at the run's own tick, carrying the offset every later checkpoint
-//! lands under, and the boundary queues one [`SourceRestart`] for the
-//! journal rather than silently rewinding scans the run already ran
-//! and recorded. The carried offset is re-evaluated on each apply
+//! stood — while naming a generation different from the run's own is a
+//! restarted or replaced source beginning a new tick generation, not a
+//! continuation of the tracked line. Its state still applies — the
+//! tracked source is the live one — but the run resumes it at the run's
+//! own tick, carrying the offset every later checkpoint lands under,
+//! and the boundary queues one [`SourceRestart`] for the journal rather
+//! than silently rewinding scans the run already ran and recorded.
+//! The regression heuristic alone cannot tell that boundary from the
+//! peer's own tracking reset — [`demote`](Peer::demote) clears the
+//! alignment, so a demoted peer's first pull on a healthy successor
+//! regresses identically — so the checkpoint's `generation` stamp
+//! decides: the uninterrupted successor still stamps the generation
+//! the demoted run's own captures carried, and a same-generation
+//! regression journals nothing while a different one is the source's
+//! new tick domain. An unidentified generation on either side can
+//! prove no continuation, so it keeps the conservative verdict.
+//! The carried offset is re-evaluated on each apply
 //! against the run's live lead over the stream — it covers at most the
 //! gap that remains and clears when the stream recovers to the run's
 //! tick — so a tracking apply can hold or realign the run's clock but
@@ -199,7 +209,8 @@ pub struct Peer<'d> {
     /// crossing's [`CarryoverReport`].
     pending_reinits: Vec<CarryoverReport>,
     /// Tracked-source restarts not yet consumed for journaling — one
-    /// [`SourceRestart`] per regressed-stream adoption.
+    /// [`SourceRestart`] per regressed-stream adoption that crossed a
+    /// generation boundary.
     pending_restarts: Vec<SourceRestart>,
     /// Whether the field-ownership claim this peer holds was observed
     /// lost — set when a field-owning scan's write reports
@@ -279,14 +290,18 @@ pub struct FencingLoss {
     pub point: PointId,
 }
 
-/// The tracked checkpoint stream regressed — the tick it served fell
-/// below the run's last alignment (or, before any alignment stood,
-/// below the run's own tick): the signature of a cold-restarted or
-/// replaced source beginning a new tick generation. The run adopted
-/// the checkpoint's state without rewinding its own tick — the resync
-/// this report names — so the scan history stays newest-last and the
-/// journal's attribution monotonic. One report queues per regression,
-/// like [`DivergenceReport`].
+/// The tracked checkpoint stream regressed across a generation
+/// boundary — the tick it served fell below the run's last alignment
+/// (or, before any alignment stood, below the run's own tick) while
+/// naming a generation the run's own stream does not carry: the
+/// signature of a cold-restarted or replaced source beginning a new
+/// tick generation. The run adopted the checkpoint's state without
+/// rewinding its own tick — the resync this report names — so the scan
+/// history stays newest-last and the journal's attribution monotonic.
+/// A regression on the run's own generation is the peer's tracking
+/// reset, not the source's restart — a demoted peer's first pull on its
+/// uninterrupted successor is the standing case — and queues nothing.
+/// One report queues per boundary crossing, like [`DivergenceReport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRestart {
     /// The run tick the resync is attributed to — the tick the
@@ -848,7 +863,8 @@ impl<'d> Peer<'d> {
     /// The run's tick is its journal and history attribution domain and
     /// never rewinds across a source-generation boundary: a checkpoint
     /// whose tick fell below the run's last alignment — or below the
-    /// run's own tick before any alignment stood — is not a
+    /// run's own tick before any alignment stood — while naming a
+    /// generation the run's own stream does not carry is not a
     /// continuation of the tracked line but the signature of a
     /// cold-restarted or replaced source beginning a new tick
     /// generation. Its state still applies — the tracked source is the
@@ -859,7 +875,13 @@ impl<'d> Peer<'d> {
     /// means. A checkpoint on the tracked line itself — a repeat or a
     /// post-miss catch-up, which may still lag the run's tick — keeps
     /// the standing offset: that realignment is the line's own, not a
-    /// new generation. Kept, but re-evaluated — the offset covers at
+    /// new generation. And a regression that names the run's own
+    /// generation — a demoted peer's first pull on its uninterrupted
+    /// successor, the demotion having cleared the alignment the tick
+    /// comparison stood on — is the peer's tracking reset rather than
+    /// the source's restart: the state adopts under the same
+    /// monotone-clock rule, but no boundary crossed, so nothing
+    /// journals. Kept, but re-evaluated — the offset covers at
     /// most the run's live lead over the stream
     /// ([`stream_offset`](Self::stream_offset)), so an apply can hold
     /// the run's tick or realign it backward but never land it ahead
@@ -908,6 +930,16 @@ impl<'d> Peer<'d> {
         // leaves unrestored behind its high-water.
         let pending = self.pending_accepted();
         let (offset, regressed) = self.stream_offset(checkpoint);
+        // A regression is a source restart only when the stream's
+        // generation provably differs from the run's own: a demoted
+        // peer cleared its own alignment, so its first pull on the
+        // uninterrupted successor — still stamping the generation this
+        // run's own captures carried — regresses in tick without the
+        // source restarting, and attributing that self-caused reset to
+        // the source is the journal lie the generation check exists to
+        // prevent.
+        let boundary = regressed
+            && Self::generation_boundary(self.executor.generation(), checkpoint.generation);
         let landed = Tick(checkpoint.tick.0 + offset);
         let adopted;
         let applied = if landed == checkpoint.tick {
@@ -924,16 +956,22 @@ impl<'d> Peer<'d> {
                 self.note_abandoned_commands(pending);
                 self.tick_offset = offset;
                 if regressed {
-                    // The staged evidence belongs to the old
-                    // generation — the new stream's field comparison
-                    // does not pair against it — and the resync the
-                    // apply just ran queues for the journal.
+                    // The staged image pairs its run tick against the
+                    // stream position it was staged on — a regressed
+                    // apply moved that pairing, so the evidence cannot
+                    // compare and is discarded whether or not the
+                    // generation changed. Only the generation boundary
+                    // journals: a same-generation regression is the
+                    // peer's own tracking reset, not the source's
+                    // restart.
                     self.staged = None;
-                    self.pending_restarts.push(SourceRestart {
-                        tick: landed,
-                        was_aligned: self.aligned,
-                        resumed_at: checkpoint.tick,
-                    });
+                    if boundary {
+                        self.pending_restarts.push(SourceRestart {
+                            tick: landed,
+                            was_aligned: self.aligned,
+                            resumed_at: checkpoint.tick,
+                        });
+                    }
                 }
                 self.aligned = Some(checkpoint.tick);
                 let was_diverged = matches!(self.sync, StandbySync::Diverged { .. });
@@ -1023,8 +1061,11 @@ impl<'d> Peer<'d> {
     /// tick's lead over the tracked stream's own tick — and whether
     /// the stream regressed: a checkpoint whose tick fell below the
     /// run's last alignment, or below the run's own tick before any
-    /// alignment stood, is the signature of a cold-restarted or
-    /// replaced source, not a continuation of the tracked line. The
+    /// alignment stood, is the signature of a source-side reset — a
+    /// cold-restarted or replaced source, or the peer's own demotion
+    /// clearing the alignment the comparison stood on. The generation
+    /// check in [`apply`](Self::apply) separates the two; the offset
+    /// mechanics are the same either way. The
     /// offset a regression resets to — `run - checkpoint.tick` —
     /// lands the apply at the run's current tick, so the run's clock
     /// never rewinds scans it already ran and journaled; a
@@ -1061,6 +1102,23 @@ impl<'d> Peer<'d> {
                 false,
             )
         }
+    }
+
+    /// Whether a regressed checkpoint stream crossed a source
+    /// generation boundary — the condition [`apply`](Self::apply) and
+    /// [`reinitialize`](Self::reinitialize) journal a
+    /// [`SourceRestart`] on. `own` is the generation this run's
+    /// executor currently stamps, `checkpoint`'s the pulled stream's:
+    /// only a checkpoint whose generation positively differs proves
+    /// the source began a new tick domain. A demoted peer's first pull
+    /// on its uninterrupted successor regresses on the generation its
+    /// own captures stamped — the tracking reset was the peer's, so
+    /// nothing journals. Either side unidentified — a checkpoint a
+    /// pre-generation build wrote, or a run never given a generation —
+    /// can prove no continuation, so the regression journals as a
+    /// restart exactly as it always did.
+    fn generation_boundary(own: Option<u64>, checkpoint: Option<u64>) -> bool {
+        own.is_none_or(|own| Some(own) != checkpoint)
     }
 
     /// The log's still-`Accepted` receipts with their absolute
@@ -1184,6 +1242,12 @@ impl<'d> Peer<'d> {
         // crossing either carries or abandons, exactly as in `apply`.
         let pending = self.pending_accepted();
         let (offset, regressed) = self.stream_offset(checkpoint);
+        // As in `apply`: the regression journals a `SourceRestart` only
+        // when the stream's generation differs from the run's own — a
+        // demoted peer's tracking reset regresses on the same
+        // generation and crosses no source boundary.
+        let boundary = regressed
+            && Self::generation_boundary(self.executor.generation(), checkpoint.generation);
         let landed = Tick(checkpoint.tick.0 + offset);
         let adopted;
         let applied = if landed == checkpoint.tick {
@@ -1199,7 +1263,7 @@ impl<'d> Peer<'d> {
             Ok(report) => {
                 self.note_abandoned_commands(pending);
                 self.tick_offset = offset;
-                if regressed {
+                if boundary {
                     self.pending_restarts.push(SourceRestart {
                         tick: landed,
                         was_aligned: self.aligned,
@@ -1439,8 +1503,9 @@ impl<'d> Peer<'d> {
     }
 
     /// Drains tracked-source restarts queued since the last call — one
-    /// [`SourceRestart`] per regressed-stream adoption — for the
-    /// transition journal the monitoring layer records them into.
+    /// [`SourceRestart`] per regressed-stream adoption that crossed a
+    /// generation boundary — for the transition journal the monitoring
+    /// layer records them into.
     pub fn take_source_restarts(&mut self) -> Vec<SourceRestart> {
         std::mem::take(&mut self.pending_restarts)
     }
@@ -3521,6 +3586,79 @@ mod tests {
             peer.take_source_restarts(),
             vec![SourceRestart {
                 tick: Tick(6),
+                was_aligned: None,
+                resumed_at: Tick(1),
+            }]
+        );
+    }
+
+    /// The QA finding `source-restarted-journaled-on-demote-track`: the
+    /// same demote-then-pull shape on the *uninterrupted* successor. The
+    /// demotion cleared the alignment, so the successor's served tick
+    /// regresses against the run's own — but the stream still names the
+    /// generation this run's own captures stamped, because the
+    /// successor's executor adopted it tracking this peer. The reset was
+    /// the peer's tracking state, not the source's restart: the state
+    /// still adopts at the run's tick, and nothing journals.
+    #[test]
+    fn a_demoted_peers_reset_on_the_same_generation_journals_no_restart() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate).with_generation(7), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.scan();
+
+        // The promoted successor's executor carries this line's
+        // generation — adopted tracking this peer's stream, exactly as
+        // the pair's pull path does — while its served tick still trails
+        // the demoted run's own.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.apply(&peer.checkpoint()).unwrap();
+
+        peer.demote().unwrap();
+        assert_eq!(peer.aligned_tick(), None);
+        peer.scan();
+        assert_eq!(peer.tick(), Tick(3));
+
+        // ckpt{tick: 2} against run tick 3 with no alignment standing:
+        // the regression the heuristic used to journal.
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(3));
+        assert_eq!(peer.aligned_tick(), Some(Tick(2)));
+        assert!(peer.take_source_restarts().is_empty());
+    }
+
+    /// The generation check's other half on the same shape: the
+    /// demoted peer's first pull on a genuinely restarted source —
+    /// its checkpoints name a generation this run's stream never
+    /// carried — still journals the `SourceRestart` with no prior
+    /// alignment.
+    #[test]
+    fn a_demoted_peers_reset_on_a_new_generation_journals_the_restart() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate).with_generation(7), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.scan();
+        peer.demote().unwrap();
+        peer.scan();
+        assert_eq!(peer.tick(), Tick(3));
+
+        // The cold-restarted source minted its own generation — a new
+        // tick domain the demoted run's captures never stamped.
+        let restarted_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut restarted = executor(&restarted_driver).with_generation(9);
+        restarted.run(1);
+        peer.apply(&restarted.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(3));
+        assert_eq!(peer.aligned_tick(), Some(Tick(1)));
+        assert_eq!(
+            peer.take_source_restarts(),
+            vec![SourceRestart {
+                tick: Tick(3),
                 was_aligned: None,
                 resumed_at: Tick(1),
             }]

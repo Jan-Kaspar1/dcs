@@ -159,9 +159,16 @@ pub enum JournalEvent {
     },
     /// A tracking peer's checkpoint source restarted or was replaced:
     /// the stream's tick fell below the run's last alignment — or,
-    /// before any alignment stood, below the run's own tick — a new
-    /// tick generation, not a continuation of the tracked line. The
-    /// peer adopted the checkpoint's state without rewinding its run
+    /// before any alignment stood, below the run's own tick — while the
+    /// checkpoint's generation stamp differs from the run's own, the
+    /// new tick generation that marks a cold-started or replaced source
+    /// rather than a continuation of the tracked line. A regression on
+    /// the run's own generation is the peer's tracking reset, not the
+    /// source's restart — a demoted peer's first pull on its
+    /// uninterrupted successor is the standing case — and journals
+    /// nothing; a stream that cannot name a generation keeps the
+    /// conservative verdict. The peer adopted the checkpoint's state
+    /// without rewinding its run
     /// tick: the entry's `tick` is the run tick the resync landed at,
     /// `was_aligned` the alignment the regression broke, and
     /// `resumed_at` the regressed checkpoint's own tick — where the new
@@ -170,8 +177,8 @@ pub enum JournalEvent {
     /// its own.
     SourceRestarted {
         /// The last applied checkpoint's tick before the regression —
-        /// `None` when the run had never aligned, the regression then
-        /// measured against the run's own tick.
+        /// `None` when the run had none — a demoted peer's first pull,
+        /// the regression then measured against the run's own tick.
         was_aligned: Option<Tick>,
         /// The regressed checkpoint's own tick — where the new
         /// generation's stream resumed.
