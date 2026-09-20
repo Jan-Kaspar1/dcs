@@ -65,7 +65,16 @@ first transfer answers the named `not_converged` refusal with no field
 hand-off, a receipted write to the tracking standby answers the named
 `not_active` rejection with no field effect or phantom audit, and the
 same promote succeeds once the standby tracks — the active undisturbed
-throughout. The stage's automatic-failover leg (`ci/failover.py`) then
+throughout. The stage's failure-handover leg (`ci/handover.py`) proves
+the duty-failure behavior on the deployed pair: a proven duty-pump
+field-channel fault hands `duty` to the standby pump inside the
+declared bound while the operator surface annunciates it — the
+faulted pump's `fault`/`avail` reporting the exclusion and the managed
+fault alarm carrying journaled `point_changed` evidence — losing every
+pump raises `none_available`/`all_faulted` with their managed alarms,
+and restoring each input produces the declared recovery with the
+pair's controller roles unmoved throughout. The stage's
+automatic-failover leg (`ci/failover.py`) then
 proves the unattended half: the declared `failover_budget` arms the
 standby's `--auto-promote`, the field-owning container is stopped, and
 the surviving peer self-promotes at the declared miss budget — its
