@@ -398,13 +398,17 @@ mod store;
 
 use crate::store::Store;
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
-pub use pair::{CONVERGENCE_GRACE, PairClient, PairError, PairHealth, PeerStatus, PeerView};
+pub use pair::{
+    CONVERGENCE_GRACE, PAIR_FAULT_KINDS_VERSION, PairClient, PairError, PairFaultKind, PairHealth,
+    PeerStatus, PeerView,
+};
 pub use recorder::MonitorConfig;
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry, PointHistory, PointId,
-    PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
+    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError,
+    TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, TrackReport, Transfer};
@@ -1032,6 +1036,20 @@ impl<'d> Monitor<'d> {
         }
         self.store.sync_receipts(peer.receipts());
         result
+    }
+
+    /// Journals a model-boundary crossing that ran before the monitor
+    /// bound — the `--revised` state-file resume's lone-roll carryover
+    /// — attributed, like a pulled crossing's entry, to the tick the
+    /// run resumed at. Landing it after the bind keeps the durable
+    /// record in process-lifetime order: the run-boundary marker first,
+    /// the crossing's [`CarryoverReport`] behind it.
+    pub fn note_reinitialized(&self, report: CarryoverReport) {
+        self.shared
+            .lock()
+            .unwrap()
+            .recorder
+            .note_reinitialized(report);
     }
 
     /// Marks a tracking peer degraded after a checkpoint fetch produced
