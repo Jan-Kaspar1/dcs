@@ -266,7 +266,23 @@
 #                journal records the transition distinguishably from
 #                an operator-requested switch; a variant severing the
 #                standby leaves the active's field writes undisturbed
-#                and reports no failover; two passes produce identical
+#                and reports no failover; a measurement run on the
+#                settled pair then walks decision 42's declared
+#                measurement contract — the emitted failover-select's
+#                primary/backup field points, out feeding the
+#                threshold chain, backup_active feeding the managed
+#                Bool alarm, the chain's on_bad_demand fallback —
+#                degrading the primary through the plant protocol's
+#                quality-fault surface so the backup serves with the
+#                chain still controlling on it and the managed alarm
+#                annunciating journaled point_changed evidence,
+#                degrading the backup as well so the declared
+#                all-sources-bad fallback drops demand to
+#                on_bad_demand rather than control on bad data, and
+#                restoring the backup then the primary so the
+#                selection and the alarms return per their declared
+#                lifecycle with the pair's roles unchanged; two
+#                passes produce identical
 #                digests (failover-failed, failover-nondeterministic)
 #                The stage's staged-vs-field divergence leg,
 #                ci/divergence.py on the same declared deployment: with
@@ -1441,8 +1457,20 @@ done
 # the promoted peer's durable journal records the transition
 # distinguishably from an operator-requested switch. A variant run
 # severs the standby instead: the field owner's writes run
-# undisturbed and nothing reports a failover. Two passes must
-# produce identical digests.
+# undisturbed and nothing reports a failover. A measurement run on
+# a freshly converged pair then exercises decision 42's declared
+# measurement contract — the emitted model's failover-select,
+# threshold chain, and managed backup-active alarm resolved from
+# the artifact's wiring: the primary level source's quality fault
+# asserts backup_active while the chain keeps controlling on the
+# selected backup measurement and the managed alarm annunciates;
+# the backup's fault as well engages the declared on_bad_demand
+# fallback rather than control on bad data; restoring the backup
+# then the primary returns the selection and the alarm per its
+# declared lifecycle — the receipted ack clearing the standing
+# latch — the durable journal carrying the transitions in driven
+# order and the pair's roles unchanged. Two passes must produce
+# identical digests.
 run_failover() {
     python3 ci/failover.py \
         --plant-server "$TOOLS/dcs-plant-server" \
@@ -1453,22 +1481,30 @@ run_failover() {
         --manifest deploy/manifest.json "$@"
 }
 FIRST="$(run_failover)" \
-    || fail "failover-failed: the automatic-failover leg did not hold — its evidence lines are above"
+    || fail "failover-failed: the failover leg did not hold — its evidence lines are above"
 SECOND="$(run_failover)" \
-    || fail "failover-failed: the automatic-failover leg did not hold — its evidence lines are above"
+    || fail "failover-failed: the failover leg did not hold — its evidence lines are above"
 [ "$FIRST" = "$SECOND" ] \
     || fail "failover-nondeterministic: two failover-leg passes produced different digests"
 echo "  $FIRST"
 
-# The doctored case: a leg asserting the standby promoted before the
-# declared budget must surface the named diagnostic — never a
-# silently unexercised promotion gate.
-if out="$(run_failover --tamper early-promotion 2>&1)"; then
-    fail "failover-unchecked: a doctored promotion expectation passed the failover leg"
-fi
-[[ "$out" == *"expected the standby active at miss"* ]] \
-    || fail "failover-unchecked: the early-promotion case did not report its named diagnostic: $out"
-echo "  early-promotion: reported, failover-failed"
+# The doctored cases: legs expecting the standby promoted before the
+# declared budget, the station still controlling on the bad primary,
+# or a nonzero fallback demand must surface the named diagnostic —
+# never a silently unexercised contract.
+for tamper in early-promotion controls-on-bad nonzero-fallback; do
+    if out="$(run_failover --tamper "$tamper" 2>&1)"; then
+        fail "failover-unchecked: a doctored $tamper expectation passed the failover leg"
+    fi
+    case "$tamper" in
+        early-promotion) evidence="expected the standby active at miss" ;;
+        controls-on-bad) evidence="expected the station still controlling on the bad primary" ;;
+        nonzero-fallback) evidence="expected the fallback demand nonzero" ;;
+    esac
+    [[ "$out" == *"$evidence"* ]] \
+        || fail "failover-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, failover-failed"
+done
 
 # The pair contract's staged-vs-field divergence leg, on the same
 # manifest-declared deployment: ci/divergence.py converges the pair,
