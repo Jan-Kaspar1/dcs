@@ -26,16 +26,19 @@ _pair_spec.loader.exec_module(pair)
 def emitted(component, event, **fields):
     """One served resource `events` entry — a routed emission record
     with a local stream `seq`, the `retention` class, and the inner
-    EmittedEvent naming its producer and payload field map."""
+    EmittedEvent naming its producer and payload field map under the
+    journal variant's `event` key."""
     return {
         "seq": emitted.next_seq,
         "tick": 10,
         "retention": "journal",
         "event": {
             "event_emitted": {
-                "component": component,
-                "event": event,
-                "fields": fields,
+                "event": {
+                    "component": component,
+                    "event": event,
+                    "fields": fields,
+                }
             }
         },
     }
@@ -177,7 +180,7 @@ class ParityTests(unittest.TestCase):
     def test_inner_component_reattribution_fails(self):
         self.standby["components"][1]["events"][0]["event"][
             "event_emitted"
-        ]["component"] = "blower"
+        ]["event"]["component"] = "blower"
         with self.assertRaises(pair.Abort):
             self.parity()
 
@@ -189,24 +192,24 @@ class ParityTests(unittest.TestCase):
     def test_changed_field_value_fails(self):
         self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
-        ]["fields"]["note"] = "drifted"
+        ]["event"]["fields"]["note"] = "drifted"
         with self.assertRaises(pair.Abort):
             self.parity()
 
     def test_changed_field_order_fails(self):
         fields = self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
-        ]["fields"]
+        ]["event"]["fields"]
         self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
-        ]["fields"] = dict(reversed(list(fields.items())))
+        ]["event"]["fields"] = dict(reversed(list(fields.items())))
         with self.assertRaises(pair.Abort):
             self.parity()
 
     def test_changed_identity_fails(self):
         inner = self.standby["components"][0]["events"][0]["event"][
             "event_emitted"
-        ]
+        ]["event"]
         inner["event"] = "stroke_complete"
         with self.assertRaises(pair.Abort):
             self.parity()

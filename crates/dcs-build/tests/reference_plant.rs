@@ -29,7 +29,10 @@
 //! `POST /scan` keeping the peers identical, a receipted
 //! `demote`/`promote` switching the roles, and the run continuing
 //! bumplessly with the adopted receipts and the durable journal
-//! files' transition records intact —
+//! files' transition records intact — plus the stage's
+//! emit-identical half: with the standby tracking, the sequencer's
+//! counted `step_completed` emissions must serve identical routed
+//! event records through both peers' `GET /resources` views —
 //! the `consumers` stage,
 //! which replays that driven run under each consumer schedule (no UI,
 //! polling, a stalled reader, churn, malformed/flooded traffic, a UI
@@ -52,8 +55,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`, and the
-//! `surface-mismatch` paths
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `event-parity-failed`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -378,6 +381,28 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     assert!(
         stdout.contains("broken-peer-flag: reported, pair-failed"),
         "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The stage's emit-identical half ran and held: the tracking
+    // standby's served event records equal the active's over the
+    // counted `step_completed` set, and each doctored standby stream
+    // reported the named diagnostic.
+    let parity_line = stdout
+        .lines()
+        .find(|line| line.contains("event-parity-digest"))
+        .unwrap_or_else(|| panic!("the parity leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "counted step_completed records identical on both peers",
+        "the standby tracking",
+    ] {
+        assert!(
+            parity_line.contains(phrase),
+            "the parity digest names no '{phrase}' evidence: {parity_line}"
+        );
+    }
+    assert!(
+        stdout.contains("dropped-event-record: reported, event-parity-failed")
+            && stdout.contains("reattributed-event-record: reported, event-parity-failed"),
+        "the parity leg's doctored cases did not report their named diagnostic:\n{stdout}"
     );
     assert!(
         stdout.contains("== consumers =="),

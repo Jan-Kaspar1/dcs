@@ -273,7 +273,13 @@ controller converging to `tracking` through `GET /role`, scans driven
 through `POST /scan` keeping the peers' images identical, a receipted
 `demote`/`promote` switching the roles, and the run continuing
 bumplessly with the adopted receipts and the durable journal files'
-transition records intact — the `consumers` stage, which replays that driven run
+transition records intact — beside the stage's emit-identical leg,
+which drives the emitted model's sequencer through the tracking
+pair until a counted `step_completed` set stands and asserts both
+peers' `GET /resources` views serve the same routed `event_emitted`
+records — identical component attribution, declared identities,
+ordered fields, tick, and retention — while the standby reports
+`tracking` and its writes stay gated — the `consumers` stage, which replays that driven run
 under each consumer schedule — no UI attached, normal polling, a
 stalled reader, disconnect/reconnect churn, malformed and flooded
 traffic within the declared limits, and a UI process restart —
@@ -342,6 +348,8 @@ The checks' failures are named diagnostics:
 | `ctl-nondeterministic` | Two passes of the `dcs-ctl` leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `pair-failed` | The redundant-pair leg did not hold: the manifest-declared standby did not converge to `tracking`, the peers' images or adopted receipt logs diverged, the receipted `demote`/`promote` switch did not answer its named reports or refusals, the run did not continue bumplessly, or a declared `--state-file`/`--journal-file` path was not honored — the durable records missing the run's transitions or `seq` order. Reported by the reference plant's `ci/check.sh`. |
 | `pair-nondeterministic` | Two passes of the redundant-pair leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `event-parity-failed` | The emit-identical standby leg did not hold: the tracking peer never converged, the counted `step_completed` set never stood on the active, the standby's served `event_emitted` records diverged from the active's — a missing record, a re-attributed component, a changed identity, ordered field, tick, or retention — or the standby's role moved or its writes went ungated. Reported by the reference plant's `ci/check.sh`. |
+| `event-parity-nondeterministic` | Two passes of the emit-identical standby leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |

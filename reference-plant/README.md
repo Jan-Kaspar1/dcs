@@ -39,7 +39,10 @@ ci/restart.py          the restart-recovery leg — the driven
                        onto the same state/journal files
 ci/pair.py             the redundant-pair leg — the manifest-declared
                        standby pair run, switched, and checked against
-                       its persisted state and journal files
+                       its persisted state and journal files; --parity
+                       runs the emit-identical leg — the tracking
+                       standby's served event records asserted equal
+                       to the active's over a counted emission set
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -223,6 +226,23 @@ behavioral exercise, not just its static agreement. A violated
 contract fails `pair-failed`; two passes must produce the identical
 `pair-digest`, a divergence failing `pair-nondeterministic`.
 
+The stage's emit-identical leg (`ci/pair.py --parity`) then proves the
+standby's published event record is not a hollow copy: with the pair
+settled and tracking, the sequencer's `run` input is held through the
+field owner's receipted path — the same write refused `not_active` at
+the standby's role boundary — and driven scans run the declared step
+table out until the counted `step_completed` set stands. `GET
+/resources` on both peers must then serve the same routed
+`event_emitted` records — identical outer and inner component
+attribution, declared event identities, ordered payload fields, tick,
+and retention, the stream-local `seq` positions excluded — while the
+standby still reports `tracking`: the property that lets a UI consumer
+fail its event feed over between the peers without a gap in
+attribution. A divergence, a dropped record, or a hollow stream fails
+`event-parity-failed`; two passes must produce the identical
+`event-parity-digest`, a divergence failing
+`event-parity-nondeterministic`.
+
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
 identical driven run once per consumer schedule: `zero-clients` (no UI
@@ -390,7 +410,10 @@ or failing to name a refused checkpoint — is `restart-resume-failed`;
 two restart-leg passes diverging is `restart-resume-nondeterministic`;
 a declared pair failing to converge, switch, or keep its journaled
 record is `pair-failed`; two pair-leg passes diverging is
-`pair-nondeterministic`;
+`pair-nondeterministic`; a tracking standby whose served event
+records diverge from the active's — or whose counted emission set
+never stands — is `event-parity-failed`; two event-parity passes
+diverging is `event-parity-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is

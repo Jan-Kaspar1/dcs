@@ -85,7 +85,18 @@
 #                switches the roles, and the run continues bumplessly
 #                with the adopted receipts and the durable journal
 #                files' transition records intact; two passes produce
-#                identical digests (pair-failed, pair-nondeterministic)
+#                identical digests (pair-failed, pair-nondeterministic).
+#                The stage's emit-identical leg then runs the declared
+#                pair again: with the standby tracking, the emitted
+#                model's sequencer is driven through the owner's
+#                receipted path until a counted set of step_completed
+#                emissions stands, and both peers' GET /resources views
+#                must serve the same routed event records — identical
+#                component attribution, declared identities, ordered
+#                fields, tick, and retention — while the standby
+#                reports tracking and its writes stay gated; two passes
+#                produce identical digests (event-parity-failed,
+#                event-parity-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -664,6 +675,47 @@ fi
 [[ "$out" == *"never reported tracking"* ]] \
     || fail "pair-unchecked: the broken-peer-flag case did not report its named diagnostic: $out"
 echo "  broken-peer-flag: reported, pair-failed"
+
+# The emit-identical half of the pair stage — decision 84's parity
+# rule proven on the consumer's deployed pair: `ci/pair.py --parity`
+# converges the declared standby to tracking, drives the emitted
+# model's sequencer through the field owner's receipted path — the
+# `run` write refused `not_active` at the standby's role boundary —
+# until the counted `step_completed` set stands, then asserts both
+# peers' `GET /resources` views collect the same routed `event_emitted`
+# records: identical component attribution, declared identities,
+# ordered fields, tick, and retention, the stream-local seqs excluded.
+# A UI consumer failing its event feed over between the peers must
+# meet no gap in attribution. Two passes must produce identical
+# digests.
+run_parity() {
+    python3 ci/pair.py --parity \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
+SECOND="$(run_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "event-parity-nondeterministic: two event-parity passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a standby whose served record set is missing an
+# emission or carries one re-attributed must surface the named
+# diagnostic — never a silently hollow or diverged parity pass.
+for tamper in dropped-event-record reattributed-event-record; do
+    if out="$(run_parity --tamper "$tamper" 2>&1)"; then
+        fail "event-parity-unchecked: the $tamper case passed the parity leg"
+    fi
+    [[ "$out" == *"event-parity-failed"* ]] \
+        || fail "event-parity-unchecked: the $tamper case did not report event-parity-failed: $out"
+    echo "  $tamper: reported, event-parity-failed"
+done
 
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
