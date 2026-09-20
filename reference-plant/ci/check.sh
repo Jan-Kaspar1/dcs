@@ -140,6 +140,28 @@
 #                produce identical digests
 #                (force-carryover-failed,
 #                force-carryover-nondeterministic)
+#                The stage's tune-carryover leg, ci/tune_carryover.py
+#                on the same declared deployment: with the pair
+#                tracking, a receipted set_parameter on a declared
+#                writable configuration point — the emitted model's
+#                exercise sequencer step_1_out, the honest sequence
+#                parameter whose parked table's demand lands on the
+#                out port's next sample while nothing downstream
+#                consumes it — submitted through the active's
+#                POST /command; the settled receipt recorded, the
+#                tuned value asserted live on both peers' served
+#                parameter reports and on the out port's bound point
+#                the declared signal sources, the demote/promote
+#                switch issued, and the promoted peer asserted still
+#                carrying the tune — the parameter report and the
+#                signal's reading — across scans, its served journal
+#                ordering the promotion's role_changed entries after
+#                the tune's command_settled; a further set_parameter
+#                on the new active settling applied with a fresh
+#                receipt, the pair restored to its declared roles;
+#                two passes produce identical digests
+#                (tune-carryover-failed,
+#                tune-carryover-nondeterministic)
 #                The stage's force-release leg, ci/force_release.py
 #                on the same declared deployment: with the pair
 #                tracking, a receipted force_point on a declared
@@ -1000,6 +1022,49 @@ fi
     || fail "force-carryover-unchecked: the expect-unforced case did not report its named diagnostic: $out"
 echo "  expect-unforced: reported, force-carryover-failed"
 
+# The pair contract's tune-carryover leg, on the same
+# manifest-declared deployment: ci/tune_carryover.py converges the
+# pair, submits a receipted set_parameter on a declared writable
+# configuration point — the emitted model's exercise sequencer
+# step_1_out, the honest sequence parameter whose out port feeds a
+# declared signal — through the active's POST /command, records the
+# settled receipt, issues the demote/promote switch, and asserts on
+# the promoted peer's served surface that the tuned value is live:
+# the snapshot's parameters report and the out point's
+# declared-signal reading holding across driven scans, the promoted
+# peer's served journal ordering the promotion's role_changed
+# entries after the tune's command_settled, and a further
+# set_parameter on the new active settling applied with a fresh
+# receipt — the promoted peer's own command path live. The leg then
+# restores the pair's declared roles. Two passes must produce
+# identical digests.
+run_tune() {
+    python3 ci/tune_carryover.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_tune)" \
+    || fail "tune-carryover-failed: the tune-carryover leg did not hold — its evidence lines are above"
+SECOND="$(run_tune)" \
+    || fail "tune-carryover-failed: the tune-carryover leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "tune-carryover-nondeterministic: two tune-carryover passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg asserting the parameter's original value
+# after the tune must surface the named diagnostic — the tuned value
+# rides the checkpoint, never a silently reverted pass.
+if out="$(run_tune --tamper expect-original 2>&1)"; then
+    fail "tune-carryover-unchecked: a doctored original-value expectation passed the carryover leg"
+fi
+[[ "$out" == *"expected the original value"* ]] \
+    || fail "tune-carryover-unchecked: the expect-original case did not report its named diagnostic: $out"
+echo "  expect-original: reported, tune-carryover-failed"
+
 # The pair contract's force-release leg, on the same
 # manifest-declared deployment: ci/force_release.py converges the
 # pair, submits a receipted force_point on a declared writable In
@@ -1348,7 +1413,7 @@ for file in ci/availability.py ci/burst_order.py ci/consumers.py \
         ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/standby_restart.py \
-        ci/takeover.py README.md; do
+        ci/takeover.py ci/tune_carryover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

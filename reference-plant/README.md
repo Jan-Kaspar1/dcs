@@ -58,6 +58,16 @@ ci/force_carryover.py  the pair contract's force-carryover leg — a
                        snapshots, then still standing on the promoted
                        peer after the switch, released through the
                        receipted path, and the pair's roles restored
+ci/tune_carryover.py   the pair contract's tune-carryover leg — a
+                       receipted set_parameter on a declared writable
+                       configuration point while tracking, asserted
+                       live on both peers' parameter reports and the
+                       bound point's declared-signal reading, then
+                       still live on the promoted peer after the
+                       switch with the promotion journaled after the
+                       tune's settlement, a further tune settling
+                       applied with a fresh receipt, and the pair's
+                       roles restored
 ci/force_release.py    the pair contract's force-release leg — a
                        receipted force substituted at
                        Uncertain(Substituted) across scans on the
@@ -393,6 +403,41 @@ manifest's duty controller `active` and its standby `tracking`. A
 violated contract fails `force-carryover-failed`; two passes must
 produce the identical `force-digest`, a divergence failing
 `force-carryover-nondeterministic`.
+
+The stage's tune-carryover leg — `ci/tune_carryover.py` on the same
+declared deployment — then proves a customer's runtime parameter
+tuning survives the switch on the customer's pair, the
+runtime-tuning-continuity clause applied to the receipted
+`set_parameter` path exactly as the platform's lane proves it. With
+the pair tracking, the leg records the target's served value — the
+control proving the un-tuned default is what an un-carried tune
+would read — and submits `set_parameter` through the active's
+`POST /command`. The target is the exercise `sequencer`'s
+`step_1_out`, the honest writable configuration point the emitted
+model declares: a descriptor-declared sequence parameter whose
+served registry entry carries its `set_parameter` command, and
+whose parked table's demand lands on the `out` port's next sample
+while nothing downstream consumes it — the point the declared
+`exercise-out` signal sources. The `accepted` submission must
+settle `applied` identically into both peers' adopted log, the
+tuned value live on both peers' served parameter reports and on
+the signal's reading. The leg then issues the `demote`/`promote`
+switch and asserts on the promoted peer — across driven scans —
+that the parameter report and the signal's reading still carry the
+tuned value: runtime tuning rides the checkpoint through the
+promotion exactly as it does on the lane, never reverted to the
+model-declared default. The promoted peer's served journal must
+order the promotion's `role_changed` entries after the tune's
+`command_settled`, and a further `set_parameter` on the new active
+must settle `applied` with a fresh receipt — the promoted peer's
+own command path proven live. The leg then restores the pair's
+declared roles, leaving the manifest's duty controller `active`
+and its standby `tracking`. A violated contract fails
+`tune-carryover-failed`; two passes must produce the identical
+`tune-digest`, a divergence failing
+`tune-carryover-nondeterministic`. The leg's doctored case — an
+expectation asserting the parameter's original value after the
+tune — must report the named diagnostic rather than pass silently.
 
 The stage's force-release leg — `ci/force_release.py` on the same
 declared deployment — then proves the release half of the forcing
