@@ -62,7 +62,11 @@
 //!   `?since=<seq>` returns only samples newer than the caller's last
 //!   seen sequence — an evicted stretch surfaces as a numbering gap
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
-//!   journal in scan order; `?since=<seq>` filters likewise
+//!   journal in scan order; `?since=<seq>` filters likewise. The tail
+//!   is bounded, but `run_boundary` entries are pinned: evicting one
+//!   would silently merge two process lifetimes in the served audit,
+//!   so the markers outlive ordinary event volume and answer ahead of
+//!   the retained tail in `seq` order
 //! - `GET /schema` → `200` [`SchemaView`] — the served block-interface
 //!   registry of the schema-driven-interface decision: one instance-level
 //!   [`BlockInterface`](dcs_core::BlockInterface) per component instance,
@@ -178,7 +182,12 @@
 //! marker line separates process lifetimes within the file, and a
 //! restart's marker also journals once as a `run_boundary` entry so a
 //! `GET /journal` consumer attributes entries to a process lifetime —
-//! so `GET /journal` answers continuously across a restart; a file that
+//! so `GET /journal` answers continuously across a restart. Those
+//! served markers are pinned out of the tail's bound: ordinary event
+//! volume can age the boundary past the retained window, but the
+//! served answer keeps it — pinned entries answer ahead of the
+//! retained tail, and the replay keeps a marker its own tail bound
+//! evicted. A file that
 //! cannot be replayed fails startup naming the file and the offending
 //! record, and a missing file is a cold start. A run resumed through
 //! `--state-file` diffs its first scan against the restored executor
@@ -1963,7 +1972,9 @@ impl MonitorClient {
     }
 
     /// `GET /journal`: the retained transition-journal entries with a
-    /// `seq` above `since` (`0` fetches everything retained).
+    /// `seq` above `since` (`0` fetches everything retained) — the
+    /// pinned `run_boundary` markers included, ahead of the bounded
+    /// tail.
     pub fn journal(&self, since: u64) -> io::Result<Vec<JournalEntry>> {
         self.get_json(&format!("/journal?since={since}"))
     }
