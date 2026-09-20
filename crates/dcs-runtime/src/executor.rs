@@ -805,6 +805,16 @@ pub struct Executor<'d> {
     /// the assembling layer supplied one: stamped into every checkpoint
     /// and the value a restored checkpoint's fingerprint must equal.
     model_fingerprint: Option<ModelFingerprint>,
+    /// The tick-domain generation this run's checkpoint stream belongs
+    /// to — the identity the assembling shell mints through
+    /// [`with_generation`](Self::with_generation) and every checkpoint
+    /// stamps. `apply`, `restore`, and `reinitialize` adopt the
+    /// checkpoint's: the run joins the line the captured state came
+    /// from, so the whole tracked line shares one generation across
+    /// switchovers while a cold-started or replaced source begins a new
+    /// one. `None` while the run was never given one — the unminted
+    /// test/legacy shape — or when the last adoption carried none.
+    generation: Option<u64>,
     tick: Tick,
 }
 
@@ -934,6 +944,7 @@ impl<'d> Executor<'d> {
             io_health: IoHealth::default(),
             fenced_write: None,
             model_fingerprint: None,
+            generation: None,
             tick: Tick::ZERO,
         })
     }
@@ -950,6 +961,33 @@ impl<'d> Executor<'d> {
     pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
         self.model_fingerprint = Some(fingerprint);
         self
+    }
+
+    /// Records this run's checkpoint-stream generation — the tick-domain
+    /// identity every [`checkpoint`](Executor::checkpoint) stamps.
+    ///
+    /// The running process's shell mints it
+    /// ([`mint_generation`](crate::mint_generation)) at startup: each
+    /// process boot begins a new tick domain, so the generation is
+    /// supplied per run, never derived. The mint stays out of
+    /// `Executor::new` itself so a run assembled without one — tests,
+    /// lone runs — still produces fully deterministic checkpoints. A
+    /// later [`apply`](Executor::apply), [`restore`](Executor::restore),
+    /// or [`reinitialize`](Executor::reinitialize) adopts the
+    /// checkpoint's generation instead: the run joins the line the
+    /// captured state came from, so the whole tracked line shares one
+    /// generation across a switchover while a cold-started or replaced
+    /// source begins a new one.
+    pub fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+
+    /// The generation this run's checkpoint stream belongs to — the
+    /// value [`with_generation`](Self::with_generation) recorded or the
+    /// last adoption carried; `None` while unidentified.
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.generation
     }
 
     /// Declares the pending-command queue's capacity bound — how many
@@ -1466,6 +1504,7 @@ impl<'d> Executor<'d> {
         Checkpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: self.model_fingerprint,
+            generation: self.generation,
             tick: self.tick,
             components: self
                 .components
@@ -1550,6 +1589,11 @@ impl<'d> Executor<'d> {
         }
 
         executor.tick = checkpoint.tick;
+        // The restored run joins the checkpointed line's generation —
+        // a `--state-file` resume continues the same tick domain, so the
+        // checkpoints it serves carry the line's identity, not a fresh
+        // one.
+        executor.generation = checkpoint.generation;
         executor.image.borrow_mut().extend(
             checkpoint
                 .outputs
@@ -1631,6 +1675,11 @@ impl<'d> Executor<'d> {
         }
 
         self.tick = checkpoint.tick;
+        // The run joins the checkpointed line's generation: from this
+        // adoption on, the checkpoints this executor serves name the
+        // line's tick-domain identity, so a peer tracking it can tell
+        // the line's continuation from a new generation's stream.
+        self.generation = checkpoint.generation;
         let mut image = self.image.borrow_mut();
         // The output image becomes exactly the checkpoint's: drop stale
         // `Out` samples so a value from the standby's own earlier scans
@@ -1981,6 +2030,10 @@ impl<'d> Executor<'d> {
         }
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
+        // The crossing keeps the tracked line's generation: the revised
+        // run continues the checkpoint stream's tick domain, so the
+        // checkpoints it serves still name the line they came from.
+        self.generation = checkpoint.generation;
         self.emitted.clear();
         self.command_verdicts.clear();
         self.fenced_write = None;
@@ -6762,6 +6815,7 @@ mod tests {
         Checkpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            generation: None,
             tick: Tick(50),
             components: [
                 ("a".to_string(), StateMap::new()),
@@ -6936,6 +6990,7 @@ mod tests {
         Checkpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            generation: None,
             tick: Tick(50),
             components: [("loop".to_string(), state)].into_iter().collect(),
             driver: None,

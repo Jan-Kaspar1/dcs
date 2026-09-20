@@ -80,7 +80,7 @@ mod revision;
 
 pub use checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, CommandAdmissionCounts, RestoreError,
-    SUPPORTED_FORMAT_VERSIONS,
+    SUPPORTED_FORMAT_VERSIONS, mint_generation,
 };
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{

@@ -248,7 +248,7 @@ use dcs_controller::registry;
 use dcs_core::{CarryoverReport, IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
-use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate};
+use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -989,8 +989,14 @@ fn main() -> ExitCode {
         Some(gate) => gate,
         None => driver.io(),
     };
+    // This process boot is a new checkpoint-stream generation: every
+    // checkpoint the run serves stamps it, so a tracking peer can tell
+    // the source's cold restart — a fresh mint — from its own demotion's
+    // tracking reset on the uninterrupted line. A `--state-file` resume
+    // below adopts the file's generation instead: the resumed run
+    // continues the line it persisted.
     let mut executor = match assemble(&model, &registry(), io) {
-        Ok(executor) => executor,
+        Ok(executor) => executor.with_generation(mint_generation()),
         Err(error) => return fail(error),
     };
 
