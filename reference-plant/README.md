@@ -171,6 +171,13 @@ ci/managed_lifecycle.py  the pair contract's managed-alarm
                         the named never-shelvable refusal, and the
                         designed oos/suppress wiring through its
                         suppressed trip and return to service
+ci/managed_carryover.py  the pair contract's managed run-state
+                        carryover leg — the managed alarm kinds'
+                        checkpointed run state proven carried across a
+                        promotion on the deployed pair: a mid-shelve
+                        countdown releasing at its continued expiry,
+                        never a restarted bound, and the wired
+                        out_of_service standing with evaluation held
 ci/staging.py          the pair contract's staging leg — the emitted
                        threshold chain's level-driven demand staging
                        exercised on the deployed pair: the unopposed
@@ -851,6 +858,40 @@ expectation asserting the never-shelvable write settled applied,
 and one asserting the `shelved` flag still stands after the
 declared bound's own auto-release — must each report the named
 diagnostic rather than pass silently.
+
+The stage's managed run-state carryover leg —
+`ci/managed_carryover.py` on the same declared deployment — then
+proves the managed alarm kinds' checkpointed run state itself carries
+across a takeover on the customer-owned pair (WW-ENG-003, WW-ALM-002,
+WW-LCM-001), the continuity the lifecycle leg's quiet-pair surface
+never reached. With the pair settled and tracking, the pump's `oos`
+point takes the receipted inhibit so the fault alarm reports
+`out_of_service`/`suppressed`, and a driven run-contact fault holds
+the standing suppressed trip — `alarm` reporting the process truth
+while the latch stays withheld. The shelvable low-level alarm's
+writable journaled `shelve` point then takes the receipted request
+mid-run, and the documented demote/promote lands inside the emitted
+model's declared `max_shelve_ticks` bound with the countdown still in
+flight. On the promoted peer the leg asserts `shelved` stands carried
+and releases at the tick the continued countdown expires — the
+journaled assertion-to-expiry span measuring the declared bound with
+the promotion inside it, a bound restarted at the switch releasing
+later — that `out_of_service`/`suppressed` stand with evaluation
+held, and that every written point rode the checkpoint. Both durable
+journal files must carry the ordered record continuous across the
+switch — each its single cold-start boundary with `seq` order intact,
+the promoted peer's record ordering the adopted settlements, the
+promotion's `role_changed` entries inside the countdown's span, the
+expiry at the continued bound's tick, and the restores in run order —
+the served journal answering the same record. Every driven input is
+restored on the promoted peer and the pair returns to its manifest
+roles. A violated contract fails `carry-failed`; two passes must
+produce the identical `carry-digest`, a divergence failing
+`carry-nondeterministic`. The leg's doctored cases — an expectation
+asserting the expiry a fresh bound after the switch, the countdown
+restarted, and one asserting the promoted peer dropped
+`out_of_service` — must each report the named diagnostic rather than
+pass silently.
 
 The stage's staging leg — `ci/staging.py` on the same declared
 deployment — then proves the deployed pair stages and de-stages on

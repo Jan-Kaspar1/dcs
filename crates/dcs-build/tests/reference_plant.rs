@@ -77,6 +77,19 @@
 //! `out_of_service`/`suppressed` wiring through the suppressed trip
 //! and the return to service, the durable journal's ordered record
 //! audited and the pair's roles and driven inputs restored — the pair
+//! contract's managed run-state carryover leg, which proves the
+//! managed alarm kinds' checkpointed run state carries across a
+//! takeover on the deployed pair — a per-pump fault alarm held
+//! `out_of_service` through its wired `oos` point and tripped
+//! suppressed, the shelvable alarm shelved mid-run through its
+//! writable journaled `shelve` point, the documented
+//! `demote`/`promote` landing inside the declared `max_shelve_ticks`
+//! bound, the promoted peer asserting `shelved` stands and releases
+//! at the tick the continued countdown expires — never a bound
+//! restarted at the switch — `out_of_service` standing with
+//! evaluation held, both durable journals' ordered records continuous
+//! across the switch, and every driven input and the pair's launch
+//! roles restored — the pair
 //! contract's staging leg, which proves the deployed pair stages and
 //! de-stages on level through the emitted model's declared setpoint
 //! chain: both pumps held out of service through receipted `oos`
@@ -112,6 +125,7 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
+//! `carry-failed`/`carry-nondeterministic`,
 //! `staging-failed`/`staging-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
@@ -633,6 +647,37 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, managed-lifecycle-failed")),
             "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's managed run-state carryover leg ran and
+    // held: the managed alarm kinds' checkpointed run state carried
+    // across the promotion — the mid-shelve countdown releasing at
+    // its continued expiry rather than a restarted bound, the wired
+    // out-of-service standing with evaluation held — its digest line
+    // reports the evidence, and each doctored expectation reported
+    // its named diagnostic.
+    let carry_line = stdout
+        .lines()
+        .find(|line| line.contains("carry-digest"))
+        .unwrap_or_else(|| panic!("the managed-carryover leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "shelved at tick",
+        "switched at tick",
+        "released at tick",
+        "declared bound",
+        "out-of-service held",
+        "roles restored at tick",
+        "journal entries",
+    ] {
+        assert!(
+            carry_line.contains(phrase),
+            "the managed-carryover digest names no '{phrase}' evidence: {carry_line}"
+        );
+    }
+    for tamper in ["restarted-bound", "dropped-oos"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, carry-failed")),
+            "the managed-carryover leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     // The pair contract's staging leg ran and held: the out-of-service
