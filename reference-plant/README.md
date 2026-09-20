@@ -139,6 +139,14 @@ ci/report.py           the pair contract's alarm-report leg — the
                        driven pair's served journal and the field
                        owner's durable journal file, its refusal
                        modes exiting nonzero
+ci/managed_lifecycle.py  the pair contract's managed-alarm
+                       lifecycle leg — the emitted model's whole
+                       managed-alarm surface exercised end to end
+                       on the deployed pair: activation, attributed
+                       ack, the bounded shelve and its auto-release,
+                       the named never-shelvable refusal, and the
+                       designed oos/suppress wiring through its
+                       suppressed trip and return to service
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -709,6 +717,45 @@ failing `report-nondeterministic`. The leg's doctored cases — an
 expectation asserting the driven alarm left no activation, a dead
 monitor address, and a missing journal path — must each report the
 named diagnostic rather than pass silently.
+
+The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
+same declared deployment — then exercises the emitted model's whole
+managed-alarm surface end to end on the customer-owned pair
+(WW-ENG-003, WW-ALM-001, WW-ALM-002), the lifecycle the platform's
+own fixtures previously proved alone. With the pair settled and
+tracking, a field-held fault — the injected non-Good on
+`level-primary` — fails the measurement over so the `backup-active`
+managed Bool alarm's `alarm`/`unacknowledged` annunciate on the
+active's monitor with the journaled `point_changed` record; the
+receipted `ack` write settles `applied` under the leg's declared
+actor and clears the latch. The shelvable low-level alarm's writable
+`shelve` point takes the receipted request: `shelved` must report
+while the request stands and auto-release at the emitted model's
+declared `max_shelve_ticks` — the durable journal's assertion and
+expiry ticks measuring the bound exactly — while the
+never-shelvable high-level alarm's bound-but-unwritable `shelve`
+point answers the named `not_writable` refusal on the attributed
+receipt, journaled as a `command_settled` rejection with no state
+changed. The pump's `oos` point then drives the declared
+designed-suppression wiring (decision 73): the fault alarm reports
+`out_of_service`/`suppressed` while the alarms the model wires
+without those inputs report neither; a driven run-contact fault
+proves `alarm` still reports the process truth while suppression
+withholds `unacknowledged`; and the return to service evaluates the
+standing condition as a fresh `unacknowledged` transition the
+receipted `ack` clears before the field fault clears. Every
+commanded transition settles through the receipted path with actor
+attribution; the pair's roles never move and every driven input is
+restored; the field owner's durable journal file must carry the
+lifecycle's receipts and transitions in `seq` order, the served
+journal answering the same record. A violated contract fails
+`managed-lifecycle-failed`; two passes must produce the identical
+`managed-lifecycle-digest`, a divergence failing
+`managed-lifecycle-nondeterministic`. The leg's doctored cases — an
+expectation asserting the never-shelvable write settled applied,
+and one asserting the `shelved` flag still stands after the
+declared bound's own auto-release — must each report the named
+diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
