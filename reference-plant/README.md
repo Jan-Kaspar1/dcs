@@ -134,11 +134,21 @@ ci/standby_restart.py  the pair contract's standby-restart leg —
                        writes, receipts, and journal run undisturbed,
                        then promoting to prove the pair left whole
 ci/report.py           the pair contract's alarm-report leg — the
-                       released `dcs-alarm-report` computing the
-                       declared AlarmReport metric set over the
-                       driven pair's served journal and the field
-                       owner's durable journal file, its refusal
-                       modes exiting nonzero
+                        released `dcs-alarm-report` computing the
+                        declared AlarmReport metric set over the
+                        driven pair's served journal and the field
+                        owner's durable journal file, its refusal
+                        modes exiting nonzero
+ci/command_switch.py   the pair contract's command-switch leg — the
+                        exercise sequencer's kind-declared `advance`
+                        invoked through the released `dcs-ctl invoke`
+                        before and after a receipted demote/promote,
+                        each submission settling exactly once with
+                        the receipt attributed to the serving peer,
+                        the emitted events continuing monotonically
+                        with unchanged attribution, a carried invoke
+                        settling exactly once across the restore
+                        switch, and the pair's launch roles restored
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
