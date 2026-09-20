@@ -69,7 +69,11 @@ pub struct MonitorConfig {
     /// served journal answers continuously across a restart; a file
     /// that cannot be replayed fails the bind naming the file and the
     /// offending record, and a missing file is a cold start. Point
-    /// history stays volatile — only the journal persists.
+    /// history stays volatile — only the journal persists. The sink is
+    /// single-writer: the bind takes an exclusive lock on the path for
+    /// the monitor's lifetime, so a second live process configured with
+    /// the same path fails its bind naming the conflict rather than
+    /// interleaving a corrupted record.
     pub journal_file: Option<PathBuf>,
 }
 
@@ -140,7 +144,9 @@ impl Recorder {
     /// tick under `--state-file` — recorded in the journal file's
     /// run-boundary marker. Replaying a configured file seeds the
     /// journal ring and continues `seq` numbering; a file that cannot
-    /// be replayed fails here naming the file and the offending record.
+    /// be replayed fails here naming the file and the offending record,
+    /// and a file a live process already holds fails here naming the
+    /// writer-lock conflict.
     /// When the file already records earlier lifetimes, this run's
     /// marker also journals once as a served `run_boundary` entry — the
     /// file marker's served form — so a `GET /journal` consumer can
