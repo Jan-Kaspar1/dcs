@@ -86,7 +86,7 @@ use dcs_core::{
     Command, CommandOutcome, CommandReceipt, ComponentResources, PointId, ResourceEvent,
     ResourceView, RoleReport, SwitchError, Value, ValueKind,
 };
-use dcs_monitor::MonitorClient;
+use dcs_monitor::{MonitorClient, PairClient};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io;
@@ -110,6 +110,8 @@ read commands:
                               named component's ComponentResources
                               entry
   role                        the instance's RoleReport
+  pair-health <peer>...        JSON redundancy health of <addr> and peers;
+                              faults exit nonzero naming their kinds
   receipts                    the executor's receipt log
   journal [--since <seq>]     journal entries with a seq above <seq>
   history --point <id>... [--since <seq>]
@@ -235,6 +237,9 @@ enum Action {
         component: Option<String>,
     },
     Role,
+    PairHealth {
+        peers: Vec<String>,
+    },
     Receipts,
     Journal {
         since: u64,
@@ -307,6 +312,14 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             _ => return Err(usage(format!("wrong arguments for {command:?}"))),
         },
         ("role", []) => Action::Role,
+        ("pair-health", peers) => {
+            if peers.is_empty() || peers.iter().any(|peer| peer.starts_with("--")) {
+                return Err(usage(format!("wrong arguments for {command:?}")));
+            }
+            Action::PairHealth {
+                peers: peers.to_vec(),
+            }
+        }
         ("receipts", []) => Action::Receipts,
         ("journal", rest) => Action::Journal {
             since: parse_since(rest).map_err(usage)?,
@@ -532,6 +545,27 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             }
         }
         Action::Role => print_json(&client.role().map_err(|e| transport(addr, e))?, addr),
+        Action::PairHealth { peers } => {
+            let mut addrs = vec![addr];
+            for peer in peers {
+                addrs.push(resolve(peer)?);
+            }
+            let mut pair = PairClient::new(addrs);
+            pair.poll_roles();
+            let health = pair.health();
+            let answer = print_json(&health, addr)?;
+            if health.fault_kinds.is_empty() {
+                Ok(answer)
+            } else {
+                Err(Failure {
+                    answer: Some(answer),
+                    message: format!(
+                        "dcs-ctl: {addr}: pair-health faults: {}",
+                        print_json(&health.fault_kinds, addr)?
+                    ),
+                })
+            }
+        }
         Action::Receipts => print_json(&client.receipts().map_err(|e| transport(addr, e))?, addr),
         Action::Journal { since } => print_json(
             &client.journal(*since).map_err(|e| transport(addr, e))?,

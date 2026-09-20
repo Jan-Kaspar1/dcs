@@ -92,6 +92,10 @@ DEFAULT_CONFIG = {
     # revised container does not exist yet, and the case removes it
     # before the model-revision launch.
     'foreign_port': 18083,
+    # The dead-peer-latency case's driven third controller publishes
+    # its monitor here; its sim-net side shares the run's labeled
+    # bridge.
+    'driven_port': 18084,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -111,7 +115,11 @@ DEFAULT_CONFIG = {
     # (~3-5 s of misses) never reaches it.
     'failover_misses': 120,
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
-    'dynamics_fixture': 'crates/dcs-demo/fixtures/pump_station_dynamics.json',
+    # The lane's own dynamics declaration: the shared fixture leaves
+    # the inflow channel to scripted forcing, while the unattended rig
+    # needs the declared inflow so the station cycles demand on its own
+    # — the duty-rotation case's honest lever.
+    'dynamics_fixture': 'qa_lane/fixtures/pump_station_dynamics.json',
     'capabilities': [
         {'key': 'no-ethercat',
          'detail': 'No EtherCAT driver in this revision; all field I/O '
@@ -763,25 +771,37 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
            'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant '
+           '-p dcs-controller -p dcs-plant -p dcs-sim-net '
            '&& cargo build --release --locked '
            '-p dcs-monitor --bin dcs-ctl',
            timeout=cfg['builder_timeout'])
+    # Extra binaries each image ships beside its entrypoint: the plant
+    # image carries dcs-plant-ctl — the plant-side tool the lane execs
+    # inside the container against the server's loopback listener, so
+    # the covered plant ops run through the shipped binary rather than
+    # a second Python implementation of the wire protocol.
+    ship = {'plant': ['dcs-plant-ctl']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
             ('plant', 'dcs-plant-server', 'dcs-hwtest/plant')):
-        binary_path = work / 'target' / 'release' / binary
-        if not binary_path.is_file():
-            raise RuntimeError('build produced no ' + binary)
+        binaries = [binary] + ship.get(crate, [])
+        for name in binaries:
+            binary_path = work / 'target' / 'release' / name
+            if not binary_path.is_file():
+                raise RuntimeError('build produced no ' + name)
         context = run_dir / ('image-' + crate)
         context.mkdir(exist_ok=True)
-        shutil.copy2(binary_path, context / binary)
+        copies = ''
+        for name in binaries:
+            shutil.copy2(work / 'target' / 'release' / name,
+                         context / name)
+            copies += 'COPY ' + name + ' /usr/local/bin/' + name + '\n'
         (context / 'Dockerfile').write_text(
             'FROM debian:bookworm-slim\n'
             'RUN useradd --no-create-home --shell /usr/sbin/nologin '
             '--uid 10001 dcs\n'
-            'COPY ' + binary + ' /usr/local/bin/' + binary + '\n'
+            + copies +
             'USER dcs\n'
             'ENTRYPOINT ["' + binary + '"]\n'
             'CMD ["--help"]\n')
@@ -833,6 +853,14 @@ CONTAINER_RUN_DIR = '/var/lib/dcs-run'
 CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 
+# Deterministic plant-writer owner tokens pinned per endpoint key so a
+# scenario attachment can `ensure_writer` with the standing owner's
+# token — the designed shared-claim path for a test harness driving
+# plant stimuli (the controller's --owner-token contract). Each
+# process keeps its own token: the sim's writer claim still fences
+# every other owner, and a standby holds no claim until it promotes.
+PLANT_OWNER_TOKENS = {'active': 424243, 'standby': 424244}
+
 
 def _controller_dir(run_dir, name):
     """The run-dir state directory bind-mounted into controller `name`'s
@@ -869,6 +897,42 @@ def restart_controller(run_id, name, timeline):
     docker('stop', '--time', '2', container, timeout=90)
     docker('start', container, timeout=60)
     timeline('controller-restarted', container + ' running')
+
+
+def cold_restart_controller(run_id, run_dir, name, timeline):
+    """The scenario-callable cold restart: `docker stop` on one of the
+    run's controller containers, remove that controller's host-side
+    --state-file inside the bounded run dir, then `docker start` — the
+    induction the source-restart scenario needs to produce a
+    checkpoint stream whose served tick regresses below the tracking
+    peer's last alignment. Where `restart_controller` preserves the
+    persisted state and resumes the same run, this leaves the
+    restarted process nothing to resume: it binds its --journal-file
+    (which stays — the new run-boundary marker at tick 0 is part of
+    the evidence the resume was cold) and serves its checkpoint
+    stream from the beginning of a fresh run.
+
+    `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
+    container and state dir, 'standby' ctrl-b's, whichever role each
+    currently reports. Only the named controller's state.json is
+    removed, and only inside this run's bounded directory. Both
+    docker halves are recorded on the run's action timeline; a docker
+    or state-file failure raises so the calling scenario reports the
+    cold restart never completed rather than silently performing a
+    warm restart.
+    """
+    container = _controller_container(run_id, name)
+    peer = container.rsplit('-', 1)[1]
+    state = _controller_dir(run_dir, peer) / 'state.json'
+    timeline('controller-cold-restart', 'docker stop ' + container
+             + '; drop ' + str(state))
+    docker('stop', '--time', '2', container, timeout=90)
+    existed = state.is_file()
+    state.unlink(missing_ok=True)
+    docker('start', container, timeout=60)
+    timeline('controller-cold-restarted', container
+             + ' running cold (state file '
+             + ('dropped' if existed else 'already absent') + ')')
 
 
 def stop_controller(run_id, name, timeline):
@@ -918,6 +982,23 @@ def start_plant(run_id, timeline):
     timeline('plant-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('plant-started', container + ' running')
+
+
+def plant_ctl(run_id, port, *args):
+    """The scenario-callable plant-tool invocation: `docker exec` runs
+    the shipped `dcs-plant-ctl` inside the run's plant container
+    against the server's loopback listener — the ticket's honest seam,
+    so the lane's covered plant ops drive the binary the image carries
+    rather than a second Python implementation of the wire protocol.
+    The loopback address binds inside the container's own netns — the
+    exchange never leaves the rig bridge the netpolicy closes.
+    `check=False` returns the CompletedProcess on a refused request too
+    — the tool's nonzero exit is the answer the caller classifies, not
+    a docker failure."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    return docker('exec', container, 'dcs-plant-ctl',
+                  '127.0.0.1:' + str(port), *args,
+                  check=False, timeout=60)
 
 
 def _revised_peer_role(cfg):
@@ -1112,30 +1193,109 @@ def stop_foreign_controller(run_id, timeline):
     timeline('negotiation-stopped', container + ' removed')
 
 
+def start_driven_controller(cfg, record, run_dir, model, active,
+                            timeline):
+    """The scenario-callable driven-standby launch — the
+    dead-peer-latency case's second survivor: the run's labeled
+    driven controller on the same mounted model, `--standby <peer>
+    --driven`, so every checkpoint pull it ever performs happens
+    inside a `POST /scan` request — the per-request pull chain a
+    batched scan carries, and the work the serve-pool decision
+    confines to the batch's own worker. Fresh and never driven, it
+    reports `unsynchronized` — the convergence-grace clock the pair
+    health surface reads.
+
+    `active` is the scenario ctx key of the peer the driven standby
+    tracks ('active' is ctrl-a, 'standby' ctrl-b) — the checkpoint
+    source the case's stop induction then makes unreachable. The
+    container carries the run's managed and run labels so teardown
+    reconciles it with the rest of the rig, mounts the run's model
+    read-only at /model/plant.json, publishes its monitor on
+    cfg['driven_port'], and gets its own runner-owned state/journal
+    directory. The launch is recorded on the run's action timeline; a
+    docker failure raises so the calling scenario reports the action
+    never completed.
+
+    Returns the launched container's name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_driven expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    directory = _controller_dir(run_dir, 'd')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-d'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    timeline('driven-start', 'launch ' + container + ' --standby '
+             + standby + ' --driven')
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['driven_port']) + ':8082',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/plant.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--standby', standby,
+           '--driven', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE)
+    timeline('driven-up', container + ' serving a driven standby')
+    return {'container': container}
+
+
+def stop_driven_controller(run_id, timeline):
+    """The dead-peer-latency case's teardown: `docker rm -f` on the
+    driven peer's container — removed outright, not held down, so
+    later cases see the rig's original pair. Recorded on the run's
+    action timeline like the other lifecycle actions; a docker
+    failure raises so the calling scenario reports the teardown
+    never completed."""
+    container = 'dcs-hw-' + run_id + '-d'
+    timeline('driven-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('driven-stopped', container + ' removed')
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key (the model-revision case's third controller
     answers on 'revised' once launched, the checkpoint-negotiation
-    case's foreign peer on 'foreign'), the published plant-protocol
-    endpoint, the run's evidence dir and deadline, the runner-owned
-    controller-restart, plant stop/start, model-revision, and
-    foreign-peer launch/teardown actions, and the host-side
+    case's foreign peer on 'foreign', the dead-peer-latency case's
+    driven standby on 'driven'), the published plant-protocol
+    endpoint, the pinned plant-writer owner token per endpoint key,
+    the run's evidence dir and deadline, the runner-owned
+    controller restart/cold-restart, plant stop/start,
+    model-revision, foreign-peer launch/teardown, and driven-peer
+    launch/teardown actions, the shipped plant tool's docker-exec
+    invocation, and the host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
-             'foreign': 'foreign'}
+             'foreign': 'foreign', 'driven': 'd'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
+        'driven': 'http://127.0.0.1:' + str(cfg['driven_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # The pinned --owner-token per endpoint key: a scenario
+        # attachment ensures the writer claim under the active's token
+        # to drive plant stimuli on the designed shared-claim path.
+        'plant_owner': dict(PLANT_OWNER_TOKENS),
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'cold_restart_controller': lambda name: cold_restart_controller(
+            run_id, run_dir, name, timeline),
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
@@ -1143,6 +1303,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
+        # The shipped dcs-plant-ctl inside the plant container — the
+        # lane's seam for every plant op the tool's subcommands cover.
+        'plant_ctl': lambda *args: plant_ctl(
+            run_id, cfg['plant_port'], *args),
         'start_revised': lambda name, incompatible=False:
             start_revised_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'],
@@ -1151,6 +1315,11 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             cfg, record, run_dir, src / cfg['model_fixture'], name,
             timeline),
         'stop_foreign': lambda: stop_foreign_controller(
+            run_id, timeline),
+        'start_driven': lambda name: start_driven_controller(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
+        'stop_driven': lambda: stop_driven_controller(
             run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
@@ -1222,6 +1391,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(PLANT_OWNER_TOKENS['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1234,6 +1404,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(PLANT_OWNER_TOKENS['standby']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',

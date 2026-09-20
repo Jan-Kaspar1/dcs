@@ -780,7 +780,7 @@ fn schema_and_resource_reads_never_hold_the_executor_lock() {
         // no part of serving either view joins the executor lock.
         let deadline = Instant::now() + Duration::from_secs(5);
         for _ in 0..12 {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
         }
         assert!(
             Instant::now() < deadline,

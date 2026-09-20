@@ -54,14 +54,44 @@ container while the active keeps scanning; peer management and takeover
 semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 11–15) and are not part of this image.
 
+### Rolling a revised model
+
+The no-interruption path is the pair roll: start a third container as
+`--standby <active> --revised` mounting the revised document, let it
+converge `reinitialized` on the active's checkpoint stream under the
+documented carryover rule, then demote the old peer and promote it —
+the field writer changes models at a scan boundary without the process
+ever stopping (decision 25).
+
+A lone controller has no peer to carry the run, so its roll is the
+scheduled outage the restart already is — the unattended-station
+deployment class the lifecycle evidence names. The container runs with
+a persistent `--state-file` mount; for the roll the deployment stops
+it, swaps its mounted model for the revised document, and restarts it
+armed `--revised` on the same state file. The persisted checkpoint's
+foreign fingerprint crosses the model boundary through the same
+carryover rule the pair uses — carried setpoints, the output image,
+and the force set survive where a cold start would lose them — the run
+resumes at the last persisted cycle, and the crossing's carryover
+report prints at startup and lands in the durable record when
+`--journal-file` runs. A revision the rule cannot carry fails startup
+naming the `CarryoverError` and leaves the state file untouched, so
+the operator rolls back to the previous document and restarts into the
+known-good checkpoint; restarting on the revised document *without*
+`--revised` still refuses the fingerprint, so the crossing never
+happens undeclared. The outage is bounded by the restart itself — the
+pair roll remains the path when the process must not stop.
+
 ## Plant container image
 
 `Dockerfile.plant` packages the `dcs-plant-server` binary — the shared
 simulated plant of `dcs-sim-net` — the same way: a
 `rust:1.98.1-bookworm` build stage runs
-`cargo build --release --locked -p dcs-plant`, and a
-`debian:bookworm-slim` runtime stage carries only the resulting binary,
-executed as the same non-root user. A second Dockerfile, rather than a
+`cargo build --release --locked -p dcs-plant -p dcs-sim-net`, and a
+`debian:bookworm-slim` runtime stage carries the resulting server
+binary plus `dcs-plant-ctl`, the plant-side wire-protocol tool, beside
+it for `docker exec` perturbation of the running plant — executed as
+the same non-root user. A second Dockerfile, rather than a
 build-arg-parameterized shared one, keeps each image a self-contained,
 statically inspectable artifact; the two files are deliberately kept in
 lockstep. Together with the controller image it completes the
@@ -195,7 +225,10 @@ http://localhost:8080/?peer=localhost:8081
 
 The page polls `GET /role` on both peers, renders the settled-active
 peer's telemetry plus per-peer pair health, and submits commands only
-to the peer reporting `active`.
+to the peer reporting `active`. The plant image also ships
+`dcs-plant-ctl`, the plant-side tool `docs/architecture.md` records —
+`docker exec dcs-plant dcs-plant-ctl dcs-plant:9001 <command>` perturbs
+the running plant's field points for a live demonstration.
 
 ### Demonstrating a promotion
 

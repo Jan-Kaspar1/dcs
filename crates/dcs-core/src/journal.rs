@@ -387,6 +387,12 @@ mod tests {
                         carried_forces: vec![],
                         dropped: vec![DroppedElement::InternalPoint { point: PointId(31) }],
                         reinitialized: vec!["level_ctrl".to_string()],
+                        reverted_tuning: vec![crate::RevertedParameter {
+                            component: "level_ctrl".to_string(),
+                            parameter: "gain".to_string(),
+                            checkpointed: Value::Float(3.0),
+                            declared: Value::Float(2.0),
+                        }],
                         initialized: vec![PointId(32)],
                     },
                 },

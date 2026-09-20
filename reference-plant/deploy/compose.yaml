@@ -25,6 +25,13 @@
 # process. The model and dynamics mounts stay read-only: deployment
 # inputs are mounted, never written.
 #
+# The manifest's `failover_budget` on the standby entry instantiates
+# as ctrl-b's `--auto-promote` argument — the missed-pull budget at
+# which the tracking standby self-promotes when its active dies
+# (decision 28's automatic-failover rule). Declaring the pair's
+# `standby` wiring alone never arms it: only the declared budget
+# does.
+#
 # `ci/check.sh`'s `deploy` stage asserts this file and the manifest
 # agree on every field — a divergence fails `rig-mismatch` — and that
 # `docker compose config` (or the stage's fallback parser) accepts it.
@@ -116,6 +123,8 @@ services:
       - dcs-plant:9001
       - --standby
       - ctrl-a:8080
+      - --auto-promote
+      - "3"
       - --scan-ms
       - "100"
       - --listen

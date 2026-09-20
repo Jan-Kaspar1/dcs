@@ -125,7 +125,7 @@ fn boolean(driver: &FanoutDriver, point: PointId) -> bool {
 /// last `step` made current: the tick-0 demand is already in effect at
 /// scan 1.
 fn scan(executor: &mut Executor, driver: &FanoutDriver) {
-    executor.scan().unwrap();
+    executor.scan();
     driver.step(0.1).unwrap();
 }
 
