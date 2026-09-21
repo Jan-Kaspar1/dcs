@@ -23,8 +23,9 @@
 //! command reports the scan tick it is scheduled to apply at and later an
 //! [`CommandOutcome::Applied`] receipt at that tick; a refused command is
 //! [`CommandOutcome::Rejected`] with a [`CommandError`] naming the
-//! reason — unknown point, not model-declared writable, type mismatch, or
-//! driver rejection for point commands; unknown component, unknown or
+//! reason — unknown point, not model-declared writable, type mismatch,
+//! driver rejection, or a write to a force-held internal point for point
+//! commands; unknown component, unknown or
 //! unsupported parameter, type mismatch, or out-of-range for parameter
 //! commands; a full pending-command queue refusing admission for either —
 //! and carrying the offending point or component.
@@ -57,6 +58,14 @@ pub enum Command {
     /// `kind`, or when `kind` differs from the kind the point map declares
     /// for `point`. Matching is strict, never coercing, mirroring the I/O
     /// contract.
+    ///
+    /// A write to a point a [`ForcePoint`](Self::ForcePoint) currently
+    /// pins is honored only where a store exists for the release to
+    /// observe: a forced *field* point's write still reaches the driver
+    /// — the force overrides the image, not the field — while a forced
+    /// *internal* point has no store but the image the force owns, so
+    /// its write refuses with [`CommandError::PointForced`] rather than
+    /// settling `applied` for an effect that could never land.
     WriteValue {
         /// The logical point to write.
         point: PointId,
@@ -95,7 +104,11 @@ pub enum Command {
     /// `value` stamped
     /// [`Quality::Uncertain`](crate::Quality::Uncertain)`(`[`QualityReason::Substituted`](crate::QualityReason::Substituted)`)`
     /// — substitution, never false `Good` data — and the driver's read
-    /// is bypassed; a force writes nothing to the field.
+    /// is bypassed; a force writes nothing to the field. While the
+    /// force stands, a [`WriteValue`](Self::WriteValue) to a *field*
+    /// point still reaches the driver for the release to observe; the
+    /// same write to a force-held *internal* point refuses with
+    /// [`CommandError::PointForced`].
     ForcePoint {
         /// The logical point to force.
         point: PointId,
@@ -214,6 +227,19 @@ pub enum CommandError {
         point: PointId,
         /// The error the driver returned.
         error: IoError,
+    },
+    /// The write targets an image-held (internal) `In` point while a
+    /// force stands on it. The force owns the point's image until
+    /// release — the input phase re-stamps the forced value every scan —
+    /// and the executor keeps no second store for the release to
+    /// observe, so nothing the write staged could ever land: settling
+    /// `Applied` would journal an effect that never happened. Release
+    /// the force, then write. Forced *field* points refuse nothing
+    /// here: their write still reaches the driver, which holds it for
+    /// the release to observe.
+    PointForced {
+        /// The offending point.
+        point: PointId,
     },
     /// The controller hosts no component of this name.
     UnknownComponent {
@@ -359,7 +385,8 @@ impl CommandError {
             CommandError::UnknownPoint { point }
             | CommandError::NotWritable { point }
             | CommandError::TypeMismatch { point, .. }
-            | CommandError::DriverRejected { point, .. } => Some(*point),
+            | CommandError::DriverRejected { point, .. }
+            | CommandError::PointForced { point } => Some(*point),
             CommandError::NotActive { point, .. }
             | CommandError::QueueFull { point, .. }
             | CommandError::Superseded { point } => *point,
@@ -405,6 +432,12 @@ impl fmt::Display for CommandError {
             CommandError::DriverRejected { point, error } => {
                 write!(f, "driver rejected command on I/O point {point:?}: {error}")
             }
+            CommandError::PointForced { point } => write!(
+                f,
+                "I/O point {point:?} is forced: the force owns the image-held \
+                 point until release, so the write cannot land; release the \
+                 force, then write"
+            ),
             CommandError::UnknownComponent { component } => {
                 write!(f, "unknown component {component:?}")
             }
@@ -847,6 +880,9 @@ mod tests {
                 },
             },
             CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(7) },
+            },
+            CommandOutcome::Rejected {
                 reason: CommandError::UnknownComponent {
                     component: "ghost".to_string(),
                 },
@@ -947,6 +983,7 @@ mod tests {
                 point,
                 error: IoError::Disconnected(point),
             },
+            CommandError::PointForced { point },
             CommandError::QueueFull {
                 point: Some(point),
                 capacity: 4,
