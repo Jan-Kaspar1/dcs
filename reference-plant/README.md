@@ -186,6 +186,15 @@ ci/command_switch.py   the pair contract's command-switch leg — the
                         with unchanged attribution, a carried invoke
                         settling exactly once across the restore
                         switch, and the pair's launch roles restored
+ci/demote_pending.py   the pair contract's demote-boundary
+                        pending-command leg — a receipted write
+                        admitted on the active and demoted past
+                        inside its pending window settling exactly
+                        once through the carry or the named
+                        superseded rejection, both peers' journals,
+                        receipt logs, images, and durable files
+                        audited for the single audited settle, and
+                        the pair's launch roles restored
 ci/managed_lifecycle.py  the pair contract's managed-alarm
                         lifecycle leg — the emitted model's whole
                         managed-alarm surface exercised end to end
@@ -926,6 +935,38 @@ produce the identical `command-switch-digest`, a divergence failing
 `command-switch-nondeterministic`. The leg's doctored cases — a
 submission settling zero times and one settling twice — must each
 report the named diagnostic rather than pass silently.
+
+The stage's demote-pending leg — `ci/demote_pending.py` on the same
+declared deployment — then exercises the demote-boundary
+pending-command settlement contract on the customer's pair: a command
+an operator races against a demotion must meet the audited settle,
+never a silent loss or a phantom application. With the pair settled
+and tracking, the leg submits a receipted `write_value` on a declared
+writable point through the field owner's `POST /command` and leaves
+it pending, then issues the documented `demote` on the owner inside
+that window and the `promote` on the converged standby — the
+promotion's final-sync checkpoint carrying the still-`Accepted`
+admission into the successor's log. The demoted peer's first
+quiesced scan, driven before the promoted peer's first field-owning
+scan, is the decisive observation: its fenced image must journal no
+`command_settled` for the admission, must still hold the suspended
+`accepted` receipt, and must still read the baseline — a quiesced
+scan mints no `applied` the line never ordered and drops no pending
+entry unaudited. The promoted peer then settles the admission
+exactly once — `applied` through the carry, or `Rejected{superseded}`
+with the settle journaled on the demoted peer alone — and the audit
+asserts both peers' served journals and adopted receipt logs carry
+the same single outcome, the served images agree, and each
+manifest-declared durable journal file records the settle in `seq`
+order. The leg restores the pair's launch roles, leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `demote-pending-failed`; two passes must
+produce the identical `demote-pending-digest`, a divergence failing
+`demote-pending-nondeterministic`. The leg's doctored cases — an
+expectation asserting the phantom applied settle the fenced image
+must never journal, and one asserting the pending entry vanished
+from every receipt surface and journal — must each report the named
+diagnostic rather than pass silently.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole
