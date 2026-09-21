@@ -12,7 +12,7 @@ use dcs_core::{
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
-use dcs_runtime::{Executor, PointMap};
+use dcs_runtime::{Executor, Peer, PointMap};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -257,5 +257,187 @@ fn served_run_boundaries_survive_a_flood_past_the_tail_bound() {
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #726's regression: a tracking standby restarted onto a checkpoint
+/// whose receipt window no longer covers a settlement its journal file
+/// already recorded — the missing `--state-file` cold start —
+/// re-journaled the adopted `command_settled` across the run boundary.
+/// The durable file is the pair's one command audit trail — one
+/// `command_settled` per settlement — so the replayed file's settled
+/// fold must mark the journaled receipt already recorded, while a
+/// settlement the file never saw still journals as this run's news.
+#[test]
+fn a_cold_restarted_standby_does_not_rejournal_the_adopted_settlement() {
+    let dir = scratch("adopted-settled");
+    let journal = dir.join("standby.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let active_driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let map = || PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let bind_standby = || {
+        let executor = Executor::new(&driver, map(), Vec::new()).unwrap();
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::standby(executor, None),
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(journal.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    let settlements = || {
+        read_journal_file(&journal)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .count()
+    };
+
+    // The tracked run: a write submitted to the field owner applies at
+    // its next boundary — the receipt the pair's audit carries.
+    let mut active = Peer::active(
+        Executor::new(&active_driver, map(), Vec::new()).unwrap(),
+        None,
+    );
+    active.scan();
+    active.submit_command(Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(2.5),
+    });
+    active.scan();
+    let checkpoint = active.checkpoint();
+
+    // First lifetime: the standby converges on the checkpoint and its
+    // first scan journals the adopted settlement — the file's one
+    // record of it.
+    let first = bind_standby();
+    first.apply_checkpoint(&checkpoint).unwrap();
+    first.paced_scan();
+    assert_eq!(settlements(), 1);
+    drop(first);
+
+    // The restart onto a missing `--state-file`: a cold executor
+    // behind the replayed journal file. The first post-restart
+    // adoption carries the same settled receipt — first observed by
+    // the empty receipt baseline, it must not journal a second time.
+    let second = bind_standby();
+    second.apply_checkpoint(&checkpoint).unwrap();
+    second.paced_scan();
+    assert_eq!(
+        settlements(),
+        1,
+        "the journaled settlement must not re-record across the run boundary"
+    );
+    assert_eq!(read_journal_file(&journal).unwrap().boundaries.len(), 2);
+
+    // A settlement the file never saw still journals: the next adopted
+    // command is this run's news, not the replay fold's.
+    active.submit_command(Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(7.5),
+    });
+    active.scan();
+    second.apply_checkpoint(&active.checkpoint()).unwrap();
+    second.paced_scan();
+    assert_eq!(settlements(), 2);
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #726's sibling path: a standby restarted with its `--state-file`
+/// intact — the restored checkpoint's receipt window covering the
+/// journaled settlement — must not re-journal either: the restored
+/// receipts are marked observed at bind, and the fold's accounting
+/// leaves a settlement the file never saw free to journal.
+#[test]
+fn a_state_restored_standby_still_journals_only_new_settlements() {
+    let dir = scratch("restored-settled");
+    let journal = dir.join("standby.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let active_driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let map = || PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let settlements = || {
+        read_journal_file(&journal)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::CommandSettled { .. }))
+            .count()
+    };
+
+    // The tracked run settles the write the pair audits.
+    let mut active = Peer::active(
+        Executor::new(&active_driver, map(), Vec::new()).unwrap(),
+        None,
+    );
+    active.scan();
+    active.submit_command(Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(2.5),
+    });
+    active.scan();
+
+    // First lifetime: adopt, journal, and persist — the standby's own
+    // checkpoint is the `--state-file` its restart resumes from.
+    let first = {
+        let executor = Executor::new(&driver, map(), Vec::new()).unwrap();
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::standby(executor, None),
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(journal.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    first.apply_checkpoint(&active.checkpoint()).unwrap();
+    first.paced_scan();
+    assert_eq!(settlements(), 1);
+    let persisted = first.checkpoint();
+    drop(first);
+
+    // The restart resumes the persisted checkpoint — the restored
+    // receipt log is marked observed at bind — and reconverges: the
+    // journaled settlement must not re-record.
+    let restored = {
+        let mut executor = Executor::new(&driver, map(), Vec::new()).unwrap();
+        executor.apply(&persisted).unwrap();
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::standby(executor, None),
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(journal.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    restored.apply_checkpoint(&active.checkpoint()).unwrap();
+    restored.paced_scan();
+    assert_eq!(settlements(), 1);
+
+    // The next settlement the file never saw still journals.
+    active.submit_command(Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(7.5),
+    });
+    active.scan();
+    restored.apply_checkpoint(&active.checkpoint()).unwrap();
+    restored.paced_scan();
+    assert_eq!(settlements(), 2);
+    drop(restored);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
