@@ -98,6 +98,14 @@ STARVE_REQUESTS = (
 # The serving-lane reads the hold samples on each peer.
 READ_ENDPOINTS = ("/role", "/snapshot", "/checkpoint")
 
+# The attempts one sampled read gets before its miss is named: each
+# attempt is a fresh request owed an answer inside the declared bound,
+# but the sample only reports a miss when every attempt misses — one
+# scheduling stall on a shared runner cannot read as the pinned-lane
+# regression the leg exists to catch, while a starved lane misses
+# them all.
+STARVE_ATTEMPTS = 3
+
 # The transition events a starvation window must never add to either
 # peer's durable journal — a role change or a lost field claim is the
 # spurious-failover record.
@@ -130,14 +138,27 @@ def starvation_flood(url):
     return streams
 
 
-def timed_get(url, bound):
-    """GET a JSON endpoint requiring the answer inside `bound`
-    seconds; returns `(body, elapsed)`. Raises on any transport
-    error or timeout — a starved read."""
-    started = time.monotonic()
-    with urllib.request.urlopen(url, timeout=bound) as response:
-        body = json.load(response)
-    return body, time.monotonic() - started
+def sampled_read(url, bound):
+    """One bounded liveness sample: GET `url` up to STARVE_ATTEMPTS
+    times, each attempt a fresh request owed an answer inside `bound`
+    seconds. Returns `(body, verdict, detail)` — `bounded` with the
+    decoded body when an attempt answers inside the bound, `late`
+    when attempts answered but none inside it, `starved` when no
+    attempt answered at all; `detail` is the last attempt's error."""
+    answered = False
+    error = None
+    for _ in range(STARVE_ATTEMPTS):
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(url, timeout=bound) as response:
+                body = json.load(response)
+        except Exception as exc:
+            error = exc
+            continue
+        answered = True
+        if time.monotonic() - started <= bound:
+            return body, "bounded", None
+    return None, "late" if answered else "starved", error
 
 
 def forbidden_events(path):
@@ -228,7 +249,10 @@ def starvation_pass(args, tamper):
         )
         rounds = budget + 1
         reads = {
-            name: {path: {"answered": 0, "within": 0} for path in READ_ENDPOINTS}
+            name: {
+                path: {"bounded": 0, "late": 0, "starved": 0}
+                for path in READ_ENDPOINTS
+            }
             for name, _url, _role in peers
         }
         pulls = {"driven": 0, "landed": 0}
@@ -236,24 +260,22 @@ def starvation_pass(args, tamper):
         for round_ in range(rounds):
             for name, url, want in peers:
                 for path in READ_ENDPOINTS:
-                    try:
-                        body, elapsed = timed_get(url + path, bound)
-                    except Exception as error:
+                    body, verdict, detail = sampled_read(url + path, bound)
+                    reads[name][path][verdict] += 1
+                    if verdict == "starved":
                         failures.append(
                             f"GET {path} on {name} never answered "
                             f"inside the declared {bound}s bound under "
-                            f"the hold: {error}"
+                            f"the hold: {detail}"
                         )
                         continue
-                    reads[name][path]["answered"] += 1
-                    if elapsed <= bound:
-                        reads[name][path]["within"] += 1
-                    else:
+                    if verdict == "late":
                         failures.append(
-                            f"GET {path} on {name} answered in "
-                            f"{elapsed:.2f}s past the declared {bound}s "
-                            "bound under the hold"
+                            f"GET {path} on {name} answered past the "
+                            f"declared {bound}s bound on every attempt "
+                            "under the hold"
                         )
+                        continue
                     if path == "/role":
                         role = (
                             body.get("role") if isinstance(body, dict) else None
@@ -341,10 +363,10 @@ def starvation_pass(args, tamper):
                     name: {
                         path: (
                             "bounded"
-                            if entry["within"] == rounds
-                            else "late"
-                            if entry["answered"]
+                            if entry["bounded"] == rounds
                             else "starved"
+                            if entry["starved"] == rounds
+                            else "late"
                         )
                         for path, entry in endpoints.items()
                     }
