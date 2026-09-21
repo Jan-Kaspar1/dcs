@@ -738,7 +738,12 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 /// false `Good` data — and an internal-link route onto the point is
 /// likewise overridden. A `WriteValue` to a forced field point still
 /// reaches the driver — the force overrides the image, not the field —
-/// so the release observes whatever the field then carries. Release is
+/// so the release observes whatever the field then carries; the same
+/// write to a forced *internal* point refuses at validation with
+/// [`CommandError::PointForced`] — the image the force owns is the
+/// point's only store, so the input phase would re-stamp the forced
+/// value over the staged write within the same scan and an `Applied`
+/// settlement would journal an effect that never lands. Release is
 /// the same boundary in reverse: the applying scan's input phase reads
 /// the driver again for a field point, while a held internal point's
 /// image — left with the force's last `Substituted` stamp — is
@@ -1300,11 +1305,14 @@ impl<'d> Executor<'d> {
     /// Queues `command` for application at the start of the next scan and
     /// returns its receipt.
     ///
-    /// Submission validates the command statically — a `WriteValue`,
+    /// Submission validates the command — a `WriteValue`,
     /// `ForcePoint`, or `UnforcePoint` against the point map (the point
     /// must be served, must be a writable `In` point, and for the
     /// value-carrying pair the declared kind must match both the
-    /// map's kind and the supplied value's variant), a `SetParameter`
+    /// map's kind and the supplied value's variant; a `WriteValue`
+    /// additionally refuses an internal point a force currently pins,
+    /// [`CommandError::PointForced`], since the force owns the point's
+    /// only store until release), a `SetParameter`
     /// against the addressed component's
     /// descriptor (the component must be registered, the parameter
     /// declared, the value's kind matching, and a declared
@@ -1314,8 +1322,10 @@ impl<'d> Executor<'d> {
     /// tick the command is scheduled to apply at; at the head of the next
     /// [`scan`](Executor::scan), before the input-read phase, that same
     /// log entry's outcome is updated to [`CommandOutcome::Applied`], or
-    /// `Rejected` when the driver refuses the write or the component
-    /// refuses the tuned value — exactly one receipt per command, kept
+    /// `Rejected` when the driver refuses the write, the component
+    /// refuses the tuned value, or a force queued ahead of a write in
+    /// the same boundary pinned its internal point first — exactly one
+    /// receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
     /// The log is bounded — settled receipts evict oldest-first past
     /// [`receipt_log_capacity`](Executor::receipt_log_capacity), a
@@ -2189,21 +2199,30 @@ impl<'d> Executor<'d> {
         Ok(())
     }
 
-    /// Validates `command` statically and resolves what it will apply.
-    /// The checks are static — the map fixes which points exist, which of
-    /// them are writable `In` points, and their declared kinds, and a
-    /// component's descriptor fixes which parameters exist, their kinds,
-    /// and their declared ranges — so the same check at submission and at
-    /// application can only differ when the driver or the component
-    /// itself refuses.
+    /// Validates `command` and resolves what it will apply. The checks
+    /// are static — the map fixes which points exist, which of them are
+    /// writable `In` points, and their declared kinds, and a component's
+    /// descriptor fixes which parameters exist, their kinds, and their
+    /// declared ranges — plus one run-state check: whether a force
+    /// currently pins an internal point a `WriteValue` targets, which a
+    /// force queued ahead of it in the same boundary can newly answer,
+    /// so a submission's `Accepted` can still settle `Rejected` at
+    /// application when the boundary's own ordering forces the point
+    /// first.
     ///
     /// A `WriteValue` must name a served point ([`CommandError::UnknownPoint`])
     /// the map marks writable and whose direction is `In`
     /// ([`CommandError::NotWritable`] otherwise — every `Out` point
     /// refuses writes), then the declared kind must match the map's and
     /// the supplied value's variant ([`CommandError::TypeMismatch`]).
-    /// `ForcePoint`/`UnforcePoint` share that surface: a force pins a
-    /// point only the operator could write, so the same
+    /// One state check follows the static ones: a `WriteValue` to an
+    /// *internal* point a force currently pins refuses with
+    /// [`CommandError::PointForced`] — the image is the point's only
+    /// store and the force owns it until release, so nothing the write
+    /// staged could ever land — while a forced *field* point's write
+    /// still resolves, the driver holding it for the release to
+    /// observe. `ForcePoint`/`UnforcePoint` share the writable surface:
+    /// a force pins a point only the operator could write, so the same
     /// `UnknownPoint`/`NotWritable`/`TypeMismatch` rejections bound it —
     /// and a force never touches the driver, so no boundary refusal
     /// exists for the pair.
@@ -2247,6 +2266,20 @@ impl<'d> Executor<'d> {
                         expected: *kind,
                         found: *value,
                     });
+                }
+                // A write to a forced *internal* point cannot land: the
+                // image is the point's only store and the force owns it
+                // — the input phase re-stamps the forced value over the
+                // staged write within the same scan — so the receipted
+                // path refuses rather than settle `Applied` for an
+                // effect nothing can observe. A forced *field* point's
+                // write still resolves: the driver keeps it for the
+                // release to read back.
+                if matches!(command, Command::WriteValue { .. })
+                    && spec.internal.is_some()
+                    && self.forces.contains_key(point)
+                {
+                    return Err(CommandError::PointForced { point: *point });
                 }
                 Ok(match command {
                     Command::ForcePoint { .. } => Resolved::Force {
@@ -2381,7 +2414,12 @@ impl<'d> Executor<'d> {
     ///
     /// A command to an internal point writes the image directly — the
     /// driver does not serve it — so a held `In` value changes here and
-    /// holds until the next command.
+    /// holds until the next command. A write to an internal point a
+    /// force pins never reaches here: validation refuses it
+    /// [`CommandError::PointForced`], at submission or at this boundary
+    /// when a force queued ahead of it just landed, because the force's
+    /// input-phase substitution would erase the staged value before any
+    /// publication could observe it.
     ///
     /// A `SetParameter` lands on the component's
     /// [`apply_parameter`](Component::apply_parameter) hook at this same
@@ -4789,6 +4827,145 @@ mod tests {
         for (sample, point) in released.into_iter().zip([PointId(10), PointId(20)]) {
             assert_eq!(written.sample(point), sample, "point {point:?}");
         }
+    }
+
+    /// QA finding
+    /// `write-to-forced-held-point-settles-applied-without-effect`: an
+    /// internal `In` point's image IS its store, so a write staged
+    /// while a force stands is overwritten by the force's input-phase
+    /// substitution in the same scan — an `Applied` receipt would
+    /// journal an effect that never lands. The receipted path refuses
+    /// the write by name instead, and the image, the receipt, and the
+    /// post-release value all agree.
+    #[test]
+    fn write_to_a_forced_internal_point_is_refused_by_name() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+
+        executor.scan();
+        // The held point keeps its wired initial: internal `In` samples
+        // re-stamp only when a command writes them.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick::ZERO))
+        );
+
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 2))
+        );
+
+        // The write refuses at submission with the named reason — never
+        // accepted, never queued, never applied.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // The next scan substitutes the forced value as usual: the
+        // written 4.0 enters no publication, and the settled receipt
+        // says exactly that — `Rejected`, not a phantom `Applied`.
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 3))
+        );
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // Release stands the forced value `Good` — the only value the
+        // applied commands ever staged.
+        executor.submit_command(unforce_point(10));
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(4)))
+        );
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(4)))
+        );
+    }
+
+    #[test]
+    fn write_queued_behind_a_force_in_the_same_boundary_is_refused() {
+        // The boundary re-validates each queued command in submission
+        // order, so a write accepted while the point was unforced still
+        // settles `Rejected` when a force queued ahead of it lands
+        // first — the queue's own ordering can newly answer the
+        // run-state check.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+
+        executor.scan();
+        let outcomes: Vec<&CommandOutcome> = executor
+            .receipts()
+            .iter()
+            .map(|receipt| &receipt.outcome)
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                &CommandOutcome::Applied { tick: Tick(1) },
+                &CommandOutcome::Rejected {
+                    reason: CommandError::PointForced { point: PointId(10) }
+                },
+            ]
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 1))
+        );
+
+        // Submission validates against the standing force set, not the
+        // pending queue: a write submitted while the force still stands
+        // refuses even with its release already queued behind it.
+        executor.submit_command(unforce_point(10));
+        let refused = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            refused.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // Once the release lands the same write applies legitimately —
+        // the point is no longer forced when the write resolves, so its
+        // value lands in the image and holds.
+        executor.scan();
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(4.0), Tick(3)))
+        );
     }
 
     #[test]
