@@ -10,6 +10,12 @@ from unittest.mock import patch
 
 from agent_pool.runtime import Runtime, atomic_json, is_alive, process_identity, runner
 
+# agent_pool.runtime is a Linux/WSL runtime: process identity reads /proc,
+# timeout and stop paths signal process groups via os.killpg, and spawn
+# fixtures rely on /bin/true.
+posix_only = unittest.skipUnless(os.name == 'posix',
+                                 'agent_pool runtime is Linux/WSL only')
+
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
@@ -69,10 +75,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['exit_code'], 7)
         self.assertEqual(result['status'], 'failed')
 
+    @posix_only
     def test_runner_timeout(self):
         result = self.run_spec([sys.executable, '-c', 'import time; time.sleep(30)'], .1)
         self.assertEqual(result['status'], 'timeout')
 
+    @posix_only
     def test_process_identity_detects_reused_and_missing_pid(self):
         meta = {'pid': os.getpid(), 'identity': process_identity(os.getpid())}
         self.assertTrue(is_alive(meta))
@@ -80,6 +88,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(is_alive(meta))
         self.assertIsNone(process_identity(999999999))
 
+    @posix_only
     def test_restart_reads_durable_completion(self):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.devin = '/bin/true'
@@ -142,6 +151,7 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.opencode_db = self.root / 'missing.db'
         self.assertIsNone(self.runtime.session_id(self.source, model='opencode/muse', key='issue-1-2-0'))
 
+    @posix_only
     def test_runner_stall_kills_silent_child(self):
         spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
                 'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .5,
@@ -157,6 +167,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertIn('hang', result.get('error', ''))
 
+    @posix_only
     def test_runner_error_stall_kills_stream_error_faster(self):
         spec = {'command': [sys.executable, '-c',
                             'print("stream error: rate limit exceeded", flush=True); '
@@ -208,6 +219,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(self.runtime.session_id(self.source, since=11), 'latest')
             self.assertIsNone(self.runtime.session_id(self.source, since=21))
 
+    @posix_only
     def test_spawn_refuses_live_checkout_owner(self):
         clone = self.runtime.prepare_clone('worker-01')
         invocation = self.runtime.state_root / 'old'
@@ -225,6 +237,7 @@ class RuntimeTests(unittest.TestCase):
             self.runtime.prepare_clone('worker-01', 'codex/issue-1-1')
         self.assertEqual(self.runtime.run_git(clone, 'branch', '--show-current'), 'codex/issue-1-1')
 
+    @posix_only
     def test_restart_detects_running_runner_and_stop_receipt(self):
         spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
                 'cwd': str(self.source), 'timeout': 60,
