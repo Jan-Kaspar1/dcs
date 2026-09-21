@@ -149,9 +149,17 @@
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
 //! peer for later" — else the address the tracking peer announced
-//! through its pulls. Either way the demoted instance pulls, applies,
-//! and reconverges like any standby, and a later `POST /promote`
-//! fails back without a restart. A field owner with neither — nothing
+//! through its pulls. The announced fallback is a hint, not a proof:
+//! the serving side cannot tell the puller's monitor port from any
+//! other port its connection's source claims, so `POST /demote`
+//! toward an announced-only source first pulls one checkpoint from it
+//! and proceeds only when that checkpoint continues this run's line —
+//! journaling the adopted source and pinning it, so a later `?peer=`
+//! rewrite cannot redirect the demoted peer's pulls — while a dead,
+//! unreachable, or forged hint refuses `no_tracking_source` like an
+//! absent one. Either way the demoted instance pulls, applies, and
+//! reconverges like any standby, and a later `POST /promote` fails
+//! back without a restart. A field owner with neither — nothing
 //! configured and no peer ever announced — refuses `POST /demote`
 //! outright (`no_tracking_source`) rather than silently marooning
 //! itself.

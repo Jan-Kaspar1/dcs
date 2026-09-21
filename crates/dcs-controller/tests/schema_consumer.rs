@@ -1693,15 +1693,30 @@ fn run_verification(tag: &str) -> Outcome {
         checkpoints,
         receipts: standby.receipts().unwrap(),
         emitted: emitted(&standby),
-        journals: [
-            active.journal(0).unwrap(),
-            standby.journal(0).unwrap(),
-            reference.journal(0).unwrap(),
-            read_journal_file(&active_journal).unwrap().entries,
-            read_journal_file(&standby_journal).unwrap().entries,
-            read_journal_file(&reference_journal).unwrap().entries,
-        ]
-        .into(),
+        journals: {
+            let mut journals: Vec<Vec<JournalEntry>> = [
+                active.journal(0).unwrap(),
+                standby.journal(0).unwrap(),
+                reference.journal(0).unwrap(),
+                read_journal_file(&active_journal).unwrap().entries,
+                read_journal_file(&standby_journal).unwrap().entries,
+                read_journal_file(&reference_journal).unwrap().entries,
+            ]
+            .into();
+            // The adopted-source entry names the peer's monitor
+            // address — its ephemeral listen port run-unique by
+            // nature — so the identical-runs comparison masks the
+            // port while keeping the event's presence, `seq`, `tick`,
+            // and named host.
+            for journal in &mut journals {
+                for entry in journal {
+                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
+                        source.set_port(0);
+                    }
+                }
+            }
+            journals
+        },
     }
 }
 
