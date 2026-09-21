@@ -4166,7 +4166,8 @@ class BackupHealthFeed:
     output's last image on the alarm's `in` carrier, the selector
     drives backup_unhealthy off the plant-served backup quality, and
     the latching alarm stands on `in`, holds unacknowledged on its
-    edge latch, and ack-dominates — so the carrier delay means the
+    edge latch, and consumes ack on its rising edge — so the carrier
+    delay means the
     full annunciation lands a scan behind the injected fault.
     Declared-journaled points record point_changed; the carrier does
     not. Fault flags stage each named failure the issue calls out."""
@@ -4205,6 +4206,7 @@ class BackupHealthFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -4286,7 +4288,9 @@ class BackupHealthFeed:
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         self._drive(self.ALARM, condition and not self.mute_alarm)
         self._drive(self.UNACK, self.latched and not self.mute_latch)
         if degraded and self.journals_role and not self._role_journaled:
@@ -4617,7 +4621,7 @@ class SourceFailoverFeed:
     the primary's served quality degrades, the chain advances its
     held demand on the failover-fed level under the declared
     setpoints, and the alarm stands on `in`, latches unacknowledged on
-    the edge, and releases it while ack reads true. Declared-journaled
+    the edge, and releases it on ack's rising edge. Declared-journaled
     points record point_changed; the carriers do not. Fault flags
     stage each named failure the issue calls out."""
 
@@ -4671,6 +4675,7 @@ class SourceFailoverFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -4812,11 +4817,13 @@ class SourceFailoverFeed:
         self._drive(self.HIGH_LEVEL,
                     bool(trusted and level >= self.HIGH))
         # The wired managed alarm: `in` is the flag's carrier, the
-        # latch holds until ack reads true.
+        # latch holds until ack's rising edge.
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         if self.unlatches_on_clear and not condition:
             self.latched = False
         self._drive(self.ALARM, condition and not self.mute_alarm)
