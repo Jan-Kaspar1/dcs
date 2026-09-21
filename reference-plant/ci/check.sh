@@ -28,6 +28,16 @@
 #                `dcs-model signal-index` outputs recorded to the run's
 #                evidence (tooling-rejected, pin-unresolvable,
 #                schema-drift, diff-mismatch)
+#   alarm-validation
+#                the rejection half of decision 70's alarm record at
+#                the customer boundary — every managed alarm instance
+#                carrying its rationalization prose and
+#                priority/class/response_ticks codes, doctored copies
+#                refused by the released `dcs-controller --check`
+#                naming the missing element, and the driven run's
+#                served components/parameters sections reporting the
+#                same record (alarm-validation-failed,
+#                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
 #                recorded `model.fingerprint`
 #                (manifest-fingerprint-mismatch)
@@ -821,6 +831,43 @@ echo "  dcs-model summary (sha256 $(printf '%s\n' "$SUMMARY_OUT" | sha256sum | c
 printf '%s\n' "$SUMMARY_OUT" | sed 's/^/    /'
 echo "  dcs-model signal-index (sha256 $(printf '%s\n' "$INDEX_OUT" | sha256sum | cut -d' ' -f1)):"
 printf '%s\n' "$INDEX_OUT" | sed 's/^/    /'
+
+echo "== alarm-validation =="
+# The rejection half of decision 70's alarm record — a leg beside the
+# acceptance checks above: ci/alarm_validation.py audits the emitted
+# document's managed-alarm record (each instance's rationalization
+# prose and priority/class/response_ticks codes), doctors copies of it
+# — one managed alarm's required_action removed, the same field
+# emptied, another kind's priority removed — and requires the released
+# `dcs-controller --check` to refuse each naming the missing element,
+# never a silent load, then checks the driven run's served
+# components/parameters sections report the same record. Contract
+# violations report `alarm-validation: …` lines on stderr.
+run_alarm_validation() {
+    python3 ci/alarm_validation.py \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json
+}
+ALARM_1="$(run_alarm_validation)" \
+    || fail "alarm-validation-failed: the alarm-validation leg refused"
+ALARM_2="$(run_alarm_validation)" \
+    || fail "alarm-validation-failed: the alarm-validation leg refused"
+[ "$ALARM_1" = "$ALARM_2" ] \
+    || fail "alarm-validation-nondeterministic: two alarm-validation passes produced different digests"
+echo "  $ALARM_1"
+
+# The leg's refusal assertions must themselves be proven — a run that
+# writes the pristine document where each doctored copy belongs must
+# report every acceptance, never pass a silent load.
+if out="$(python3 ci/alarm_validation.py \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --tamper skip-doctoring 2>&1)"; then
+    fail "alarm-validation-unchecked: a run with the doctoring skipped passed"
+fi
+[[ "$out" == *"alarm-validation:"* ]] \
+    || fail "alarm-validation-unchecked: the skipped-doctoring run did not report alarm-validation: $out"
+echo "  a skipped-doctoring run refused: alarm-validation"
 
 echo "== fingerprint =="
 EMITTED_FP="$("$BIN" --fingerprint)"
@@ -2020,7 +2067,8 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
+for file in ci/alarm_validation.py ci/availability.py \
+        ci/burst_order.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \

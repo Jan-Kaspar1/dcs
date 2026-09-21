@@ -30,6 +30,12 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
+ci/alarm_validation.py the alarm-validation leg — the emitted model's
+                       managed-alarm record audited, doctored copies
+                       refused by the released `dcs-controller
+                       --check`, and the driven run's served
+                       components/parameters sections reporting the
+                       same record
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
@@ -296,6 +302,21 @@ summary` and `dcs-model signal-index` run over the checked-in model
 with their outputs recorded to the run's evidence — the check
 transcript carries them verbatim with their sha256 digests, identical
 on every pass.
+
+The stage's `alarm-validation` leg then proves the rejection half of
+the alarm contract on a customer-owned document — `ci/alarm_validation.py`
+audits that every managed alarm instance in the emitted model carries
+its `rationalization` block plus `priority`/`class`/`response_ticks`,
+doctors copies of the document — one instance's `required_action`
+removed, the same field emptied, another kind's `priority` removed —
+and requires the released `dcs-controller --check` to refuse each,
+naming the missing element rather than loading silently or warning
+only, and checks the driven run's served `components`/`parameters`
+sections report the same record. Two passes must produce the
+identical `alarm-validation-digest`; a violated contract fails
+`alarm-validation-failed`, a divergence
+`alarm-validation-nondeterministic`, and a run whose skipped
+doctoring passes `alarm-validation-unchecked`.
 
 ### 5. Run the simulation
 
