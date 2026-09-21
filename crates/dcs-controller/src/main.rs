@@ -1270,7 +1270,7 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        for receipt in peer.take_superseded_commands() {
+                        for (_index, receipt) in peer.take_superseded_commands() {
                             eprintln!(
                                 "standby: pending command superseded at tick {}: {:?}",
                                 peer.tick().0,
