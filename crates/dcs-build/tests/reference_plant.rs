@@ -12,7 +12,10 @@
 //! byte-pinned to the release record's artifacts fetched through the
 //! stand-in remote at the pinned rev, `diff` legs over a doctored
 //! compatible revision and the identical document, and
-//! `summary`/`signal-index` recorded as run evidence — the manifest
+//! `summary`/`signal-index` recorded as run evidence — the
+//! alarm-validation leg proving the released `dcs-controller --check`
+//! refuses a customer-owned document whose managed-alarm record is
+//! broken, naming the missing element — the manifest
 //! fingerprint check, the
 //! rig-definition consistency check asserting `deploy/compose.yaml`
 //! instantiates `deploy/manifest.json`, the deterministic scripted
@@ -444,6 +447,13 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "conforms to the recorded schema artifact",
         "missing-required refused: schema-mismatch",
         "mistyped-required refused: schema-mismatch",
+        // The alarm-validation leg ran and held: the emitted model's
+        // managed-alarm record audited, the doctored copies refused
+        // by the released `--check`, and the leg's own
+        // skipped-doctoring negative case reported its diagnostic.
+        "managed alarm instances carry the declared record",
+        "doctored documents refused",
+        "a skipped-doctoring run refused: alarm-validation",
     ] {
         assert!(
             stdout.contains(line),
