@@ -159,6 +159,17 @@ ci/standby_restart.py  the pair contract's standby-restart leg —
                        inside the declared window while the active's
                        writes, receipts, and journal run undisturbed,
                        then promoting to prove the pair left whole
+ci/startup_claim.py    the pair contract's startup-claim ordering
+                       leg — with the pair switched so the field
+                       owner holds the plant's writer claim, a third
+                       released controller launched against the same
+                       plant address on a doomed --journal-file
+                       (a corrupt first record its startup replay
+                       cannot read), asserting the doomed spawn
+                       aborts before its preemptive claim while the
+                       incumbent keeps role, tick, writes, receipts,
+                       and the claim's fencing, and the pair restores
+                       its launch roles once the process stops
 ci/report.py           the pair contract's alarm-report leg — the
                         released `dcs-alarm-report` computing the
                         declared AlarmReport metric set over the
@@ -457,6 +468,26 @@ normally, so the refusal names the negotiation failure rather than a
 rig defect. A violated contract fails `negotiation-failed`; two
 passes must produce the identical `negotiation-digest`, a divergence
 failing `negotiation-nondeterministic`.
+
+The stage's startup-claim ordering leg — `ci/startup_claim.py` on
+the same declared deployment — proves a doomed startup can never
+strand the plant's write claim over the running active. With the
+pair switched so the field owner holds the claim, the leg launches
+a third released `dcs-controller` against the same plant address on
+a doomed `--journal-file` — a corrupt first record its startup
+replay cannot read. The spawn must abort at startup validation
+naming the replay failure — never reporting a listener, never
+logging the preemptive claim — while the incumbent keeps `active`,
+its tick advances, its field writes and a mid-window receipted
+command keep landing, a foreign attachment's mutation probe stays
+`fenced` under the standing claim, and its journal gains no role,
+fencing, divergence, or restart records. The doomed peer's journal
+file must still hold exactly the corrupt record and its state file
+must never appear; once the foreign process is gone the pair
+restores its launch roles. A violated contract fails
+`startup-claim-failed`; two passes must produce the identical
+`startup-claim-digest`, a divergence failing
+`startup-claim-nondeterministic`.
 The stage's refusal half — `ci/refusal.py` on the same declared
 deployment — then proves the pair refuses honestly at its role
 boundaries, the half a customer driving their own pair needs the

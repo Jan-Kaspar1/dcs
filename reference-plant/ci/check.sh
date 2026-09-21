@@ -117,6 +117,20 @@
 #                promotes normally; two passes produce identical
 #                digests (negotiation-failed,
 #                negotiation-nondeterministic)
+#                The stage's startup-claim ordering leg,
+#                ci/startup_claim.py on the same declared deployment:
+#                with the pair switched so the field owner holds the
+#                plant's writer claim, a third released controller
+#                launched against the same plant address on a doomed
+#                --journal-file — a corrupt first record its startup
+#                replay cannot read — must abort before any preemptive
+#                claim: the incumbent keeps role, tick, field writes,
+#                and receipts, foreign probes stay fenced under the
+#                standing claim, the doomed peer's files prove the run
+#                never survived the failed replay, and the pair
+#                restores its launch roles once the process stops; two
+#                passes produce identical digests
+#                (startup-claim-failed, startup-claim-nondeterministic)
 #                The stage's refusal half, ci/refusal.py on the same
 #                declared deployment: a POST /promote on the freshly
 #                launched standby — before its first transfer — answers
@@ -1235,6 +1249,50 @@ fi
     || fail "negotiation-unchecked: the expect-tracking case did not report the degraded negotiation state it saw: $out"
 echo "  expect-tracking: reported, negotiation-failed"
 
+# The pair contract's startup-claim ordering leg, on the same
+# manifest-declared deployment: ci/startup_claim.py settles the pair
+# and issues the documented demote/promote switch so the field owner
+# holds the plant's writer claim, then launches a third released
+# controller against the same plant address whose startup inputs are
+# doomed by construction — a corrupt first record in its declared
+# --journal-file that the startup replay cannot read. The spawn must
+# abort at startup validation naming the replay failure — never
+# reporting a listener, never logging the preemptive claim — while
+# the incumbent stays active, its tick advances, its writes and a
+# mid-window receipted command keep landing, a foreign attachment's
+# mutation probe stays fenced under the standing claim, and the
+# incumbent's journal gains no disturbance records; the doomed peer's
+# journal file must still hold exactly the corrupt record and its
+# state file must never appear, and the pair restores its launch
+# roles once the foreign process is gone. Two passes must produce
+# identical digests.
+run_startup_claim() {
+    python3 ci/startup_claim.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_startup_claim)" \
+    || fail "startup-claim-failed: the startup-claim ordering leg did not hold — its evidence lines are above"
+SECOND="$(run_startup_claim)" \
+    || fail "startup-claim-failed: the startup-claim ordering leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "startup-claim-nondeterministic: two startup-claim passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a dead foreign claim stranded over the incumbent —
+# the pre-fix defect's observable shape — must surface the named
+# diagnostic rather than pass.
+if out="$(run_startup_claim --tamper stranded-claim 2>&1)"; then
+    fail "startup-claim-unchecked: a stranded foreign claim passed the startup-claim leg"
+fi
+[[ "$out" == *"disturbed the incumbent"* ]] \
+    || fail "startup-claim-unchecked: the stranded-claim case did not report its named diagnostic: $out"
+echo "  stranded-claim: reported, startup-claim-failed"
+
 # The pair contract's refusal half, on the same manifest-declared
 # deployment: ci/refusal.py catches the freshly launched standby before
 # its first transfer — the documented induction — where POST /promote
@@ -2218,7 +2276,7 @@ for file in ci/alarm_validation.py ci/availability.py \
         ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
-        ci/standby_restart.py \
+        ci/standby_restart.py ci/startup_claim.py \
         ci/takeover.py ci/tune_carryover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
