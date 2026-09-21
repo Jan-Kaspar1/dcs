@@ -111,7 +111,21 @@
 //! pumps drawing the level down through the declared de-stage order —
 //! the lag's run releasing before the duty's — to the `below-cutoff`
 //! floor, the durable journal audited for the ordered record and the
-//! pair's roles unchanged — and the `upgrade` stage, which repins the
+//! pair's roles unchanged — the pair contract's per-pump
+//! out-of-service leg, which proves a receipted `oos` write on the
+//! duty pump excludes it on the deployed pair — the in-service cone
+//! and the aggregated availability dropping, `duty` handing to the
+//! sibling inside the declared wiring bound, `staged` reporting the
+//! available count, the held pump's command released through the
+//! sibling's service — each managed per-pump alarm reporting the
+//! `out_of_service`/`suppressed` states its declared lifecycle
+//! bindings select, a mid-OOS run-contact fault asserting `alarm` as
+//! process truth with the `unacknowledged` latch withheld, the false
+//! write returning the pump to availability and re-annunciating the
+//! outlasted trip, the receipted `ack` settling the latch, the next
+//! cycle's rotation handing `duty` back, and the durable journal
+//! carrying every managed transition beside the attributed
+//! settlements — and the `upgrade` stage, which repins the
 //! materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -136,6 +150,7 @@
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
 //! `carry-failed`/`carry-nondeterministic`,
 //! `staging-failed`/`staging-nondeterministic`,
+//! `oos-failed`/`oos-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -743,6 +758,40 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, staging-failed")),
             "the staging leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's per-pump out-of-service leg ran and held:
+    // the receipted `oos` write on the duty pump dropped its
+    // availability and handed `duty` to the sibling inside the
+    // declared wiring bound, the managed alarms reported the states
+    // their declared lifecycle bindings select with `alarm` still
+    // reporting process truth mid-OOS, and the false write returned
+    // the pump to availability and the duty rotation — its digest
+    // line reports the evidence, and each doctored expectation
+    // reported its named diagnostic.
+    let oos_line = stdout
+        .lines()
+        .find(|line| line.contains("oos-digest"))
+        .unwrap_or_else(|| panic!("the out-of-service leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "duty handed to the sibling at tick",
+        "managed states at tick",
+        "served at tick",
+        "returned at tick",
+        "acknowledged at tick",
+        "rejoined at tick",
+        "roles unmoved through tick",
+        "journal entries",
+    ] {
+        assert!(
+            oos_line.contains(phrase),
+            "the out-of-service digest names no '{phrase}' evidence: {oos_line}"
+        );
+    }
+    for tamper in ["keeps-duty", "managed-silent"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, oos-failed")),
+            "the out-of-service leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(
