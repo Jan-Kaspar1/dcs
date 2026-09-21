@@ -334,7 +334,7 @@
 //! point the pane offers an acknowledge button issuing an ordinary
 //! receipted `write_value` — no alarm-specific protocol — pulsed back
 //! to `false` once a scan has observed it, because the kind's `ack` is
-//! level-observed.
+//! consumed on its rising edge.
 //!
 //! ## The pair view
 //!

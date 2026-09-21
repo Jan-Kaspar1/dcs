@@ -15,9 +15,9 @@ use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepErr
 
 /// A managed latching alarm: [`LatchingAlarm`](crate::LatchingAlarm)'s
 /// `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly — the same
-/// hysteresis rule, the same level-sensitive ack-dominates latch —
-/// plus the managed-alarm surface decisions 71–73 record, shared
-/// verbatim with [`ManagedBoolLatchingAlarm`](crate::ManagedBoolLatchingAlarm).
+/// hysteresis rule, the same consumed-edge ack latch — plus the
+/// managed-alarm surface decisions 71–73 record, shared verbatim with
+/// [`ManagedBoolLatchingAlarm`](crate::ManagedBoolLatchingAlarm).
 ///
 /// **Managed surface (decisions 71–73):** three optional level-observed
 /// inputs — `shelve`, `oos`, `suppress`, each `In` `Bool` and typically
@@ -75,8 +75,13 @@ pub struct ManagedLatchingAlarm {
     limits: AlarmLimits,
     config: ManagedAlarmConfig,
     state: Alarm,
-    /// The acknowledgment latch: set on a fresh trip, cleared while
-    /// `ack` reads `true`, withheld while `suppress` stands.
+    /// The `ack` level observed on the previous scan — the baseline
+    /// the acknowledgment's rising edge is detected against. `false`
+    /// before the first scan, so a `true` first read is an
+    /// acknowledgment.
+    ack_seen: bool,
+    /// The acknowledgment latch: set on a fresh trip, cleared on
+    /// `ack`'s rising edge, withheld while `suppress` stands.
     latched: bool,
     /// The managed-state machine's run state — the shelve-expiry timer,
     /// the suppression baseline, the out-of-service level.
@@ -104,6 +109,7 @@ impl ManagedLatchingAlarm {
             io,
             config,
             state: Alarm::Clear,
+            ack_seen: false,
             latched: false,
             managed: ManagedState::default(),
         })
@@ -156,7 +162,9 @@ impl Component for ManagedLatchingAlarm {
         self.state = previous.evaluate(pv, self.limits);
         let fresh_trip =
             self.state != Alarm::Clear && (self.state != previous || managed.was_suppressed);
-        self.latched = (self.latched || fresh_trip) && !ack.value && !managed.suppressed;
+        let acknowledged = ack.value && !self.ack_seen;
+        self.ack_seen = ack.value;
+        self.latched = ((self.latched && !acknowledged) || fresh_trip) && !managed.suppressed;
         let mut quality = sample.quality.merge(ack.quality);
         if pv.is_nan() {
             quality = quality.merge(Quality::Bad(QualityReason::DeviceFault));
@@ -232,12 +240,15 @@ impl Component for ManagedLatchingAlarm {
     }
 
     /// Captures the sibling's `state`/`unacknowledged` vocabulary, the
-    /// tuned parameters, and the managed run state — the shelve-expiry
-    /// timer, the suppression baseline, the out-of-service level — so a
-    /// tracking standby continues a mid-shelve countdown identically.
+    /// observed `ack` level — so a standby tracking a held `ack` does
+    /// not read a phantom acknowledgment edge — the tuned parameters,
+    /// and the managed run state — the shelve-expiry timer, the
+    /// suppression baseline, the out-of-service level — so a tracking
+    /// standby continues a mid-shelve countdown identically.
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
+        state.insert("ack", Value::Bool(self.ack_seen));
         state.insert("unacknowledged", Value::Bool(self.latched));
         self.managed.capture(&mut state);
         state
@@ -248,6 +259,7 @@ impl Component for ManagedLatchingAlarm {
             &self.name,
             &[
                 "state",
+                "ack",
                 "unacknowledged",
                 "shelve_elapsed",
                 "suppressed",
@@ -276,6 +288,10 @@ impl Component for ManagedLatchingAlarm {
         self.config = config;
         self.managed = managed;
         self.state = restored;
+        // `ack` is absent from checkpoints predating the field; a held
+        // level then reads as an edge on the first restored scan — the
+        // same clearing the older level-rule applied every scan.
+        self.ack_seen = state.optional_bool(&self.name, "ack")?.unwrap_or(false);
         self.latched = latched;
         Ok(())
     }
@@ -762,6 +778,136 @@ mod tests {
         }
         assert!(!shelved(&io));
         assert!(alarmed(&io));
+        assert!(!unacknowledged(&io));
+    }
+
+    #[test]
+    fn an_ack_held_since_before_the_trip_does_not_disarm_the_latch() {
+        let mut block = component();
+        let io = io();
+
+        // The QA finding's reproduction: `ack` written `true` while the
+        // alarm stands clear and never released. Under the consumed-
+        // edge rule the edge cleared an empty latch, so the later trip
+        // still annunciates — no `suppressed`/`shelved`/
+        // `out_of_service` state asserts to name a withholding, because
+        // there is none.
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 50.0,
+                ack: true,
+                ..Inputs::default()
+            },
+            1,
+        );
+        assert!(!alarmed(&io));
+        assert!(!unacknowledged(&io));
+
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                ack: true,
+                ..Inputs::default()
+            },
+            2,
+        );
+        assert!(alarmed(&io));
+        assert!(
+            unacknowledged(&io),
+            "the held ack cannot pre-acknowledge the fresh trip"
+        );
+        assert!(!suppressed(&io));
+        assert!(!shelved(&io));
+        assert!(!out_of_service(&io));
+
+        // Releasing `ack` while the trip stands leaves the latch
+        // standing; a second pulse acknowledges it.
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                ..Inputs::default()
+            },
+            3,
+        );
+        assert!(alarmed(&io));
+        assert!(unacknowledged(&io));
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                ack: true,
+                ..Inputs::default()
+            },
+            4,
+        );
+        assert!(alarmed(&io));
+        assert!(!unacknowledged(&io));
+    }
+
+    #[test]
+    fn a_fresh_trip_latches_even_on_the_ack_edge_scan() {
+        let mut block = component();
+        let io = io();
+
+        // A trip and the acknowledgment edge arriving on one scan: the
+        // pulse acknowledged what stood before it, so the fresh trip
+        // latches rather than passing silently.
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                ack: true,
+                ..Inputs::default()
+            },
+            1,
+        );
+        assert!(alarmed(&io));
+        assert!(unacknowledged(&io));
+
+        // The held `ack` consumes nothing further — the latch stands.
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                ack: true,
+                ..Inputs::default()
+            },
+            2,
+        );
+        assert!(unacknowledged(&io));
+
+        // Suppression still withholds: the named managed state is the
+        // only gate on the latch.
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 50.0,
+                suppress: true,
+                ..Inputs::default()
+            },
+            3,
+        );
+        step(
+            &mut block,
+            &io,
+            Inputs {
+                pv: 95.0,
+                suppress: true,
+                ..Inputs::default()
+            },
+            4,
+        );
+        assert!(suppressed(&io));
         assert!(!unacknowledged(&io));
     }
 
