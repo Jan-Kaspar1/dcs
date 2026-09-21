@@ -1057,6 +1057,9 @@ impl<'d> Monitor<'d> {
         for resolution in peer.take_resolutions() {
             recorder.note_resolution(resolution);
         }
+        for orphan in peer.take_orphans() {
+            recorder.note_field_orphaned(orphan);
+        }
         for restart in peer.take_source_restarts() {
             recorder.note_source_restart(restart);
         }
@@ -1091,6 +1094,9 @@ impl<'d> Monitor<'d> {
         }
         for report in peer.take_reinitializations() {
             recorder.note_reinitialized(report);
+        }
+        for orphan in peer.take_orphans() {
+            recorder.note_field_orphaned(orphan);
         }
         for restart in peer.take_source_restarts() {
             recorder.note_source_restart(restart);
@@ -1440,6 +1446,9 @@ impl<'d> Monitor<'d> {
                 for report in peer.take_reinitializations() {
                     recorder.note_reinitialized(report);
                 }
+                for orphan in peer.take_orphans() {
+                    recorder.note_field_orphaned(orphan);
+                }
                 for restart in peer.take_source_restarts() {
                     recorder.note_source_restart(restart);
                 }
@@ -1642,6 +1651,9 @@ fn track_and_record(
     }
     for report in peer.take_reinitializations() {
         recorder.note_reinitialized(report);
+    }
+    for orphan in peer.take_orphans() {
+        recorder.note_field_orphaned(orphan);
     }
     for restart in peer.take_source_restarts() {
         recorder.note_source_restart(restart);
@@ -2536,6 +2548,7 @@ mod tests {
             forces: Default::default(),
             receipts: Vec::new(),
             command_admission: Default::default(),
+            source_owns_field: None,
         };
         let own = checkpoint();
 

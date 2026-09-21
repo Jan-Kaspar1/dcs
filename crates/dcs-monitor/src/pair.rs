@@ -197,7 +197,7 @@ pub struct PairHealth {
 }
 
 #[doc = "Version of the serialized pair-fault kind vocabulary, pinned by contract drift tests."]
-pub const PAIR_FAULT_KINDS_VERSION: u32 = 1;
+pub const PAIR_FAULT_KINDS_VERSION: u32 = 2;
 
 #[doc = "Stable redundancy fault names shared by the pair view and operator consumers."]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,17 +215,20 @@ pub enum PairFaultKind {
     StandbyDegraded,
     #[doc = "A standby reported staged outputs diverging from the field."]
     StandbyDiverged,
+    #[doc = "A standby reported the tracked line has no field owner."]
+    StandbyOrphaned,
 }
 
 impl PairFaultKind {
     #[doc = "The complete vocabulary for this version, in drift-pin order."]
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::PeerUnreachable,
         Self::StandbyUnsynchronizedPastGrace,
         Self::NoActivePeer,
         Self::DualActive,
         Self::StandbyDegraded,
         Self::StandbyDiverged,
+        Self::StandbyOrphaned,
     ];
 }
 
@@ -410,6 +413,14 @@ impl PairClient {
                                     .map(|mismatch| mismatch.point.0.to_string())
                                     .collect::<Vec<_>>()
                                     .join(", ")
+                            ));
+                        }
+                        Some(StandbySync::Orphaned { aligned }) => {
+                            fault_kinds.push(PairFaultKind::StandbyOrphaned);
+                            faults.push(format!(
+                                "{} reports the tracked line has no field owner \
+                                 (aligned at tick {})",
+                                peer.addr, aligned.0
                             ));
                         }
                         _ => {}

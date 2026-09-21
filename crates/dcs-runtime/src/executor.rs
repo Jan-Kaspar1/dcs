@@ -1572,6 +1572,9 @@ impl<'d> Executor<'d> {
             forces: self.forces.clone(),
             receipts: self.receipts.clone(),
             command_admission: self.command_admission,
+            // The executor has no role view — the serving `Peer` stamps
+            // `source_owns_field` over its own capture.
+            source_owns_field: None,
         }
     }
 
@@ -7224,6 +7227,7 @@ mod tests {
             forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
+            source_owns_field: None,
         }
     }
 
@@ -7384,6 +7388,7 @@ mod tests {
             forces: BTreeMap::new(),
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
+            source_owns_field: None,
         }
     }
 
