@@ -500,6 +500,24 @@
 #                measures, and the pair's roles unmoved throughout;
 #                two passes produce identical digests (oos-failed,
 #                oos-nondeterministic)
+#                The stage's power-fail interlock leg,
+#                ci/power_trip.py on the same declared deployment:
+#                with the pair settled and the group holding a full
+#                duty demand, the station power-fail contact driven
+#                through the plant protocol drops `power-ok` and both
+#                pumps' availability aggregates — the motor commands
+#                releasing while the chain's `demand` still stands,
+#                `none-available` annunciating, and the managed
+#                `power-fail` alarm's `alarm`/`unacknowledged`
+#                asserting with journaled `point_changed` evidence;
+#                a receipted `power-fail-ack` clears the latch while
+#                the condition stands, and the released contact
+#                returns the permissives and re-stages the demand
+#                inside the declared `min_off_ticks`/`start_delay_ticks`
+#                bounds with the field outputs moving only on the
+#                driven scan sequence and the pair's roles unchanged;
+#                two passes produce identical digests
+#                (power-trip-failed, power-trip-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2062,6 +2080,58 @@ for tamper in keeps-duty managed-silent; do
     echo "  $tamper: reported, oos-failed"
 done
 
+# The pair contract's power-fail interlock leg, on the same
+# manifest-declared deployment: ci/power_trip.py converges the pair
+# and drives the simulated well until the pump group holds a full
+# demand — both pumps staged and running — then drives the station
+# power-fail contact through the plant protocol's field write, the
+# emitted model's protection-layer wiring (power-fail → power-ok →
+# each pump's power-ok-in feeding avail_i) dropping every pump's
+# availability while the chain's demand still stands: the motor
+# commands release, none-available annunciates, and the managed
+# power-fail alarm's alarm/unacknowledged assert with journaled
+# point_changed evidence. A receipted power-fail-ack must clear the
+# latch while the condition still stands; the released contact then
+# returns power-ok and both availability legs and re-stages the
+# standing demand inside the declared min_off_ticks/start_delay_ticks
+# bounds — no motor command re-asserting inside its holdout, the
+# lag's start inside the declared delay, the field outputs moving
+# only on the driven scan sequence, and the pair's roles unchanged.
+# Two passes must produce identical digests.
+run_power_trip() {
+    python3 ci/power_trip.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_power_trip)" \
+    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
+SECOND="$(run_power_trip)" \
+    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "power-trip-nondeterministic: two power-trip passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg asserting the motor commands still stand
+# under the driven power-fail, and one asserting the pumps'
+# availability never dropped, must each surface the named diagnostic
+# — never a silently untripped interlock.
+for tamper in commands-standing availability-holds; do
+    if out="$(run_power_trip --tamper "$tamper" 2>&1)"; then
+        fail "power-trip-unchecked: a $tamper case passed the power-trip leg"
+    fi
+    case "$tamper" in
+        commands-standing) expected="expected the commands standing" ;;
+        availability-holds) expected="expected availability still reporting" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "power-trip-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, power-trip-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2074,7 +2144,7 @@ for file in ci/alarm_validation.py ci/availability.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
         ci/negotiation.py ci/oos.py ci/pair.py \
-        ci/peer_announce.py \
+        ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
         ci/standby_restart.py \

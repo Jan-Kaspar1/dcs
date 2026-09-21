@@ -206,6 +206,19 @@ ci/oos.py              the pair contract's out-of-service leg — a
                        `alarm` still reporting process truth mid-OOS,
                        and the false write returning the pump to
                        availability and the duty rotation
+ci/power_trip.py       the pair contract's power-fail interlock leg —
+                       the station power-fail contact driven through
+                       the plant protocol on the settled pair under a
+                       standing duty demand: `power-ok` and both
+                       pumps' availability dropping, the motor
+                       commands releasing while the chain's demand
+                       stands, `none-available` and the managed
+                       `power-fail` alarm annunciating with journaled
+                       evidence, the receipted `power-fail-ack`
+                       clearing the latch mid-condition, and the
+                       released contact re-staging the demand inside
+                       the declared bounds with the pair's roles
+                       unchanged
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -1033,6 +1046,44 @@ The leg's doctored cases — an expectation asserting the held-out pump
 keeps `duty`, and one asserting the managed alarms never report their
 declared states — must each report the named diagnostic rather than
 pass silently (`oos-unchecked`).
+
+The stage's power-fail interlock leg — `ci/power_trip.py` on the
+same declared deployment — then proves the station protection-layer
+trip and its declared recovery on the customer-owned pair
+(WW-ENG-003, WW-OPS-001, WW-CTL-002), the demand behavior the
+cascade legs never exercised. With the pair settled and the group
+holding a full duty demand — both pumps staged and running — the
+leg drives the `power-fail` contact through the plant protocol's
+field write and asserts through the active's monitor that
+`power-ok` drops, both pumps' `power-ok-in`/`avail` aggregates lose
+their power leg and report unavailable, and the motor commands
+release while the chain's `demand` still stands — `none-available`
+annunciating and the managed `power-fail` alarm's
+`alarm`/`unacknowledged` asserting with journaled `point_changed`
+evidence on the durable record. A receipted `power-fail-ack` write
+through the active's `POST /command` must settle `applied` under the
+leg's actor and clear the `unacknowledged` latch while the driven
+condition still stands — the contact held, the alarm reporting
+process truth. Releasing the contact then asserts the declared
+recovery: `power-ok` and both availability legs return, the alarm
+returns while the acknowledged latch stays down and the
+never-acknowledged `none-available` latch holds, and the group
+re-stages the standing demand inside the emitted model's declared
+bounds — no `cmd` re-asserting inside its `min_off_ticks` holdout,
+the lag's start inside the declared `start_delay_ticks` of the
+duty's — the field outputs moving only on the driven scan sequence,
+the plant-side reads proving no output step lands between scans.
+The pair's controller roles never move — a field contact is a plant
+event, not a failover — and the field owner's durable journal file
+must carry the driven transitions and attributed settlements in
+`seq` order, the served `GET /journal` answering the same record. A
+violated contract fails `power-trip-failed`; two passes must
+produce the identical `power-trip-digest`, a divergence failing
+`power-trip-nondeterministic`. The leg's doctored cases — an
+expectation asserting the motor commands still stand under the
+driven power-fail, and one asserting the pumps' availability never
+dropped — must each report the named diagnostic rather than pass
+silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the

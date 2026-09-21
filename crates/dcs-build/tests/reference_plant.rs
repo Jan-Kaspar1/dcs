@@ -128,8 +128,16 @@
 //! outlasted trip, the receipted `ack` settling the latch, the next
 //! cycle's rotation handing `duty` back, and the durable journal
 //! carrying every managed transition beside the attributed
-//! settlements — and the `upgrade` stage, which repins the
-//! materialized tree to the checkout's `HEAD`
+//! settlements — the pair contract's power-fail interlock leg, which
+//! drives the station `power-fail` contact through the plant protocol
+//! on the settled pair under a standing demand — `power-ok` and both
+//! pumps' availability dropping, the motor commands releasing while
+//! the chain's `demand` still stands, `none-available` and the managed
+//! `power-fail` alarm annunciating with journaled evidence, the
+//! receipted `power-fail-ack` clearing the latch mid-condition, and
+//! the released contact re-staging the demand inside the declared
+//! bounds with the pair's roles unchanged — and the `upgrade` stage,
+//! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
 //!
@@ -154,6 +162,7 @@
 //! `carry-failed`/`carry-nondeterministic`,
 //! `staging-failed`/`staging-nondeterministic`,
 //! `oos-failed`/`oos-nondeterministic`,
+//! `power-trip-failed`/`power-trip-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -802,6 +811,39 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, oos-failed")),
             "the out-of-service leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's power-fail interlock leg ran and held: the
+    // driven `power-fail` contact dropped `power-ok` and both pumps'
+    // availability, the motor commands released while the chain's
+    // demand still stood, `none-available` and the managed `power-fail`
+    // alarm annunciated with journaled evidence, the receipted
+    // `power-fail-ack` cleared the latch mid-condition, and the
+    // released contact re-staged the standing demand inside the
+    // declared bounds — its digest line reports the evidence, and each
+    // doctored expectation reported its named diagnostic.
+    let power_trip_line = stdout
+        .lines()
+        .find(|line| line.contains("power-trip-digest"))
+        .unwrap_or_else(|| panic!("the power-fail interlock leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking by tick",
+        "full demand at tick",
+        "tripped at tick",
+        "acknowledged at tick",
+        "permissives returned at tick",
+        "re-staged by tick",
+        "run continued to tick",
+    ] {
+        assert!(
+            power_trip_line.contains(phrase),
+            "the power-trip digest names no '{phrase}' evidence: {power_trip_line}"
+        );
+    }
+    for tamper in ["commands-standing", "availability-holds"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, power-trip-failed")),
+            "the power-fail interlock leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(
