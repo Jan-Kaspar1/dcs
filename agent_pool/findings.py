@@ -53,7 +53,7 @@ from pathlib import Path
 from qa_lane import report as qa_report
 from qa_lane import verify as qa_verify
 
-from . import planning
+from . import areas, planning
 
 SCHEMA_VERSION = qa_report.SCHEMA_VERSION
 KEY = re.compile(r'^[a-z0-9][a-z0-9-]{0,79}$')
@@ -399,6 +399,7 @@ def priority(finding):
 def issue_body(finding, report, dependencies=(), preamble=None, key=None):
     meta = {'key': key or issue_key(finding['key']),
             'group': concurrency_group(finding['module']),
+            'area': areas.infer(finding['module'], finding['title'], finding['summary']),
             'dependencies': list(dependencies), 'priority': priority(finding)}
     evidence = '\n'.join('- ' + e['detail'] for e in finding['evidence'])
     sections = [
@@ -452,7 +453,8 @@ def _publish_defect(github, finding, report, dependencies=(), suffix='', preambl
     key = issue_key(finding['key']) + suffix
     body = issue_body(finding, report, dependencies=dependencies,
                       preamble=preamble, key=key)
-    labels = ['agent:ready', 'priority:P' + str(priority(finding))]
+    labels = ['agent:ready', 'priority:P' + str(priority(finding)),
+              areas.label(areas.infer(finding['module'], finding['title'], finding['summary']))]
     title = ('[QA] ' + finding['title'])[:200]
     return github.create_issue(title, body, labels, key=key)
 

@@ -240,7 +240,7 @@ class FakeGitHub:
 def managed_issue(number, improvement=None, priority=2, group='core', dependencies=(), state='OPEN'):
     item = dict(key=f'issue-{number}', title=f'Task {number}', scope='s', acceptance='a',
                 tests='t', dependencies=list(dependencies), priority=priority,
-                milestone='m', group=group)
+                milestone='m', group=group, area='control-runtime')
     if improvement:
         item['improvement'] = improvement
     return dict(number=number, title=item['title'], body=planning.body(item),
@@ -395,7 +395,7 @@ class ReviewLaneTests(unittest.TestCase):
         self.ingest(issues=[managed_issue(1)])
         arch = dict(key='arch-deepen-executor', title='Deepen executor', scope='s',
                     acceptance='a', tests='t', dependencies=[], priority=2,
-                    milestone='architecture', group='dcs-runtime', improvement='deepen-executor')
+                    milestone='architecture', group='dcs-runtime', area='control-runtime', improvement='deepen-executor')
         proposal = {'issues': [arch], 'dispositions': [
             {'key': 'deepen-executor', 'decision': 'accept', 'reason': 'real friction'},
             {'key': 'rename-tick', 'decision': 'defer', 'reason': 'needs wire policy',
@@ -434,10 +434,10 @@ class ReviewLaneTests(unittest.TestCase):
     def test_proposal_resolves_same_pass_dependency_keys_to_issue_numbers(self):
         contract = dict(key='shared-contract', title='Define contract', scope='s',
                         acceptance='a', tests='t', dependencies=[], priority=1,
-                        milestone='m', group='dcs-core')
+                        milestone='m', group='dcs-core', area='engineering')
         consumer = dict(key='runtime-consumer', title='Use contract', scope='s',
                         acceptance='a', tests='t', dependencies=['shared-contract'],
-                        priority=1, milestone='m', group='dcs-runtime')
+                        priority=1, milestone='m', group='dcs-runtime', area='control-runtime')
         proposal = planning.validate({'issues': [consumer, contract]})
         self.supervisor.state.set('pending_proposal', proposal)
         self.supervisor.planner([], [])
@@ -499,7 +499,7 @@ class ReviewLaneTests(unittest.TestCase):
     def test_issue_creation_idempotent_after_uncertain_response(self):
         item = dict(key='arch-deepen-executor', title='Deepen executor', scope='s',
                     acceptance='a', tests='t', dependencies=[], priority=2,
-                    milestone='architecture', group='dcs-runtime',
+                    milestone='architecture', group='dcs-runtime', area='control-runtime',
                     improvement='deepen-executor')
         self.supervisor.state.set('pending_proposal', {'issues': [item], 'dispositions': []})
         self.github.fail_once = True
@@ -680,7 +680,7 @@ class ReviewLaneTests(unittest.TestCase):
 
     def test_legacy_pending_proposal_list_is_normalized(self):
         item = dict(key='legacy-task', title='Legacy', scope='s', acceptance='a',
-                    tests='t', dependencies=[], priority=2, milestone='m', group='core')
+                    tests='t', dependencies=[], priority=2, milestone='m', group='core', area='delivery-platform')
         self.supervisor.state.set('pending_proposal', [item])
         self.supervisor.planner([], [])
         self.assertIsNone(self.supervisor.state.get('pending_proposal'))

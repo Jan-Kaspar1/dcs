@@ -12,6 +12,7 @@ from .state import State
 from .admission import Admission, classify
 from .github import GitHub, GitHubError
 from .runtime import Runtime
+from . import areas
 from . import findings as findings_lane
 from . import planning
 from . import review as review_lane
@@ -954,7 +955,8 @@ Repair context: {repair}
                 if not set(resolved) <= numbers:
                     raise ValueError('Planner referenced nonexistent dependencies')
                 published = dict(item, dependencies=resolved)
-                number = self.github.create_issue(item['title'], planning.body(published), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
+                number = self.github.create_issue(item['title'], planning.body(published),
+                    ['agent:ready', f"priority:P{item['priority']}", areas.label(item['area'])], item['key'])
                 created[item['key']] = number
                 known[item['key']] = number
                 numbers.add(number)
@@ -976,7 +978,9 @@ Repair context: {repair}
             clone = self.runtime.prepare_clone('coordinator')
             output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
             output.parent.mkdir(parents=True, exist_ok=True)
-            process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')), model=self.models[0])
+            allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
+            process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(
+                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary()), model=self.models[0])
         except Exception:
             self.admission.release('planner')
             raise
@@ -1013,11 +1017,20 @@ Repair context: {repair}
                 continue
             labels = [l['name'] for l in issue.get('labels', [])]
             want = f"priority:P{meta.get('priority', 3)}"
+            wanted_area = areas.label(meta['area']) if meta.get('area') else None
             wrong = [l for l in labels if l.startswith('priority:P') and l != want]
-            if wrong or (want not in labels and 'agent:ready' in labels):
+            wrong_areas = [l for l in labels if l.startswith('area:') and l != wanted_area]
+            add = []
+            if want not in labels and 'agent:ready' in labels:
+                add.append(want)
+            if wanted_area and wanted_area not in labels:
+                add.append(wanted_area)
+            if wrong or wrong_areas or add:
                 self.github.update_issue(issue['number'],
-                                         add_labels=[] if want in labels else [want],
-                                         remove_labels=wrong)
+                                         add_labels=add,
+                                         remove_labels=wrong + wrong_areas)
+        self.state.set('area_allocation', areas.Allocation.from_inventory(
+            issues, self.state.jobs()).summary())
 
     def retries(self, issues):
         if self.state.paused():
@@ -1041,18 +1054,26 @@ Repair context: {repair}
         capacity = self.state.capacity()
         if self.slots_used() >= capacity:
             return
+        allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
+        self.state.set('area_allocation', allocation.summary())
         closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
-        def priority(issue):
+        def rank(issue):
             try:
-                return planning.metadata(issue.get('body', '')).get('priority', 3), issue['number']
+                meta = planning.metadata(issue.get('body', ''))
+                return meta.get('priority', 3), allocation.score(meta['area']), issue['number']
             except (ValueError, KeyError):
-                return 4, issue['number']
-        for issue in sorted(issues, key=priority):
+                return 4, float('inf'), issue['number']
+        candidates = list(issues)
+        while candidates:
+            issue = min(candidates, key=rank)
+            candidates.remove(issue)
             if issue.get('state') != 'OPEN' or self.state.job(issue['number']):
                 continue
             if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
                 continue
             meta = planning.metadata(issue['body'])
+            if not meta.get('area'):
+                continue
             if not set(meta['dependencies']) <= closed:
                 continue
             improvement = meta.get('improvement')
@@ -1075,6 +1096,8 @@ Repair context: {repair}
                 continue
             if improvement and not active_improvement:
                 self.state.set('review:active_improvement', improvement)
+            allocation.note(meta['area'])
+            self.state.set('area_allocation', allocation.summary())
             try:
                 self.launch(job, issue)
             except Exception as exc:
