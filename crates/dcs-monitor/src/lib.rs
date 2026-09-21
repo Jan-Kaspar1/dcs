@@ -428,7 +428,9 @@ use dcs_core::{
     TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
-use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, TrackReport, Transfer};
+use dcs_runtime::{
+    ApplyError, Checkpoint, Executor, Peer, SUPPORTED_FORMAT_VERSIONS, TrackReport, Transfer,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
@@ -483,6 +485,18 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// tracking cycle whose pull is still in flight already counts its
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How far ahead of this run's own tick a checkpoint pulled to verify
+/// an announced demotion hint may serve: a successor tracking this run
+/// applies this run's checkpoints and scans alongside it, so it can
+/// honestly sit a few ticks ahead — but a same-generation stream far
+/// ahead of the run's tick is not this line's continuation. It is the
+/// signature of a forged or foreign stream served from an
+/// attacker-chosen endpoint, and the demotion refuses it rather than
+/// moving the run onto it. Thirty-two ticks is a short skew window at
+/// any deployed scan period — far beyond the lockstep drift of a real
+/// tracking peer, far below any forgery worth serving.
+const MAX_ANNOUNCED_AHEAD: u64 = 32;
 
 /// The worker count [`Monitor::serve`] dispatches the serving lane
 /// across — every request that cannot hold a worker on a client-paced
@@ -609,8 +623,15 @@ pub struct Monitor<'d> {
     /// wildcard a `0.0.0.0`-bound puller sends, which resolves to that
     /// address — so the read endpoint can neither rewrite the tracking
     /// source for an unrelated client nor record one no peer can
-    /// dial. Outside `shared`: the value is request-path
-    /// bookkeeping, never part of a scan's state.
+    /// dial. Landing is not trusting: the serving side cannot tell the
+    /// puller's monitor port from any other same-IP port the
+    /// connection's source claims, so a recorded hint stays unverified
+    /// until a demotion proves it — `POST /demote` pulls one
+    /// checkpoint from the hint and adopts it only when the checkpoint
+    /// continues this run's line, journaling the adopted source. A
+    /// dead or forged hint refuses `NoTrackingSource` instead of
+    /// stranding or adopting. Outside `shared`: the value is
+    /// request-path bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
 }
 
@@ -773,7 +794,12 @@ impl<'d> Monitor<'d> {
     /// only from the connection it names as its own address, with a
     /// wildcard-announced IP resolved to that address and a port-0
     /// claim refused, so the recorded source is always one a demotion
-    /// could dial. The
+    /// could dial. A recorded hint alone does not arm a demotion: the
+    /// serving side cannot verify the puller's monitor port from the
+    /// connection, so `POST /demote` toward an announced-only source
+    /// first pulls one checkpoint from it and proceeds only when that
+    /// checkpoint continues this run's line — adopting the source into
+    /// the journal — and otherwise refuses `NoTrackingSource`. The
     /// announced fallback is the follow-peer half of the
     /// tracking-source contract: a peer launched without a source — an
     /// active never told its peer — that is later demoted tracks its
@@ -1346,6 +1372,13 @@ impl<'d> Monitor<'d> {
     /// driven cadence's resting shape) and its state cannot land. A
     /// failed pull leaves the standing convergence to decide, exactly
     /// as an unpulled promote would.
+    ///
+    /// A demotion toward an announced-only source — nothing configured,
+    /// only a `?peer=` hint recorded — first verifies the hint the
+    /// same way outside the lock: one checkpoint pull against it that
+    /// must continue this run's line, or the demotion refuses
+    /// `NoTrackingSource`. The verified adoption journals naming the
+    /// source, ahead of the role change it enables.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
         // The final-sync fetch runs outside the shared lock under the
         // dedicated pull bound — like the tracking pull it can wait on
@@ -1362,6 +1395,20 @@ impl<'d> Monitor<'d> {
                     .map_err(|error| format!("fetch from {source}: {error}")),
             ),
             _ => None,
+        };
+        // The demotion-hint verification runs outside the shared lock
+        // under the same bound and for the same reason: a hint naming
+        // a dead or hostile endpoint must fail as that endpoint's own
+        // network wait, never as the lock's hold. A demotion with a
+        // configured source, a promotion, or a non-owner verifies
+        // nothing.
+        let verified = if promote {
+            None
+        } else {
+            match self.verify_demote_hint() {
+                Ok(hint) => hint,
+                Err(response) => return response,
+            }
         };
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;
@@ -1393,6 +1440,24 @@ impl<'d> Monitor<'d> {
             // pull can ever reconverge; refuse up front rather than
             // silently marooning the instance.
             Err(SwitchError::NoTrackingSource)
+        } else if !promote
+            && peer.owns_field()
+            && self.configured_source().is_none()
+        {
+            // An announced-only demotion: the hint must still be the
+            // one verified above — a re-announce that landed mid-verify
+            // un-verifies the record, and the safe answer is refusal,
+            // never a demotion toward an unproven endpoint. The
+            // verified adoption journals naming its source ahead of
+            // the role change it enables, so the run's move onto the
+            // announced endpoint is never silent.
+            match (*self.announced.lock().unwrap(), verified) {
+                (Some(current), Some(source)) if current == source => {
+                    recorder.note_tracking_source(peer.tick(), source);
+                    peer.demote()
+                }
+                _ => Err(SwitchError::NoTrackingSource),
+            }
         } else {
             peer.demote()
         };
@@ -1405,6 +1470,48 @@ impl<'d> Monitor<'d> {
             }
             Err(error) => json(409, &error),
         }
+    }
+
+    /// The explicitly configured tracking source — `Driven`'s `track`
+    /// or [`with_standby_source`](Self::with_standby_source) — when
+    /// set: operator-declared, so a demotion follows it without
+    /// proving anything. The announced follow-peer hint is not one of
+    /// these, and never satisfies the demotion guard on its own.
+    fn configured_source(&self) -> Option<SocketAddr> {
+        self.driven.track.or(self.standby_source)
+    }
+
+    /// Proves the announced follow-peer hint a demotion would follow,
+    /// or refuses the demotion — the `?peer=` hardening: the serving
+    /// side cannot tell the puller's monitor port from any other
+    /// same-IP port the connection claims, so a recorded hint is
+    /// unverified until one checkpoint pulled from it proves it
+    /// continues this run's line. Returns the verified hint, or `None`
+    /// when the demotion needs no proof — a configured source covers
+    /// it, or the peer owns no field — or the `409 NoTrackingSource`
+    /// refusal when the owner has only an unproven hint: nothing
+    /// announced, an unreachable hint, or a hint whose checkpoint is
+    /// not this run's continuation.
+    fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
+        if self.configured_source().is_some() {
+            return Ok(None);
+        }
+        if !self.shared.lock().unwrap().peer.owns_field() {
+            return Ok(None);
+        }
+        let hint = match *self.announced.lock().unwrap() {
+            Some(hint) => hint,
+            None => return Err(json(409, &SwitchError::NoTrackingSource)),
+        };
+        let own = self.shared.lock().unwrap().peer.checkpoint();
+        let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT).checkpoint() {
+            Ok(pulled) => pulled,
+            Err(_) => return Err(json(409, &SwitchError::NoTrackingSource)),
+        };
+        if verify_announced_checkpoint(&pulled, &own).is_err() {
+            return Err(json(409, &SwitchError::NoTrackingSource));
+        }
+        Ok(Some(hint))
     }
 }
 

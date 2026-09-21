@@ -285,7 +285,8 @@ fn attributed_events(
 /// receipts its commands settle (addressed by name or by bound point),
 /// its own step failures, and its kind-emitted events. Run-level
 /// entries — role changes, divergence detections and resolutions,
-/// reinitializations, run boundaries — belong to no instance.
+/// reinitializations, tracking-source adoptions, run boundaries —
+/// belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
@@ -305,6 +306,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::SourceRestarted { .. }
+        | JournalEvent::TrackingSourceAdopted { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }
