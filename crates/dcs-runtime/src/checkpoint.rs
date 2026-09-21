@@ -46,6 +46,7 @@ use dcs_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 
 /// The checkpoint format version this build writes.
 ///
@@ -213,6 +214,25 @@ pub struct Checkpoint {
     /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
     #[serde(default)]
     pub command_admission: CommandAdmissionCounts,
+    /// The monitor address the capturing peer pulls checkpoints from
+    /// when it does not own the field — its configured `--standby`/
+    /// `--peer` target, or the address a tracking peer announced
+    /// through its pulls — stamped by [`Peer::checkpoint`](crate::Peer)
+    /// so a `--state-file` resume records who the incumbent's
+    /// checkpoint stream lives on. Peer-local wiring, not run state:
+    /// `apply`/`restore`/`reinitialize` ignore it, and a served
+    /// checkpoint's value describes the *serving* peer, not the
+    /// adopting one. The restart-as-active consult reads it back on a
+    /// relaunched launched-active: the unconditional startup claim
+    /// cannot tell a dead owner's relaunch from a restart while the
+    /// promoted peer holds the field, so the restartee pulls the named
+    /// incumbent's checkpoint first and adopts its newer line rather
+    /// than silently rolling the field back. `None` on an executor's
+    /// own capture — [`Executor::checkpoint`](crate::Executor) does not
+    /// know monitor addresses — and on checkpoints written before the
+    /// stamp existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_source: Option<SocketAddr>,
 }
 
 /// Mints a fresh checkpoint-stream generation — the value a run's

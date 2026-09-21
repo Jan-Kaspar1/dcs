@@ -424,8 +424,8 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
-    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError,
-    TelemetrySnapshot, Tick,
+    PointHistory, PointId, PublicationHealth, ResourceView, RestartConsultOutcome, RoleReport,
+    SchemaView, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{ApplyError, Checkpoint, Executor, Peer, TrackReport, Transfer};
@@ -735,9 +735,15 @@ impl<'d> Monitor<'d> {
     /// Arms `POST /scan` with `driven` wiring and returns the monitor —
     /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
     /// one refuses `POST /scan`, so the wiring never runs. The `track`
-    /// address also becomes the promotion-boundary pull's source.
+    /// address also becomes the promotion-boundary pull's source, and
+    /// mirrors into the peer so every checkpoint it serves — and the
+    /// `after_scan` state-file persist — stamps it as
+    /// `tracking_source`.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track;
+        if let Some(track) = driven.track {
+            self.shared.lock().unwrap().peer.note_tracking_source(track);
+        }
         self.driven = driven;
         self
     }
@@ -760,9 +766,16 @@ impl<'d> Monitor<'d> {
     /// a paced `--standby` run's target, which the pacing loop owns and
     /// `Driven` never sees. `POST /promote` runs one final pull against
     /// it so the promoted run carries every command the active admitted
-    /// up to the promote request.
+    /// up to the promote request. The same address mirrors into the
+    /// peer so its served and persisted checkpoints stamp it as
+    /// `tracking_source`.
     pub fn with_standby_source(mut self, source: SocketAddr) -> Self {
         self.standby_source = Some(source);
+        self.shared
+            .lock()
+            .unwrap()
+            .peer
+            .note_tracking_source(source);
         self
     }
 
@@ -1074,6 +1087,32 @@ impl<'d> Monitor<'d> {
             .note_reinitialized(report);
     }
 
+    /// Journals a restart-as-active incumbent consult that ran before
+    /// this monitor bound — the pre-claim check a relaunched
+    /// launched-active made against the checkpoint stream its persisted
+    /// state (or configured `--peer`) named — attributed to the run's
+    /// resumed tick. Landing it after the bind keeps the durable record
+    /// in process-lifetime order: the run-boundary marker first, the
+    /// consult's audit behind it, before the startup claim.
+    pub fn note_restart_consult(&self, source: String, outcome: RestartConsultOutcome) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        shared.recorder.note_restart_consult(tick, source, outcome);
+    }
+
+    /// Journals pending commands a restart-as-active consult's adoption
+    /// adjudicated — the restartee's own still-`Accepted` receipts the
+    /// adopted line's submission window passed without carrying, each
+    /// already settled `Rejected` carrying `Superseded` — attributed to
+    /// the resumed tick, behind the consult's own entry.
+    pub fn note_superseded(&self, receipts: Vec<CommandReceipt>) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        for receipt in receipts {
+            shared.recorder.note_settled(receipt, tick);
+        }
+    }
+
     /// Marks a tracking peer degraded after a checkpoint fetch produced
     /// nothing — an unreachable active or a refused request — and counts
     /// the heartbeat miss toward the failover budget.
@@ -1171,6 +1210,16 @@ impl<'d> Monitor<'d> {
                 // unrelated client or record one that cannot be dialed.
                 if let Some(announced) = checkpoint_peer(query, remote) {
                     *self.announced.lock().unwrap() = Some(announced);
+                    // Mirror into the peer so the checkpoints it
+                    // serves — and a `--state-file` persist — stamp
+                    // the announced fallback as `tracking_source`,
+                    // naming this instance's successor to a later
+                    // restart-as-active consult.
+                    self.shared
+                        .lock()
+                        .unwrap()
+                        .peer
+                        .note_announced_source(announced);
                 }
                 json(200, &self.shared.lock().unwrap().peer.checkpoint())
             }

@@ -39,7 +39,7 @@ use crate::journal_file::JournalFile;
 use crate::store::Store;
 use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
-    JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
+    JournalEvent, PointId, Quality, RestartConsultOutcome, Role, TelemetrySnapshot, Tick, Value,
 };
 use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
 use std::collections::HashMap;
@@ -307,6 +307,20 @@ impl Recorder {
                 resumed_at: restart.resumed_at,
             },
         );
+    }
+
+    /// Journals a restart-as-active incumbent consult — the pre-claim
+    /// check a restarted launched-active ran against the checkpoint
+    /// stream its persisted state named — attributed to the tick the
+    /// consult ran at, carrying the consulted `source` and what the
+    /// consult did with what it found.
+    pub(super) fn note_restart_consult(
+        &mut self,
+        tick: Tick,
+        source: String,
+        outcome: RestartConsultOutcome,
+    ) {
+        self.push(tick, JournalEvent::RestartConsult { source, outcome });
     }
 
     /// Marks the executor's standing state already observed — the

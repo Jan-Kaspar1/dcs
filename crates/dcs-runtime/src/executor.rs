@@ -1532,6 +1532,10 @@ impl<'d> Executor<'d> {
             forces: self.forces.clone(),
             receipts: self.receipts.clone(),
             command_admission: self.command_admission,
+            // The tracking source is peer wiring, not run state — the
+            // executor does not know monitor addresses;
+            // `Peer::checkpoint` stamps it.
+            tracking_source: None,
         }
     }
 
@@ -6839,6 +6843,7 @@ mod tests {
             forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
+            tracking_source: None,
         }
     }
 
@@ -6999,6 +7004,7 @@ mod tests {
             forces: BTreeMap::new(),
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
+            tracking_source: None,
         }
     }
 
