@@ -30,12 +30,16 @@ as the manifest declares. The run:
   crafted announce issued at the decisive point: after the promote's
   final-sync pull has re-announced the genuine standby address on the
   demoted peer's monitor, but before the demoted peer's first
-  tracking pull. A `?peer=` landing there is the last write the
-  demotion's tracking-source fallback would follow — refused, the
-  demoted peer tracks its real successor into `tracking`; landed, it
-  strands on the dead pull. (An announce landed *earlier* could not
-  strand anything: the promote's own announce overwrites it — the
-  honest healing path this leg must see past.);
+  tracking pull. Refused there, the demoted peer tracks its real
+  successor into `tracking` — and the source the demotion verified
+  and adopted is pinned, so even a landed rewrite at that point
+  could not redirect the pulls; a landed announce *before* the
+  demote is the case the hardened contract must answer — the
+  endpoint it names is unverified, so the demotion refuses
+  `no_tracking_source` rather than stranding the peer on a dead
+  pull. (A landed announce between the genuine ones could not
+  strand anything even before the pinning: the next pull's own
+  announce overwrites it — the honest healing path.);
 - the restore — the same switch back leaves the manifest-declared
   duty controller `active` and its standby `tracking` again.
 
@@ -52,8 +56,9 @@ exits 1 — the check's `peer-announce-failed`. `--tamper
 landed-announce` doctors the crafted announce onto the pulling
 connection's own source address — a closed local port — so it lands
 exactly as it would on a controller whose acceptance check regressed,
-stranding the demoted peer and proving the leg's reconvergence
-assertion fires.
+and the field owner's demotion refuses `no_tracking_source` against
+the unverifiable hint rather than stranding the demoted peer —
+proving the leg's demote-refusal assertion fires.
 """
 
 import argparse
@@ -80,8 +85,10 @@ FOREIGN_HOST = "10.255.255.1"
 
 def crafted_peer(tamper):
     """The `?peer=` address the crafted announce names — a closed port
-    either way, so a landed announce strands the demoted peer on a
-    dead pull. The honest leg moves the just-released port onto
+    either way, so a landed announce records a hint no checkpoint
+    pull can verify: the demotion it would arm refuses
+    `no_tracking_source` instead of stranding the peer on a dead
+    pull. The honest leg moves the just-released port onto
     `FOREIGN_HOST`, naming a source the pulling connection does not
     own; the `landed-announce` tamper keeps the loopback source so the
     announce lands."""
@@ -171,12 +178,16 @@ def announce_pass(args, tamper):
         # re-announces the genuine standby address on the demoted
         # peer's monitor — so the same crafted announce is issued
         # again at the decisive point, after that last genuine write
-        # and before the demoted peer's first tracking pull: the
-        # demotion's tracking-source fallback follows whatever
-        # `?peer=` last recorded. Refused, the demoted peer
-        # reconverges `tracking` on its real successor; landed, it
-        # strands `unsynchronized` on the dead address — the
-        # acceptance contract's observable proof.
+        # and before the demoted peer's first tracking pull. The
+        # demotion already verified the genuine hint and pinned the
+        # adoption — refused or landed, the rewrite cannot redirect
+        # the demoted peer's pulls, and the peer reconverges
+        # `tracking` on its real successor. A crafted announce that
+        # landed *before* the demote is the case the hardened
+        # contract answers at the demote itself: the hint it planted
+        # never verifies, so `POST /demote` refuses
+        # `no_tracking_source` — the acceptance contract's observable
+        # proof under the tamper.
         decisive = {}
 
         def attempt():
@@ -249,8 +260,9 @@ def main():
         "--tamper",
         choices=["landed-announce"],
         help="doctor the crafted announce onto the pulling "
-        "connection's own source address so it lands — the demoted "
-        "peer must strand unsynchronized",
+        "connection's own source address so it lands — the field "
+        "owner's demotion must refuse no_tracking_source against "
+        "the unverifiable hint",
     )
     args = parser.parse_args()
 

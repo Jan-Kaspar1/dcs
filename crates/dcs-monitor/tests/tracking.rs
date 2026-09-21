@@ -1017,10 +1017,15 @@ fn demote_toward_a_verified_announced_source_journals_the_adopted_source() {
     // The adoption is journaled at the demotion boundary, naming the
     // verified source — the audit record of where the run moved.
     assert!(
-        active.client.journal(0).unwrap().iter().any(|entry| matches!(
-            entry.event,
-            JournalEvent::TrackingSourceAdopted { source } if source == successor
-        )),
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == successor
+            )),
         "the demotion must journal its adopted tracking source: {:?}",
         active.client.journal(0).unwrap()
     );
@@ -1064,27 +1069,81 @@ fn adoption_from_an_announced_source_is_journaled_with_its_source() {
     // the same.
     let mut forged = lonely.client.checkpoint().unwrap();
     forged.tick = Tick(forged.tick.0 + 1);
-    forged.outputs.insert(
-        PointId(20),
-        Sample::good(Value::Float(1234.0), forged.tick),
-    );
+    forged
+        .outputs
+        .insert(PointId(20), Sample::good(Value::Float(1234.0), forged.tick));
     let hostile = Hostile::serve(&forged);
 
     lonely.client.checkpoint_announcing(hostile.addr).unwrap();
     assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
     assert!(
-        lonely.client.journal(0).unwrap().iter().any(|entry| matches!(
-            entry.event,
-            JournalEvent::TrackingSourceAdopted { source } if source == hostile.addr
-        )),
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == hostile.addr
+            )),
         "even a plausible hostile adoption must journal its source: {:?}",
         lonely.client.journal(0).unwrap()
     );
 
     // The demoted peer adopts the hostile stream — and the adoption
-    // the journal names is the one the run now carries.
+    // the journal names is the one the run now carries: its tracked
+    // alignment is the forged checkpoint's tick.
     lonely.client.advance(1).unwrap();
-    assert_eq!(lonely.client.role().unwrap().tick, forged.tick);
+    let report = lonely.client.role().unwrap();
+    assert!(
+        matches!(
+            report.sync,
+            Some(StandbySync::Tracking { aligned }) if aligned == forged.tick
+        ),
+        "the demoted peer aligned on the hostile stream: {report:?}"
+    );
+}
+
+/// The finding's redirect half on the standing tracking path: the
+/// source a verified announced demotion adopts is also the one the
+/// demoted peer keeps pulling — pinned — so a later `?peer=` rewrite,
+/// the same unauthenticated mutation that planted the hint, cannot
+/// move the tracking onto an endpoint the demotion never proved.
+#[test]
+fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
+    let (standby, active) = DrivenStandby::start(None);
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let successor = active.monitor.tracking_source().unwrap();
+
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+
+    // The same-source re-announce still lands — the read endpoint
+    // cannot refuse a dialable self-claim — but the demoted peer's
+    // pulls stay pinned to the verified adoption rather than the
+    // rewrite's hostile endpoint.
+    let mut forged = active.client.checkpoint().unwrap();
+    forged.tick = Tick(99999);
+    let hostile = Hostile::serve(&forged);
+    active.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+
+    // The demoted peer keeps tracking the adopted successor: it
+    // reconverges on the real stream instead of adopting the hostile
+    // port's forged tick domain — the alignment, not just the
+    // convergence, proves which endpoint the pulls reached.
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { aligned }) if aligned != forged.tick),
+        "the demoted peer tracks the pinned adoption, not the rewrite: {report:?}"
+    );
+    assert!(
+        report.tick.0 < forged.tick.0,
+        "the run's clock stayed off the forged domain: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
 }
 
 /// The paced-standby reproduction of the QA finding

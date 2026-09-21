@@ -633,6 +633,17 @@ pub struct Monitor<'d> {
     /// stranding or adopting. Outside `shared`: the value is
     /// request-path bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
+    /// The tracking source a verified announced demotion pinned — the
+    /// endpoint `POST /demote` proved serves this run's continuation
+    /// and journaled as the adopted source. The demoted peer's pulls
+    /// target it rather than re-reading `announced`, so a later
+    /// `?peer=` rewrite — the same unauthenticated mutation that
+    /// planted the hint — cannot move the tracking onto an endpoint
+    /// the demotion never proved. `None` until an announced-only
+    /// demotion verifies one; a configured source always outranks it,
+    /// and the next announced-only demotion re-proves and re-pins.
+    /// Outside `shared`: request-path bookkeeping like `announced`.
+    adopted: Mutex<Option<SocketAddr>>,
 }
 
 /// The peer — executor plus redundancy role — and the history recorder,
@@ -750,6 +761,7 @@ impl<'d> Monitor<'d> {
             command_persist: None,
             standby_source: None,
             announced: Mutex::new(None),
+            adopted: Mutex::new(None),
         })
     }
 
@@ -789,26 +801,30 @@ impl<'d> Monitor<'d> {
 
     /// The checkpoint address this peer tracks — `Driven`'s `track` or
     /// the configured [`with_standby_source`](Self::with_standby_source)
-    /// when set, else the monitor address a tracking peer announced
-    /// through its `GET /checkpoint?peer=` pulls — an announce accepted
-    /// only from the connection it names as its own address, with a
-    /// wildcard-announced IP resolved to that address and a port-0
-    /// claim refused, so the recorded source is always one a demotion
-    /// could dial. A recorded hint alone does not arm a demotion: the
-    /// serving side cannot verify the puller's monitor port from the
-    /// connection, so `POST /demote` toward an announced-only source
-    /// first pulls one checkpoint from it and proceeds only when that
-    /// checkpoint continues this run's line — adopting the source into
-    /// the journal — and otherwise refuses `NoTrackingSource`. The
-    /// announced fallback is the follow-peer half of the
-    /// tracking-source contract: a peer launched without a source — an
-    /// active never told its peer — that is later demoted tracks its
-    /// successor here and reconverges instead of stranding
-    /// `unsynchronized` and unpromotable.
+    /// when set, else the pinned adoption a verified announced
+    /// demotion recorded, else the monitor address a tracking peer
+    /// announced through its `GET /checkpoint?peer=` pulls — an
+    /// announce accepted only from the connection it names as its own
+    /// address, with a wildcard-announced IP resolved to that address
+    /// and a port-0 claim refused, so the recorded source is always
+    /// one a demotion could dial. A recorded hint alone does not arm
+    /// a demotion: the serving side cannot verify the puller's monitor
+    /// port from the connection, so `POST /demote` toward an
+    /// announced-only source first pulls one checkpoint from it and
+    /// proceeds only when that checkpoint continues this run's line —
+    /// adopting the source into the journal and pinning it as the
+    /// tracking target, so a later `?peer=` rewrite cannot redirect
+    /// the demoted peer's pulls — and otherwise refuses
+    /// `NoTrackingSource`. The announced fallback is the follow-peer
+    /// half of the tracking-source contract: a peer launched without
+    /// a source — an active never told its peer — that is later
+    /// demoted tracks its successor here and reconverges instead of
+    /// stranding `unsynchronized` and unpromotable.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
         self.driven
             .track
             .or(self.standby_source)
+            .or_else(|| *self.adopted.lock().unwrap())
             .or_else(|| *self.announced.lock().unwrap())
     }
 
@@ -1440,20 +1456,21 @@ impl<'d> Monitor<'d> {
             // pull can ever reconverge; refuse up front rather than
             // silently marooning the instance.
             Err(SwitchError::NoTrackingSource)
-        } else if !promote
-            && peer.owns_field()
-            && self.configured_source().is_none()
-        {
+        } else if !promote && peer.owns_field() && self.configured_source().is_none() {
             // An announced-only demotion: the hint must still be the
             // one verified above — a re-announce that landed mid-verify
             // un-verifies the record, and the safe answer is refusal,
             // never a demotion toward an unproven endpoint. The
             // verified adoption journals naming its source ahead of
             // the role change it enables, so the run's move onto the
-            // announced endpoint is never silent.
+            // announced endpoint is never silent — and pins that
+            // endpoint as the tracking target, so a `?peer=` rewrite
+            // landing after the demotion cannot redirect the demoted
+            // peer's pulls onto a source the demotion never proved.
             match (*self.announced.lock().unwrap(), verified) {
                 (Some(current), Some(source)) if current == source => {
                     recorder.note_tracking_source(peer.tick(), source);
+                    *self.adopted.lock().unwrap() = Some(source);
                     peer.demote()
                 }
                 _ => Err(SwitchError::NoTrackingSource),
@@ -1736,6 +1753,84 @@ fn checkpoint_peer(query: &str, remote: Option<SocketAddr>) -> Option<SocketAddr
     } else {
         None
     }
+}
+
+/// Why a checkpoint pulled to verify an announced demotion hint is
+/// not this run's continuation — [`verify_announced_checkpoint`]'s
+/// named refusals. Each means the announced endpoint serves a stream
+/// this run's tracked line does not produce, so the demotion the
+/// hint would have armed refuses `NoTrackingSource` rather than
+/// moving the run onto it.
+#[derive(Debug, Clone, PartialEq)]
+enum AnnouncedCheckpointError {
+    /// The pulled document's format version is not one this build
+    /// reads — not a checkpoint of this line at all.
+    UnreadableVersion {
+        /// The version the pulled document declares.
+        found: u32,
+    },
+    /// The pulled checkpoint names a different tick-domain
+    /// generation — a restarted or unrelated stream, not the line
+    /// this run's checkpoints feed. A tracking peer adopts this run's
+    /// generation verbatim on every apply — and a reinitialized
+    /// successor keeps it across a model revision's fingerprint
+    /// crossing — so any inequality, including an identified stream
+    /// against this run's unidentified one, is not the tracked
+    /// continuation.
+    ForeignGeneration,
+    /// The pulled checkpoint's tick runs more than
+    /// [`MAX_ANNOUNCED_AHEAD`] past this run's own: a successor
+    /// tracking this run sits only a few ticks ahead of it, so a
+    /// same-generation stream that far ahead is not this line's
+    /// continuation — it is a forged or foreign tick domain wearing
+    /// this line's identity.
+    Ahead {
+        /// The tick the pulled checkpoint claims.
+        pulled: Tick,
+        /// This run's own tick when the hint was verified.
+        own: Tick,
+    },
+}
+
+/// Whether one checkpoint pulled from an announced demotion hint
+/// proves the hinted endpoint serves this run's continuation — the
+/// demote-side half of the `?peer=` hardening. The serving side
+/// cannot tell the puller's monitor port from any other same-IP port
+/// a connection claims, so the recorded hint is trusted only after
+/// the endpoint's own checkpoint answers as this line's successor
+/// would: a readable format, this run's generation — the line's
+/// tick-domain identity, which a tracking peer adopts verbatim on
+/// every apply and a reinitialized successor keeps across the
+/// fingerprint crossing — and a tick no further ahead of this run's
+/// than [`MAX_ANNOUNCED_AHEAD`], the honest skew of a peer applying
+/// this run's checkpoints and scanning alongside it. The model
+/// fingerprint is deliberately absent here: a revised successor's
+/// checkpoints legitimately carry the next model's — the demoted
+/// peer's own apply gate refuses a foreign fingerprint at adoption
+/// and reports `degraded`, the revision roll's designed shape, so a
+/// fingerprint inequality is not a demote-side refusal. A checkpoint
+/// behind this run's tick is no rejection either: a lagging
+/// successor is still this line, and the demoted peer's pulls simply
+/// reconverge it.
+fn verify_announced_checkpoint(
+    pulled: &Checkpoint,
+    own: &Checkpoint,
+) -> Result<(), AnnouncedCheckpointError> {
+    if !SUPPORTED_FORMAT_VERSIONS.contains(&pulled.format_version) {
+        return Err(AnnouncedCheckpointError::UnreadableVersion {
+            found: pulled.format_version,
+        });
+    }
+    if pulled.generation != own.generation {
+        return Err(AnnouncedCheckpointError::ForeignGeneration);
+    }
+    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+        return Err(AnnouncedCheckpointError::Ahead {
+            pulled: pulled.tick,
+            own: own.tick,
+        });
+    }
+    Ok(())
 }
 
 /// The `/journal` query: `since` keeps only entries with a higher `seq`.
@@ -2397,5 +2492,96 @@ mod tests {
         // tracking source — the same strand the wildcard caused.
         assert_eq!(checkpoint_peer("peer=0.0.0.0:0", Some(remote)), None);
         assert_eq!(checkpoint_peer("peer=172.22.0.4:0", Some(remote)), None);
+    }
+
+    /// The demote-side half of the `?peer=` hardening at the document
+    /// level: the checkpoint pulled to prove an announced hint must be
+    /// this line's continuation — readable format, this run's model
+    /// fingerprint and generation, and a tick within the honest
+    /// successor skew — or the hint proves nothing and the demotion
+    /// refuses.
+    #[test]
+    fn verify_announced_checkpoint_accepts_only_this_lines_continuation() {
+        let checkpoint = || Checkpoint {
+            format_version: dcs_runtime::CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: Some(dcs_core::ModelFingerprint(7)),
+            generation: Some(11),
+            tick: Tick(100),
+            components: Default::default(),
+            driver: None,
+            outputs: Default::default(),
+            internal: Default::default(),
+            forces: Default::default(),
+            receipts: Vec::new(),
+            command_admission: Default::default(),
+        };
+        let own = checkpoint();
+
+        // The honest successor shapes: this line at the same tick, a
+        // few ticks ahead inside the skew window, and far behind — a
+        // lagging successor is still this line.
+        for ahead in [0, 1, MAX_ANNOUNCED_AHEAD] {
+            let mut pulled = checkpoint();
+            pulled.tick = Tick(own.tick.0 + ahead);
+            assert_eq!(verify_announced_checkpoint(&pulled, &own), Ok(()));
+        }
+        let mut lagging = checkpoint();
+        lagging.tick = Tick(3);
+        assert_eq!(verify_announced_checkpoint(&lagging, &own), Ok(()));
+        // The revision roll's successor: the next model's fingerprint
+        // on this line's generation — the demoted peer's own apply
+        // gate answers the foreign fingerprint at adoption, so the
+        // demote-side check lets the crossing through.
+        let mut revised = checkpoint();
+        revised.model_fingerprint = Some(dcs_core::ModelFingerprint(8));
+        assert_eq!(verify_announced_checkpoint(&revised, &own), Ok(()));
+        // An unidentified line — both unminted — still verifies on
+        // generation and tick: the unminted test/legacy shape.
+        let mut unminted_own = checkpoint();
+        unminted_own.model_fingerprint = None;
+        unminted_own.generation = None;
+        let mut pulled = unminted_own.clone();
+        pulled.tick = Tick(101);
+        assert_eq!(verify_announced_checkpoint(&pulled, &unminted_own), Ok(()));
+
+        // The reproduction's forgery: this line's identity at a tick
+        // far ahead of the run's — refused.
+        let mut forged = checkpoint();
+        forged.tick = Tick(99999);
+        assert_eq!(
+            verify_announced_checkpoint(&forged, &own),
+            Err(AnnouncedCheckpointError::Ahead {
+                pulled: Tick(99999),
+                own: Tick(100),
+            })
+        );
+        let mut just_past = checkpoint();
+        just_past.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
+        assert!(matches!(
+            verify_announced_checkpoint(&just_past, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
+        // A foreign generation — a restarted or unrelated stream, and
+        // an identified stream against this run's unidentified one —
+        // and an unreadable format are refusals too.
+        let mut restarted = checkpoint();
+        restarted.generation = Some(12);
+        assert_eq!(
+            verify_announced_checkpoint(&restarted, &own),
+            Err(AnnouncedCheckpointError::ForeignGeneration)
+        );
+        let mut identified = checkpoint();
+        identified.model_fingerprint = None;
+        identified.generation = Some(11);
+        assert_eq!(
+            verify_announced_checkpoint(&identified, &unminted_own),
+            Err(AnnouncedCheckpointError::ForeignGeneration)
+        );
+        let mut unreadable = checkpoint();
+        unreadable.format_version = 999;
+        assert_eq!(
+            verify_announced_checkpoint(&unreadable, &own),
+            Err(AnnouncedCheckpointError::UnreadableVersion { found: 999 })
+        );
     }
 }
