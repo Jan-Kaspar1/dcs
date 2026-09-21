@@ -234,8 +234,11 @@ pub struct Peer<'d> {
     /// restoring the unreached tail suspended instead. A genuinely
     /// abandoned command can never apply here — the gate quiesces the
     /// run's writes — so it settles rejected rather than vanishing
-    /// unaudited or `applied` on an abandoned image.
-    pending_superseded: Vec<CommandReceipt>,
+    /// unaudited or `applied` on an abandoned image. Each entry keeps
+    /// the receipt's absolute submission index beside it — the identity
+    /// the journal's settle dedup keys on, so a repeat drain of the
+    /// same adjudication never re-journals it.
+    pending_superseded: Vec<(u64, CommandReceipt)>,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -1163,15 +1166,18 @@ impl<'d> Peer<'d> {
                     .is_some_and(|adopted| adopted.command == receipt.command)
             });
             if !carried {
-                self.pending_superseded.push(CommandReceipt {
-                    command: receipt.command.clone(),
-                    outcome: CommandOutcome::Rejected {
-                        reason: CommandError::Superseded {
-                            point: receipt.command.point(),
+                self.pending_superseded.push((
+                    index,
+                    CommandReceipt {
+                        command: receipt.command.clone(),
+                        outcome: CommandOutcome::Rejected {
+                            reason: CommandError::Superseded {
+                                point: receipt.command.point(),
+                            },
                         },
+                        actor: receipt.actor,
                     },
-                    actor: receipt.actor,
-                });
+                ));
             }
         }
     }
@@ -1513,10 +1519,11 @@ impl<'d> Peer<'d> {
     /// Drains pending-command settlements queued since the last call —
     /// one [`CommandReceipt`] rewritten to `Rejected` carrying
     /// [`CommandError::Superseded`] per still-`Accepted` entry a
-    /// checkpoint adoption abandoned — for the settle journal the
-    /// monitoring layer records them into through
-    /// `Recorder::note_settled`.
-    pub fn take_superseded_commands(&mut self) -> Vec<CommandReceipt> {
+    /// checkpoint adoption abandoned, each paired with its absolute
+    /// submission index — for the settle journal the monitoring layer
+    /// records them into through `Recorder::note_settled`, the index
+    /// being what its dedup keys on.
+    pub fn take_superseded_commands(&mut self) -> Vec<(u64, CommandReceipt)> {
         std::mem::take(&mut self.pending_superseded)
     }
 
@@ -3865,9 +3872,10 @@ mod tests {
         assert_eq!(peer.receipts(), source.receipts());
         let superseded = peer.take_superseded_commands();
         assert_eq!(superseded.len(), 1, "{superseded:?}");
-        assert_eq!(superseded[0].command, Clocked::bump(7));
+        assert_eq!(superseded[0].0, 0);
+        assert_eq!(superseded[0].1.command, Clocked::bump(7));
         assert_eq!(
-            superseded[0].outcome,
+            superseded[0].1.outcome,
             CommandOutcome::Rejected {
                 reason: CommandError::Superseded { point: None }
             }
