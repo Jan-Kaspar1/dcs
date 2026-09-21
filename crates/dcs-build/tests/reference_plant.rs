@@ -743,6 +743,31 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the demote-pending leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's demote-follow reconvergence leg ran and
+    // held: under the manifest's declared 0.0.0.0 listen binds, both
+    // documented switch directions left the demoted peer reconverged
+    // to tracking on the successor's dialable announced source, the
+    // tracking held across the pull train, and the launch roles
+    // restored — its digest line reports the evidence, and the
+    // self-addressed announce case reported its named diagnostic.
+    let reconvergence_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-reconvergence-digest"))
+        .unwrap_or_else(|| panic!("the demote-reconvergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking its announced successor",
+        "pulls",
+        "roles restored",
+    ] {
+        assert!(
+            reconvergence_line.contains(phrase),
+            "the demote-reconvergence digest names no '{phrase}' evidence: {reconvergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("self-announce: reported, demote-reconvergence-failed"),
+        "the demote-reconvergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     // The pair contract's managed-lifecycle leg ran and held: the
     // emitted model's managed-alarm surface exercised end to end on
     // the deployed pair — the field-driven activation, the attributed
