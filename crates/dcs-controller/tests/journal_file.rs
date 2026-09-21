@@ -9,6 +9,7 @@
 
 use dcs_core::{Command, JournalEntry, PointId, Tick, Value, ValueKind};
 use dcs_monitor::MonitorClient;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
@@ -455,6 +456,70 @@ fn a_receipted_write_and_a_component_transition_journal_side_by_side() {
     );
     assert_eq!(file_entries(&journal), after_restart);
     assert_eq!(file_boundaries(&journal), vec![(1, 0), (2, 0)]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #726's reproduction on the scripted redundant pair: a command
+/// settled on the pair journals on both peers' durable files; the
+/// standby restarted onto a checkpoint whose receipt window no longer
+/// covers the journaled settlement — its `--state-file` removed, the
+/// documented cold start — re-journaled the adopted `command_settled`
+/// over the same file. The durable journal is the pair's one command
+/// audit trail: exactly one `command_settled` per settlement across
+/// the run boundary.
+#[test]
+fn a_standby_restarted_without_its_state_file_does_not_rejournal_the_settlement() {
+    let dir = scratch("standby-rejournal");
+    let active_journal = dir.join("active.jsonl");
+    let standby_journal = dir.join("standby.jsonl");
+    let active_state = dir.join("active-state.json");
+    let standby_state = dir.join("standby-state.json");
+    let standby_args = |active: SocketAddr| {
+        let mut args = driven_args(&standby_journal, Some(&standby_state));
+        args.extend(["--standby".to_string(), active.to_string()]);
+        args
+    };
+    let settlements = |path: &Path| {
+        file_entries(path)
+            .iter()
+            .filter(|entry| matches!(entry.event, dcs_core::JournalEvent::CommandSettled { .. }))
+            .count()
+    };
+
+    // The pair: the active settles the write and the tracking
+    // standby's pull adopts the settled receipt — each peer's file
+    // recording the settlement once.
+    let mut active = spawn_driven(&driven_args(&active_journal, Some(&active_state)));
+    let active_client = MonitorClient::new(active.addr);
+    let mut standby = spawn_driven(&standby_args(active.addr));
+    let standby_client = MonitorClient::new(standby.addr);
+    standby_client.advance(1).unwrap();
+    active_client.advance(1).unwrap();
+    active_client.command(&setpoint_write()).unwrap();
+    active_client.advance(1).unwrap();
+    standby_client.advance(2).unwrap();
+    assert_eq!(settlements(&standby_journal), 1);
+    assert_eq!(settlements(&active_journal), 1);
+    kill(&mut standby);
+
+    // The reproduction's trigger: the standby restarts onto its
+    // journal file with the `--state-file` gone — the documented cold
+    // start — and reconverges on the active's checkpoint, whose
+    // receipt window still covers the journaled settlement. The
+    // adopted receipt must not re-journal across the run boundary.
+    std::fs::remove_file(&standby_state).unwrap();
+    let mut standby = spawn_driven(&standby_args(active.addr));
+    let standby_client = MonitorClient::new(standby.addr);
+    standby_client.advance(2).unwrap();
+    assert_eq!(
+        settlements(&standby_journal),
+        1,
+        "the adopted settlement must not re-journal across the run boundary"
+    );
+    assert_eq!(file_boundaries(&standby_journal), vec![(1, 0), (2, 0)]);
+    kill(&mut standby);
+    kill(&mut active);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
