@@ -2256,9 +2256,19 @@ impl MonitorClient {
         path: &str,
         body: Option<&str>,
     ) -> io::Result<(u16, String)> {
-        let mut stream = match self.timeout {
-            Some(timeout) => TcpStream::connect_timeout(&self.addr, timeout)?,
-            None => TcpStream::connect(self.addr)?,
+        let mut stream = loop {
+            let attempt = match self.timeout {
+                Some(timeout) => TcpStream::connect_timeout(&self.addr, timeout),
+                None => TcpStream::connect(self.addr),
+            };
+            match attempt {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                other => break other?,
+            }
         };
         if let Some(timeout) = self.timeout {
             stream.set_read_timeout(Some(timeout))?;
@@ -2293,6 +2303,18 @@ fn decode<T: DeserializeOwned>(status: u16, body: &str) -> io::Result<T> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error}: {body}")))
 }
 
+/// Reads into `chunk`, retrying an interrupted wait — a caught signal
+/// (e.g. a spawned helper's `SIGCHLD`) is not link trouble, and reporting
+/// it as one would turn a stray signal into a false endpoint failure.
+fn read_chunk(stream: &mut TcpStream, chunk: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match stream.read(chunk) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
 /// Reads one HTTP response: headers up to the blank line, then the body
 /// by `Content-Length`, by `Transfer-Encoding: chunked` framing (which a
 /// server may pick over a known length once a body grows past its
@@ -2304,7 +2326,7 @@ fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
         if let Some(end) = find_subslice(&buf, b"\r\n\r\n") {
             break end;
         }
-        match stream.read(&mut chunk)? {
+        match read_chunk(stream, &mut chunk)? {
             0 => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -2353,7 +2375,7 @@ fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
                 if let Some(end) = find_subslice(&buf[pos..], b"\r\n") {
                     break pos + end;
                 }
-                match stream.read(&mut chunk)? {
+                match read_chunk(stream, &mut chunk)? {
                     0 => {
                         return Err(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
@@ -2374,7 +2396,7 @@ fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
                 break;
             }
             while buf.len() - pos < size + 2 {
-                match stream.read(&mut chunk)? {
+                match read_chunk(stream, &mut chunk)? {
                     0 => {
                         return Err(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
@@ -2392,7 +2414,7 @@ fn read_response(stream: &mut TcpStream) -> io::Result<(u16, String)> {
         match content_length {
             Some(length) => {
                 while buf.len() - body_start < length {
-                    match stream.read(&mut chunk)? {
+                    match read_chunk(stream, &mut chunk)? {
                         0 => break,
                         n => buf.extend_from_slice(&chunk[..n]),
                     }
