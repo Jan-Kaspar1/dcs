@@ -931,6 +931,36 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the alarm-rationalization leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's claim-fencing leg ran and held: the
+    // dedicated third sim-net attachment's write and step probes
+    // fenced under the standing claim — the same mutations through
+    // the shipped dcs-plant-ctl exiting nonzero — while the field
+    // owner's writes kept landing, the lifecycle verbs answered per
+    // contract under foreign and owner tokens, the rogue claim's
+    // settled answer never passed silently, and the pair restored
+    // its launch roles — its digest line reports the evidence, and
+    // each doctored case reported its named diagnostic.
+    let fencing_line = stdout
+        .lines()
+        .find(|line| line.contains("claim-fencing-digest"))
+        .unwrap_or_else(|| panic!("the claim-fencing leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking by tick",
+        "claim surface",
+        "the rogue claim",
+        "run ended at tick",
+    ] {
+        assert!(
+            fencing_line.contains(phrase),
+            "the claim-fencing digest names no '{phrase}' evidence: {fencing_line}"
+        );
+    }
+    for tamper in ["write-through", "foreign-ensure-granted", "rogue-silent"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, claim-fencing-failed")),
+            "the claim-fencing leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
