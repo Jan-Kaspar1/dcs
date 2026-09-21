@@ -8,8 +8,8 @@ use dcs_core::{
     QualityReason, Role, Sample, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
-    WriteGate,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, PointSpec,
+    StepError, WriteGate,
 };
 use dcs_sim::{
     ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
@@ -460,6 +460,127 @@ fn two_identical_scripted_runs_produce_identical_sample_sequences() {
         })
     };
     assert_eq!(run(), run());
+}
+
+/// A point map declaring a `stale_after_ticks` freshness budget on the
+/// `In` point — the shape a budgeted `io_point` resolves into.
+fn budgeted_map(point: u64, budget: u64) -> PointMap {
+    PointMap::new()
+        .with_spec(
+            PointId(point),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: false,
+                stale_after_ticks: Some(budget),
+                journaled: false,
+            },
+        )
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+}
+
+#[test]
+fn a_resumed_field_owner_clears_the_stale_an_unstepped_window_left() {
+    with_server(loopback_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 2),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // The field owner steps: the plant's own tick domain advances
+        // with the run's and every read lands fresh.
+        for _ in 0..3 {
+            remote.step(0.1).unwrap();
+            executor.scan();
+            assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        }
+
+        // The QA reproduction: the owner is paused (or demoted) and the
+        // plant stops stepping while the run keeps ticking — the plant
+        // domain freezes, the report stops changing, and the held
+        // sample ages to stale past its budget. The field still serves
+        // the last-known value good: stale is the run's verdict on a
+        // frozen report, not the driver's.
+        executor.run(4);
+        assert_eq!(remote.read(PointId(10)).unwrap().quality, Quality::Good);
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // The owner resumes stepping — the plant domain resumes behind
+        // the run's by the window's length, permanently. A lag measured
+        // across the two domains reads past the budget forever and
+        // latches stale; judged on the report's own change, the first
+        // fresh read restores the driver's quality.
+        remote.step(0.1).unwrap();
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        assert!(
+            remote.read(PointId(10)).unwrap().tick < executor.snapshot().tick,
+            "the resumed plant domain still lags the run's — the offset a \
+             cross-domain lag would read as permanently stale"
+        );
+
+        // And stays fresh while the resumed domain keeps advancing —
+        // the permanent offset is not the freshness the budget measures.
+        for _ in 0..3 {
+            remote.step(0.1).unwrap();
+            executor.scan();
+            assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        }
+    });
+}
+
+#[test]
+fn a_run_resumed_behind_the_plant_domain_still_marks_stale() {
+    with_server(loopback_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+
+        // The resume shape the QA finding's symmetric edge names: the
+        // plant has already advanced well past the run's first tick —
+        // a checkpoint restart lands behind the driver's stamp domain.
+        for _ in 0..20 {
+            remote.step(0.1).unwrap();
+        }
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 2),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // While the field owner keeps stepping the report keeps
+        // changing: fresh every scan even from behind.
+        for _ in 0..3 {
+            remote.step(0.1).unwrap();
+            executor.scan();
+            assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        }
+
+        // The owner stalls: the report stops changing and the run's own
+        // lag accrues — the verdict a stamp-domain subtraction could
+        // never reach from behind, since the lag saturates at zero.
+        executor.run(3);
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+    });
 }
 
 #[test]
