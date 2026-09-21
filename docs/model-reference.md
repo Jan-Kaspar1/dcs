@@ -185,9 +185,15 @@ only. Per point kind:
 - a writable *field* `in` point's command write is forwarded to the
   driver at the scan boundary and the same scan's input phase reads it
   back — documented operator substitution of the input image, holding
-  until the field side asserts a different value;
+  until the field side asserts a different value; while the point is
+  forced the write still reaches the driver, which holds it for the
+  release to observe;
 - a writable *internal* `in` point takes the write in the image and
-  holds it until the next command — the common setpoint target.
+  holds it until the next command — the common setpoint target; while
+  the point is forced the write refuses with
+  `CommandError::PointForced`, because the image the force owns is the
+  point's only store — a staged value could never land. Release the
+  force, then write.
 
 A channel-bound `writable` point is part of the operator surface worth
 reviewing, so lint flags it (`writable_field_point`); writable internal
