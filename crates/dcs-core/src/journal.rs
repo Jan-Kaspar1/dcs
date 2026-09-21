@@ -19,6 +19,7 @@ use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 /// One typed value in an [`EmittedEvent`]'s payload — the value half
 /// of a declared [`EventField`](crate::EventField): the variant
@@ -210,6 +211,18 @@ pub enum JournalEvent {
     FieldClaimLost {
         /// The point whose write the field fenced.
         point: PointId,
+    },
+    /// A field owner demoted toward the address a tracking peer
+    /// announced through its `GET /checkpoint?peer=` pulls verified
+    /// that hint by pulling a checkpoint from it that continues this
+    /// run's line, and adopted it as the tracking source the demoted
+    /// peer now pulls. `source` names the adopted address — the audit
+    /// record of which endpoint an unauthenticated announce moved this
+    /// run onto, so a redirected or forged source is never adopted
+    /// silently. The entry's `tick` is the demotion boundary's tick.
+    TrackingSourceAdopted {
+        /// The adopted tracking source's monitor address.
+        source: SocketAddr,
     },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
@@ -436,13 +449,20 @@ mod tests {
             JournalEntry {
                 seq: 14,
                 tick: Tick(20),
+                event: JournalEvent::TrackingSourceAdopted {
+                    source: "127.0.0.1:8081".parse().unwrap(),
+                },
+            },
+            JournalEntry {
+                seq: 15,
+                tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
                     resumed_at: Tick(2),
                 },
             },
             JournalEntry {
-                seq: 15,
+                seq: 16,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },
@@ -464,6 +484,7 @@ mod tests {
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
+        assert!(json.contains("\"tracking_source_adopted\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
     }
 

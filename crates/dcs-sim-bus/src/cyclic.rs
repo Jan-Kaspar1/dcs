@@ -679,7 +679,17 @@ impl CyclicBusDriver {
 fn connect_stream(addresses: &[SocketAddr], timeout: Duration) -> io::Result<TcpStream> {
     let mut failure = io::Error::new(io::ErrorKind::NotFound, "no device server address");
     for &address in addresses {
-        match TcpStream::connect_timeout(&address, timeout) {
+        let attempt = loop {
+            match TcpStream::connect_timeout(&address, timeout) {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        match attempt {
             Ok(stream) => {
                 stream.set_read_timeout(Some(timeout))?;
                 stream.set_write_timeout(Some(timeout))?;
