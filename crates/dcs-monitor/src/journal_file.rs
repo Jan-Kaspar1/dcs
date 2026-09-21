@@ -51,7 +51,7 @@
 //! with the holder's file descriptor, so an ordinary restart —
 //! including a killed process's — re-acquires it immediately.
 
-use dcs_core::{JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
+use dcs_core::{CommandReceipt, JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -173,12 +173,14 @@ pub(super) enum JournalRecord {
 
 /// What a replayed file yields: the retained journal tail for the
 /// in-memory ring, the `seq` the next appended entry takes, the number
-/// of process lifetimes the file already records, and the file's last
-/// recorded observation per point — the whole record's fold, not just
+/// of process lifetimes the file already records, the file's last
+/// recorded observation per point, and every settled receipt its
+/// `command_settled` entries carry — the whole record's fold, not just
 /// the retained tail's, so a resumed run's recorder can diff its first
 /// scan against the state the journal itself last carried instead of
-/// re-recording the standing census as first observations. The default
-/// is the cold start: no entries, `seq` numbering from 1.
+/// re-recording the standing census as first observations or
+/// re-journaling a settlement the file already holds. The default is
+/// the cold start: no entries, `seq` numbering from 1.
 #[derive(Debug)]
 pub(super) struct Replay {
     /// The file's last `capacity` entries, oldest first.
@@ -197,6 +199,15 @@ pub(super) struct Replay {
     pub qualities: HashMap<PointId, Quality>,
     /// The last value each journaled point's transitions recorded.
     pub values: HashMap<PointId, Value>,
+    /// Every receipt the file's `command_settled` entries carry, in
+    /// journaled order — a fold over the whole record, evicted tail
+    /// included, so identical receipts settling distinct submissions
+    /// stay counted separately. A resumed run's recorder accounts an
+    /// adopted or restored receipt's settlement against this list
+    /// rather than re-recording the one settlement across the run
+    /// boundary — the durable file is the run's one command audit
+    /// trail.
+    pub settled: Vec<CommandReceipt>,
 }
 
 impl Default for Replay {
@@ -208,6 +219,7 @@ impl Default for Replay {
             runs: 0,
             qualities: HashMap::new(),
             values: HashMap::new(),
+            settled: Vec::new(),
         }
     }
 }
@@ -336,6 +348,9 @@ fn replay(file: File, path: &Path, capacity: usize) -> io::Result<Replay> {
                     }
                     JournalEvent::PointChanged { point, to, .. } => {
                         replayed.values.insert(*point, *to);
+                    }
+                    JournalEvent::CommandSettled { receipt } => {
+                        replayed.settled.push(receipt.clone());
                     }
                     _ => {}
                 }
