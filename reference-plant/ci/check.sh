@@ -1695,13 +1695,16 @@ echo "  $FIRST"
 
 # The doctored case: a crafted announce naming the pulling
 # connection's own source — a closed local port — lands exactly as it
-# would on a controller whose acceptance check regressed, stranding
-# the demoted peer unsynchronized; the leg must surface the named
-# diagnostic — never a silently poisoned pass.
+# would on a controller whose acceptance check regressed. The
+# hardened contract answers it at the demote: the planted hint names
+# an endpoint no checkpoint pull can verify, so `POST /demote`
+# refuses `no_tracking_source` rather than stranding the demoted
+# peer on the dead pull; the leg must surface the named diagnostic —
+# never a silently poisoned pass.
 if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
     fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
 fi
-[[ "$out" == *"never reconverged"* ]] \
+[[ "$out" == *"no_tracking_source"* ]] \
     || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
 echo "  landed-announce: reported, peer-announce-failed"
 

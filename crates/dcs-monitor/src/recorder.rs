@@ -44,6 +44,7 @@ use dcs_core::{
 use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded and
@@ -360,6 +361,16 @@ impl Recorder {
                 resumed_at: restart.resumed_at,
             },
         );
+    }
+
+    /// Journals an adopted tracking source — a field owner demoted
+    /// toward an announced follow-peer hint verified that hint by
+    /// pulling a checkpoint from it continuing this run's line, and
+    /// now pulls there. Attributed to the demotion boundary's `tick`
+    /// and naming `source`, so the audit records which endpoint the
+    /// demotion moved the run onto.
+    pub(super) fn note_tracking_source(&mut self, tick: Tick, source: SocketAddr) {
+        self.push(tick, JournalEvent::TrackingSourceAdopted { source });
     }
 
     /// Marks the executor's standing state already observed — the

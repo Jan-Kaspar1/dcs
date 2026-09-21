@@ -244,14 +244,21 @@ pub enum PlantError {
 /// [`io::ErrorKind::InvalidData`] means the line exceeded `max` — a
 /// protocol violation the caller answers by dropping the connection. Other
 /// errors are ordinary I/O failures, `WouldBlock`/`TimedOut` included when
-/// the stream carries a read timeout.
+/// the stream carries a read timeout. An interrupted wait
+/// ([`io::ErrorKind::Interrupted`]) is retried, not reported: a caught
+/// signal is not link trouble — the process can field `SIGCHLD` from
+/// spawned helpers while a request is in flight, and that must not drop
+/// the connection.
 pub(crate) fn read_message(
     reader: &mut BufReader<TcpStream>,
     max: usize,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::with_capacity(128);
     loop {
-        let chunk = reader.fill_buf()?;
+        let chunk = match reader.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
         if chunk.is_empty() {
             return Ok(None);
         }

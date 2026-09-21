@@ -210,7 +210,12 @@ def select_snapshot(snapshot):
 
 def journal_records(path):
     """The `--journal-file`'s lines in file order: `("boundary",
-    {"run", "tick"})` markers and `("entry", entry)` records."""
+    {"run", "tick"})` markers and `("entry", entry)` records. A
+    `tracking_source_adopted` entry names the monitor address the
+    demotion verified — carrying the run's ephemeral listen port, the
+    one detail two identical passes cannot share — so the returned
+    entry holds the address's host with the port elided, keeping the
+    record digest-stable without hiding which host was adopted."""
     records = []
     with open(path) as handle:
         for number, line in enumerate(handle, 1):
@@ -223,7 +228,13 @@ def journal_records(path):
             if "run_boundary" in record:
                 records.append(("boundary", record["run_boundary"]))
             elif "entry" in record:
-                records.append(("entry", record["entry"]))
+                entry = record["entry"]
+                adopted = entry.get("event", {}).get(
+                    "tracking_source_adopted"
+                )
+                if adopted is not None:
+                    adopted["source"] = adopted["source"].rsplit(":", 1)[0]
+                records.append(("entry", entry))
             else:
                 raise Abort(
                     f"journal file {path} line {number} is not a journal record"
