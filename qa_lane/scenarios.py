@@ -18445,6 +18445,398 @@ def scenario_demote_settle_uniqueness(ctx):
 
 
 # --------------------------------------------------------------------
+# The demote-boundary pending-command settlement contract (WW-LCM-001's
+# continuity clause, WW-FND-004's receipted-command clause) pinned on
+# the rig the #625 defect was demonstrated on: demote() suspends the
+# peer's accepted-pending commands (suspend_pending_commands), so a
+# command admitted on the active and demoted past before its applying
+# scan settles exactly once — carried into the successor's adoption to
+# apply, or settled Rejected{superseded} with its journaled audit
+# entry. Never either loss shape the QA run reproduced: a phantom
+# command_settled{applied} journaled on the fenced quiesced image and
+# erased a tick later, or a silent receipt-log replacement dropping
+# the pending command unaudited — the same audit family as the
+# promote-boundary (#527) and restart-gap (#533) fixes, on the
+# boundary that batch missed. The leg admits one receipted write on
+# the field owner, issues the documented demote on its heels — inside
+# the admission-to-application window — then audits the admission
+# against both peers' served journals, adopted receipt logs, served
+# images, and durable --journal-file records: exactly one
+# command_settled outcome — applied through the carry with its value
+# landing, or the named superseded rejection journaled — no applied
+# settle minted by a quiesced scan, no pending command vanishing
+# without a settle entry. The named diagnostics are
+# demote-pending-failed — the contract never performed: a refused
+# switch step, an admission refused or never reaching a terminal
+# journaled outcome — and demote-pending-nondeterministic — the run
+# produced an outcome the contract declares impossible: two terminal
+# outcomes on one admission, a peer journaling the settle twice, the
+# durable record disagreeing with the served journals, diverged
+# adopted logs, a phantom application, or two passes disagreeing. Two
+# passes — two switches, so the entry role layout restores by
+# construction — produce identical digests.
+
+DEMOTE_PENDING_SETTLE = 45    # bound on each demote/promote and the
+                              # pair's reconvergence
+DEMOTE_PENDING_AUDIT = 30     # bound on the admission's terminal
+                              # journaled outcome
+DEMOTE_PENDING_POLL = 0.4     # wait cadence inside the leg
+
+
+def _durable_settled(path, admission):
+    """The command_settled receipts a `--journal-file` carries for the
+    pending admission — None while the file cannot be read."""
+    try:
+        items = _journal_entries(path)
+    except (OSError, ValueError):
+        return None
+    return [receipt for receipt in
+            (_journal_settled(item) for item in items)
+            if _admission_hit(receipt, admission)]
+
+
+def _demote_pending_pass(ctx, number, entry_owner, point):
+    """One pending-command pass: admit a single receipted write on the
+    field-owning peer, demote on its heels, promote the converged
+    peer, then audit the admission — exactly one journaled terminal
+    outcome across the served and durable records, the same single
+    outcome in both peers' adopted logs, at most one image
+    application. Returns (digest, violations, evidence): the digest is
+    the pass's normalized verdict record, identical across clean
+    passes — direction-free, so the two passes' opposite switches
+    still agree."""
+    violations = {}
+    evidence = {'entry_owner': entry_owner, 'point': point}
+    admission = None
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-pending-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_PENDING_POLL)
+    if owner not in ('active', 'standby'):
+        failed('owner', 'no launched peer reports role=active — the '
+               'pending command has no field owner')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    peer = 'standby' if owner == 'active' else 'active'
+    evidence['owner'], evidence['peer'] = owner, peer
+    base, peer_base = ctx[owner], ctx[peer]
+    if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                interval=DEMOTE_PENDING_POLL) is None:
+        failed('tracking', peer + ' is not a tracking standby — the '
+               'demote/promote has no converged target')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    snapshot = _try_snapshot(ctx, base) or {}
+    baseline = _point_value(snapshot, point)
+    if not isinstance(baseline, bool):
+        baseline = False
+    admission = {
+        'point': point, 'value': not baseline, 'baseline': baseline,
+        'command': {'write_value': {'point': point, 'kind': 'bool',
+                                    'value': {'bool': not baseline}}},
+        'actor': 'qa-lane-settle-pending-' + str(number),
+        'demoted': owner, 'promoted': peer}
+    evidence['admission'] = {
+        'actor': admission['actor'], 'point': point,
+        'value': admission['value'], 'baseline': baseline,
+        'demoted': owner, 'promoted': peer}
+    try:
+        floors = {}
+        for name in ('active', 'standby'):
+            _, journal = http_json('GET', ctx[name] + '/journal')
+            entries = _journal_list(journal)
+            floors[name] = (entries[-1].get('seq') or 0) \
+                if entries else 0
+    except Exception as exc:
+        failed('floors', 'a peer\'s journal floor never served: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    journals = ctx.get('journal_files') or {}
+    if journals.get('active') is None \
+            or journals.get('standby') is None:
+        failed('journals', 'the run context carries no journal-file '
+               'path for the pair')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The pending window: the receipted submission lands on the
+    # still-active owner, the documented demote on its heels — before
+    # the submission's applying scan.
+    try:
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': admission['command'],
+             'actor': admission['actor']})
+    except Exception as exc:
+        failed('submit', 'the pending submission never answered: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    evidence['submission'] = {'status': status, 'receipt': receipt}
+    if status != 200 or _outcome_key(receipt) != 'accepted':
+        failed('admission', 'the pending command was not admitted '
+               'accepted: ' + str(status) + ' '
+               + json.dumps(receipt)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    status, demote = _settle_call(base + '/demote')
+    evidence['demote'] = {'status': status, 'body': demote}
+    if status != 200:
+        failed('demote', 'the field owner\'s demote answered '
+               + str(status) + ': ' + json.dumps(demote)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The converged peer promotes — the documented order, mid-
+    # transition refusals retried inside the settle bound.
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(peer_base + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_PENDING_POLL)
+    evidence['promote'] = {'body': promoted, 'last_refusal': last}
+    if promoted is None:
+        failed('promote', 'the converged peer\'s promote never '
+               'succeeded: ' + json.dumps(last)[:300])
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The switch settles: the promoted peer reports active, the
+    # demoted one reconverges tracking behind it — the adopted line
+    # the audit reads.
+    settled = wait_for(
+        lambda: (_pair_active(ctx) == peer or None)
+        and _tracking_standby(ctx, owner),
+        deadline, interval=DEMOTE_PENDING_POLL)
+    evidence['settled'] = settled
+    if settled is None:
+        failed('settle', 'the switch never settled: the promoted '
+               'peer\'s role or the demoted peer\'s reconvergence '
+               'missed the bound')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The served audit: the admission resolves to exactly one terminal
+    # outcome — applied through the carry or the named superseded
+    # rejection — journaled once, carried identically in both peers'
+    # adopted logs, and applied to the image at most once.
+    window = wait_for(
+        lambda: (lambda w: w if w is not None
+                 and _settle_resolved(w, admission)
+                 else None)(
+            _settle_window(ctx, admission, floors)),
+        time.monotonic() + DEMOTE_PENDING_AUDIT,
+        interval=DEMOTE_PENDING_POLL)
+    evidence['audit'] = {'actor': admission['actor'], 'window': window}
+    if window is None:
+        failed('settled-' + admission['actor'],
+               'admission ' + str(admission['actor'])
+               + ' (point ' + str(admission['point'])
+               + ') never reached a terminal journaled outcome inside '
+               + str(DEMOTE_PENDING_AUDIT) + 's')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+
+    def served_note(key, _diagnostic, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    verdict = _settle_judge(window, admission, served_note,
+                            check_image=True)
+    outcome = next(iter(
+        _outcome_key(receipt)
+        for entries in window['journaled'].values()
+        for receipt in entries), None)
+    # The durable audit: both peers' --journal-file records must carry
+    # the same single outcome the served journals settled — the
+    # demoted peer once either way, the promoted peer once only when
+    # the line applied it. A phantom applied on the fenced image, or
+    # a pending command the replacement dropped unaudited, surfaces
+    # here as a second outcome, a count miss, or a served/durable
+    # disagreement no wait can heal.
+    durable = {}
+    for name in ('active', 'standby'):
+        durable[name] = _durable_settled(journals[name], admission)
+        if durable[name] is None:
+            failed('durable-' + name, 'the ' + name + ' journal file '
+                   'never served the admission: '
+                   + str(journals[name])[:200])
+            return {'outcomes': 'diverged', 'admissions': 1}, \
+                violations, evidence
+    evidence['durable'] = {
+        name: receipts for name, receipts in durable.items()}
+    durable_outcomes = {_outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+    if len(durable_outcomes) != 1:
+        nondet('durable-outcome-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + json.dumps(sorted(durable_outcomes))
+               + ' — one admission, never more than one terminal '
+               'outcome')
+        verdict = 'diverged'
+    elif next(iter(durable_outcomes)) != outcome:
+        nondet('durable-mismatch-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + next(iter(durable_outcomes))
+               + ' where the served journals settled ' + str(outcome))
+        verdict = 'diverged'
+    else:
+        for name in ('active', 'standby'):
+            count = len(durable[name])
+            want = (1 if (name == admission['demoted']
+                          or outcome == 'applied') else 0)
+            if count != want:
+                verdict = 'diverged'
+                nondet('durable-journal-' + admission['actor'] + '-'
+                       + name,
+                       'admission ' + str(admission['actor'])
+                       + ' durable-journaled ' + str(count)
+                       + ' command_settled records on ' + name
+                       + ' — the contract settles exactly '
+                       + str(want) + ' there')
+    evidence['digest'] = {
+        'outcomes': 'single'
+                    if verdict == 'single' and not violations
+                    else 'diverged',
+        'admissions': 1}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_pending_command(ctx):
+    """Admit one receipted write on the active, demote inside its
+    pending window, and prove the suspended command settles exactly
+    once — the #625 contract's rig replay: the admission either rides
+    the successor's adoption to apply, or settles the named
+    superseded rejection with its journaled audit — never a phantom
+    applied on the fenced quiesced image, never a silent unaudited
+    drop."""
+    case = Case(
+        'demote-pending-command',
+        'Pending command settles once across demote',
+        'against the deployed pair, one receipted writable-point '
+        'write admitted on the field-owning peer and demoted past '
+        'inside its pending window settles exactly once per pass — '
+        'applied through the successor\'s carry with its value '
+        'landing, or the named superseded rejection with the settle '
+        'journaled on the durable record — no quiesced scan journals '
+        'a phantom command_settled{applied}, no pending command '
+        'vanishes without a settle entry, the pair returns to its '
+        'entry role layout, and two passes produce identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the pending command needs is absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+        owner = wait_for(lambda: _pair_active(ctx), deadline,
+                         interval=DEMOTE_PENDING_POLL)
+        if owner is None:
+            return case.finish('failed', 'demote-pending-failed: no '
+                               'peer reports role=active')
+        peer = 'standby' if owner == 'active' else 'active'
+        if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                    interval=DEMOTE_PENDING_POLL) is None:
+            return case.finish('inconclusive', 'the pair has no '
+                               'tracking standby — the demote/promote '
+                               'has no converged target')
+        case.observe('field owner: ' + owner + ' (' + ctx[owner]
+                     + '); demoting the pending command against '
+                     + peer)
+        _, signals = http_json('GET', ctx[owner] + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'demote-pending-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the pending '
+                      'writable point')
+        points = _writable_bool_points(signals, 2)
+        if not points:
+            return case.finish('inconclusive', 'the model declares '
+                               'no writable bool in-point for the '
+                               'pending command')
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                point = points[(number - 1) % len(points)]
+                digest, violations, evidence = _demote_pending_pass(
+                    ctx, number, owner, point)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-pending-pass-' + str(number) + '.json',
+                    evidence)
+                case.evidence('file', ref, 'pending-command pass '
+                              + str(number) + ' — the submission, '
+                              'the switch answers, the served and '
+                              'durable audit, and the normalized '
+                              'digest')
+                if violations:
+                    diagnostic = 'demote-pending-failed' \
+                        if any(name
+                               == 'demote-pending-failed'
+                               for name, _ in violations.values()) \
+                        else \
+                        'demote-pending-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's entry layout for the cases behind this one —
+            # two passes switch twice and restore it by construction;
+            # a mid-pass exit gets the documented order run again,
+            # best-effort.
+            current = _pair_active(ctx)
+            other = 'standby' if owner == 'active' else 'active'
+            if current != owner \
+                    and _tracking_standby(ctx, owner) is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx[owner] + '/promote')
+                    wait_for(
+                        lambda: (_pair_active(ctx) == owner or None)
+                        and _tracking_standby(ctx, other),
+                        time.monotonic() + DEMOTE_PENDING_SETTLE,
+                        interval=DEMOTE_PENDING_POLL)
+                    case.observe('cleanup: restored the entry role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-pending-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two pending-command passes, identical digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
 # Decision 70's declared-once alarm rationalization record on the
 # deployed pair (WW-ALM-001's master-alarm-database clause, WW-OPS-002's
 # bounded retune path). Every managed alarm instance in the rig model
@@ -18945,7 +19337,12 @@ def scenario_alarm_rationalization(ctx):
 # that window: it races receipted submissions against the documented
 # demote on whichever peer owns the field, cycles the switch twice per
 # pass, and lands the pair back on the launch roles before the tune
-# case's a->b switch. The
+# case's a->b switch. The demote-pending-command case shares that
+# window: it admits one receipted write on the field owner, demotes
+# inside the pending window, audits the single settle on the served
+# and durable records, and — two passes switching twice — lands the
+# pair back on the launch roles before the tune case's a->b switch.
+# The
 # parameter-tune case also runs ahead of the
 # failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
 # so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
@@ -19010,6 +19407,7 @@ SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_lag_staging,
              scenario_standby_loss,
              scenario_demote_settle_uniqueness,
+             scenario_demote_pending_command,
              scenario_parameter_tune_carryover, scenario_failover,
              scenario_checkpoint_negotiation,
              scenario_doomed_startup_claim,
