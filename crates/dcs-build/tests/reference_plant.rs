@@ -143,7 +143,15 @@
 //! `power-fail` alarm annunciating with journaled evidence, the
 //! receipted `power-fail-ack` clearing the latch mid-condition, and
 //! the released contact re-staging the demand inside the declared
-//! bounds with the pair's roles unchanged — and the `upgrade` stage,
+//! bounds with the pair's roles unchanged — the pair contract's
+//! alarm-rationalization leg, which asserts the emitted model's
+//! managed alarm instances' declared-once record verbatim on both
+//! peers' served surfaces — `GET /signals`' components section
+//! carrying each instance's `rationalization` block, `GET
+//! /snapshot`'s parameters section serving each alarm's declared
+//! `priority`/`class`/`response_ticks` live — before and after the
+//! documented `demote`/`promote` switch, and the pair's launch roles
+//! restored — and the `upgrade` stage,
 //! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -170,6 +178,7 @@
 //! `staging-failed`/`staging-nondeterministic`,
 //! `oos-failed`/`oos-nondeterministic`,
 //! `power-trip-failed`/`power-trip-nondeterministic`,
+//! `alarm-rationalization-failed`/`alarm-rationalization-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -880,6 +889,35 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, power-trip-failed")),
             "the power-fail interlock leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's alarm-rationalization leg ran and held: the
+    // emitted model's managed alarm instances' declared record served
+    // verbatim on both peers — the signal index's components section
+    // and the snapshot's parameters section — before and after the
+    // documented switch, and the pair's launch roles restored — its
+    // digest line reports the evidence, and each doctored served
+    // record reported its named diagnostic.
+    let rationalization_line = stdout
+        .lines()
+        .find(|line| line.contains("alarm-rationalization-digest"))
+        .unwrap_or_else(|| panic!("the alarm-rationalization leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "managed alarm instances served verbatim on both peers",
+        "tracking by tick",
+        "switched at tick",
+        "unchanged across the switch",
+        "roles restored at tick",
+    ] {
+        assert!(
+            rationalization_line.contains(phrase),
+            "the alarm-rationalization digest names no '{phrase}' evidence: {rationalization_line}"
+        );
+    }
+    for tamper in ["dropped-record", "rewritten-field"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, alarm-rationalization-failed")),
+            "the alarm-rationalization leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

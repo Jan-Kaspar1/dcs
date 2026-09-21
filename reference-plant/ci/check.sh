@@ -557,6 +557,24 @@
 #                driven scan sequence and the pair's roles unchanged;
 #                two passes produce identical digests
 #                (power-trip-failed, power-trip-nondeterministic)
+#                The stage's alarm-rationalization leg,
+#                ci/alarm_rationalization.py on the same declared
+#                deployment — the declared-once half of decision 70's
+#                contract at the consumer boundary (WW-ENG-003,
+#                WW-ALM-001): the emitted model's managed alarm
+#                instances' declared record asserted verbatim on both
+#                peers' served surfaces — GET /signals' components
+#                section carrying each instance's rationalization
+#                block, GET /snapshot's parameters section serving
+#                each alarm's declared priority/class/response_ticks
+#                live — then the documented demote/promote switch and
+#                the same audit again on the switched pair, the single
+#                declaration reaching the operator boundary unchanged
+#                on whichever peer serves; mismatches or a dropped
+#                record fail by instance name, the pair's launch roles
+#                restored; two passes produce identical digests
+#                (alarm-rationalization-failed,
+#                alarm-rationalization-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2264,12 +2282,58 @@ for tamper in commands-standing availability-holds; do
     echo "  $tamper: reported, power-trip-failed"
 done
 
+# The pair contract's alarm-rationalization leg, on the same
+# manifest-declared deployment — the declared-once half of decision
+# 70's contract at the consumer boundary: ci/alarm_rationalization.py
+# converges the pair and audits both peers' served surfaces against
+# the emitted model's managed-alarm record — GET /signals' components
+# section carrying each instance's declared rationalization block
+# verbatim, GET /snapshot's parameters section serving each alarm's
+# declared priority/class/response_ticks live — then issues the
+# documented demote/promote switch and re-audits both peers: the
+# single declared record reaching the operator boundary unchanged on
+# whichever peer serves. Two passes must produce identical digests.
+run_alarm_rationalization() {
+    python3 ci/alarm_rationalization.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_alarm_rationalization)" \
+    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
+SECOND="$(run_alarm_rationalization)" \
+    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "alarm-rationalization-nondeterministic: two alarm-rationalization passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a served record dropping a managed alarm's
+# component record and parameter report, and one rewriting a declared
+# field's served value, must each surface the named diagnostic by
+# instance name — never a silently unmatched pass.
+for tamper in dropped-record rewritten-field; do
+    if out="$(run_alarm_rationalization --tamper "$tamper" 2>&1)"; then
+        fail "alarm-rationalization-unchecked: a $tamper case passed the alarm-rationalization leg"
+    fi
+    case "$tamper" in
+        dropped-record) expected="is declared but not served" ;;
+        rewritten-field) expected="served rationalization=" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "alarm-rationalization-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, alarm-rationalization-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/alarm_validation.py ci/availability.py \
+for file in ci/alarm_rationalization.py ci/alarm_validation.py \
+        ci/availability.py \
         ci/burst_order.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
