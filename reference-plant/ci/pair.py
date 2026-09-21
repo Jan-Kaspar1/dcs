@@ -117,16 +117,56 @@ def closed_port():
     return f"{address[0]}:{address[1]}"
 
 
-def spawn_peer(controller, model, dt, plant_addr, standby, files, auto_promote=None):
+def dialable(bound):
+    """The dialable form of a bound `host:port` the monitor reported:
+    an unspecified bind host — the manifest's declared `0.0.0.0`
+    wildcard — is dialed through loopback, the same resolution the
+    serving peer applies to a wildcard `?peer=` announce."""
+    host, _, port = bound.rpartition(":")
+    if host == "0.0.0.0":
+        return f"127.0.0.1:{port}"
+    if host in ("::", "[::]"):
+        return f"[::1]:{port}"
+    return bound
+
+
+def listen_bind(entry):
+    """The controller's declared `listen` bind instantiated on a
+    runner-assigned port — the manifest's wildcard bind shape
+    preserved while the port stays runner-owned, the same mapping
+    `persistence_files` applies to the declared paths."""
+    listen = entry.get("listen")
+    if not listen:
+        return "127.0.0.1:0"
+    return f"{listen.rsplit(':', 1)[0]}:0"
+
+
+def spawn_peer(
+    controller,
+    model,
+    dt,
+    plant_addr,
+    standby,
+    files,
+    auto_promote=None,
+    listen="127.0.0.1:0",
+    bound=None,
+):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
     owner), `auto_promote` the manifest's declared failover budget
     arming that standby's self-promotion (None leaves promotion
     manual), `files` the controller's declared persistence paths under
-    the leg's scratch directory. Returns `(process, monitor_url,
-    preamble)`: `monitor_url` is None when the process exits before
-    reporting a listener — the preamble then carries the startup
-    refusal's stderr lines."""
+    the leg's scratch directory, `listen` the `--listen` bind (the
+    declared wildcard host on a runner port under a declared-binds
+    launch, the default an ephemeral loopback bind), `bound` an
+    optional list the verbatim bound address is appended to — the
+    leg's evidence the declared wildcard bind actually deployed.
+    Returns `(process, monitor_url, preamble)`: `monitor_url` is the
+    dialable form of the reported bind — a wildcard bind normalized
+    to loopback — or None when the process exits before reporting a
+    listener, the preamble then carrying the startup refusal's stderr
+    lines."""
     argv = [
         controller,
         model,
@@ -134,7 +174,7 @@ def spawn_peer(controller, model, dt, plant_addr, standby, files, auto_promote=N
         plant_addr,
         "--driven",
         "--listen",
-        "127.0.0.1:0",
+        listen,
         "--dt",
         str(dt),
     ]
@@ -153,7 +193,10 @@ def spawn_peer(controller, model, dt, plant_addr, standby, files, auto_promote=N
     for line in process.stderr:
         line = line.strip()
         if "listening on" in line:
-            return process, "http://" + line.rsplit(None, 1)[-1], preamble
+            raw = line.rsplit(None, 1)[-1]
+            if bound is not None:
+                bound.append(raw)
+            return process, "http://" + dialable(raw), preamble
         preamble.append(line)
     process.wait(timeout=10)
     return process, None, preamble
@@ -366,6 +409,10 @@ class PairRig:
         self.plant_io = None
         self.duty_url = self.standby_url = None
         self.duty_preamble = self.standby_preamble = []
+        # The verbatim `host:port` each monitor reported binding —
+        # under a declared-binds launch the wildcard evidence the
+        # demote-reconvergence leg asserts.
+        self.duty_bound = self.standby_bound = []
 
     def close(self):
         """Stop the spawned children — tracking peer, field owner,
@@ -470,6 +517,7 @@ class PairRig:
         promote_note="",
         audit_receipts=False,
         after_promote=None,
+        after_tick=None,
     ):
         """The documented switch: `POST /demote` on the field owner
         then `POST /promote` on the converged peer — each answered by
@@ -482,11 +530,13 @@ class PairRig:
         adopted receipt logs asserted one identical log. `after_promote`,
         when given, runs once after the promote report and before the
         first handover tick — the last moment a leg can act on the
-        demoted peer before its tracking pulls begin. Returns the
-        switch record: the demote/promote reports, the handover
-        `ticks` and final `owner` snapshot, both role reports, the
-        promoted peer's receipts when audited, and each named peer's
-        served transitions."""
+        demoted peer before its tracking pulls begin. `after_tick`,
+        when given, runs after each handover tick — the window a leg
+        audits the pair's served tracking state across the pull
+        train. Returns the switch record: the demote/promote reports,
+        the handover `ticks` and final `owner` snapshot, both role
+        reports, the promoted peer's receipts when audited, and each
+        named peer's served transitions."""
         pre = {
             url: self.served_transitions(url, failures)
             for url in (demote_url, promote_url)
@@ -512,6 +562,8 @@ class PairRig:
             )
             record["ticks"].append(owner["tick"])
             record["owner"] = owner
+            if after_tick is not None:
+                after_tick()
         if not handover:
             return record
         demoted_role = get(f"{demote_url}/role", "GET /role", failures)
@@ -572,7 +624,8 @@ class PairRig:
         return record
 
 
-def launch_pair(args, manifest, tamper=None, auto_promote=None):
+def launch_pair(args, manifest, tamper=None, auto_promote=None,
+                declared_binds=False):
     """Resolve the declared standby pair and launch it on the released
     tooling — the bring-up the pair-stage legs share: each
     controller's declared persistence instantiated under a
@@ -586,7 +639,11 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None):
     standby)` — callers resolving it themselves keep their own
     no-pair wording. `auto_promote`, when given, arms the spawned
     standby's `--auto-promote` flag — the manifest's declared
-    `failover_budget` carried to the invocation. Returns the
+    `failover_budget` carried to the invocation. `declared_binds`,
+    when true, binds each controller's `--listen` on its declared
+    listen's host with a runner-assigned port — the manifest's
+    wildcard bind shape deployed, each verbatim bound address
+    recorded on the rig's `duty_bound`/`standby_bound`. Returns the
     PairRig."""
     declared = (
         manifest_pair(manifest)
@@ -611,6 +668,8 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None):
             rig.plant_addr,
             None,
             rig.duty_files,
+            listen=listen_bind(rig.duty_decl) if declared_binds else "127.0.0.1:0",
+            bound=rig.duty_bound,
         )
         if rig.duty_url is None:
             raise Abort(
@@ -633,6 +692,8 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None):
             target,
             rig.standby_files,
             auto_promote=auto_promote,
+            listen=listen_bind(rig.standby_decl) if declared_binds else "127.0.0.1:0",
+            bound=rig.standby_bound,
         )
         if rig.standby_url is None:
             raise Abort(
