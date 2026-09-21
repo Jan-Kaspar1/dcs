@@ -6249,6 +6249,10 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
@@ -13633,16 +13637,19 @@ class DemoteSettlePeer:
 
 
 class DemoteSettleFeed:
-    """A stubbed pair for the demote-settle-uniqueness leg: ctrl-a owns
-    the field at launch, ctrl-b tracks. Every endpoint call is one
-    scan — the owner applies its pending admissions at the boundary
-    and journals their settlements, the demote closes the gate so a
-    still-accepted admission suspends, the promote's final-sync
-    transfer carries the demoted log across, and a tracking peer's
-    adoption journals the line's verdict — applied for the admissions
-    the carry landed, superseded for the ones the adopted window
-    passed. Doctor flags stage each named defect the issue calls
-    out."""
+    """A stubbed pair for the demote-settle-uniqueness leg — shared by
+    the demote-pending-command leg: ctrl-a owns the field at launch,
+    ctrl-b tracks. Every endpoint call is one scan — the owner applies
+    its pending admissions at the boundary and journals their
+    settlements, the demote closes the gate so a still-accepted
+    admission suspends, the promote's final-sync transfer carries the
+    demoted log across, and a tracking peer's adoption journals the
+    line's verdict — applied for the admissions the carry landed,
+    superseded for the ones the adopted window passed. Doctor flags
+    stage each named defect the issue calls out. An optional
+    `journal_files` mapping (ctx keys 'active'/'standby' to paths)
+    mirrors every journaled event into real --journal-file records for
+    the demote-pending leg's durable audit."""
 
     POINTS = (302, 300, 301, 332, 333, 334)
     SIGNALS = [{'point': point,
@@ -13651,11 +13658,24 @@ class DemoteSettleFeed:
                 'direction': 'in', 'value_type': 'bool',
                 'writable': True} for point in POINTS]
 
-    def __init__(self):
+    def __init__(self, journal_files=None):
         self.a = DemoteSettlePeer('a')
         self.a.role = 'active'
         self.b = DemoteSettlePeer('b')
         self.b.tracking = True
+        # The demote-pending leg's durable audit reads each endpoint's
+        # --journal-file: peer 'a' serves ctx key 'active', peer 'b'
+        # ctx key 'standby'. A feed without paths mirrors nothing —
+        # the demote-settle-uniqueness leg never reads the files.
+        self.journal_paths = {}
+        for peer, key in ((self.a, 'active'), (self.b, 'standby')):
+            path = (journal_files or {}).get(key)
+            if path is not None:
+                path = Path(path)
+                path.write_text(
+                    json.dumps({'run_boundary': {'run': 1,
+                                                 'tick': 0}}) + '\n')
+                self.journal_paths[peer.name] = path
         # The doctors staging each named defect.
         self.double_settle = False    # an admission journals applied
                                       # AND superseded
@@ -13689,6 +13709,13 @@ class DemoteSettleFeed:
         peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
                              'event': event})
         peer.next_seq += 1
+        path = self.journal_paths.get(peer.name)
+        if path is not None:
+            with path.open('a') as stream:
+                stream.write(json.dumps(
+                    {'entry': {'seq': peer.journal[-1]['seq'],
+                               'tick': peer.tick,
+                               'event': event}}) + '\n')
 
     def _settle(self, peer, receipt):
         """One receipt's terminal journaling — the recorder's
@@ -13935,6 +13962,10 @@ class DemoteSettleTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(
             verify.case_function('demote-settle-uniqueness'),
@@ -14069,6 +14100,225 @@ class DemoteSettleTests(unittest.TestCase):
             evidence.mkdir()
             self.evidence = evidence
             record = self.run_scenario(feed=feed)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class DemotePendingTests(unittest.TestCase):
+    """The demote-pending-command leg against the stubbed pair: one
+    receipted write admitted on the field owner, demoted inside its
+    pending window, settling exactly once — applied through the
+    carry or the named superseded rejection with the settle on the
+    durable record. A clean rig passes with identical digests and
+    evidence, each doctored loss shape reports its named diagnostic,
+    and an unreachable peer is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal_a = Path(self.tmp.name) / 'a' / 'journal.jsonl'
+        self.journal_b = Path(self.tmp.name) / 'b' / 'journal.jsonl'
+        self.journal_a.parent.mkdir(parents=True)
+        self.journal_b.parent.mkdir(parents=True)
+        self.feed = DemoteSettleFeed(
+            {'active': str(self.journal_a),
+             'standby': str(self.journal_b)})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'journal_files': {'active': str(self.journal_a),
+                                 'standby': str(self.journal_b)}}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'DEMOTE_PENDING_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_AUDIT', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_POLL', 0.001):
+            return scenarios.scenario_demote_pending_command(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The restored pre-switch window behind the demote-settle
+        # case — the settled tracking pair ahead of the tune case's
+        # a->b switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_settle_uniqueness)
+            + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-pending-command'),
+            scenarios.scenario_demote_pending_command)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-pending-signals.json',
+                     'demote-pending-pass-1.json',
+                     'demote-pending-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('demote-pending-pass-1.json',
+                               'demote-pending-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertEqual(passes[0]['digest']['outcomes'], 'single')
+        self.assertEqual(passes[0]['digest']['admissions'], 1)
+        # Two passes switch twice: the pair ends on its entry layout.
+        self.assertEqual(self.feed.a.role, 'active')
+        self.assertEqual(self.feed.b.role, 'standby')
+        # The durable record mirrors the served single outcome on
+        # each pass.
+        for passed in passes:
+            durable = passed['durable']
+            self.assertEqual(set(durable), {'active', 'standby'})
+            outcomes = {scenarios._outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+            self.assertEqual(len(outcomes), 1, outcomes)
+        report.validate_scenario(record)
+
+    def test_superseded_admission_is_a_legal_single_outcome(self):
+        self.feed.drop_carry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        passed = json.loads(
+            (self.evidence / 'demote-pending-pass-1.json').read_text())
+        outcomes = {
+            scenarios._outcome_key(receipt)
+            for audit in (passed['audit'],)
+            if audit['window']
+            for entries in audit['window']['journaled'].values()
+            for receipt in entries}
+        self.assertIn('rejected:superseded', outcomes, outcomes)
+        report.validate_scenario(record)
+
+    def test_phantom_application_reports_nondeterministic(self):
+        self.feed.drop_carry = True
+        self.feed.phantom_apply = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('application the journal never settled',
+                      record['detail'])
+        report.validate_scenario(record)
+
+    def test_vanished_admission_reports_failed(self):
+        self.feed.drop_admission = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('terminal journaled outcome', record['detail'])
+        report.validate_scenario(record)
+
+    def test_double_settled_admission_reports_nondeterministic(self):
+        self.feed.double_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverged_logs_report_nondeterministic(self):
+        self.feed.diverge_logs = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('adopted log', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demote_reports_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('demote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_promote_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_active_reports_failed(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_pair_reports_inconclusive(self):
+        self.feed.no_tracking = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_journal_files_reports_inconclusive(self):
+        record = self.run_scenario(journal_files={})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'outcomes': 'single', 'admissions': 1}, {}, {}),
+                       ({'outcomes': 'diverged', 'admissions': 1},
+                        {}, {})])
+        with patch.object(scenarios, '_demote_pending_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            run_dir = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence = run_dir / 'evidence'
+            evidence.mkdir(parents=True)
+            journal_a = run_dir / 'a' / 'journal.jsonl'
+            journal_b = run_dir / 'b' / 'journal.jsonl'
+            journal_a.parent.mkdir(parents=True)
+            journal_b.parent.mkdir(parents=True)
+            feed = DemoteSettleFeed(
+                {'active': str(journal_a),
+                 'standby': str(journal_b)})
+            record = self.run_scenario(
+                feed=feed, evidence_dir=str(evidence),
+                journal_files={'active': str(journal_a),
+                               'standby': str(journal_b)})
             runs.append((record, {p.name: p.read_text()
                                   for p in evidence.iterdir()}))
         self.assertEqual(runs[0], runs[1])
