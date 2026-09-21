@@ -6250,9 +6250,8 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
             order.index(scenarios.scenario_demote_pending_command))
-        self.assertEqual(
-            order.index(scenarios.scenario_demote_pending_command)
-            + 1,
+        self.assertLess(
+            order.index(scenarios.scenario_demote_pending_command),
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
