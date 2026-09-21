@@ -1557,6 +1557,7 @@ mod tests {
         // it approximately.
         let history = vec![PointHistory {
             point: PointId(100),
+            generation: None,
             samples: vec![
                 HistorySample {
                     seq: 1,

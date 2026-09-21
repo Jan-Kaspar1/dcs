@@ -60,7 +60,13 @@
 //!   point's retained samples in tick order from the store's bounded
 //!   rings; `?point=<id>` (repeatable) selects points and
 //!   `?since=<seq>` returns only samples newer than the caller's last
-//!   seen sequence — an evicted stretch surfaces as a numbering gap
+//!   seen sequence — an evicted stretch surfaces as a numbering gap.
+//!   Each answer also carries the store's per-boot `generation`: the
+//!   rings are volatile and begin numbering at 1 again on a process
+//!   restart, so the stamp is what lets a since-cursor consumer tell
+//!   the restarted seq domain from an in-order empty answer — the
+//!   boundary the durable journal's `run_boundary` marker names for
+//!   the persisted stream
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise. The tail
 //!   is bounded, but `run_boundary` entries are pinned: evicting one
@@ -229,11 +235,16 @@
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
 //! — and submits `write_value` commands to `/command`, displaying the
-//! returned receipt. The page also reports its own delivery honesty —
+//! returned receipt. Every request a poll issues carries an abort
+//! deadline, so a hung connection marks the feed rather than pinning
+//! the page. The page also reports its own delivery honesty —
 //! the consumer-side gap/freshness state the bounded-publication
 //! decision requires: a `since`-cursor read stepping over an evicted
 //! stretch marks the feed line "publication gap", a snapshot re-serving
 //! the same publication's seq and tick marks it "stale publication",
+//! a served stream's `generation` change — or the publication seq or
+//! tick itself regressing — marks "source restarted" and re-reads the
+//! cursors from seq 0, and a failed poll marks "feed disconnected",
 //! each rendered beside the view — distinct from a peer's unreachable
 //! redundancy fault and from a point's non-Good quality — and cleared
 //! on the next in-sequence, fresh publication. The snapshot's

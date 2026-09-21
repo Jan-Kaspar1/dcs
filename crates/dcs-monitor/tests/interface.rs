@@ -345,11 +345,12 @@ fn the_page_carries_the_generic_five_category_renderers() {
         let page = client.page().unwrap();
 
         // The fetch half: the schema and resource views ride the same
-        // poll as the snapshot, tolerating a peer that predates the
-        // endpoints — the absent-section convention.
+        // poll as the snapshot — through the same deadline-bounded
+        // fetch every request takes — tolerating a peer that predates
+        // the endpoints — the absent-section convention.
         for needle in [
-            "fetch(base + \"/schema\")",
-            "fetch(base + \"/resources\")",
+            "fetchBounded(base + \"/schema\")",
+            "fetchBounded(base + \"/resources\")",
             "(r.ok ? r.json() : null)",
             "interfaceByName",
             "resourcesByName",

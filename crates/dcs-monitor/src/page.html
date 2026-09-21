@@ -15,8 +15,11 @@
   .bad { color: #b00; font-weight: bold; }
   .nosample { color: #888; font-style: italic; }
   #status { color: #666; }
-  #feed-state.gap, #feed-state.stale { display: inline-block; padding: 0.1rem 0.6rem;
-    border: 1px solid #36a; border-radius: 3px; color: #36a; font-weight: 600; }
+  #feed-state.gap, #feed-state.stale, #feed-state.reset { display: inline-block;
+    padding: 0.1rem 0.6rem; border: 1px solid #36a; border-radius: 3px;
+    color: #36a; font-weight: 600; }
+  #feed-state.offline { display: inline-block; padding: 0.1rem 0.6rem;
+    border: 1px solid #b00; border-radius: 3px; color: #b00; font-weight: 600; }
   #receipt { background: #f6f6f6; padding: 0.5rem; white-space: pre-wrap; }
   #trends { display: flex; flex-wrap: wrap; gap: 1rem; }
   .trend { margin: 0; }
@@ -372,11 +375,17 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // since-poll answering past the cursor's successor — the stretch the
 // bounded store evicted before the page read it — marks the feed
 // "publication gap"; a /snapshot re-serving the same publication's
-// seq and tick — a stall — marks it "stale publication". Both render
-// on the #feed-state line beside the view, distinct from the pair
-// section's unreachable-peer fault (a peer's reachability, not the
-// feed's delivery) and from a row's non-Good quality (process data,
-// not delivery), and each clears on the next in-sequence, fresh
+// seq and tick — a stall — marks it "stale publication"; a served
+// generation change — the store mints one per boot and stamps it on
+// the publication section and every /history answer — marks "source
+// restarted", the seq domains having begun again at 1, and the
+// cursors re-read from seq 0 rather than starving on numbers the new
+// process lifetime will never reach; and a poll whose fetch fails or
+// overruns its deadline marks "feed disconnected". All render on the
+// #feed-state line beside the view, distinct from the pair section's
+// unreachable-peer fault (a peer's reachability, not the feed's
+// delivery) and from a row's non-Good quality (process data, not
+// delivery), and each clears on the next in-sequence, fresh
 // publication.
 //
 // Command audit identity (the command-path audit-identity decision):
@@ -492,13 +501,21 @@ const journalSeen = new Set();
 let journalSince = 0;
 // The feed's delivery state — see the feed-state note above. The
 // current source's last rendered publication identity
-// ({published, tick}) plus the named degradations the latest poll
-// observed: gap = {stream, from, through}, the served seq stretch a
-// since-poll stepped over; stale = the re-served publication's
-// identity when a poll found nothing new. null marks are a fresh,
-// in-sequence feed; a source switch resets the identity — each peer
-// numbers its own publications.
-const feed = { publication: null, gap: null, stale: null };
+// ({published, tick, generation}) plus the named degradations the
+// latest poll observed: gap = {stream, from, through}, the served seq
+// stretch a since-poll stepped over; stale = the re-served
+// publication's identity when a poll found nothing new; reset =
+// {detail}, the seq domain having restarted under the cursors;
+// offline = the failed fetch's error, when the last poll served
+// nothing at all. null marks are a fresh, in-sequence feed; a source
+// switch resets the identity — each peer numbers its own publications.
+const feed = {
+  publication: null,
+  gap: null,
+  stale: null,
+  reset: null,
+  offline: null,
+};
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -632,6 +649,32 @@ function noteSyncAge(state) {
   }
 }
 
+// The deadline every page request carries: the page's whole contract
+// is bounded polls on a one-second cadence, so a fetch is never left
+// to hang — a connection that answers nothing aborts at the deadline
+// and the poll marks the feed's delivery state instead of freezing.
+// Several cadences long, so a healthy peer on a slow link still
+// answers inside it.
+const POLL_DEADLINE_MS = 5000;
+
+// fetch with the poll deadline: the AbortController's timer bounds
+// the request, and an abort reads back as the named timeout rather
+// than the engine's AbortError text.
+async function fetchBounded(resource, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), POLL_DEADLINE_MS);
+  try {
+    return await fetch(resource, { ...(options || {}), signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("request timed out after " + POLL_DEADLINE_MS + " ms");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -639,7 +682,7 @@ function noteSyncAge(state) {
 async function pollRoles() {
   await Promise.all(peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await fetchBounded(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       peerState[i].report = await response.json();
       peerState[i].error = null;
@@ -676,7 +719,13 @@ function selectSource() {
 // same run without duplicating samples.
 function switchSource(next) {
   source = next;
-  for (const state of trends.values()) state.lastSeq = 0;
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    // The new peer's rings number in its own generation — recorded
+    // fresh on the first answer rather than matched against the old
+    // source's, so the merge by tick continues unmarked.
+    state.generation = null;
+  }
   journalSince = 0;
   // The new peer numbers its own publications: the feed's freshness
   // and gap bookkeeping starts over — a mark observed against the old
@@ -684,6 +733,8 @@ function switchSource(next) {
   feed.publication = null;
   feed.gap = null;
   feed.stale = null;
+  feed.reset = null;
+  feed.offline = null;
 }
 
 // The indices of the peers reporting settled "active" — the legitimate
@@ -851,24 +902,79 @@ function renderPair() {
 // section's `published` seq and the snapshot's tick, and the served
 // streams' entry seqs — so no endpoint or wire type is added.
 
+// Whether the publication that just landed belongs to a new serving
+// lifetime — the monitor restarted between polls. The minted
+// generation is the certain mark; a peer predating the stamp — or a
+// snapshot still lacking the section — falls back to the seq and tick
+// domains themselves: neither `published` nor `tick` can move backward
+// within one process lifetime, so a regression names a restart too.
+function publicationReset(last, current) {
+  if (last.generation !== null && current.generation !== null) {
+    return last.generation !== current.generation;
+  }
+  return (last.published !== null && current.published !== null &&
+          current.published < last.published) ||
+      current.tick < last.tick;
+}
+
+// The seq-domain reset a detected restart performs: every since-cursor
+// goes back to 0 so the next read re-fetches the retained head of the
+// new lifetime's streams — the regression answer `{samples: []}` could
+// never express. The drawn trend series reset with their cursors: the
+// old lifetime's samples have no defined tick order against the new
+// run's — a --state-file resume's tick domain continues, a cold
+// start's begins again — so the pane rebuilds from what the restarted
+// store retains rather than silently stitching two seq domains. The
+// journal pane keeps its merged entries: the merge-dedup the source
+// switch already relies on re-adds each entry once, and a durable
+// journal's own run_boundary marker names the seam in-band.
+function resetStreams() {
+  for (const state of trends.values()) {
+    state.samples = [];
+    state.lastSeq = 0;
+    state.lastTick = null;
+    state.generation = null;
+  }
+  journalSince = 0;
+}
+
 // Records the publication a landed snapshot serves — its `publication`
-// section's `published` seq beside the snapshot tick — and marks the
-// feed stale when that identity repeats: the source answered with the
-// same read model it last served, so the values about to re-render are
-// last-known rather than current. A new identity clears the mark. A
-// peer serving snapshots without the section compares on tick alone.
+// section's `published` seq and the store's per-boot `generation`
+// beside the snapshot tick — and marks the feed stale when that
+// identity repeats: the source answered with the same read model it
+// last served, so the values about to re-render are last-known rather
+// than current. A new identity clears the mark. A peer serving
+// snapshots without the section compares on tick alone. An identity
+// that stepped *backward* — a changed generation, or a regressed
+// published seq or tick from a peer that cannot name one — is the
+// restart the seq reset above describes: the feed marks "source
+// restarted" and the cursors reset, so the same poll's since-reads
+// re-fetch the new lifetime's retained head instead of starving on
+// seqs it will never serve.
 function notePublication(snapshot) {
   const health = snapshot.publication || null;
   const current = {
     published: health ? health.published : null,
     tick: snapshot.tick,
+    generation: health && health.generation != null ? health.generation : null,
   };
   const last = feed.publication;
-  feed.stale = last !== null &&
+  feed.reset = last !== null && publicationReset(last, current)
+    ? { was: last, now: current }
+    : null;
+  feed.stale = feed.reset === null && last !== null &&
     current.published === last.published && current.tick <= last.tick
     ? current
     : null;
   feed.publication = current;
+  if (feed.reset !== null) resetStreams();
+}
+
+// Notes a served stream reporting a generation the page's cursor
+// predates — the same reset publicationReset catches at the
+// publication level, seen here on the stream's own stamp.
+function noteFeedReset(detail) {
+  if (feed.reset === null) feed.reset = { detail: detail };
 }
 
 // Notes a served seq stretch the page's since-cursor stepped over:
@@ -889,6 +995,14 @@ function noteFeedGap(stream, from, through) {
 function renderFeed() {
   const line = document.getElementById("feed-state");
   const notices = [];
+  if (feed.offline !== null) {
+    notices.push("feed disconnected: " + feed.offline.message +
+      " — values shown are last-known, not current");
+  }
+  if (feed.reset !== null) {
+    notices.push("source restarted: served seqs began again at 1" +
+      " — cursors reset, refetching the retained history");
+  }
   if (feed.gap !== null) {
     notices.push("publication gap: " + feed.gap.stream + " seqs " +
       feed.gap.from + "–" + feed.gap.through +
@@ -903,6 +1017,8 @@ function renderFeed() {
   }
   line.hidden = notices.length === 0;
   line.className =
+    feed.offline !== null ? "offline" :
+    feed.reset !== null ? "reset" :
     feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
   line.textContent = notices.join("; ");
 }
@@ -984,7 +1100,7 @@ function selectPairSource(pair) {
 async function pollPairCard(pair) {
   await Promise.all(pair.peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await fetchBounded(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       pair.state[i].report = await response.json();
       pair.state[i].error = null;
@@ -999,7 +1115,7 @@ async function pollPairCard(pair) {
   const state = pair.state[pair.source];
   if (state.error !== null || state.report === null) return;
   try {
-    const response = await fetch(pair.peers[pair.source].base + "/snapshot");
+    const response = await fetchBounded(pair.peers[pair.source].base + "/snapshot");
     if (!response.ok) throw new Error("HTTP " + response.status);
     pair.snapshot = await response.json();
   } catch (error) {
@@ -1157,14 +1273,17 @@ async function refresh() {
     // /resources answers 404 — the interface surface then renders
     // nothing, the absent-section convention.
     const [snapshot, schema, resources] = await Promise.all([
-      fetch(base + "/snapshot").then(r => r.json()),
-      fetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      fetchBounded(base + "/snapshot").then(r => r.json()),
+      fetchBounded(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      fetchBounded(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
     ]);
-    // Freshness bookkeeping before the view re-renders: the served
-    // publication's seq/tick identity decides whether this poll found
-    // anything new, and the since-polls below note any evicted stretch
-    // they step over.
+    // The source answered: the disconnected mark from any earlier
+    // failed poll clears. Freshness bookkeeping before the view
+    // re-renders: the served publication's seq/tick/generation
+    // identity decides whether this poll found anything new — or found
+    // the source restarted under the cursors — and the since-polls
+    // below note any evicted stretch they step over.
+    feed.offline = null;
     notePublication(snapshot);
     feed.gap = null;
     interfaceByName.clear();
@@ -1236,6 +1355,12 @@ async function refresh() {
     renderProtection(telemetry, forced);
   } catch (error) {
     document.getElementById("status").textContent = "poll failed: " + error;
+    // A poll that landed nothing — an unreachable source or an aborted
+    // deadline — is the feed's own delivery failure: the last-known
+    // values still on the page are named as such rather than read as
+    // current.
+    feed.offline = error;
+    renderFeed();
   } finally {
     polling = false;
   }
@@ -1615,12 +1740,23 @@ function inDeclaredRange(range, value) {
 // kind, collecting the client-side warnings the entry draws — text that
 // is not such a value, or a value outside the declared range. The
 // warnings never block: the submission still goes through the receipted
-// path, whose named rejection is what a refused edit displays.
+// path, whose named rejection is what a refused edit displays — except
+// a Bool entry that is not a Bool token, which returns a null value the
+// submission refuses outright: a coerced `false` would arrive as a
+// real command rather than a parse failure.
 function parameterValue(param, text) {
   const warnings = [];
   let value;
   if (param.kind === "bool") {
-    value = { bool: text === "true" };
+    const parsed = parseBool(text);
+    if (parsed === null) {
+      // The one kind an unparseable entry cannot ride out to the
+      // receipted path: any Bool value is valid, so a coerced `false`
+      // would submit as a real command — the edit refuses instead.
+      warnings.push("not a Bool value");
+      return { value: null, warnings };
+    }
+    value = { bool: parsed };
   } else if (param.kind === "int") {
     if (!/^[-+]?\d+$/.test(text)) warnings.push("not an Int value");
     value = { int: parseInt(text, 10) };
@@ -2108,7 +2244,13 @@ async function submitInterfaceCommand(button) {
   for (const input of button.closest("tr").querySelectorAll(".command-arg")) {
     const text = input.value.trim();
     if (input.dataset.kind === "bool") {
-      args[input.dataset.arg] = { bool: text === "true" };
+      const parsed = parseBool(text);
+      if (parsed === null) {
+        setCommandStatus(component, name,
+          { text: "not a bool value", warn: true, bad: false });
+        return;
+      }
+      args[input.dataset.arg] = { bool: parsed };
     } else if (text !== "") {
       const value = argumentValue(input.dataset.kind, text);
       if (value === null) {
@@ -2664,7 +2806,8 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null });
+    trends.set(meta.point,
+      { samples: [], lastSeq: 0, lastTick: null, generation: null });
   }
 }
 
@@ -2673,16 +2816,32 @@ function buildTrends() {
 // is a safe common cursor; each point's own lastSeq still dedupes what
 // the fetch returns, and lastTick dedupes across a source switch — the
 // new peer's ring re-serves ticks already drawn, which are skipped.
+// Each answer's generation stamp names the ring's serving lifetime: a
+// restarted monitor numbers its samples from 1 again, so an answer
+// stamped with a generation the cursor predates is the reset —
+// entries numbered below the old cursor are the new lifetime's
+// samples, not replays, and the series re-reads from seq 0 rather than
+// starving on seqs the restarted ring will never reach.
 async function refreshTrends(base) {
   const states = [...trends.values()];
   let since = 0;
   if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
     since = Math.min(...states.map(state => state.lastSeq));
   }
-  const histories = await (await fetch(base + "/history?since=" + since)).json();
+  const histories = await (await fetchBounded(base + "/history?since=" + since)).json();
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    if (history.generation != null) {
+      if (state.generation !== null && history.generation !== state.generation) {
+        state.samples = [];
+        state.lastSeq = 0;
+        state.lastTick = null;
+        noteFeedReset("history generation " + state.generation +
+          " -> " + history.generation);
+      }
+      state.generation = history.generation;
+    }
     // A since-read answering past the cursor's successor is the served
     // form of the named publication gap: the stretch between evicted
     // from the bounded ring while the page wasn't polling.
@@ -2758,7 +2917,7 @@ function drawTrend(meta) {
 // after a source switch adds each transition once: both peers journal
 // the same run's events, and each journals its own role changes.
 async function refreshJournal(base) {
-  const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
+  const entries = await (await fetchBounded(base + "/journal?since=" + journalSince)).json();
   // The journal stream's served form of the same gap.
   if (journalSince > 0 && entries.length > 0 &&
       entries[0].seq > journalSince + 1) {
@@ -3055,10 +3214,33 @@ function describeReason(reason) {
   return JSON.stringify(reason);
 }
 
+// Strict Boolean entry: only the named tokens parse — "true"/"1"/"on"
+// and "false"/"0"/"off", case-insensitive. Anything else returns null
+// so the caller refuses it client-side: arbitrary text must never
+// reach the wire coerced to `false`, which reads as a real command.
+function parseBool(text) {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "true" || trimmed === "1" || trimmed === "on") return true;
+  if (trimmed === "false" || trimmed === "0" || trimmed === "off") return false;
+  return null;
+}
+
+// Parses a command-form or affordance entry into a Value of the
+// point's declared kind — strictly, the same rule the interface
+// command arguments already follow: an entry that is not such a value
+// returns null and the caller refuses it rather than shipping a body
+// the receipted path could only answer with a parse failure — or, for
+// Bool, a body that reads as a real `false` write.
 function commandValue(kind, text) {
-  if (kind === "bool") return { bool: /^(true|1|on)$/i.test(text.trim()) };
-  if (kind === "int") return { int: parseInt(text, 10) };
-  return { float: parseFloat(text) };
+  if (kind === "bool") {
+    const parsed = parseBool(text);
+    return parsed === null ? null : { bool: parsed };
+  }
+  if (kind === "int") {
+    return /^[-+]?\d+$/.test(text.trim()) ? { int: parseInt(text, 10) } : null;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? { float: number } : null;
 }
 
 // POSTs the command to a peer: the attributed envelope
@@ -3073,7 +3255,7 @@ async function postCommand(base, command) {
   const body = operator === null
     ? command
     : { command: command, actor: operator };
-  const response = await fetch(base + "/command", {
+  const response = await fetchBounded(base + "/command", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
@@ -3139,6 +3321,11 @@ async function submitParameter(button) {
     return;
   }
   const parsed = parameterValue(param, text);
+  if (parsed.value === null) {
+    setParamStatus(component, name,
+      { text: parsed.warnings.join("; "), warn: true, bad: false });
+    return;
+  }
   const command = { set_parameter: {
     component: component, name: name, value: parsed.value } };
   let answer;
@@ -3180,10 +3367,16 @@ async function submitForce(button) {
       "enter a value to force " + meta.name + " to";
     return;
   }
+  const value = commandValue(meta.value_type, text);
+  if (value === null) {
+    document.getElementById("receipt").textContent =
+      "not a " + meta.value_type + " value: \"" + text + "\"";
+    return;
+  }
   const command = { force_point: {
     point: meta.point,
     kind: meta.value_type,
-    value: commandValue(meta.value_type, text),
+    value: value,
   } };
   try {
     await submitCommand(command);
@@ -3221,7 +3414,7 @@ async function init() {
     setInterval(refreshOverview, 1000);
     return;
   }
-  index = await (await fetch("/signals")).json();
+  index = await (await fetchBounded("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
   // The index's components section — serde-defaulted, so an index
   // served without it joins nothing — carries the per-instance records
@@ -3280,15 +3473,22 @@ async function init() {
     const input = button.parentElement.querySelector("input.command-value");
     const meta = metaByPoint.get(Number(button.dataset.point));
     if (!meta || !meta.writable || !input) return;
-    if (input.value.trim() === "") {
+    const text = input.value.trim();
+    if (text === "") {
       document.getElementById("receipt").textContent =
         "enter a value for " + meta.name;
+      return;
+    }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
       return;
     }
     const command = { write_value: {
       point: meta.point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, input.value),
+      value: value,
     } };
     try {
       await submitCommand(command);
@@ -3355,10 +3555,22 @@ async function init() {
     const point = Number(select.value);
     const meta = index.points.find(p => p.point === point);
     if (!meta) return;
+    const text = document.getElementById("command-value").value.trim();
+    if (text === "") {
+      document.getElementById("receipt").textContent =
+        "enter a value for " + meta.name;
+      return;
+    }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
+      return;
+    }
     const command = { write_value: {
       point: point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, document.getElementById("command-value").value),
+      value: value,
     } };
     try {
       await submitCommand(command);
@@ -3380,10 +3592,16 @@ async function init() {
         "enter a value to force " + meta.name + " to";
       return;
     }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
+      return;
+    }
     const command = { force_point: {
       point: point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, text),
+      value: value,
     } };
     try {
       await submitCommand(command);

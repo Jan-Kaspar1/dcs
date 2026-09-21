@@ -488,8 +488,9 @@ fn assert_transitions(
 }
 
 /// Replaces the run-varying strings inside a serialized value —
-/// monitor, relay, and plant addresses are ephemeral ports — so two
-/// runs' digests compare. Longer strings mask first: one address can
+/// monitor, relay, and plant addresses are ephemeral ports, and the
+/// served publication stamps a per-boot `generation` — so two runs'
+/// digests compare. Longer strings mask first: one address can
 /// never be a prefix of another, but the rule keeps the replacement
 /// honest for any run-varying string.
 fn masked(value: serde_json::Value, masks: &[(String, String)]) -> serde_json::Value {
@@ -497,7 +498,24 @@ fn masked(value: serde_json::Value, masks: &[(String, String)]) -> serde_json::V
     for (from, to) in masks {
         text = text.replace(from.as_str(), to);
     }
-    serde_json::from_str(&text).unwrap()
+    // The generation stamp is deliberately a fresh identity per store:
+    // two equal runs genuinely differ in it, so it masks to a fixed
+    // value like the addresses do.
+    const KEY: &str = "\"generation\":";
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(KEY) {
+        let value = at + KEY.len();
+        let digits = rest[value..]
+            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
+            .map(|i| value + i)
+            .unwrap_or(rest.len());
+        redacted.push_str(&rest[..value]);
+        redacted.push('0');
+        rest = &rest[digits..];
+    }
+    redacted.push_str(rest);
+    serde_json::from_str(&redacted).unwrap()
 }
 
 /// The trace's last recorded row.

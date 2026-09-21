@@ -32,6 +32,18 @@ pub struct HistorySample {
 pub struct PointHistory {
     /// The point this history belongs to.
     pub point: PointId,
+    /// The serving store's stream generation — the per-boot identity
+    /// of the `seq` domain `samples` are numbered in. The volatile
+    /// rings begin numbering at 1 on every process start, so a
+    /// `since`-cursor consumer can only tell a restart's reset from an
+    /// in-order empty answer by this stamp: a generation different
+    /// from the one the cursor was taken under means the `seq` domain
+    /// restarted, the same boundary the durable journal's
+    /// `run_boundary` marker names for the persisted stream. `None` —
+    /// and absent on the wire — in payloads serialized before the
+    /// field existed or produced outside a publication store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     /// The retained samples in append order — oldest first, so in
     /// ascending tick order — bounded by the producer's configured
     /// capacity. A point that has produced no samples yet reports an
@@ -48,6 +60,7 @@ mod tests {
     fn history_serde_roundtrip() {
         let history = PointHistory {
             point: PointId(10),
+            generation: Some(9),
             samples: vec![
                 HistorySample {
                     seq: 1,
@@ -70,6 +83,7 @@ mod tests {
         );
         let empty = PointHistory {
             point: PointId(30),
+            generation: None,
             samples: Vec::new(),
         };
         let json = serde_json::to_string(&empty).unwrap();

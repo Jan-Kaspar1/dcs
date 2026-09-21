@@ -183,6 +183,18 @@ pub struct PublicationHealth {
     pub depth: u64,
     /// The retained window's configured bound.
     pub window: u64,
+    /// The publication store's per-boot generation — the identity of
+    /// the `seq` domain `published` counts in, shared with the
+    /// volatile history rings `GET /history` serves. A store mints one
+    /// at construction, so a monitor restart — every volatile `seq`
+    /// domain beginning again at 1 — reads to a cursor consumer as a
+    /// generation change rather than an in-order answer that starves
+    /// the stale cursor silently; the durable journal's `run_boundary`
+    /// marker names the same process-lifetime boundary for the
+    /// persisted stream. `None` — and absent on the wire — in
+    /// snapshots serialized before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 /// The snapshot's command-ingress section: admission metrics for the
@@ -523,6 +535,7 @@ mod tests {
                 coalesced: 3,
                 depth: 4,
                 window: 8,
+                generation: Some(11),
             }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

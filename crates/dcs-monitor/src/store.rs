@@ -255,6 +255,16 @@ pub(crate) struct RoutedEvents {
 #[derive(Clone)]
 pub(crate) struct Store {
     inner: Arc<Mutex<Inner>>,
+    /// The store's per-boot stream generation — minted once at
+    /// construction and stamped on every `seq`-domain answer (the
+    /// snapshot's `publication` section, each served
+    /// [`PointHistory`]). Every volatile stream the store numbers —
+    /// publications, history ring seqs — begins at 1 again on a
+    /// process restart, so the generation is what lets a since-cursor
+    /// consumer tell the restarted domain from an in-order answer;
+    /// the durable journal names the same boundary with its
+    /// `run_boundary` markers instead.
+    generation: u64,
 }
 
 impl Store {
@@ -269,6 +279,7 @@ impl Store {
         event_history_capacity: usize,
     ) -> Self {
         Self {
+            generation: dcs_runtime::mint_generation(),
             inner: Arc::new(Mutex::new(Inner {
                 latest: None,
                 window: VecDeque::new(),
@@ -415,6 +426,7 @@ impl Store {
             coalesced: inner.coalesced,
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
+            generation: Some(self.generation),
         });
         let publication = Arc::new(Publication {
             seq,
@@ -426,6 +438,7 @@ impl Store {
                 .iter_mut()
                 .map(|(&point, samples)| PointHistory {
                     point,
+                    generation: Some(self.generation),
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
@@ -478,6 +491,7 @@ impl Store {
             .into_iter()
             .map(|point| PointHistory {
                 point,
+                generation: Some(self.generation),
                 samples: inner
                     .rings
                     .get(&point)
@@ -557,6 +571,7 @@ impl Store {
             coalesced: inner.coalesced,
             depth: inner.window.len() as u64,
             window: inner.window_capacity as u64,
+            generation: Some(self.generation),
         }
     }
 }

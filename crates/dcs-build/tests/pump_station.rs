@@ -228,6 +228,27 @@ fn bool_(sample: dcs_core::Sample) -> bool {
     }
 }
 
+/// Redacts the served per-boot `generation` stamps — deliberately a
+/// fresh identity per store, so two equal runs genuinely differ in
+/// it; everything the run *produces* must still compare equal.
+fn redact_generations(text: &str) -> String {
+    const KEY: &str = "\"generation\":";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let value = at + KEY.len();
+        let digits = rest[value..]
+            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
+            .map(|i| value + i)
+            .unwrap_or(rest.len());
+        out.push_str(&rest[..value]);
+        out.push('0');
+        rest = &rest[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The managed-lifecycle run's observable record — pump 2's designed
 /// suppression, `lal`'s bounded shelving, and `lah`'s rejected shelve.
 #[derive(Debug, PartialEq)]
@@ -1128,7 +1149,9 @@ fn managed_run() -> ManagedRun {
                 journal: client.journal(0).unwrap(),
                 receipts: client.receipts().unwrap(),
                 rejected_shelve: rejected_shelve.unwrap(),
-                snapshot: serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
+                snapshot: redact_generations(
+                    &serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
+                ),
             }
         }));
         monitor.shutdown();

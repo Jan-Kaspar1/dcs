@@ -466,6 +466,27 @@ fn journal_is_bounded_with_visible_eviction() {
     });
 }
 
+/// Redacts the served per-boot `generation` stamps — deliberately a
+/// fresh identity per store, so two equal runs genuinely differ in
+/// it; everything the run *produces* must still compare equal.
+fn redact_generations(text: &str) -> String {
+    const KEY: &str = "\"generation\":";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let value = at + KEY.len();
+        let digits = rest[value..]
+            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
+            .map(|i| value + i)
+            .unwrap_or(rest.len());
+        out.push_str(&rest[..value]);
+        out.push('0');
+        rest = &rest[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn identical_scripted_runs_produce_identical_history_and_journal() {
     let run = || {
@@ -484,7 +505,9 @@ fn identical_scripted_runs_produce_identical_history_and_journal() {
             driver.faults.lock().unwrap().remove(&PointId(10));
             client.advance(1).unwrap();
             (
-                serde_json::to_string(&client.history(&[], 0).unwrap()).unwrap(),
+                redact_generations(
+                    &serde_json::to_string(&client.history(&[], 0).unwrap()).unwrap(),
+                ),
                 serde_json::to_string(&client.journal(0).unwrap()).unwrap(),
             )
         })
@@ -588,7 +611,9 @@ fn identical_stale_runs_produce_identical_history_and_journal() {
             |driver, client| {
                 stale_run(client, driver);
                 (
-                    serde_json::to_string(&client.history(&[], 0).unwrap()).unwrap(),
+                    redact_generations(
+                        &serde_json::to_string(&client.history(&[], 0).unwrap()).unwrap(),
+                    ),
                     serde_json::to_string(&client.journal(0).unwrap()).unwrap(),
                 )
             },

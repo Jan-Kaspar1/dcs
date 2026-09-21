@@ -368,6 +368,27 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Redacts the served per-boot `generation` stamps — deliberately a
+/// fresh identity per store, so two equal runs genuinely differ in
+/// it; everything the run *produces* must still compare equal.
+fn redact_generations(text: &str) -> String {
+    const KEY: &str = "\"generation\":";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let value = at + KEY.len();
+        let digits = rest[value..]
+            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
+            .map(|i| value + i)
+            .unwrap_or(rest.len());
+        out.push_str(&rest[..value]);
+        out.push('0');
+        rest = &rest[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn telemetry(snapshot: &dcs_core::TelemetrySnapshot, point: PointId) -> &dcs_core::PointTelemetry {
     snapshot
         .points
@@ -1573,7 +1594,10 @@ fn value_parse_errors_print_usage_against_a_live_monitor() {
 #[test]
 fn identical_invocations_produce_identical_output() {
     // The same scripted session against two fresh rigs prints the same
-    // answers — output is a function of the run, nothing else.
+    // answers — output is a function of the run, nothing else. The one
+    // deliberate exception is the served `generation` stamp: each
+    // rig's store mints its own per-boot seq-domain identity, so the
+    // comparison redacts it like the ephemeral address.
     let script = |addr: SocketAddr| {
         let mut outputs = Vec::new();
         for args in [
@@ -1599,8 +1623,8 @@ fn identical_invocations_produce_identical_output() {
             // cross-run comparison.
             outputs.push((
                 output.status.code(),
-                stdout(&output),
-                stderr(&output).replace(&addr.to_string(), "ADDR"),
+                redact_generations(&stdout(&output)),
+                redact_generations(&stderr(&output)).replace(&addr.to_string(), "ADDR"),
             ));
         }
         outputs
