@@ -18837,6 +18837,385 @@ def scenario_demote_pending_command(ctx):
 
 
 # --------------------------------------------------------------------
+# The demoted-peer tracking-source contract under the wildcard-bind
+# deployment — WW-OPS-003's hot-swap clause, the follow-peer half the
+# #616/#618/#619/#620 fixes settle. Every monitor binds --listen
+# 0.0.0.0, so the tracking source a launched active records from the
+# standby's `?peer=` announces must resolve to the pull connection's
+# proven source — a dialable peer address — never the announced
+# wildcard bind that would dial the demoted peer's own stack. The
+# defect family recorded the wildcard verbatim: the demoted peer
+# looping back to itself, every pull re-poisoning the recorded source,
+# or stranding permanently unsynchronized so fail-back needed a
+# restart. On the settled runtime the demoted peer announces a
+# dialable source, follows its successor, reconverges to tracking,
+# holds it across the pull train, and promotes back through the
+# documented switch with launch roles restored and no journal run
+# boundary — a restart's signature — on either --journal-file. The
+# wire surface naming the recorded source is the `degraded` sync
+# detail's "fetch from <addr>: <error>", which the leg audits on every
+# served report for a wildcard, self-addressed, or foreign target.
+# Named diagnostics: demote-reconvergence-failed for the contract
+# never performing — a refused switch step or a settle missing the
+# bound — and demote-reconvergence-nondeterministic for an outcome the
+# contract declares impossible: a non-peer tracking source served,
+# tracking lost across the pull train, a run boundary landing, a
+# residual degraded marker, or two passes disagreeing.
+
+DEMOTE_RECONVERGENCE_SETTLE = 60  # bound on the whole pass: every
+                                # switch's settle and the demoted
+                                # peer's reconvergence
+DEMOTE_RECONVERGENCE_HOLD = 5     # consecutive tracking polls the
+                                # reconverged peer must hold — the
+                                # pull train a re-poisoning source
+                                # cannot survive
+DEMOTE_RECONVERGENCE_POLL = 0.4   # wait cadence inside the leg
+
+# The launched pair's monitor ports on the rig bridge
+# (runner._start_rig's --listen pair): a demoted peer's recorded
+# tracking source must name the successor's port — its own port is
+# the self-pin, an unspecified host the wildcard bind.
+RECONVERGENCE_PORTS = {'active': '8080', 'standby': '8081'}
+
+
+def _fetch_source(detail):
+    """The pull target a `degraded` detail names — the 'fetch from
+    <addr>: <error>' string a failed checkpoint pull reports — or
+    None when the detail names no source."""
+    if not isinstance(detail, str) or 'fetch from ' not in detail:
+        return None
+    source = detail.split('fetch from ', 1)[1].split(': ', 1)[0]
+    return source or None
+
+
+def _source_kind(source, demoted):
+    """Classify the tracking source a degraded detail names: 'wildcard'
+    for an unspecified bind address — the announced --listen 0.0.0.0
+    the defect family recorded verbatim — 'self' for the demoted
+    peer's own monitor port, 'peer' for the successor's, 'foreign'
+    for anything else. Only 'peer' is a dialable contract answer."""
+    if '0.0.0.0' in source or '[::]' in source:
+        return 'wildcard'
+    port = source.rsplit(':', 1)[-1]
+    if port == RECONVERGENCE_PORTS[demoted]:
+        return 'self'
+    successor = 'standby' if demoted == 'active' else 'active'
+    return 'peer' if port == RECONVERGENCE_PORTS[successor] \
+        else 'foreign'
+
+
+def _tracking_report(report):
+    """Whether a served RoleReport is a tracking standby — the
+    promotable posture a documented switch needs."""
+    return isinstance(report, dict) \
+        and report.get('role') == 'standby' \
+        and 'tracking' in (report.get('sync') or {})
+
+
+def _reconvergence_switch(ctx, demote, promote, deadline, watch):
+    """One documented demote-then-promote switch: POST /demote on the
+    field owner, POST /promote on the converged peer — mid-transition
+    refusals retried inside the bound — then the settle: the promoted
+    peer reports active and the demoted one reports standby tracking,
+    every polled report audited through watch(name, report). Returns
+    the failure detail, or None on settle."""
+    status, body = _settle_call(ctx[demote] + '/demote')
+    if status != 200:
+        return 'demote on ' + demote + ' answered ' + str(status) \
+               + ': ' + json.dumps(body)[:300]
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(ctx[promote] + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if promoted is None:
+        return 'promote on ' + promote + ' never succeeded inside ' \
+               'the bound: ' + json.dumps(last)[:300]
+    reports, settled = {}, None
+    while time.monotonic() < deadline and settled is None:
+        for name in (demote, promote):
+            report = _try_role(ctx, ctx[name])
+            if report is not None:
+                watch(name, report)
+                reports[name] = report
+        if (reports.get(promote) or {}).get('role') == 'active' \
+                and _tracking_report(reports.get(demote)):
+            settled = reports
+        else:
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if settled is None:
+        return 'the switch never settled: ' \
+               + json.dumps(reports, sort_keys=True)[:400]
+    return None
+
+
+def _demote_reconvergence_pass(ctx, number, journals):
+    """One demote/reconverge/fail-back pass on the launched pair:
+    demote ctrl-a — the launched active, whose only tracking source
+    is the monitor address the standby's checkpoint pulls announced —
+    promote the tracking peer, watch the demoted peer reconverge
+    tracking on a dialable successor and hold it across the pull
+    train, then run the same switch back and prove the launch roles
+    restore with no journal run boundary and no residual degraded
+    marker. Returns (digest, violations, evidence): the digest is the
+    pass's normalized verdict record, identical across clean passes."""
+    violations = {}
+    sources = {'active': set(), 'standby': set()}
+    evidence = {'pass': number}
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-reconvergence-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-reconvergence-nondeterministic', detail)
+
+    def bail():
+        evidence['sources'] = {name: sorted(items)
+                               for name, items in sources.items()}
+        return {'reconverged': False, 'failback': False,
+                'wildcard_sightings': 0, 'boundary_growth': 0}, \
+            violations, evidence
+
+    def watch(name, report):
+        """Audit one served RoleReport mid-leg: a wildcard inside the
+        sync state is an announced bind address recorded as a
+        tracking source, and a degraded detail's named pull target
+        must be the successor's dialable monitor address — both
+        verdict inputs, never just evidence."""
+        sync = report.get('sync') or {}
+        text = json.dumps(sync)
+        if '0.0.0.0' in text or '[::]' in text:
+            nondet('wildcard-' + name,
+                   name + ' reports a wildcard tracking source: '
+                   + text[:250] + ' — an announced --listen 0.0.0.0 '
+                   'bind is undialable')
+        source = _fetch_source(
+            (sync.get('degraded') or {}).get('detail'))
+        if source is not None:
+            sources[name].add(source)
+            kind = _source_kind(source, name)
+            if kind != 'peer':
+                nondet(kind + '-source-' + name,
+                       name + ' tracks a ' + kind + ' source '
+                       + source + ' — the recorded announce must be '
+                       'the successor\'s dialable monitor address')
+
+    deadline = time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE
+    bounds = {}
+    for name in ('active', 'standby'):
+        try:
+            bounds[name] = len(_journal_file_runs(journals[name]))
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable: ' + str(exc)[:200])
+            return bail()
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_RECONVERGENCE_POLL)
+    evidence['entry_owner'] = owner
+    if owner is None:
+        failed('owner', 'no launched peer reports role=active — the '
+               'announced-source leg has no field owner')
+        return bail()
+    if owner != 'active':
+        # The announced-source leg demotes the launched active — the
+        # only peer whose tracking source is a recorded announce (the
+        # other's is its configured --standby). A pair settled the
+        # other way gets the documented restore first — itself the
+        # fail-back the contract guarantees.
+        detail = _reconvergence_switch(ctx, owner, 'active', deadline,
+                                       watch)
+        evidence['entry_restore'] = detail or 'settled'
+        if detail is not None:
+            failed('entry-restore', 'the pair cannot reach the '
+                   'launch roles the announced-source leg needs: '
+                   + detail)
+            return bail()
+    # The announced-source half: demote the launched active and
+    # promote the tracking peer — the demoted peer's post-demotion
+    # pulls resolve only the recorded announce, so its reconvergence
+    # proves the announce dialable while watch() audits every served
+    # target.
+    detail = _reconvergence_switch(ctx, 'active', 'standby', deadline,
+                                   watch)
+    evidence['forward'] = detail or 'settled'
+    if detail is not None:
+        failed('forward', 'the demote/promote forward switch: '
+               + detail)
+        return bail()
+    # The pull train: repeated polls are repeated pulls — a source
+    # re-poisoning on each pull drops the peer out of tracking; the
+    # contract holds it.
+    held = []
+    while time.monotonic() < deadline \
+            and len(held) < DEMOTE_RECONVERGENCE_HOLD:
+        report = _try_role(ctx, ctx['active'])
+        if report is not None:
+            watch('active', report)
+            held.append(report)
+        time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    evidence['hold'] = held
+    if not held:
+        failed('hold', 'the demoted peer\'s monitor served no report '
+               'across the pull-train window')
+        return bail()
+    if not all(_tracking_report(report) for report in held):
+        nondet('hold', 'the reconverged peer dropped out of tracking '
+               'across repeated pulls: ' + json.dumps(
+                   [report.get('sync') for report in held])[:400])
+        return bail()
+    # Fail-back through the same documented switch: demote the
+    # successor, promote the reconverged peer — the contract's
+    # no-restart promise — restoring the launch roles.
+    detail = _reconvergence_switch(ctx, 'standby', 'active', deadline,
+                                   watch)
+    evidence['failback'] = detail or 'settled'
+    if detail is not None:
+        failed('failback', 'the fail-back switch: ' + detail)
+        return bail()
+    growth = {}
+    for name in ('active', 'standby'):
+        try:
+            growth[name] = len(_journal_file_runs(journals[name])) \
+                - bounds[name]
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable after the switch: ' + str(exc)[:200])
+            return bail()
+    evidence['boundary_growth'] = growth
+    if any(growth.values()):
+        nondet('restart', 'a journal file gained a run boundary — a '
+               'peer process restarted inside the switch: '
+               + json.dumps(growth, sort_keys=True))
+    # The restored pair's markers: launch roles — ctrl-a active,
+    # ctrl-b tracking — with no residual degraded sync on either
+    # served report.
+    final = {name: _try_role(ctx, ctx[name])
+             for name in ('active', 'standby')}
+    evidence['final'] = final
+    if not _tracking_report(final['standby']) \
+            or (final['active'] or {}).get('role') != 'active':
+        failed('restored', 'the launch roles did not restore: '
+               + json.dumps(final, sort_keys=True)[:400])
+        return bail()
+    for name, report in final.items():
+        if 'degraded' in (report.get('sync') or {}):
+            nondet('residual-' + name, name + ' still reports a '
+                   'degraded marker after restore: '
+                   + json.dumps(report.get('sync'))[:250])
+    evidence['sources'] = {name: sorted(items)
+                           for name, items in sources.items()}
+    evidence['digest'] = {
+        'reconverged': True, 'failback': True,
+        'wildcard_sightings': sum(
+            1 for key in violations if key.startswith('wildcard')),
+        'boundary_growth': sum(growth.values())}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_reconvergence(ctx):
+    """Demote the launched active, prove its announced tracking source
+    a dialable peer address through reconvergence on the successor,
+    and fail back through the documented switch — launch roles
+    restored, no restart, no residual degraded marker."""
+    case = Case(
+        'demote-reconvergence',
+        'Demoted launched-active tracks its announced successor and '
+        'fails back',
+        'on the deployed pair, POST /demote on the launched active '
+        'leaves it tracking the monitor address the standby\'s '
+        'checkpoint pulls announced — a dialable peer address, never '
+        'the announced 0.0.0.0 bind — reconverging to tracking on the '
+        'promoted successor and holding it across repeated pulls; the '
+        'documented switch then promotes it back with no process '
+        'restart and no residual degraded marker, the launch roles '
+        'restored for the cases behind, and two passes produce '
+        'identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the announced-source leg needs is '
+                               'absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                digest, violations, evidence = \
+                    _demote_reconvergence_pass(ctx, number, journals)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-reconvergence-pass-' + str(number)
+                    + '.json', evidence)
+                case.evidence('file', ref, 'demote/reconverge/'
+                              'fail-back pass ' + str(number)
+                              + ' — the switch answers, the audited '
+                              'tracking sources, the boundary diff, '
+                              'and the normalized digest')
+                if violations:
+                    diagnostic = 'demote-reconvergence-failed' \
+                        if any(name == 'demote-reconvergence-failed'
+                               for name, _ in violations.values()) \
+                        else 'demote-reconvergence-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's launch roles for the cases behind — ctrl-a
+            # owns the field; two passes switch twice and restore it
+            # by construction. A mid-pass exit gets the documented
+            # order run again, best-effort.
+            current = _pair_active(ctx)
+            if current != 'active' \
+                    and _tracking_standby(ctx, 'active') is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx['active'] + '/promote')
+                    wait_for(
+                        lambda:
+                        (_pair_active(ctx) == 'active' or None)
+                        and _tracking_standby(ctx, 'standby'),
+                        time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE,
+                        interval=DEMOTE_RECONVERGENCE_POLL)
+                    case.observe('cleanup: restored the launch role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-reconvergence-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two demote/reconvergence passes, identical '
+                     'digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
 # Decision 70's declared-once alarm rationalization record on the
 # deployed pair (WW-ALM-001's master-alarm-database clause, WW-OPS-002's
 # bounded retune path). Every managed alarm instance in the rig model
@@ -19342,6 +19721,11 @@ def scenario_alarm_rationalization(ctx):
 # inside the pending window, audits the single settle on the served
 # and durable records, and — two passes switching twice — lands the
 # pair back on the launch roles before the tune case's a->b switch.
+# The demote-reconvergence case shares that window: it demotes the
+# launched active, audits the announced tracking source and the
+# reconvergence it drives, fails back through the same documented
+# switch, and — two passes switching twice — lands the pair back on
+# the launch roles before the tune case's a->b switch.
 # The
 # parameter-tune case also runs ahead of the
 # failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
@@ -19408,6 +19792,7 @@ SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_standby_loss,
              scenario_demote_settle_uniqueness,
              scenario_demote_pending_command,
+             scenario_demote_reconvergence,
              scenario_parameter_tune_carryover, scenario_failover,
              scenario_checkpoint_negotiation,
              scenario_doomed_startup_claim,
