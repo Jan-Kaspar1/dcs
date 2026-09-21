@@ -43,6 +43,16 @@ ci/alarm_rationalization.py  the pair contract's alarm-
                        snapshot parameters, before and after the
                        changeover, and the pair's launch roles
                        restored
+ci/claim_fencing.py    the pair contract's claim-fencing leg — a
+                       dedicated third sim-net attachment exercising
+                       the standing writer claim's whole lifecycle on
+                       the settled pair's spawned plant: fenced write
+                       and step probes, the ensure/release verbs under
+                       foreign and owner tokens, the same mutations
+                       driven through the shipped `dcs-plant-ctl`, a
+                       rogue claim's settled answer, and the pair
+                       restored with its launch roles and the claim's
+                       owner unchanged
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
@@ -1190,6 +1200,43 @@ identical `alarm-rationalization-digest`, a divergence failing
 a served record dropping one managed alarm's component record and
 parameter report, and one rewriting a declared field's served value
 — must each report the named diagnostic rather than pass silently.
+
+The stage's claim-fencing leg — `ci/claim_fencing.py` on the same
+declared deployment — is the consumer-side mirror of the platform
+lane's standing field-claim scenario (WW-ENG-003, WW-OPS-003): the
+pair legs prove switchover and receipted commands, but none attaches
+a third plant-protocol client, so the single-writer claim the
+redundancy contract stands on went unexercised here. With the pair
+settled and a field-owning peer holding the spawned
+`dcs-plant-server`'s writer claim — the launched active's startup
+claim where the release logs its owner token, else the documented
+`demote`/`promote` switch stands the promoted peer's claim up first —
+a dedicated third sim-net attachment's `write` and `step` must answer
+the named fencing refusal while the field owner's own writes and its
+served `active` role stay undisturbed, and the same mutations driven
+through the shipped `dcs-plant-ctl` exit nonzero naming the refusal
+while its unfenced `list`/`read` still answer. The lifecycle verbs
+then answer per contract on that attachment where the release speaks
+them: a foreign token's `ensure_writer` refused `fenced`, the owner's
+token answering `claimed_shared` with a
+write landing under the shared hold, `release_writer` dropping only
+the caller's hold so the standing claim keeps fencing the released
+attachment, and a release from a holder of nothing a harmless `done`
+that leaves the claim standing. A rogue `claim_writer` then resolves
+per the settled contract, never silently — a refusal leaves the claim
+and the owner untouched, while the unconditional preempt it grants
+journals `field_claim_lost` on the superseded owner and demotes it in
+place with its monitor serving throughout, after which the leg
+re-promotes the demoted owner — the promotion claim preempts the
+rogue token — and the pair settles its launch roles with the claim's
+owner standing unchanged. The dead-owner window — an owner
+disconnect leaving the claim standing — is a separate leg's scope.
+A violated contract fails `claim-fencing-failed`; two passes must
+produce the identical `claim-fencing-digest`, a divergence failing
+`claim-fencing-nondeterministic`. The leg's doctored cases — a probe
+attachment writing through the claim, a foreign `ensure_writer`
+granted, and a rogue claim succeeding with no supersession evidence —
+must each report the named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
