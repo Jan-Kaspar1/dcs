@@ -36,6 +36,13 @@ ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        --check`, and the driven run's served
                        components/parameters sections reporting the
                        same record
+ci/alarm_rationalization.py  the pair contract's alarm-
+                       rationalization leg — the emitted model's
+                       managed-alarm record asserted verbatim on the
+                       deployed pair's served signal index and
+                       snapshot parameters, before and after the
+                       changeover, and the pair's launch roles
+                       restored
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
@@ -1156,6 +1163,33 @@ expectation asserting the motor commands still stand under the
 driven power-fail, and one asserting the pumps' availability never
 dropped — must each report the named diagnostic rather than pass
 silently.
+
+The stage's alarm-rationalization leg —
+`ci/alarm_rationalization.py` on the same declared deployment —
+then proves the declared-once half of the alarm contract's
+rationalization record reaches the operator boundary on the
+customer-owned pair (WW-ENG-003, WW-ALM-001): the alarm-validation
+stage proved the rejection half on the document, but nothing had
+asserted the deployed pair serves the same single declaration. With
+the pair settled and tracking, the leg reads the emitted model's
+managed alarm instances and audits both peers' served surfaces —
+`GET /signals`' components section must carry each instance's
+declared `rationalization` block verbatim (consequence, required
+action, display/procedure reference) and `GET /snapshot`'s
+parameters section must serve each alarm's declared
+`priority`/`class`/`response_ticks` live, every mismatch or dropped
+record failing by the instance's `<kind>:<id>` name. The documented
+`demote`/`promote` switch lands and the same audit re-reads both
+peers — the promoted owner and the reconverged tracker serving the
+identical declared record, the declaration riding the checkpoint
+rather than re-derived per peer — then the leg restores the pair's
+launch roles. A violated contract fails
+`alarm-rationalization-failed`; two passes must produce the
+identical `alarm-rationalization-digest`, a divergence failing
+`alarm-rationalization-nondeterministic`. The leg's doctored cases —
+a served record dropping one managed alarm's component record and
+parameter report, and one rewriting a declared field's served value
+— must each report the named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
