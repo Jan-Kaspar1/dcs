@@ -550,13 +550,13 @@ const HEARTBEAT_WORKERS: usize = 2;
 /// the same unbounded wait. tiny_http exposes no socket timeout to
 /// bound either wait: a client that stalls mid-body holds its worker
 /// for as long as it cares to. Those client-paced waits are
-/// quarantined on this lane so the serving lane — `GET /checkpoint`
-/// among it, the heartbeat a tracking standby measures the active's
-/// liveness by — keeps answering through a stalled-body flood, per
-/// the disposable-consumer contract. Two workers keep a long
-/// `POST /scan` batch from queueing every command behind it; a flood
-/// beyond the lane's width can still starve submissions, but never
-/// the served surface.
+/// quarantined on this lane so the heartbeat lane — `GET /checkpoint`
+/// among it, the pull a tracking standby measures the active's
+/// liveness by — and the serving lane keep answering through a
+/// stalled-body flood, per the disposable-consumer contract. Two
+/// workers keep a long `POST /scan` batch from queueing every command
+/// behind it; a flood beyond the lane's width can still starve
+/// submissions, but never the served surface.
 const SUBMIT_WORKERS: usize = 2;
 
 /// The bound on every lane's pending-request queue — the flood half
@@ -935,10 +935,10 @@ impl<'d> Monitor<'d> {
                     // way out, itself a write a wedged connection can
                     // stall, so the drop runs off the dispatcher's
                     // thread rather than ever blocking routing.
-                    let Err(request) = lane.push(request) else {
+                    let Some(request) = lane.push(request) else {
                         continue;
                     };
-                    if let Err(request) = refused.push(request) {
+                    if let Some(request) = refused.push(request) {
                         std::thread::spawn(move || drop(request));
                     }
                 }
@@ -1704,18 +1704,18 @@ impl Lane {
     }
 
     /// Queues `request` for the lane's workers, or hands it back —
-    /// `Err(request)` — when the lane is closed or already holding
+    /// `Some(request)` — when the lane is closed or already holding
     /// [`LANE_QUEUE_DEPTH`] requests. Never waits: a push past the
     /// bound is the caller's signal to refuse the request elsewhere,
     /// so a pinned lane's queue is the flood's hard bound.
-    fn push(&self, request: Request) -> Result<(), Request> {
+    fn push(&self, request: Request) -> Option<Request> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closed || inner.queue.len() >= LANE_QUEUE_DEPTH {
-            return Err(request);
+            return Some(request);
         }
         inner.queue.push_back(request);
         self.ready.notify_one();
-        Ok(())
+        None
     }
 
     fn pop(&self) -> Option<Request> {
