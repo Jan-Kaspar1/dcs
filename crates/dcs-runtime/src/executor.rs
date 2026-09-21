@@ -1401,6 +1401,13 @@ impl<'d> Executor<'d> {
         &self.receipts
     }
 
+    /// The standing force set — each forced point's substituted value.
+    /// The peer layer diffs it across a checkpoint adoption so a force
+    /// change no receipt accounts for can journal its true cause.
+    pub(crate) fn forces(&self) -> &BTreeMap<PointId, Value> {
+        &self.forces
+    }
+
     /// The events the last completed scan's components emitted, in the
     /// order they were drained — component scan order, then each
     /// component's own emission order — each stamped with the producing
@@ -1625,7 +1632,11 @@ impl<'d> Executor<'d> {
     /// `Accepted` re-queued for this run's next boundary — extended by
     /// this run's own still-unreached tail when the adopted window's
     /// submission high-water never saw it (see
-    /// [`adopt_receipts`](Self::adopt_receipts)). The next
+    /// [`adopt_receipts`](Self::adopt_receipts)). The force set takes
+    /// the checkpoint's image as its base, then the same unreached
+    /// tail's settled force verdicts re-assert over it — an applied
+    /// release this run receipted is durable truth a staler peer's
+    /// image cannot silently revert. The next
     /// [`scan`](Executor::scan) then
     /// continues the run the checkpoint captured.
     ///
@@ -1702,8 +1713,12 @@ impl<'d> Executor<'d> {
                 .map(|(&point, &sample)| (point, sample)),
         );
         drop(image);
-        // The checkpoint's force set is authoritative: the standby
-        // forces exactly what the active forced — no more, no less.
+        // The checkpoint's force set is the base image — the standby
+        // forces exactly what the active forced — except where this
+        // run's own receipted verdicts reach past the checkpoint's
+        // high-water: `adopt_receipts` re-asserts those settled force
+        // commands over the adopted set before the apply completes, so
+        // a staler image cannot silently revert durable truth.
         self.forces.clone_from(&checkpoint.forces);
         // The last scan's drained emissions and probed command verdicts
         // belong to the abandoned line: the adopted run's records start
@@ -1757,9 +1772,24 @@ impl<'d> Executor<'d> {
         // while the run's window reaches back to meet it: a prior base
         // above the mark leaves a gap no restoration can span.
         let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
-        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+        // The receipts this run holds past the adopted high-water —
+        // submissions the checkpoint's source never observed at
+        // capture. `uncovered` is the spanable suffix restored into
+        // the log below; `unreached` is the wider set the force-set
+        // replay reads — the whole abandoned window when a gap leaves
+        // it unspanable — because an applied verdict is durable truth
+        // whether or not its receipt survives the merge: a staler
+        // image cannot silently re-stand a force the journal already
+        // released, nor drop one it recorded standing.
+        let unreached: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
             let skip = (adopted_end - self.receipt_base()).min(self.receipts.len() as u64) as usize;
             self.receipts[skip..].to_vec()
+        } else {
+            self.receipts.clone()
+        };
+        self.reassert_receipted_forces(&unreached);
+        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+            unreached
         } else {
             Vec::new()
         };
@@ -1803,6 +1833,61 @@ impl<'d> Executor<'d> {
         }
     }
 
+    /// Re-asserts the settled force verdicts `receipts` carries, in
+    /// order — the receipted-command contract's force-set half: an
+    /// `Applied` `ForcePoint`/`UnforcePoint` is durable truth, so an
+    /// adopted image whose capture predates the receipt cannot
+    /// silently revert it. Callers pass exactly the receipts the
+    /// checkpoint's coverage missed: [`adopt_receipts`](Self::adopt_receipts)
+    /// passes this run's unreached tail, and
+    /// [`carry_pending_commands`](Self::carry_pending_commands) the
+    /// appended carry — settled entries only; `Accepted` and
+    /// `Rejected` verdicts move no force. A receipted release on an
+    /// internal point also re-stamps its held image sample `Good` —
+    /// the same resumption the applying scan boundary performs — so a
+    /// carried `Substituted` stamp cannot outlive the lifted force. A
+    /// receipted force the current map no longer serves as a writable
+    /// `In` point — a model-boundary crossing's dropped surface — does
+    /// not re-stand: the verdict stays in the log, but the effect has
+    /// no surface to take.
+    fn reassert_receipted_forces(&mut self, receipts: &[CommandReceipt]) {
+        for receipt in receipts {
+            if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+                continue;
+            }
+            match &receipt.command {
+                Command::ForcePoint { point, value, .. } => {
+                    let servable = self.map.get(*point).is_some_and(|spec| {
+                        spec.direction == Direction::In
+                            && spec.writable
+                            && spec.kind == value.kind()
+                    });
+                    if servable {
+                        self.forces.insert(*point, *value);
+                    }
+                }
+                Command::UnforcePoint { point }
+                    if self.forces.remove(point).is_some()
+                        && self
+                            .map
+                            .get(*point)
+                            .is_some_and(|spec| spec.internal.is_some()) =>
+                {
+                    // The lifted force's last `Substituted` stamp would
+                    // otherwise stand on the held internal sample — the
+                    // same re-stamp the applying scan boundary performs.
+                    let held = self.image.borrow().get(point).copied();
+                    if let Some(sample) = held {
+                        self.image
+                            .borrow_mut()
+                            .insert(*point, Sample::good(sample.value, self.tick));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Adopts the admissions a checkpoint's receipt log carries past
     /// this run's own — the promote boundary's stale-tick path
     /// ([`Peer::final_sync`](crate::Peer::final_sync)): a checkpoint
@@ -1838,8 +1923,13 @@ impl<'d> Executor<'d> {
         let tail = self_end.max(checkpoint_base);
         let skipped = (tail - checkpoint_base) as usize;
         let base_len = self.receipts.len();
-        self.receipts
-            .extend(checkpoint.receipts[skipped..].iter().cloned());
+        let appended: Vec<CommandReceipt> = checkpoint.receipts[skipped..].to_vec();
+        self.receipts.extend(appended.iter().cloned());
+        // The appended tail's settled force verdicts are line truth
+        // this run never observed — the same durable-truth replay
+        // `adopt_receipts` runs on its unreached suffix, here for the
+        // carry half of the boundary.
+        self.reassert_receipted_forces(&appended);
         self.command_admission = checkpoint.command_admission;
         // Bound the union before the adopted `Accepted` entries queue:
         // the trim may reach into the tail's own settled prefix, so the
@@ -4814,6 +4904,145 @@ mod tests {
             Some(Sample::good(Value::Float(1.0), Tick(3)))
         );
         assert!(standby.snapshot().forces.is_empty());
+    }
+
+    /// QA finding `stale-checkpoint-resurrects-receipted-unforce`
+    /// (#639): the journaled release is durable truth — adopting a
+    /// checkpoint captured before it must not re-stand the force.
+    #[test]
+    fn a_stale_checkpoint_cannot_resurrect_a_receipted_unforce() {
+        let active_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut active = Executor::new(
+            &active_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+        // The stale image: captured while the force stood, its receipt
+        // window ending before the release's index.
+        let stale = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut standby = Executor::new(
+            &standby_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        standby.apply(&stale).unwrap();
+        // The release applies on this run and journals — the receipt
+        // the checkpoint's high-water never reached.
+        standby.submit_command(unforce_point(10));
+        standby.scan();
+        assert!(standby.forces().is_empty());
+
+        // The re-adoption — a restart's tracking pull on the staler
+        // peer — keeps the release: the unreached receipt re-asserts
+        // over the adopted force set.
+        standby.apply(&stale).unwrap();
+        assert!(standby.forces().is_empty());
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(2)))
+        );
+
+        // The receipted half of the same rule: an applied force this
+        // run's log holds past the checkpoint's high-water re-stands
+        // over a staler image that dropped it.
+        standby.submit_command(force_point(10, ValueKind::Float, Value::Float(7.0)));
+        standby.scan();
+        standby.apply(&stale).unwrap();
+        assert_eq!(standby.forces()[&PointId(10)], Value::Float(7.0));
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(forced(Value::Float(7.0), 2))
+        );
+    }
+
+    /// The internal-point half of the same finding: a receipted
+    /// release replayed over a stale image also lifts the held
+    /// sample's `Substituted` stamp, matching the scan boundary's own
+    /// unforce application.
+    #[test]
+    fn a_replayed_unforce_restamps_the_held_internal_sample() {
+        let map = || {
+            PointMap::new().with_writable_internal(
+                PointId(10),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let active_driver = StubDriver::new(&[], &[]);
+        let mut active = Executor::new(&active_driver, map(), Vec::new()).unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+        let stale = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[], &[]);
+        let mut standby = Executor::new(&standby_driver, map(), Vec::new()).unwrap();
+        standby.apply(&stale).unwrap();
+        standby.submit_command(unforce_point(10));
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(5.0), Tick(2)))
+        );
+
+        // The stale adoption replays the release: the force stays
+        // lifted and the held image sample is `Good` again, not the
+        // `Substituted` stamp the checkpoint's internal section carried.
+        standby.apply(&stale).unwrap();
+        assert!(standby.forces().is_empty());
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(5.0), Tick(1)))
+        );
+    }
+
+    /// The boundary-carry half: a checkpoint whose receipt log runs
+    /// ahead of this run's — the promote boundary's `final_sync` pull
+    /// — appends settled force verdicts the adopted image predates,
+    /// and they re-assert over the standing force set the same way.
+    #[test]
+    fn carry_pending_commands_replays_the_appended_force_verdicts() {
+        let active_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut active = Executor::new(
+            &active_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut standby = Executor::new(
+            &standby_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        assert_eq!(standby.forces()[&PointId(10)], Value::Float(5.0));
+
+        // The release lands on the tracked line after this run's last
+        // alignment: the carry appends the receipt and the force lifts
+        // with it, rather than standing on the older image.
+        active.submit_command(unforce_point(10));
+        active.scan();
+        standby.carry_pending_commands(&active.checkpoint());
+        assert!(standby.forces().is_empty());
+        assert_eq!(standby.receipts(), active.receipts());
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(2)))
+        );
     }
 
     #[test]

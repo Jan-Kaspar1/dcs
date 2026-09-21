@@ -1021,6 +1021,9 @@ impl<'d> Monitor<'d> {
         for receipt in peer.take_superseded_commands() {
             recorder.note_settled(receipt, peer.tick());
         }
+        for receipt in peer.take_adoption_receipts() {
+            recorder.note_settled(receipt, peer.tick());
+        }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
         // before the next scan publishes.
@@ -1054,6 +1057,9 @@ impl<'d> Monitor<'d> {
             recorder.note_source_restart(restart);
         }
         for receipt in peer.take_superseded_commands() {
+            recorder.note_settled(receipt, peer.tick());
+        }
+        for receipt in peer.take_adoption_receipts() {
             recorder.note_settled(receipt, peer.tick());
         }
         self.store.sync_receipts(peer.receipts());
@@ -1383,6 +1389,9 @@ impl<'d> Monitor<'d> {
                 for receipt in peer.take_superseded_commands() {
                     recorder.note_settled(receipt, peer.tick());
                 }
+                for receipt in peer.take_adoption_receipts() {
+                    recorder.note_settled(receipt, peer.tick());
+                }
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
@@ -1529,6 +1538,13 @@ fn track_and_record(
     // run's suspended queue the tracked line never carried — settle
     // `superseded` here rather than vanishing from the audit.
     for receipt in peer.take_superseded_commands() {
+        recorder.note_settled(receipt, peer.tick());
+    }
+    // Force-set changes the adoption authored beyond the receipted
+    // log — a re-stood or dropped force no settled verdict backs —
+    // journal here, each receipt's actor naming the adopting
+    // checkpoint.
+    for receipt in peer.take_adoption_receipts() {
         recorder.note_settled(receipt, peer.tick());
     }
     store.sync_receipts(peer.receipts());
