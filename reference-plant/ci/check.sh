@@ -429,6 +429,26 @@
 #                restored; two passes produce identical digests
 #                (demote-pending-failed,
 #                demote-pending-nondeterministic)
+#                The stage's demote-reconvergence leg,
+#                ci/demote_reconvergence.py on the same declared
+#                deployment — the consumer-side exercise of the
+#                demote-follow tracking-source contract the
+#                #616/#618/#619/#620 defect fixes settle
+#                (WW-ENG-003, WW-LCM-001): each controller bound on
+#                the manifest's declared 0.0.0.0 listen host — the
+#                wildcard bind shape the defect family recorded
+#                verbatim — the pair converged and the documented
+#                demote/promote switch run in both directions, each
+#                demoted peer reconverging tracking on the source its
+#                successor's announced pulls resolved dialable —
+#                never the wildcard, never its own address, never a
+#                foreign endpoint — holding it across a driven pull
+#                train with snapshots, adopted receipt logs, and
+#                journaled role transitions consistent and no
+#                restart-like journal boundary, the launch roles
+#                restored; two passes produce identical digests
+#                (demote-reconvergence-failed,
+#                demote-reconvergence-nondeterministic)
 #                The stage's managed-lifecycle leg,
 #                ci/managed_lifecycle.py on the same declared
 #                deployment: with the pair tracking, the emitted
@@ -2068,6 +2088,53 @@ for tamper in phantom-applied unaudited-drop; do
     echo "  $tamper: reported, demote-pending-failed"
 done
 
+# The pair contract's demote-follow reconvergence leg, on the same
+# manifest-declared deployment: ci/demote_reconvergence.py binds each
+# controller's --listen on the manifest's declared 0.0.0.0 host — the
+# wildcard bind shape the #616/#618/#619/#620 defect fixes settle —
+# converges the pair, and runs the documented demote/promote switch
+# in both directions: the launched active demotes onto the tracking
+# source the standby's wildcard-announcing pulls recorded — resolved
+# to the dialable peer address, never the wildcard, never the demoted
+# peer's own address, never a foreign endpoint — reconverging
+# tracking and holding it across a driven pull train, then the
+# reverse switch restores the launch roles and the second demoted
+# peer holds the same way. Served snapshots and adopted receipt logs
+# stay identical throughout, each durable journal file carries its
+# own role_changed transitions under the single cold-start boundary,
+# and the declared persistence files hold the run's final tick. Two
+# passes must produce identical digests.
+run_demote_reconvergence() {
+    python3 ci/demote_reconvergence.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_demote_reconvergence)" \
+    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
+SECOND="$(run_demote_reconvergence)" \
+    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "demote-reconvergence-nondeterministic: two demote-reconvergence passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a crafted ?peer= announce naming the field
+# owner's own monitor address — a claim the pulling connection's own
+# source proves, so it lands exactly as a self-claim — plants a
+# self-addressed demotion hint: the self-pin defect shape this leg
+# exists to catch. The demotion adopts the peer's own address, and
+# the leg's adopted-source audit must surface the named evidence
+# rather than letting a self-pinned demotion pass silently.
+if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
+    fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
+fi
+[[ "$out" == *"a self tracking source"* ]] \
+    || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
+echo "  self-announce: reported, demote-reconvergence-failed"
+
 # The pair contract's managed-alarm lifecycle leg, on the same
 # manifest-declared deployment: ci/managed_lifecycle.py converges the
 # pair and exercises the emitted model's declared managed-alarm
@@ -2427,7 +2494,8 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
         ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
         ci/consumers.py \
-        ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
+        ci/ctl.py ci/demote_pending.py ci/demote_reconvergence.py \
+        ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \

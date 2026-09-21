@@ -212,6 +212,15 @@ ci/demote_pending.py   the pair contract's demote-boundary
                         receipt logs, images, and durable files
                         audited for the single audited settle, and
                         the pair's launch roles restored
+ci/demote_reconvergence.py  the pair contract's demote-follow
+                        reconvergence leg — under the manifest's
+                        declared 0.0.0.0 listen binds, the documented
+                        switch in both directions reconverging each
+                        demoted peer to tracking on the successor's
+                        dialable announced source — never the
+                        wildcard, itself, or a foreign address —
+                        held across the pull train, and the pair's
+                        launch roles restored
 ci/managed_lifecycle.py  the pair contract's managed-alarm
                         lifecycle leg — the emitted model's whole
                         managed-alarm surface exercised end to end
@@ -984,6 +993,41 @@ expectation asserting the phantom applied settle the fenced image
 must never journal, and one asserting the pending entry vanished
 from every receipt surface and journal — must each report the named
 diagnostic rather than pass silently.
+
+The stage's demote-reconvergence leg — `ci/demote_reconvergence.py`
+on the same declared deployment — then pins the demote-follow
+tracking-source contract on the customer's pair (WW-ENG-003,
+WW-LCM-001): a demoted field owner must reconverge `tracking` on the
+successor its own checkpoint pulls announced, and under the
+manifest's declared `0.0.0.0` listen binds that announced source
+must resolve to the pull connection's proven address — a dialable
+peer address, never the wildcard bind recorded verbatim, never the
+demoted peer's own monitor, never a foreign endpoint. Both
+controllers bind the declared wildcard host, so the standby's
+`?peer=` pulls announce the wildcard address the defect family once
+recorded as-is. The leg converges the pair, then runs the
+documented `demote`/`promote` switch in both directions: the
+launched active — whose only tracking source is the recorded
+announce — demotes onto the verified adoption its journal records
+by name, reconverges `tracking`, and holds it across a driven pull
+train; the reverse switch then demotes the promoted peer onto its
+configured source and promotes the reconverged peer back. Every
+served role report across the handovers is audited for a wildcard,
+self-addressed, or foreign pull target; the served snapshots and
+adopted receipt logs stay identical on both peers; each durable
+journal file carries its own `role_changed` transitions in `seq`
+order under the single cold-start boundary — a restart boundary
+would be a process restart — and each declared state file holds the
+run's final tick under the manifest's fingerprint. The leg restores
+the pair's launch roles, leaving the manifest's duty controller
+`active` and its standby `tracking`. A violated contract fails
+`demote-reconvergence-failed`; two passes must produce the
+identical `demote-reconvergence-digest`, a divergence failing
+`demote-reconvergence-nondeterministic`. The leg's doctored case —
+a crafted `?peer=` announce naming the field owner's own monitor
+address, landing on the pulling connection's own source exactly as
+a self-claim — must surface the self-addressed adoption's named
+evidence rather than pass silently.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole
