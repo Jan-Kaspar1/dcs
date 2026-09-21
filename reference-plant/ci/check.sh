@@ -404,6 +404,31 @@
 #                restored; two passes produce identical digests
 #                (command-switch-failed,
 #                command-switch-nondeterministic)
+#                The stage's demote-pending leg, ci/demote_pending.py
+#                on the same declared deployment — the consumer-side
+#                exercise of the demote-boundary pending-command
+#                settlement contract (WW-ENG-003, WW-LCM-001): with
+#                the pair settled and tracking, a receipted
+#                write_value admitted on the field owner and left
+#                pending while the documented demote lands inside its
+#                window and the converged standby promotes — the
+#                promote's final sync carrying the still-`Accepted`
+#                admission — the demoted peer's first quiesced scan,
+#                driven before the promoted peer's first field-owning
+#                scan, asserted journaling no command_settled for the
+#                admission, still holding its suspended receipt, and
+#                still reading the baseline image — never a phantom
+#                applied settle on the fenced image, never a vanished
+#                pending entry — then the admission settling exactly
+#                once: applied once per peer through the carry or the
+#                named superseded rejection journaled on the demoted
+#                peer alone, both peers' adopted receipt logs
+#                identical, the served images agreeing, and each
+#                manifest-declared durable journal file carrying the
+#                same settle record; the pair's launch roles
+#                restored; two passes produce identical digests
+#                (demote-pending-failed,
+#                demote-pending-nondeterministic)
 #                The stage's managed-lifecycle leg,
 #                ci/managed_lifecycle.py on the same declared
 #                deployment: with the pair tracking, the emitted
@@ -1942,6 +1967,55 @@ for tamper in zero-settlement double-settlement; do
     echo "  $tamper: reported, command-switch-failed"
 done
 
+# The pair contract's demote-boundary pending-command leg, on the
+# same manifest-declared deployment: ci/demote_pending.py converges
+# the pair, submits a receipted write_value on a declared writable
+# internal In point through the field owner's POST /command and leaves
+# it pending, then lands the documented demote on the owner and the
+# promote on the converged standby inside that window — the demoted
+# peer's first quiesced scan, driven before the promoted peer's first
+# field-owning scan, audited for the suspended admission: no
+# command_settled journaled on the fenced image, the accepted receipt
+# still held, the baseline image unchanged — then the promoted peer
+# settling the carried admission exactly once and both peers' served
+# journals, adopted receipt logs, images, and durable journal files
+# audited for the single audited settle, before the pair's launch
+# roles restore. Two passes must produce identical digests.
+run_demote_pending() {
+    python3 ci/demote_pending.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_demote_pending)" \
+    || fail "demote-pending-failed: the demote-pending leg did not hold — its evidence lines are above"
+SECOND="$(run_demote_pending)" \
+    || fail "demote-pending-failed: the demote-pending leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "demote-pending-nondeterministic: two demote-pending passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg expecting the phantom applied settle the
+# fenced image must never journal, and one expecting the pending
+# entry vanished from every receipt surface and journal — the
+# unaudited-drop shape — must each surface the named diagnostic
+# rather than passing silently.
+for tamper in phantom-applied unaudited-drop; do
+    if out="$(run_demote_pending --tamper "$tamper" 2>&1)"; then
+        fail "demote-pending-unchecked: a $tamper case passed the demote-pending leg"
+    fi
+    case "$tamper" in
+        phantom-applied) expected="phantom applied settle" ;;
+        unaudited-drop) expected="unaudited drop" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "demote-pending-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, demote-pending-failed"
+done
+
 # The pair contract's managed-alarm lifecycle leg, on the same
 # manifest-declared deployment: ci/managed_lifecycle.py converges the
 # pair and exercises the emitted model's declared managed-alarm
@@ -2198,7 +2272,8 @@ echo "== consumers =="
 for file in ci/alarm_validation.py ci/availability.py \
         ci/burst_order.py ci/command_switch.py \
         ci/consumers.py \
-        ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
+        ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
+        ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
         ci/negotiation.py ci/oos.py ci/pair.py \

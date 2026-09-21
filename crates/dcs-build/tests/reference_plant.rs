@@ -78,7 +78,14 @@
 //! the released `dcs-alarm-report` over the driven pair's served
 //! journal and manifest-declared durable journal file — the declared
 //! `AlarmReport` metric set asserted, the refusal modes exiting
-//! nonzero — the pair contract's managed-lifecycle leg, which
+//! nonzero — the pair contract's demote-boundary pending-command
+//! leg, which admits a receipted write on the field owner and demotes
+//! inside its pending window: the demoted peer's first quiesced scan
+//! audited for no phantom `command_settled` and no vanished pending
+//! receipt, the admission settling exactly once — carried `applied`
+//! or `Rejected{superseded}` — across both peers' journals, receipt
+//! logs, images, and durable files, and the pair's launch roles
+//! restored — the pair contract's managed-lifecycle leg, which
 //! exercises the emitted model's whole managed-alarm surface on the
 //! deployed pair — the field-driven activation's journaled
 //! `alarm`/`unacknowledged`, the receipted actor-attributed `ack`,
@@ -685,6 +692,35 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, report-failed")),
             "the report leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's demote-boundary pending-command leg ran and
+    // held: the receipted write admitted on the field owner and
+    // demoted past inside its pending window settled exactly once —
+    // the fenced image's first quiesced scan audited clean before the
+    // promoted peer's first field-owning scan, both peers' journals,
+    // receipt logs, images, and durable files carrying the single
+    // audited settle — its digest line reports the evidence, and each
+    // doctored expectation reported its named diagnostic.
+    let demote_pending_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-pending-digest"))
+        .unwrap_or_else(|| panic!("the demote-pending leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "demoted inside the pending window at tick",
+        "fenced image audited at tick",
+        "persisted settle records",
+        "roles restored at tick",
+    ] {
+        assert!(
+            demote_pending_line.contains(phrase),
+            "the demote-pending digest names no '{phrase}' evidence: {demote_pending_line}"
+        );
+    }
+    for tamper in ["phantom-applied", "unaudited-drop"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, demote-pending-failed")),
+            "the demote-pending leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     // The pair contract's managed-lifecycle leg ran and held: the
